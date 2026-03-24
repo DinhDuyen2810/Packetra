@@ -33,9 +33,9 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
 
         self.start_btn = QPushButton("Start")
-        self.stop_btn  = QPushButton("Stop")
-        self.save_btn  = QPushButton("Save PCAP")
-        self.load_btn  = QPushButton("Load PCAP")
+        self.stop_btn = QPushButton("Stop")
+        self.save_btn = QPushButton("Save PCAP")
+        self.load_btn = QPushButton("Load PCAP")
         self.stop_btn.setEnabled(False)
 
         toolbar.addWidget(self.start_btn)
@@ -73,6 +73,10 @@ class MainWindow(QMainWindow):
     # ===== Capture =====
 
     def start_capture(self):
+        if self.sniffer and self.sniffer.isRunning():
+            log.warning("Sniffer đang chạy, bỏ qua start_capture()")
+            return
+
         log.info(f"Bắt đầu capture trên {self.iface!r}")
         self.sniffer = PacketSniffer(self.iface)
         self.sniffer.packet_captured.connect(self.add_packet)
@@ -82,13 +86,20 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
 
     def stop_capture(self):
-        if self.sniffer:
+        if self.sniffer and self.sniffer.isRunning():
             log.info("Dừng capture...")
             self.sniffer.stop()
             self.sniffer.wait()
             log.info("Capture đã dừng.")
+
+        self.sniffer = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+
+    def closeEvent(self, event):
+        # đảm bảo thread sniff được dừng khi đóng cửa sổ
+        self.stop_capture()
+        super().closeEvent(event)
 
     def on_sniffer_error(self, msg):
         log.error(f"Sniffer lỗi: {msg}")
