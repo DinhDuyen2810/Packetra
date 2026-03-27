@@ -1,16 +1,19 @@
 import logging
+import time
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QListWidget,
     QPushButton,
     QLabel,
     QLineEdit,
     QComboBox,
     QMenuBar,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QAbstractItemView,
 )
 
 from utils.network_utils import get_interfaces, get_traffic
@@ -40,7 +43,28 @@ class InterfaceSelector(QWidget):
         self.interfaces = get_interfaces()
         log.info(f"Interfaces found: { {k: v for k, v in self.interfaces.items()} }")
 
-        self.prev_traffic = get_traffic()
+        # Lịch sử lưu lượng để vẽ mini dashboard (sparkline)
+        self.traffic_history = {name: [0.0] * 24 for name in self.interfaces.keys()}
+        self.smoothed_speed = {name: 0.0 for name in self.interfaces.keys()}
+
+        # Snapshot 2 lần khi mở selector để xếp interface có traffic lên trước.
+        # Dùng delay ngắn để không làm đơ UI quá lâu.
+        initial_prev = get_traffic()
+        time.sleep(0.25)
+        initial_now = get_traffic()
+
+        self.prev_traffic = initial_now
+        self.active_interfaces = []
+        self.inactive_interfaces = []
+
+        for name in self.interfaces.keys():
+            delta = max(initial_now.get(name, 0) - initial_prev.get(name, 0), 0)
+            if delta > 0:
+                self.active_interfaces.append(name)
+            else:
+                self.inactive_interfaces.append(name)
+
+        self.refresh_list_structure()
         self.update_list()
 
         # QTimer: cập nhật traffic mỗi 1 giây
@@ -114,10 +138,16 @@ class InterfaceSelector(QWidget):
         self.main_layout.addLayout(subtitle_row)
 
     def _build_interface_list(self):
-        self.list_widget = QListWidget()
+        self.list_widget = QTreeWidget()
+        self.list_widget.setColumnCount(2)
+        self.list_widget.setHeaderLabels(["Interface", "Traffic"])
+        self.list_widget.header().setStretchLastSection(False)
+        self.list_widget.header().setDefaultAlignment(Qt.AlignLeft)
+        self.list_widget.header().resizeSection(0, 720)
+        self.list_widget.header().resizeSection(1, 320)
         self.list_widget.setAlternatingRowColors(True)
-        self.list_widget.setSelectionMode(QListWidget.SingleSelection)
-        self.list_widget.setUniformItemSizes(True)
+        self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_widget.setUniformRowHeights(True)
 
         # giữ tương thích với main.py (nhấn nút để bắt đầu)
         self.start_btn = QPushButton("Start Capture")
@@ -127,42 +157,95 @@ class InterfaceSelector(QWidget):
         self.main_layout.addWidget(self.list_widget, stretch=1)
         self.main_layout.addWidget(self.start_btn)
 
-    def update_list(self):
-        current = get_traffic()
+    def _ordered_interfaces(self):
+        return self.active_interfaces + self.inactive_interfaces
 
-        items = []
-        for display_name, scapy_name in self.interfaces.items():
-            prev = self.prev_traffic.get(display_name, 0)
-            now = current.get(display_name, 0)
-            speed = max(now - prev, 0)  # bytes trong 1 giây
-            items.append((display_name, scapy_name, speed))
-            log.debug(f"  {display_name}: {speed / 1024:.2f} KB/s")
-
-        # sort theo traffic giảm dần
-        items.sort(key=lambda x: x[2], reverse=True)
-
-        # Nhớ item đang chọn để giữ lại sau khi clear
-        selected_display = None
-        cur = self.list_widget.currentItem()
-        if cur:
-            selected_display = cur.text().split("|")[0].strip()
+    def refresh_list_structure(self):
+        selected_display = self.get_selected_display_name()
 
         self.list_widget.clear()
 
-        for display_name, scapy_name, speed in items:
-            text = f"{display_name}  |  {speed / 1024:.2f} KB/s"
-            self.list_widget.addItem(text)
+        for display_name in self._ordered_interfaces():
+            item = QTreeWidgetItem([display_name, ""])
+            item.setData(0, Qt.UserRole, display_name)
+            self.list_widget.addTopLevelItem(item)
 
-        # Khôi phục selection (hoặc chọn row 0)
-        restored = False
         if selected_display:
-            for i in range(self.list_widget.count()):
-                if self.list_widget.item(i).text().startswith(selected_display):
-                    self.list_widget.setCurrentRow(i)
-                    restored = True
-                    break
-        if not restored and self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
+            self.select_display(selected_display)
+        elif self.list_widget.topLevelItemCount() > 0:
+            self.list_widget.setCurrentItem(self.list_widget.topLevelItem(0))
+
+    def get_selected_display_name(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return None
+        return item.data(0, Qt.UserRole)
+
+    def select_display(self, display_name):
+        for i in range(self.list_widget.topLevelItemCount()):
+            item = self.list_widget.topLevelItem(i)
+            if item.data(0, Qt.UserRole) == display_name:
+                self.list_widget.setCurrentItem(item)
+                return
+
+    def _sparkline(self, values):
+        bars = "▁▂▃▄▅▆▇█"
+        max_val = max(values) if values else 0
+        if max_val <= 0:
+            return "▁" * max(1, len(values))
+
+        out = []
+        for v in values:
+            idx = int((v / max_val) * (len(bars) - 1))
+            idx = max(0, min(idx, len(bars) - 1))
+            out.append(bars[idx])
+        return "".join(out)
+
+    def update_list(self):
+        current = get_traffic()
+
+        # Nếu interface đang inactive mà có traffic sau khi mở selector,
+        # chuyển nó lên cuối nhóm active (giống yêu cầu).
+        promoted = []
+        for display_name in list(self.inactive_interfaces):
+            prev = self.prev_traffic.get(display_name, 0)
+            now = current.get(display_name, 0)
+            speed = max(now - prev, 0)
+            if speed > 0:
+                self.inactive_interfaces.remove(display_name)
+                self.active_interfaces.append(display_name)
+                promoted.append(display_name)
+
+        if promoted:
+            log.info(f"Promoted to active (append bottom active-group): {promoted}")
+            self.refresh_list_structure()
+
+        # Cập nhật text + dashboard, KHÔNG đảo thứ tự liên tục.
+        for i in range(self.list_widget.topLevelItemCount()):
+            item = self.list_widget.topLevelItem(i)
+            display_name = item.data(0, Qt.UserRole)
+            if not display_name:
+                continue
+
+            prev = self.prev_traffic.get(display_name, 0)
+            now = current.get(display_name, 0)
+            speed = max(now - prev, 0)
+
+            history = self.traffic_history.setdefault(display_name, [0.0] * 24)
+
+            # Làm mượt để đồ thị lên/xuống dần thay vì giật cục theo từng giây
+            prev_smooth = self.smoothed_speed.get(display_name, 0.0)
+            alpha = 0.35
+            smooth_speed = (alpha * speed) + ((1 - alpha) * prev_smooth)
+            self.smoothed_speed[display_name] = smooth_speed
+
+            history.append(smooth_speed)
+            if len(history) > 24:
+                history.pop(0)
+
+            spark = self._sparkline(history)
+            item.setText(0, f"{display_name}  |  {speed / 1024:.2f} KB/s")
+            item.setText(1, spark)
 
         self.prev_traffic = current
 
@@ -173,7 +256,7 @@ class InterfaceSelector(QWidget):
             log.warning("Không có interface nào được chọn.")
             return None
 
-        display_name = item.text().split("|")[0].strip()
+        display_name = item.data(0, Qt.UserRole)
         scapy_name = self.interfaces.get(display_name)
         log.info(f"get_selected_interface: display={display_name!r}  scapy={scapy_name!r}")
         return scapy_name
