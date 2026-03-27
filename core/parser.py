@@ -30,6 +30,17 @@ def parse_packet(packet, number):
     length = len(packet)
     info = packet.summary()
 
+    sport = None
+    dport = None
+    if packet.haslayer(TCP):
+        sport = packet[TCP].sport
+        dport = packet[TCP].dport
+    elif packet.haslayer(UDP):
+        sport = packet[UDP].sport
+        dport = packet[UDP].dport
+
+    layer_names = [layer.__name__.upper() for layer in packet.layers()]
+
     return {
         "no": number,
         "time": f"{time:.6f}",
@@ -38,5 +49,8 @@ def parse_packet(packet, number):
         "proto": proto,
         "length": length,
         "info": info,
+        "sport": sport,
+        "dport": dport,
+        "layers": layer_names,
         "raw": packet,
     }

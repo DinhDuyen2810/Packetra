@@ -1,5 +1,6 @@
 import logging
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -33,6 +34,7 @@ class MainWindow(QMainWindow):
         self.resize(1400, 850)
 
         self.packets = []
+        self.parsed_packets = []
         self.packet_count = 0
         self.sniffer = None
 
@@ -88,16 +90,15 @@ class MainWindow(QMainWindow):
         self.display_filter_input.setPlaceholderText("Apply a display filter ... <Ctrl-/>")
 
         self.apply_filter_btn = QPushButton("➡")
-        self.apply_filter_btn.setEnabled(False)
+        self.apply_filter_btn.setEnabled(True)
         self.apply_filter_btn.setFixedWidth(36)
 
-        self.plus_btn = QPushButton("+")
-        self.plus_btn.setEnabled(False)
-        self.plus_btn.setFixedWidth(28)
+        self.clear_filter_btn = QPushButton("✕")
+        self.clear_filter_btn.setFixedWidth(28)
 
         filter_row.addWidget(self.display_filter_input)
         filter_row.addWidget(self.apply_filter_btn)
-        filter_row.addWidget(self.plus_btn)
+        filter_row.addWidget(self.clear_filter_btn)
 
         filter_wrap = QWidget()
         filter_wrap.setLayout(filter_row)
@@ -111,6 +112,8 @@ class MainWindow(QMainWindow):
         )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(False)
         self.table.cellClicked.connect(self.show_details)
 
         # ===== Bottom split (details + bytes pane text) =====
@@ -135,7 +138,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(main_splitter)
 
         # ===== Status/footer giống feel Wireshark =====
-        self.footer = QLabel("Packets: 0")
+        self.footer = QLabel("Packets: 0 | Displayed: 0 | Protocols: -")
         self.footer.setContentsMargins(8, 4, 8, 4)
         layout.addWidget(self.footer)
 
@@ -146,6 +149,9 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_capture)
         self.save_btn.clicked.connect(self.save_file)
         self.load_btn.clicked.connect(self.load_file)
+        self.apply_filter_btn.clicked.connect(self.apply_display_filter)
+        self.clear_filter_btn.clicked.connect(self.clear_display_filter)
+        self.display_filter_input.returnPressed.connect(self.apply_display_filter)
 
     # ===== Capture =====
 
@@ -190,7 +196,14 @@ class MainWindow(QMainWindow):
         self.packet_count += 1
         parsed = parse_packet(packet, self.packet_count)
         self.packets.append(packet)
+        self.parsed_packets.append(parsed)
 
+        if self._matches_filter(parsed, self.display_filter_input.text()):
+            self._append_row(parsed)
+
+        self.update_footer()
+
+    def _append_row(self, parsed):
         row = self.table.rowCount()
         self.table.insertRow(row)
 
@@ -202,14 +215,89 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, 5, QTableWidgetItem(str(parsed["length"])))
         self.table.setItem(row, 6, QTableWidgetItem(parsed["info"]))
 
-        self.footer.setText(f"Packets: {self.packet_count}")
+        self._colorize_row(row, parsed["proto"])
+        self.table.scrollToBottom()
+
+    def _colorize_row(self, row, proto):
+        palette = {
+            "TCP": QColor(230, 245, 255),
+            "UDP": QColor(235, 255, 235),
+            "DNS": QColor(255, 243, 224),
+            "ARP": QColor(255, 224, 224),
+            "ICMP": QColor(245, 235, 255),
+        }
+        color = palette.get(proto)
+        if not color:
+            return
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item:
+                item.setBackground(color)
+
+    def _matches_filter(self, parsed, filter_text):
+        text = (filter_text or "").strip().lower()
+        if not text:
+            return True
+
+        if text in {"tcp", "udp", "dns", "arp", "icmp"}:
+            return parsed["proto"].lower() == text
+
+        if text.startswith("ip.addr=="):
+            value = text.split("==", 1)[1].strip()
+            return value and (parsed["src"] == value or parsed["dst"] == value)
+
+        if text.startswith("tcp.port==") or text.startswith("udp.port=="):
+            try:
+                port = int(text.split("==", 1)[1].strip())
+            except ValueError:
+                return False
+            return parsed["sport"] == port or parsed["dport"] == port
+
+        haystack = " ".join(
+            [
+                str(parsed["src"]),
+                str(parsed["dst"]),
+                str(parsed["proto"]),
+                str(parsed["length"]),
+                str(parsed["info"]),
+                " ".join(parsed["layers"]),
+            ]
+        ).lower()
+        return text in haystack
+
+    def apply_display_filter(self):
+        self.table.setRowCount(0)
+        for parsed in self.parsed_packets:
+            if self._matches_filter(parsed, self.display_filter_input.text()):
+                self._append_row(parsed)
+        self.update_footer()
+
+    def clear_display_filter(self):
+        self.display_filter_input.clear()
+        self.apply_display_filter()
+
+    def update_footer(self):
+        visible = self.table.rowCount()
+        protos = {}
+        for p in self.parsed_packets:
+            protos[p["proto"]] = protos.get(p["proto"], 0) + 1
+        proto_str = ", ".join(f"{k}:{v}" for k, v in sorted(protos.items())) if protos else "-"
+        self.footer.setText(
+            f"Packets: {self.packet_count} | Displayed: {visible} | Protocols: {proto_str}"
+        )
 
     def show_details(self, row, col):
-        if row < 0 or row >= len(self.packets):
-            log.warning(f"show_details: row {row} ngoài phạm vi (có {len(self.packets)} packets)")
+        if row < 0 or row >= self.table.rowCount():
+            log.warning(
+                f"show_details: row {row} ngoài phạm vi (có {self.table.rowCount()} hàng hiển thị)"
+            )
             return
 
-        packet = self.packets[row]
+        packet_no_item = self.table.item(row, 0)
+        if not packet_no_item:
+            return
+        packet_no = int(packet_no_item.text())
+        packet = self.packets[packet_no - 1]
         self.details.setText(packet.show(dump=True))
 
         try:
@@ -240,6 +328,11 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(self, "Open PCAP", "", "PCAP Files (*.pcap)")
         if filename:
             log.info(f"Tải PCAP từ {filename}")
+            self.stop_capture()
+            self.packets.clear()
+            self.parsed_packets.clear()
+            self.packet_count = 0
+            self.table.setRowCount(0)
             packets = load_pcap(filename)
             for p in packets:
                 self.add_packet(p)
