@@ -25,26 +25,26 @@ def get_interfaces():
             if desc and net:
                 scapy_map[desc.lower()] = (desc, net)
 
-        log.debug(f"scapy_map keys: {list(scapy_map.keys())}")
+        #log.debug(f"scapy_map keys: {list(scapy_map.keys())}")
 
         # psutil friendly names
         psutil_names = list(psutil.net_io_counters(pernic=True).keys())
-        log.debug(f"psutil names: {psutil_names}")
+        #log.debug(f"psutil names: {psutil_names}")
 
         for psutil_name in psutil_names:
             key = psutil_name.lower()
             if key in scapy_map:
                 display, scapy_net = scapy_map[key]
                 result[psutil_name] = scapy_net
-                log.debug(f"  MATCH: psutil={psutil_name!r} → scapy={scapy_net!r}")
+                #log.debug(f"  MATCH: psutil={psutil_name!r} → scapy={scapy_net!r}")
             else:
                 # Không match được → dùng psutil name làm cả display lẫn scapy name
                 # (fallback cho Linux / Mac)
                 result[psutil_name] = psutil_name
-                log.debug(f"  NO MATCH: psutil={psutil_name!r}, dùng trực tiếp")
+                #log.debug(f"  NO MATCH: psutil={psutil_name!r}, dùng trực tiếp")
 
     except Exception as e:
-        log.error(f"get_interfaces() lỗi: {e}")
+       # log.error(f"get_interfaces() lỗi: {e}")
         # Fallback hoàn toàn
         for name in psutil.net_io_counters(pernic=True):
             result[name] = name

@@ -1,8 +1,21 @@
 import logging
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTableWidget, QTableWidgetItem,
-    QTextEdit, QFileDialog, QMessageBox
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QFileDialog,
+    QMessageBox,
+    QSplitter,
+    QLineEdit,
+    QLabel,
+    QToolButton,
+    QMenuBar,
 )
 
 from core.capture import PacketSniffer
@@ -16,8 +29,8 @@ class MainWindow(QMainWindow):
     def __init__(self, iface):
         super().__init__()
         self.iface = iface
-        self.setWindowTitle(f"Packetra - {self.iface}")
-        self.resize(1000, 700)
+        self.setWindowTitle(f"*{self.iface}")
+        self.resize(1400, 850)
 
         self.packets = []
         self.packet_count = 0
@@ -27,11 +40,29 @@ class MainWindow(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
+        root = QWidget()
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # ===== Toolbar =====
+        # ===== Menu + Toolbar (giao diện giống Wireshark) =====
+        menu_bar = QMenuBar()
+        for name in ["File", "Edit", "View", "Go", "Capture", "Analyze", "Statistics", "Telephony", "Wireless", "Tools", "Help"]:
+            menu_bar.addMenu(name)
+        layout.addWidget(menu_bar)
+
         toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(8, 4, 8, 4)
+        toolbar.setSpacing(4)
 
+        for text in ["▶", "■", "⟳", "⚙", "📂", "💾", "🔍", "↶", "↷"]:
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setEnabled(False)
+            btn.setFixedSize(28, 24)
+            toolbar.addWidget(btn)
+
+        toolbar.addSpacing(6)
         self.start_btn = QPushButton("Start")
         self.stop_btn = QPushButton("Stop")
         self.save_btn = QPushButton("Save PCAP")
@@ -42,28 +73,74 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.save_btn)
         toolbar.addWidget(self.load_btn)
+        toolbar.addStretch()
+
+        toolbar_wrap = QWidget()
+        toolbar_wrap.setLayout(toolbar)
+        layout.addWidget(toolbar_wrap)
+
+        # ===== Display filter row =====
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(8, 0, 8, 4)
+        filter_row.setSpacing(6)
+
+        self.display_filter_input = QLineEdit()
+        self.display_filter_input.setPlaceholderText("Apply a display filter ... <Ctrl-/>")
+
+        self.apply_filter_btn = QPushButton("➡")
+        self.apply_filter_btn.setEnabled(False)
+        self.apply_filter_btn.setFixedWidth(36)
+
+        self.plus_btn = QPushButton("+")
+        self.plus_btn.setEnabled(False)
+        self.plus_btn.setFixedWidth(28)
+
+        filter_row.addWidget(self.display_filter_input)
+        filter_row.addWidget(self.apply_filter_btn)
+        filter_row.addWidget(self.plus_btn)
+
+        filter_wrap = QWidget()
+        filter_wrap.setLayout(filter_row)
+        layout.addWidget(filter_wrap)
 
         # ===== Packet Table =====
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["No", "Time", "Source", "Destination", "Protocol", "Length", "Info"]
+            ["No.", "Time", "Source", "Destination", "Protocol", "Length", "Info"]
         )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.cellClicked.connect(self.show_details)
 
-        # ===== Details =====
+        # ===== Bottom split (details + bytes pane text) =====
+        bottom_splitter = QSplitter(Qt.Horizontal)
+
         self.details = QTextEdit()
         self.details.setReadOnly(True)
 
-        layout.addLayout(toolbar)
-        layout.addWidget(self.table)
-        layout.addWidget(self.details)
+        self.bytes_text = QTextEdit()
+        self.bytes_text.setReadOnly(True)
+        self.bytes_text.setPlaceholderText("Raw bytes / hex view (text) sẽ hiển thị ở đây")
 
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
+        bottom_splitter.addWidget(self.details)
+        bottom_splitter.addWidget(self.bytes_text)
+        bottom_splitter.setSizes([850, 550])
+
+        main_splitter = QSplitter(Qt.Vertical)
+        main_splitter.addWidget(self.table)
+        main_splitter.addWidget(bottom_splitter)
+        main_splitter.setSizes([500, 280])
+
+        layout.addWidget(main_splitter)
+
+        # ===== Status/footer giống feel Wireshark =====
+        self.footer = QLabel("Packets: 0")
+        self.footer.setContentsMargins(8, 4, 8, 4)
+        layout.addWidget(self.footer)
+
+        root.setLayout(layout)
+        self.setCentralWidget(root)
 
         self.start_btn.clicked.connect(self.start_capture)
         self.stop_btn.clicked.connect(self.stop_capture)
@@ -125,12 +202,27 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, 5, QTableWidgetItem(str(parsed["length"])))
         self.table.setItem(row, 6, QTableWidgetItem(parsed["info"]))
 
+        self.footer.setText(f"Packets: {self.packet_count}")
+
     def show_details(self, row, col):
         if row < 0 or row >= len(self.packets):
             log.warning(f"show_details: row {row} ngoài phạm vi (có {len(self.packets)} packets)")
             return
+
         packet = self.packets[row]
         self.details.setText(packet.show(dump=True))
+
+        try:
+            raw_bytes = bytes(packet)
+            hex_chunks = [f"{b:02x}" for b in raw_bytes]
+            grouped = []
+            for i in range(0, len(hex_chunks), 16):
+                offset = f"{i:04x}"
+                line = " ".join(hex_chunks[i:i + 16])
+                grouped.append(f"{offset}  {line}")
+            self.bytes_text.setText("\n".join(grouped))
+        except Exception as e:
+            self.bytes_text.setText(f"Không thể render bytes: {e}")
 
     # ===== PCAP =====
 
@@ -138,6 +230,7 @@ class MainWindow(QMainWindow):
         if not self.packets:
             QMessageBox.warning(self, "Warning", "Không có packet nào để lưu.")
             return
+
         filename, _ = QFileDialog.getSaveFileName(self, "Save PCAP", "", "PCAP Files (*.pcap)")
         if filename:
             log.info(f"Lưu {len(self.packets)} packets → {filename}")
