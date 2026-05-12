@@ -1,0 +1,8 @@
+aaanote/
+core/__pycache__/
+gui/__pycache__/
+ultils/__pycache__/
+build/
+dist/
+.vscode/
+*.exe
