@@ -3,6 +3,7 @@ import re
 import os
 import hashlib
 import platform
+import time
 from collections import Counter
 from PySide6.QtCore import Qt, Signal, QSettings, QDateTime
 from PySide6.QtWidgets import (
@@ -33,6 +34,8 @@ class CaptureView(QWidget):
         self.iface = iface
         self.iface_display_name = iface_display_name
         self.capture_filter = capture_filter
+        self.output_settings = {}  # Output tab settings from Capture Options dialog
+        self.options_settings = {}  # Options tab settings from Capture Options dialog
 
         self.parser = PacketParser()
         self.display_filter = DisplayFilter()
@@ -41,9 +44,12 @@ class CaptureView(QWidget):
         self.sniffer = None
         self.loaded_file_path = None
         self.auto_scroll_enabled = True
+        self.realtime_update_enabled = True
         self.color_rules_enabled = True
         self._is_stopping = False
         self._last_live_status_count = 0
+        self._capture_started_at = None
+        self._captured_bytes = 0
         self.default_main_splitter_sizes = [500, 360]
         self.default_lower_splitter_sizes = [980, 650]
         self._base_fonts = {}
@@ -117,6 +123,16 @@ class CaptureView(QWidget):
         self.loaded_file_path = None
         self.capture_state_changed.emit(False)
         self._update_status('Ready')
+    
+    def set_output_settings(self, output_settings):
+        """Set Output tab settings from Capture Options dialog"""
+        self.output_settings = output_settings.copy() if output_settings else {}
+
+    def set_options_settings(self, options_settings):
+        """Set Options tab settings from Capture Options dialog"""
+        self.options_settings = options_settings.copy() if options_settings else {}
+        self.realtime_update_enabled = bool(self.options_settings.get('realtime', True))
+        self.auto_scroll_enabled = bool(self.options_settings.get('autoscroll', True))
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -287,6 +303,8 @@ class CaptureView(QWidget):
         if self.sniffer and self.sniffer.isRunning():
             return
         self.sniffer = PacketSniffer(self.iface, self.capture_filter)
+        self._capture_started_at = time.monotonic()
+        self._captured_bytes = 0
         self.sniffer.packet_captured.connect(self.add_packet)
         self.sniffer.error_occurred.connect(self.on_sniffer_error)
         self.sniffer.status_changed.connect(self._update_status)
@@ -307,6 +325,8 @@ class CaptureView(QWidget):
         if not self.sniffer or not self.sniffer.isRunning():
             self.sniffer = None
             self._is_stopping = False
+            if not self.realtime_update_enabled:
+                self.apply_display_filter()
             self.capture_state_changed.emit(False)
             self._update_status('Capture stopped')
 
@@ -347,6 +367,8 @@ class CaptureView(QWidget):
     def _on_sniffer_finished(self):
         self.sniffer = None
         self._is_stopping = False
+        if not self.realtime_update_enabled:
+            self.apply_display_filter()
         self.capture_state_changed.emit(False)
         self._update_status('Capture stopped')
 
@@ -355,7 +377,10 @@ class CaptureView(QWidget):
             return
         record = self.parser.parse(packet, len(self.records) + 1, self.iface)
         self.records.append(record)
-        if self.display_filter.matches(record, self.display_filter_input.text()):
+        raw_len = len(record.raw) if getattr(record, 'raw', None) is not None else 0
+        self._captured_bytes += raw_len
+
+        if self.realtime_update_enabled and self.display_filter.matches(record, self.display_filter_input.text()):
             self.visible_indices.append(len(self.records) - 1)
             self.table.append_record(record)
             if self.auto_scroll_enabled:
@@ -366,6 +391,42 @@ class CaptureView(QWidget):
         if current_count - self._last_live_status_count >= 20:
             self._last_live_status_count = current_count
             self._update_status('Live capture')
+
+        if self._should_stop_capture():
+            self.stop_capture()
+
+    def _should_stop_capture(self) -> bool:
+        """Evaluate stop conditions from Options tab settings"""
+        opts = self.options_settings or {}
+
+        if opts.get('stop_packets_enabled'):
+            packet_limit = int(opts.get('stop_packets_value', 1) or 1)
+            if len(self.records) >= packet_limit:
+                return True
+
+        if opts.get('stop_size_enabled'):
+            size_limit = int(opts.get('stop_size_value', 1) or 1)
+            size_unit = str(opts.get('stop_size_unit', 'kilobytes'))
+            multiplier = {
+                'kilobytes': 1024,
+                'megabytes': 1024 * 1024,
+                'gigabytes': 1024 * 1024 * 1024,
+            }.get(size_unit, 1024)
+            if self._captured_bytes >= size_limit * multiplier:
+                return True
+
+        if opts.get('stop_duration_enabled'):
+            duration_limit = int(opts.get('stop_duration_value', 1) or 1)
+            duration_unit = str(opts.get('stop_duration_unit', 'seconds'))
+            seconds = duration_limit
+            if duration_unit == 'minutes':
+                seconds *= 60
+            elif duration_unit == 'hours':
+                seconds *= 3600
+            if self._capture_started_at is not None and (time.monotonic() - self._capture_started_at) >= seconds:
+                return True
+
+        return False
 
     def apply_display_filter(self):
         self.table.setRowCount(0)
