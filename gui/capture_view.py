@@ -276,7 +276,9 @@ class CaptureView(QWidget):
         self.filter_history_action.triggered.connect(self._show_filter_history_menu)
         self.table.cellClicked.connect(self.show_details)
         self.details_tree.item_selected.connect(self.hex_view.highlight_bytes)
-        self.hex_view.bytes_selected.connect(self.details_tree.select_offset)
+        self.hex_view.bytes_range_selected.connect(self._on_bytes_range_selected)
+        self.hex_view.bytes_hovered.connect(self._on_bytes_hovered)
+        self.hex_view.hover_left.connect(self._on_hex_hover_left)
 
         self._on_find_option_changed()
         self._refresh_filter_history_menu()
@@ -472,6 +474,69 @@ class CaptureView(QWidget):
         self.hex_view.show_packet(record)
         self._update_status(f'Selected frame {record.number}')
 
+    def _on_bytes_range_selected(self, offset: int, length: int):
+        """Handle bytes range selection from hex view -> select and highlight detail"""
+        best_item = self._resolve_detail_item_for_range(offset, length)
+        if best_item:
+            self.details_tree.setCurrentItem(best_item)
+
+    def _on_bytes_hovered(self, offset: int):
+        """Hover over bytes should preview full detail field in hex/ascii without changing selection."""
+        best_item = self._resolve_detail_item_for_range(offset, 1)
+        if not best_item:
+            self.hex_view.clear_hover_range()
+            return
+
+        from PySide6.QtCore import Qt
+        data = best_item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(data, tuple):
+            start, item_length = data
+            if start >= 0 and item_length > 0:
+                self.hex_view.set_hover_range(start, item_length)
+                return
+
+        self.hex_view.clear_hover_range()
+
+    def _on_hex_hover_left(self):
+        self.hex_view.clear_hover_range()
+
+    def _resolve_detail_item_for_range(self, offset: int, length: int):
+        """Resolve deepest detail node for a byte range, excluding Frame subtree and bracketed analysis nodes."""
+        best_item = None
+        best_depth = -1
+
+        def visit(item, depth=0, in_frame_section=False):
+            nonlocal best_item, best_depth
+            from PySide6.QtCore import Qt
+
+            if in_frame_section:
+                return
+
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(data, tuple):
+                start, item_length = data
+                title = item.text(0).strip().lower()
+                is_bracketed = title.startswith('[') and title.endswith(']')
+                if start >= 0 and item_length > 0 and not is_bracketed:
+                    if start == offset and item_length == length:
+                        best_item = item
+                        best_depth = depth + 1000
+                    elif start <= offset and offset + length <= start + item_length:
+                        if depth > best_depth:
+                            best_item = item
+                            best_depth = depth
+
+            for i in range(item.childCount()):
+                visit(item.child(i), depth + 1, in_frame_section)
+
+        root = self.details_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            child = root.child(i)
+            top_title = child.text(0).strip().lower()
+            visit(child, 0, top_title.startswith('frame'))
+
+        return best_item
+
     def save_file(self, force_dialog: bool = False):
         if not self.records:
             QMessageBox.warning(None, 'Warning', 'Không có packet nào để lưu.')
@@ -514,14 +579,32 @@ class CaptureView(QWidget):
         self.loaded_file_path = filename
         packets, metadata = load_pcap(filename)
         self.capture_metadata = metadata
-        for idx, packet in enumerate(packets, start=1):
-            self.records.append(self.parser.parse(packet, idx))
+        self._all_packets = packets
+        self._parse_batch_index = 0
+        self._parse_batch_size = 100
+        self._parse_batch_timer = QTimer(self)
+        self._parse_batch_timer.timeout.connect(self._parse_next_batch)
+        self._parse_next_batch(initial=True)
+
+    def _parse_next_batch(self, initial=False):
+        batch_size = self._parse_batch_size
+        start = self._parse_batch_index
+        end = min(start + batch_size, len(self._all_packets))
+        for idx in range(start, end):
+            packet = self._all_packets[idx]
+            self.records.append(self.parser.parse(packet, idx + 1))
+        self._parse_batch_index = end
         self._set_dirty(False)
         self.apply_display_filter()
-        if self.visible_indices:
+        if initial and self.visible_indices:
             self.goto_first_packet()
-        self._remember_recent_file(filename)
-        self._update_status(f'Loaded {len(self.records)} packets from {filename}')
+        self._update_status(f'Loaded {len(self.records)} packets...')
+        if self._parse_batch_index < len(self._all_packets):
+            self._parse_batch_timer.start(10)
+        else:
+            self._parse_batch_timer.stop()
+            self._remember_recent_file(self.loaded_file_path)
+            self._update_status(f'Loaded {len(self.records)} packets from {self.loaded_file_path}')
 
     def load_file(self, file_path: str = ''):
         filename = (file_path or '').strip()

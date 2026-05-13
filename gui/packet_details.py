@@ -67,21 +67,36 @@ class PacketDetailsTree(QTreeWidget):
         best_item = None
         best_depth = -1
 
-        def visit(item, depth=0):
+        def visit(item, depth=0, in_frame_section=False):
             nonlocal best_item, best_depth
+
+            if in_frame_section:
+                for i in range(item.childCount()):
+                    visit(item.child(i), depth + 1, True)
+                return
+
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(data, tuple):
                 start, length = data
-                if start >= 0 and length > 0 and start <= offset < start + length:
+                title = item.text(0).strip().lower()
+                is_bracketed = title.startswith('[') and title.endswith(']')
+                if (
+                    start >= 0
+                    and length > 0
+                    and start <= offset < start + length
+                    and not is_bracketed
+                ):
                     if depth > best_depth:
                         best_item = item
                         best_depth = depth
             for i in range(item.childCount()):
-                visit(item.child(i), depth + 1)
+                visit(item.child(i), depth + 1, in_frame_section)
 
         root = self.invisibleRootItem()
         for i in range(root.childCount()):
-            visit(root.child(i))
+            child = root.child(i)
+            top_title = child.text(0).strip().lower()
+            visit(child, 0, top_title.startswith('frame'))
         if best_item:
             self.setCurrentItem(best_item)
 

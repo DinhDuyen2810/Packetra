@@ -138,6 +138,7 @@ class InterfaceSelectorView(QWidget):
         self.list_widget.header().resizeSection(0, 620)
         self.list_widget.header().resizeSection(1, 300)
         self.list_widget.header().resizeSection(2, 120)
+        self.list_widget.header().sectionResized.connect(self._on_header_section_resized)
         self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
         self.list_widget.setAlternatingRowColors(True)
         self.list_widget.itemDoubleClicked.connect(self._on_start_capture)
@@ -146,6 +147,17 @@ class InterfaceSelectorView(QWidget):
 
         self.main_layout.addWidget(self.list_widget, 1)
         self.tooltip_item = None
+
+    def _on_header_section_resized(self, logicalIndex, oldSize, newSize):
+        # Nếu là cột Traffic Trend (index 1), vẽ lại sparkline với width mới
+        if logicalIndex == 1:
+            for idx in range(self.list_widget.topLevelItemCount()):
+                item = self.list_widget.topLevelItem(idx)
+                name = item.data(0, Qt.UserRole)
+                history = self.traffic_history.get(name, [0.0] * 24)
+                chart = self.list_widget.itemWidget(item, 1)
+                if chart:
+                    chart.setPixmap(self._sparkline_pixmap(history, width=newSize))
 
     def _category_of_interface(self, name: str):
         low = name.lower()
@@ -244,6 +256,8 @@ class InterfaceSelectorView(QWidget):
         if promoted:
             self.refresh_list_structure()
 
+        # Get the current width of the Traffic Trend column
+        trend_col_width = self.list_widget.columnWidth(1)
         for idx in range(self.list_widget.topLevelItemCount()):
             item = self.list_widget.topLevelItem(idx)
             name = item.data(0, Qt.UserRole)
@@ -258,9 +272,12 @@ class InterfaceSelectorView(QWidget):
             history[:] = history[-24:]
             item.setText(0, f'{name}  ({self._category_of_interface(name)})')
             item.setText(2, f'{speed / 1024:.2f} KB/s')
-            chart = QLabel()
-            chart.setPixmap(self._sparkline_pixmap(history))
-            self.list_widget.setItemWidget(item, 1, chart)
+            chart = self.list_widget.itemWidget(item, 1)
+            if chart is None:
+                from PySide6.QtWidgets import QLabel
+                chart = QLabel()
+                self.list_widget.setItemWidget(item, 1, chart)
+            chart.setPixmap(self._sparkline_pixmap(history, width=max(40, trend_col_width-8)))
         self.prev_traffic = current
 
     def get_selected_display_name(self):

@@ -107,3 +107,18 @@ class PacketTable(QTableWidget):
     def sync_row_height_to_font(self):
         row_height = max(16, self.fontMetrics().height() + 4)
         self.verticalHeader().setDefaultSectionSize(row_height)
+
+    def scrollTo(self, index, hint=None):
+        """Override scrollTo to preserve horizontal scroll position.
+        Only allow vertical scrolling, not horizontal."""
+        # Save current horizontal scroll position
+        horizontal_value = self.horizontalScrollBar().value()
+        
+        # Call parent scrollTo (this may adjust horizontal position)
+        if hint is not None:
+            super().scrollTo(index, hint)
+        else:
+            super().scrollTo(index)
+        
+        # Restore horizontal scroll position to prevent unwanted horizontal scrolling
+        self.horizontalScrollBar().setValue(horizontal_value)

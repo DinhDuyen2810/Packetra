@@ -2277,6 +2277,7 @@ class ApplicationWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Xử lý khi đóng ứng dụng"""
+        # 1. If capturing, prompt to stop capture first
         if self.capture_view and self.capture_view.is_capturing():
             reply = QMessageBox.question(
                 self,
@@ -2287,5 +2288,25 @@ class ApplicationWindow(QMainWindow):
             if reply == QMessageBox.No:
                 event.ignore()
                 return
+
+        # 2. If there are unsaved changes, prompt to save/discard/cancel
+        if self.capture_view and hasattr(self.capture_view, 'has_unsaved_changes') and self.capture_view.has_unsaved_changes():
+            reply = QMessageBox.question(
+                self,
+                'Unsaved Changes',
+                'Có thay đổi chưa lưu. Bạn có muốn lưu lại trước khi thoát?',
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save
+            )
+            if reply == QMessageBox.Save:
+                # Attempt to save, if user cancels save dialog, abort exit
+                result = self.capture_view.save_file(force_dialog=False)
+                if not result:
+                    event.ignore()
+                    return
+            elif reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            # If Discard, just continue
 
         event.accept()
