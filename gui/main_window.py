@@ -204,7 +204,8 @@ class MainWindow(QMainWindow):
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
-        for packet in load_pcap(filename):
-            self.records.append(self.parser.parse(packet, len(self.records) + 1))
+        packets, metadata = load_pcap(filename)
+        for idx, packet in enumerate(packets, start=1):
+            self.records.append(self.parser.parse(packet, idx))
         self.apply_display_filter()
         self._update_status(f'Loaded {len(self.records)} packets from {filename}')

@@ -19,3 +19,5 @@ class PacketRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
     raw: Any = None
     iface: str = ''
+    interface_id: int = 0
+    packet_comment: str = ''

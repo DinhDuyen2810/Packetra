@@ -2025,17 +2025,19 @@ class ApplicationWindow(QMainWindow):
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
         refresh_btn = QPushButton('Refresh')
+        copy_btn = QPushButton('Copy')
         edit_comment_btn = QPushButton('Edit Comments')
         close_btn = QPushButton('Close')
         help_btn = QPushButton('Help')
         button_row.addWidget(refresh_btn)
         button_row.addStretch()
+        button_row.addWidget(copy_btn)
         button_row.addWidget(edit_comment_btn)
         button_row.addWidget(close_btn)
         button_row.addWidget(help_btn)
         main_layout.addLayout(button_row)
 
-        for btn in (refresh_btn, edit_comment_btn, close_btn, help_btn):
+        for btn in (refresh_btn, copy_btn, edit_comment_btn, close_btn, help_btn):
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.setFixedWidth(btn.fontMetrics().horizontalAdvance(btn.text()) + 24)
 
@@ -2076,7 +2078,7 @@ class ApplicationWindow(QMainWindow):
             html.append('</table>')
             
             ICOL = 'padding-right: 20px; padding-top: 1px; padding-bottom: 1px;'
-            # Interfaces section
+            # Interfaces section - display ALL interfaces from metadata
             html.append('<b>Interfaces</b>')
             html.append('<table cellpadding="1" cellspacing="0" style="border-collapse: collapse; margin-bottom: 10px; margin-top: 2px;">')
             html.append('<tr>')
@@ -2085,22 +2087,52 @@ class ApplicationWindow(QMainWindow):
             html.append('<td style="' + ICOL + '"><u>Dropped packets</u></td>')
             html.append('<td style="' + ICOL + '"><u>Capture filter</u></td>')
             html.append('<td style="' + ICOL + '"><u>Link type</u></td>')
-            html.append('<td style="' + ICOL + '"><u>Packet size limit</u></td>')
+            html.append('<td style="' + ICOL + '"><u>Packet size limit (snaplen)</u></td>')
             html.append('</tr>')
-            html.append('<tr>')
-            html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_name', '-'), '-') + '</td>')
-            html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_description', '-'), '-') + '</td>')
-            html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_dropped', '0 (0.0%)'), '0 (0.0%)') + '</td>')
-            html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_capture_filter', 'none'), 'none') + '</td>')
-            html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_link_type', 'Ethernet'), 'Ethernet') + '</td>')
-            html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_snaplen', '262144 bytes'), '262144 bytes') + '</td>')
-            html.append('</tr>')
+            
+            # Display all interfaces from props['interfaces']
+            interfaces = props.get('interfaces', [])
+            if interfaces:
+                for iface in interfaces:
+                    html.append('<tr>')
+                    iface_name = safe_text(iface.get('name', ''), '-')
+                    iface_desc = safe_text(iface.get('description', ''), 'Unknown')
+                    dropped = safe_text(iface.get('dropped_packets', '0 (0.0%)'), '0 (0.0%)')
+                    capture_filter = safe_text(iface.get('capture_filter', 'none'), 'none')
+                    link_type = safe_text(iface.get('link_type', 'Ethernet'), 'Ethernet')
+                    snaplen = safe_text(iface.get('snaplen', '262144 bytes'), '262144 bytes')
+                    
+                    html.append('<td style="' + ICOL + '">' + iface_name + '</td>')
+                    html.append('<td style="' + ICOL + '">' + iface_desc + '</td>')
+                    html.append('<td style="' + ICOL + '">' + dropped + '</td>')
+                    html.append('<td style="' + ICOL + '">' + capture_filter + '</td>')
+                    html.append('<td style="' + ICOL + '">' + link_type + '</td>')
+                    html.append('<td style="' + ICOL + '">' + snaplen + '</td>')
+                    html.append('</tr>')
+            else:
+                # Fallback to single interface if no interfaces list
+                html.append('<tr>')
+                html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_name', '-'), '-') + '</td>')
+                html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_description', 'Unknown'), 'Unknown') + '</td>')
+                html.append('<td style="' + ICOL + '">0 (0.0%)</td>')
+                html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_capture_filter', 'none'), 'none') + '</td>')
+                html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_link_type', 'Ethernet'), 'Ethernet') + '</td>')
+                html.append('<td style="' + ICOL + '">' + safe_text(props.get('interface_snaplen', '262144 bytes'), '262144 bytes') + '</td>')
+                html.append('</tr>')
+            
             html.append('</table>')
             
             SCOL = 'padding-right: 25px; padding-top: 1px; padding-bottom: 1px;'
-            # Comments section
+            # Comments section - display file-level comment with proper line breaks
             html.append('<b>Comments</b>')
-            html.append('<p style="margin: 2px 0 10px 0;">' + safe_text(props.get('comment', ''), '-') + '</p>')
+            file_comment = props.get('comment', '')
+            if file_comment:
+                # Escape HTML special characters and preserve newlines with <pre>
+                file_comment = file_comment.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                file_comment = file_comment.replace('\n', '<br>')
+                html.append('<p style="margin: 2px 0 10px 0; white-space: pre-wrap; word-wrap: break-word;">' + file_comment + '</p>')
+            else:
+                html.append('<p style="margin: 2px 0 10px 0;">-</p>')
             
             # Statistics section
             html.append('<b>Statistics</b>')
@@ -2142,6 +2174,12 @@ class ApplicationWindow(QMainWindow):
             html.append('</body></html>')
             content_browser.setHtml('\n'.join(html))
 
+        def copy_to_clipboard():
+            """Copy all content to clipboard"""
+            text = content_browser.toPlainText()
+            QApplication.clipboard().setText(text)
+            QMessageBox.information(dialog, 'Copy', 'Content copied to clipboard!')
+
         def edit_comment():
             props = self.capture_view.get_capture_properties()
             current = props.get('comment', '')
@@ -2149,17 +2187,26 @@ class ApplicationWindow(QMainWindow):
             text, ok = QInputDialog.getMultiLineText(dialog, 'Capture Comment', 'Comment:', current)
             if ok:
                 self.capture_view.set_capture_comment(text)
+                if self.capture_view.save_capture_comment_to_file():
+                    QMessageBox.information(dialog, 'Comment Saved', 'Comment updated and saved to file successfully.')
+                else:
+                    QMessageBox.warning(
+                        dialog,
+                        'Save Failed',
+                        'Comment updated in memory but could not be saved to file.\nOnly PCAPNG files support direct comment persistence.'
+                    )
                 fill_values()
 
         def show_help():
             QMessageBox.information(
                 dialog,
                 'Capture File Properties Help',
-                'All content is selectable. Copy any text using Ctrl+C or right-click menu. No restrictions - select and copy as much as you need.'
+                'All content is selectable. Copy any text using Ctrl+C or right-click menu, or use the Copy button to copy all content at once. Select and copy as much as you need.'
             )
 
         fill_values()
         refresh_btn.clicked.connect(fill_values)
+        copy_btn.clicked.connect(copy_to_clipboard)
         edit_comment_btn.clicked.connect(edit_comment)
         close_btn.clicked.connect(dialog.accept)
         help_btn.clicked.connect(show_help)

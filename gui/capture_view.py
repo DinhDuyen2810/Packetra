@@ -2,7 +2,6 @@ import logging
 import re
 import os
 import hashlib
-import platform
 import time
 from collections import Counter
 from PySide6.QtCore import Qt, Signal, QSettings, QDateTime
@@ -20,7 +19,7 @@ from core.parser import PacketParser
 from gui.hex_view import PacketHexView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
-from utils.pcap_io import load_pcap, save_pcap
+from utils.pcap_io import load_pcap, save_pcap, save_pcapng_file_comment
 
 log = logging.getLogger('capture_view')
 
@@ -59,6 +58,7 @@ class CaptureView(QWidget):
         self._last_find_detail_index = None
         self._filter_history = self._load_filter_history()
         self.capture_comments = ''
+        self.capture_metadata = None  # pcapng metadata (interfaces, file comment, packet comments)
 
         self._build_ui()
         self._update_status('Ready')
@@ -356,6 +356,10 @@ class CaptureView(QWidget):
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
+        self.capture_comments = ''
+        self.capture_metadata = None
+        self._captured_bytes = 0
+        self._capture_started_at = None
         self._last_live_status_count = 0
         if reset_file_path:
             self.loaded_file_path = None
@@ -479,9 +483,13 @@ class CaptureView(QWidget):
         self.stop_capture()
         self.clear_packets(reset_file_path=False)
         self.loaded_file_path = filename
-        for packet in load_pcap(filename):
-            self.records.append(self.parser.parse(packet, len(self.records) + 1))
+        packets, metadata = load_pcap(filename)
+        self.capture_metadata = metadata
+        for idx, packet in enumerate(packets, start=1):
+            self.records.append(self.parser.parse(packet, idx))
         self.apply_display_filter()
+        if self.visible_indices:
+            self.goto_first_packet()
         self._remember_recent_file(filename)
         self._update_status(f'Loaded {len(self.records)} packets from {filename}')
 
@@ -1173,6 +1181,15 @@ class CaptureView(QWidget):
 
     def set_capture_comment(self, comment: str):
         self.capture_comments = comment or ''
+    
+    def save_capture_comment_to_file(self):
+        """Save capture comment to current pcapng file."""
+        if not self.loaded_file_path or not self.loaded_file_path.lower().endswith('.pcapng'):
+            return False
+        ok = save_pcapng_file_comment(self.loaded_file_path, self.capture_comments)
+        if ok and self.capture_metadata is not None:
+            self.capture_metadata.file_comment = self.capture_comments
+        return ok
 
     def get_capture_properties(self):
         path = self.loaded_file_path or '(live capture / unsaved)'
@@ -1193,10 +1210,16 @@ class CaptureView(QWidget):
             first_time_text = QDateTime.fromSecsSinceEpoch(int(first_epoch)).toString('yyyy-MM-dd HH:mm:ss')
             last_time_text = QDateTime.fromSecsSinceEpoch(int(last_epoch)).toString('yyyy-MM-dd HH:mm:ss')
             elapsed_seconds = max(0.0, float(last_epoch - first_epoch))
-            h = int(elapsed_seconds) // 3600
-            m = (int(elapsed_seconds) % 3600) // 60
-            s = int(elapsed_seconds) % 60
-            elapsed_text = f'{h:02d}:{m:02d}:{s:02d}'
+            total_seconds = int(elapsed_seconds)
+            days = total_seconds // 86400
+            rem = total_seconds % 86400
+            h = rem // 3600
+            m = (rem % 3600) // 60
+            s = rem % 60
+            if days > 0:
+                elapsed_text = f'{days} days {h:02d}:{m:02d}:{s:02d}'
+            else:
+                elapsed_text = f'{h:02d}:{m:02d}:{s:02d}'
 
         if self.loaded_file_path and os.path.exists(self.loaded_file_path):
             try:
@@ -1255,6 +1278,47 @@ class CaptureView(QWidget):
             except Exception:
                 pass
 
+        # Extract interfaces from metadata
+        interfaces_list = []
+        if self.capture_metadata and self.capture_metadata.interfaces:
+            for iface in self.capture_metadata.interfaces:
+                interfaces_list.append({
+                    'name': iface.get('name', '-'),
+                    'description': iface.get('description', 'Unknown'),
+                    'dropped_packets': iface.get('dropped_packets', '0 (0.0%)'),
+                    'capture_filter': iface.get('capture_filter', 'none'),
+                    'link_type': iface.get('link_type', 'Ethernet'),
+                    'snaplen': iface.get('snaplen', '262144 bytes'),
+                    'comment': iface.get('comment', 'Unknown'),
+                })
+        else:
+            # Fallback: create single interface from current settings
+            interfaces_list.append({
+                'name': self.iface or self.iface_display_name or '-',
+                'description': self.iface_display_name or self.iface or 'Unknown',
+                'dropped_packets': '0 (0.0%)',
+                'capture_filter': self.capture_filter or 'none',
+                'link_type': 'Ethernet',
+                'snaplen': '262144 bytes',
+                'comment': 'Unknown',
+            })
+
+        encapsulation_values = []
+        for iface in interfaces_list:
+            link_type = str(iface.get('link_type', '')).strip()
+            if not link_type or link_type.startswith('Unknown'):
+                continue
+            if link_type not in encapsulation_values:
+                encapsulation_values.append(link_type)
+        encapsulation_text = ', '.join(encapsulation_values) if encapsulation_values else 'Unknown'
+
+        # Get file-level comment from metadata
+        file_comment = ''
+        if self.capture_metadata and self.capture_metadata.file_comment:
+            file_comment = self.capture_metadata.file_comment
+        elif self.capture_comments:
+            file_comment = self.capture_comments
+
         return {
             'file_name': os.path.basename(path),
             'file_path': path,
@@ -1262,14 +1326,14 @@ class CaptureView(QWidget):
             'sha256': sha256,
             'sha1': sha1,
             'format': format_text,
-            'encapsulation': 'Ethernet',
+            'encapsulation': encapsulation_text,
             'first_packet': first_time_text,
             'last_packet': last_time_text,
             'elapsed': elapsed_text,
             'time_span_seconds': elapsed_seconds,
-            'capture_hardware': platform.processor() or 'Unknown CPU',
-            'capture_os': platform.platform(),
-            'capture_application': 'Dumpcap (Wireshark) 4.6.5 (v4.6.5-0-gb40c46f83867)',
+            'capture_hardware': (self.capture_metadata.section_hardware if self.capture_metadata else '') or '-',
+            'capture_os': (self.capture_metadata.section_os if self.capture_metadata else '') or '-',
+            'capture_application': (self.capture_metadata.section_application if self.capture_metadata else '') or '-',
             'interface_name': self.iface or self.iface_display_name,
             'interface_description': self.iface_display_name or self.iface or '-',
             'interface_dropped': '0 (0.0%)',
@@ -1280,7 +1344,8 @@ class CaptureView(QWidget):
             'displayed_count': displayed_packets,
             'dropped_count': 0,
             'total_bytes': total_bytes,
-            'comment': self.capture_comments,
+            'comment': file_comment,
+            'interfaces': interfaces_list,
             'stats_packets_displayed': f'{displayed_packets} ({displayed_ratio:.1f}%)',
             'stats_packets_marked': '—',
             'stats_time_span': f'{elapsed_seconds:.3f}',
