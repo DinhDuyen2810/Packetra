@@ -1243,6 +1243,8 @@ class ApplicationWindow(QMainWindow):
             'main_splitter': [500, 360],
             'lower_splitter': [980, 650],
         }
+        self._search_icon_off = QIcon()
+        self._search_icon_on = QIcon()
 
         # Build UI
         self._build_ui()
@@ -1475,6 +1477,11 @@ class ApplicationWindow(QMainWindow):
         # Find
         self.action_search_btn = QAction(toolbar_icon('edit-find.png'), 'Filter', self)
         self.action_search_btn.setToolTip('Filter')
+        self.action_search_btn.setCheckable(True)
+        self._search_icon_off = toolbar_icon('edit-find.png')
+        self._search_icon_on = self._search_icon_off
+        self.action_search_btn.setIcon(self._search_icon_off)
+        self.action_search_btn.setChecked(False)
         self.toolbar.addAction(self.action_search_btn)
 
         # Color rules
@@ -1598,6 +1605,7 @@ class ApplicationWindow(QMainWindow):
 
         self.stacked_widget.setCurrentWidget(self.iface_selector_view)
         self.setWindowTitle('Packetra - Select Interface')
+        self._on_find_panel_visibility_changed(False)
         self._update_toolbar_state('selector')
 
     def show_capture_view(self, iface: str, iface_display_name: str, capture_filter: str = ''):
@@ -1606,15 +1614,35 @@ class ApplicationWindow(QMainWindow):
             self.capture_view = CaptureView(iface, iface_display_name, capture_filter)
             self.capture_view.status_changed.connect(self._on_capture_status_changed)
             self.capture_view.capture_state_changed.connect(lambda _running: self._sync_capture_buttons())
+            self.capture_view.find_panel_visibility_changed.connect(self._on_find_panel_visibility_changed)
             self.stacked_widget.addWidget(self.capture_view)
 
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self.capture_view.set_color_rules_enabled(self.action_color_btn.isChecked())
         self.stacked_widget.setCurrentWidget(self.capture_view)
-        self.setWindowTitle(f'Packetra - {iface_display_name}')
+        self._update_capture_window_title()
         self._update_toolbar_state('capture')
         self._refresh_status_metrics()
+
+    def _update_capture_window_title(self):
+        if not self.capture_view:
+            self.setWindowTitle('Packetra - Network Packet Analyzer')
+            return
+        current_name = self.capture_view.get_current_filename()
+        if current_name:
+            dirty = ' *' if self.capture_view.has_unsaved_changes() else ''
+            self.setWindowTitle(f'Packetra - {current_name}{dirty}')
+            return
+        label = self.capture_view.iface_display_name or 'Offline'
+        dirty = ' *' if self.capture_view.has_unsaved_changes() else ''
+        self.setWindowTitle(f'Packetra - {label}{dirty}')
+
+    def _on_find_panel_visibility_changed(self, visible: bool):
+        self.action_search_btn.blockSignals(True)
+        self.action_search_btn.setChecked(bool(visible))
+        self.action_search_btn.setIcon(self._search_icon_off)
+        self.action_search_btn.blockSignals(False)
 
     def _load_capture_defaults(self):
         """Load default Output/Options capture settings from QSettings"""
@@ -1740,10 +1768,14 @@ class ApplicationWindow(QMainWindow):
     def _on_open_recent_file(self, path: str):
         if not path:
             return
+        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        if not proceed:
+            return
         self.show_capture_view('', 'Offline', '')
         if self.capture_view:
             self.capture_view.load_file(path)
             self._sync_capture_buttons()
+            self._update_capture_window_title()
             self._refresh_status_metrics()
 
     def _on_start_capture(self):
@@ -1761,6 +1793,7 @@ class ApplicationWindow(QMainWindow):
         self._apply_capture_defaults_to_view()
         self.capture_view.start_new_capture()
         self._sync_capture_buttons()
+        self._update_capture_window_title()
 
     def _on_stop_capture(self):
         """Dừng capture"""
@@ -1782,14 +1815,20 @@ class ApplicationWindow(QMainWindow):
 
         self.capture_view.restart_capture()
         self._sync_capture_buttons()
+        self._update_capture_window_title()
 
     def _on_open_file(self):
         """Mở file PCAP"""
+        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        if not proceed:
+            return
+
         if not self.capture_view:
             self.show_capture_view('', 'Offline', '')
         if self.capture_view:
             self.capture_view.load_file()
             self._sync_capture_buttons()
+            self._update_capture_window_title()
             self._refresh_status_metrics()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
@@ -1798,6 +1837,7 @@ class ApplicationWindow(QMainWindow):
         """Lưu file PCAP"""
         if self.capture_view:
             self.capture_view.save_file()
+            self._update_capture_window_title()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
         else:
@@ -1805,7 +1845,13 @@ class ApplicationWindow(QMainWindow):
 
     def _on_save_as_file(self):
         """Lưu file PCAP với tên mới"""
-        self._on_save_file()
+        if self.capture_view:
+            self.capture_view.save_file(force_dialog=True)
+            self._update_capture_window_title()
+            if self.iface_selector_view:
+                self.iface_selector_view.refresh_recent_files()
+        else:
+            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
 
     def _on_search(self):
         """Tìm kiếm"""
@@ -1815,6 +1861,11 @@ class ApplicationWindow(QMainWindow):
     def _on_close_capture_file(self):
         if not self.capture_view:
             return
+
+        proceed = self._prompt_save_before_destructive_action('Đóng file sẽ bỏ dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        if not proceed:
+            return
+
         self.capture_view.stop_capture()
         self.show_interface_selector()
         self._refresh_status_metrics()
@@ -1876,7 +1927,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.reset_layout_to_default_size()
 
     def _prompt_save_before_destructive_action(self, message: str) -> bool:
-        if not self.capture_view or not self.capture_view.has_packets():
+        if not self.capture_view or not self.capture_view.has_unsaved_changes():
             return True
 
         reply = QMessageBox.question(
@@ -1893,6 +1944,7 @@ class ApplicationWindow(QMainWindow):
             saved = bool(self.capture_view.save_file())
             if not saved:
                 return False
+            self._update_capture_window_title()
             return True
 
         # "No" means continue without saving old capture.
@@ -1960,6 +2012,7 @@ class ApplicationWindow(QMainWindow):
         _ = status
         self._refresh_status_metrics()
         self._sync_capture_buttons()
+        self._update_capture_window_title()
         if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view:
             self._update_toolbar_state('capture')
 

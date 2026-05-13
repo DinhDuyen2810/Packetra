@@ -472,14 +472,29 @@ class PacketParser:
 
     def _extract_endpoints(self, packet):
         if packet.haslayer(ARP):
-            return packet[ARP].psrc, packet[ARP].pdst
+            src = str(getattr(packet[ARP], 'hwsrc', '') or '')
+            dst = str(getattr(packet[ARP], 'hwdst', '') or '')
+            if not src or src == '00:00:00:00:00:00':
+                src = str(getattr(packet[ARP], 'psrc', '') or 'N/A')
+            if not dst or dst == '00:00:00:00:00:00':
+                if packet.haslayer(Ether):
+                    dst = str(getattr(packet[Ether], 'dst', '') or '')
+                if not dst:
+                    dst = str(getattr(packet[ARP], 'pdst', '') or 'N/A')
+            return self._normalize_endpoint_text(src), self._normalize_endpoint_text(dst)
         if packet.haslayer(IP):
-            return str(packet[IP].src), str(packet[IP].dst)
+            return self._normalize_endpoint_text(str(packet[IP].src)), self._normalize_endpoint_text(str(packet[IP].dst))
         if packet.haslayer(IPv6):
-            return str(packet[IPv6].src), str(packet[IPv6].dst)
+            return self._normalize_endpoint_text(str(packet[IPv6].src)), self._normalize_endpoint_text(str(packet[IPv6].dst))
         if packet.haslayer(Ether):
-            return str(packet[Ether].src), str(packet[Ether].dst)
+            return self._normalize_endpoint_text(str(packet[Ether].src)), self._normalize_endpoint_text(str(packet[Ether].dst))
         return 'N/A', 'N/A'
+
+    def _normalize_endpoint_text(self, endpoint: str) -> str:
+        text = (endpoint or '').strip()
+        if text.lower() == 'ff:ff:ff:ff:ff:ff':
+            return 'Broadcast'
+        return text or 'N/A'
 
     def _extract_ports(self, packet):
         if packet.haslayer(TCP):

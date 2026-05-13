@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
@@ -28,18 +29,26 @@ class PacketTable(QTableWidget):
         self.setAlternatingRowColors(True)
         self.setSortingEnabled(False)
         self.setWordWrap(False)
+        self.setTextElideMode(Qt.ElideRight)
         self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(20)
+        self.verticalHeader().setMinimumSectionSize(18)
         self.setShowGrid(True)
         header = self.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.Interactive)
+        header.setSectionResizeMode(6, QHeaderView.Interactive)
+        self.setColumnWidth(0, 60)
+        self.setColumnWidth(1, 130)
         self.setColumnWidth(2, 170)
         self.setColumnWidth(3, 170)
+        self.setColumnWidth(4, 90)
+        self.setColumnWidth(5, 80)
         self.setColumnWidth(6, 720)
         self.apply_content_resize_layout()
 
@@ -86,11 +95,15 @@ class PacketTable(QTableWidget):
 
     def apply_content_resize_layout(self):
         header = self.horizontalHeader()
-        # Keep Info as stretch so the table always fills available width.
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        # Keep all columns interactive so users can resize widths manually.
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.Interactive)
+        header.setSectionResizeMode(6, QHeaderView.Interactive)
+
+    def sync_row_height_to_font(self):
+        row_height = max(16, self.fontMetrics().height() + 4)
+        self.verticalHeader().setDefaultSectionSize(row_height)

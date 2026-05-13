@@ -4,7 +4,7 @@ import os
 import hashlib
 import time
 from collections import Counter
-from PySide6.QtCore import Qt, Signal, QSettings, QDateTime
+from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget, QComboBox, QCheckBox,
@@ -27,6 +27,7 @@ log = logging.getLogger('capture_view')
 class CaptureView(QWidget):
     status_changed = Signal(str)
     capture_state_changed = Signal(bool)
+    find_panel_visibility_changed = Signal(bool)
 
     def __init__(self, iface: str = '', iface_display_name: str = '', capture_filter: str = ''):
         super().__init__()
@@ -59,6 +60,7 @@ class CaptureView(QWidget):
         self._filter_history = self._load_filter_history()
         self.capture_comments = ''
         self.capture_metadata = None  # pcapng metadata (interfaces, file comment, packet comments)
+        self._is_dirty = False
 
         self._build_ui()
         self._update_status('Ready')
@@ -120,7 +122,10 @@ class CaptureView(QWidget):
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
+        self.capture_comments = ''
+        self.capture_metadata = None
         self.loaded_file_path = None
+        self._set_dirty(False)
         self.capture_state_changed.emit(False)
         self._update_status('Ready')
     
@@ -319,6 +324,15 @@ class CaptureView(QWidget):
             # Update UI immediately; thread shutdown completes asynchronously.
             self.capture_state_changed.emit(False)
             self._update_status('Capture stopping...')
+            # Reduce queued UI work on high-traffic captures.
+            try:
+                self.sniffer.packet_captured.disconnect(self.add_packet)
+            except Exception:
+                pass
+            try:
+                self.sniffer.status_changed.disconnect(self._update_status)
+            except Exception:
+                pass
             self.sniffer.stop()
             return
 
@@ -361,6 +375,7 @@ class CaptureView(QWidget):
         self._captured_bytes = 0
         self._capture_started_at = None
         self._last_live_status_count = 0
+        self._set_dirty(False)
         if reset_file_path:
             self.loaded_file_path = None
 
@@ -381,6 +396,7 @@ class CaptureView(QWidget):
             return
         record = self.parser.parse(packet, len(self.records) + 1, self.iface)
         self.records.append(record)
+        self._set_dirty(True)
         raw_len = len(record.raw) if getattr(record, 'raw', None) is not None else 0
         self._captured_bytes += raw_len
 
@@ -456,10 +472,20 @@ class CaptureView(QWidget):
         self.hex_view.show_packet(record)
         self._update_status(f'Selected frame {record.number}')
 
-    def save_file(self):
+    def save_file(self, force_dialog: bool = False):
         if not self.records:
             QMessageBox.warning(None, 'Warning', 'Không có packet nào để lưu.')
             return False
+        if self.loaded_file_path and not force_dialog:
+            if not self._is_dirty:
+                self._update_status('No changes to save')
+                return True
+            save_pcap(self.loaded_file_path, [r.raw for r in self.records])
+            self._remember_recent_file(self.loaded_file_path)
+            self._set_dirty(False)
+            self._update_status(f'Saved to {self.loaded_file_path}')
+            return True
+
         dialog = QFileDialog(self, 'Save PCAP')
         dialog.setAcceptMode(QFileDialog.AcceptSave)
         dialog.setNameFilter('PCAP Files (*.pcap)')
@@ -467,15 +493,18 @@ class CaptureView(QWidget):
         dialog.resize(1100, 700)
         self._fit_widget_90(dialog)
 
-        if dialog.exec():
-            selected = dialog.selectedFiles()
-            if selected:
-                filename = selected[0]
-                save_pcap(filename, [r.raw for r in self.records])
-                self._remember_recent_file(filename)
-                self._update_status(f'Saved to {filename}')
-                return True
-        return False
+        if not dialog.exec():
+            return False
+        selected = dialog.selectedFiles()
+        if not selected:
+            return False
+        filename = selected[0]
+        save_pcap(filename, [r.raw for r in self.records])
+        self.loaded_file_path = filename
+        self._remember_recent_file(filename)
+        self._set_dirty(False)
+        self._update_status(f'Saved to {filename}')
+        return True
 
     def _load_capture_from_path(self, filename: str):
         if not filename:
@@ -487,6 +516,7 @@ class CaptureView(QWidget):
         self.capture_metadata = metadata
         for idx, packet in enumerate(packets, start=1):
             self.records.append(self.parser.parse(packet, idx))
+        self._set_dirty(False)
         self.apply_display_filter()
         if self.visible_indices:
             self.goto_first_packet()
@@ -592,12 +622,14 @@ class CaptureView(QWidget):
     def toggle_find_panel(self):
         visible = not self.find_widget.isVisible()
         self.find_widget.setVisible(visible)
+        self.find_panel_visibility_changed.emit(visible)
         if visible:
             self.find_input.setFocus()
             self.find_input.selectAll()
 
     def _on_find_cancel(self):
         self.find_widget.setVisible(False)
+        self.find_panel_visibility_changed.emit(False)
 
     def _on_find_option_changed(self):
         search_type = self.find_type_combo.currentText()
@@ -679,11 +711,12 @@ class CaptureView(QWidget):
             return []
 
         current = self.table.currentRow()
+        had_selection = current >= 0
         if current < 0:
             current = total - 1 if backwards else 0
 
         rows = []
-        if include_current:
+        if include_current or not had_selection:
             rows.append(current)
 
         if backwards:
@@ -800,6 +833,9 @@ class CaptureView(QWidget):
                     all_offsets.extend(self._find_all_bytes(data, narrow))
                 if wide:
                     all_offsets.extend(self._find_all_bytes(data, wide))
+                hex_needle = self._parse_hex_query(query)
+                if hex_needle:
+                    all_offsets.extend(self._find_all_bytes(data, hex_needle))
                 all_offsets = sorted(set(all_offsets))
                 length = len(narrow) if narrow else (len(wide) if wide else 0)
                 return {'matched': bool(all_offsets), 'offsets': all_offsets, 'length': length}
@@ -815,12 +851,10 @@ class CaptureView(QWidget):
             if not needle:
                 return {'matched': False, 'offsets': [], 'length': 0}
             offsets = self._find_all_bytes(data, needle)
-            # Compatibility fallback: if no plain string bytes hit, treat pure-hex query as byte sequence.
-            if not offsets:
-                hex_needle = self._parse_hex_query(query)
-                if hex_needle:
-                    offsets = self._find_all_bytes(data, hex_needle)
-                    return {'matched': bool(offsets), 'offsets': offsets, 'length': len(hex_needle)}
+            # Also treat pure-hex input in String mode so values like "31" match byte 0x31 across packets.
+            hex_needle = self._parse_hex_query(query)
+            if hex_needle:
+                offsets = sorted(set(offsets + self._find_all_bytes(data, hex_needle)))
             return {'matched': bool(offsets), 'offsets': offsets, 'length': len(needle)}
 
         # Regex on bytes (narrow/wide approximation)
@@ -1066,6 +1100,24 @@ class CaptureView(QWidget):
                 if selected:
                     return
 
+        if details_mode:
+            for row in self._iter_search_rows(backwards, include_current=False):
+                self.goto_row(row)
+                selected, _ = self._select_detail_match_in_current_tree(
+                    query,
+                    case_sensitive,
+                    search_type == 'Regular Expression',
+                    row,
+                    backwards,
+                    multiple,
+                )
+                if selected:
+                    self._last_find_row = row
+                    self._last_find_offset = None
+                    return
+            QMessageBox.information(self, 'Find', 'Không tìm thấy kết quả phù hợp.')
+            return
+
         for row in self._iter_search_rows(backwards, include_current=False):
             rec_idx = self.visible_indices[row]
             record = self.records[rec_idx]
@@ -1138,7 +1190,8 @@ class CaptureView(QWidget):
             new_size = max(7.0, min(32.0, current + delta))
             font.setPointSizeF(new_size)
             widget.setFont(font)
-        self.table.resizeRowsToContents()
+        if hasattr(self.table, 'sync_row_height_to_font'):
+            self.table.sync_row_height_to_font()
 
     def increase_main_text_size(self):
         self._apply_font_delta(1.0)
@@ -1153,7 +1206,19 @@ class CaptureView(QWidget):
             if base_size > 0:
                 font.setPointSizeF(base_size)
                 widget.setFont(font)
-        self.table.resizeRowsToContents()
+        if hasattr(self.table, 'sync_row_height_to_font'):
+            self.table.sync_row_height_to_font()
+
+    def _set_dirty(self, value: bool):
+        self._is_dirty = bool(value)
+
+    def has_unsaved_changes(self) -> bool:
+        return bool(self._is_dirty)
+
+    def get_current_filename(self) -> str:
+        if not self.loaded_file_path:
+            return ''
+        return os.path.basename(self.loaded_file_path)
 
     def resize_columns_to_content(self):
         self.table.resizeColumnsToContents()
@@ -1181,6 +1246,7 @@ class CaptureView(QWidget):
 
     def set_capture_comment(self, comment: str):
         self.capture_comments = comment or ''
+        self._set_dirty(True)
     
     def save_capture_comment_to_file(self):
         """Save capture comment to current pcapng file."""
@@ -1189,6 +1255,7 @@ class CaptureView(QWidget):
         ok = save_pcapng_file_comment(self.loaded_file_path, self.capture_comments)
         if ok and self.capture_metadata is not None:
             self.capture_metadata.file_comment = self.capture_comments
+            self._set_dirty(False)
         return ok
 
     def get_capture_properties(self):
