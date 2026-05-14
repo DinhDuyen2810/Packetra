@@ -16,6 +16,7 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
 from gui.interface_selector_view import InterfaceSelectorView
 from gui.capture_view import CaptureView
 from gui.manage_interfaces_dialog import ManageInterfacesDialog
+from utils.pcap_io import normalize_capture_extension
 
 log = logging.getLogger('application')
 
@@ -39,7 +40,7 @@ class InterfaceTreeWidget(QTreeWidget):
         """Show IP tooltip on hover"""
         item = self.itemAt(event.pos())
         if item and item.parent() is None:  # Top-level interface item
-            iface_name = item.text(0).strip()
+            iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
             if self.parent_dialog:
                 ips = self.parent_dialog._get_interface_ips(iface_name)
                 if ips and item != self.tooltip_item:
@@ -320,6 +321,28 @@ class CaptureOptionsDialog(QDialog):
         self._save_options_settings()
         super().accept()
     
+    def reject(self):
+        """Override reject to NOT save settings when user clicks Cancel or closes dialog."""
+        super().reject()
+    
+    def reset_output_to_defaults(self):
+        """Reset Output tab settings to defaults (for app close/shutdown)."""
+        from PySide6.QtCore import QSettings
+        settings = QSettings('Packetra', 'Packetra')
+        for key in list(settings.allKeys()):
+            if key.startswith('output/'):
+                settings.remove(key)
+    
+    def reset_options_to_defaults(self):
+        """Reset Options tab 'Stop capture' settings to defaults, but keep 'Display options' and 'Name resolution'."""
+        from PySide6.QtCore import QSettings
+        settings = QSettings('Packetra', 'Packetra')
+        stop_keys = ['stop_packets_enabled', 'stop_packets_value', 'stop_files_enabled', 'stop_files_value',
+                     'stop_size_enabled', 'stop_size_value', 'stop_size_unit',
+                     'stop_duration_enabled', 'stop_duration_value', 'stop_duration_unit']
+        for key in stop_keys:
+            settings.remove(f'options/{key}')
+    
     def _validate_output_settings(self):
         """Validate Output tab settings"""
         import os
@@ -382,10 +405,10 @@ class CaptureOptionsDialog(QDialog):
         # Interface tree widget
         self.iface_tree = InterfaceTreeWidget()
         self.iface_tree.parent_dialog = self
-        self.iface_tree.setColumnCount(7)
+        self.iface_tree.setColumnCount(8)
         self.iface_tree.setHeaderLabels([
             'Interface', 'Traffic', 'Link-layer Header', 'Promiscuous',
-            'Snaplen (B)', 'Buffer (MB)', 'Capture Filter'
+            'Snaplen (B)', 'Buffer (MB)', 'Capture Filter', 'Comment'
         ])
         self.iface_tree.header().setStretchLastSection(False)
         self.iface_tree.setColumnWidth(0, 200)
@@ -404,6 +427,7 @@ class CaptureOptionsDialog(QDialog):
         self.iface_tree.doubleClicked.connect(self._on_interface_double_clicked)
         # Expand/collapse on header click
         self.iface_tree.header().sectionClicked.connect(self._on_tree_header_clicked)
+        self.iface_tree.header().sectionResized.connect(self._on_input_tree_section_resized)
         
         layout.addWidget(self.iface_tree)
         
@@ -418,8 +442,8 @@ class CaptureOptionsDialog(QDialog):
         self.promisc_all_cb.stateChanged.connect(self._on_promisc_all_changed)
         cb_layout.addWidget(self.promisc_all_cb)
         
-        self.monitor_all_cb = QCheckBox('Enable monitor mode on all 802.11 interfaces')
-        cb_layout.addWidget(self.monitor_all_cb)
+        # self.monitor_all_cb = QCheckBox('Enable monitor mode on all 802.11 interfaces')
+        # cb_layout.addWidget(self.monitor_all_cb)
         self.manage_interfaces_btn = QPushButton('Manage Interfaces')
         self.manage_interfaces_btn.clicked.connect(self._on_manage_interfaces)
         cb_layout.addWidget(self.manage_interfaces_btn)
@@ -512,15 +536,32 @@ class CaptureOptionsDialog(QDialog):
         
         painter.end()
         return pix
+
+    def _on_input_tree_section_resized(self, logical_index, _old_size, new_size):
+        """Resize traffic sparkline width when Traffic column width changes."""
+        if logical_index != 1:
+            return
+        chart_width = max(40, int(new_size) - 8)
+        for iface_name, label in self.traffic_widgets.items():
+            if label:
+                label.setPixmap(self._get_sparkline_pixmap(iface_name, width=chart_width))
     
     def _populate_interfaces(self):
         """Populate interface tree with available interfaces"""
         from utils.network_utils import get_interfaces, get_traffic
+        import json
+        from PySide6.QtCore import QSettings
         
         # Clear existing items first to avoid duplicates
         self.iface_tree.clear()
         
         interfaces = get_interfaces()
+        settings = QSettings('Packetra', 'Packetra')
+        settings_json = settings.value('interface_settings', '{}', str)
+        try:
+            saved_settings = json.loads(settings_json)
+        except Exception:
+            saved_settings = {}
         self.promisc_checkboxes = {}
         self.iface_items = {}
         self.traffic_widgets = {}
@@ -530,48 +571,52 @@ class CaptureOptionsDialog(QDialog):
         self.traffic_history = {name: [0.0] * 24 for name in interfaces}
         
         for iface_name in interfaces:
+            iface_key = f"interface_{iface_name}"
+            iface_pref = saved_settings.get(iface_key, {})
+            if not iface_pref.get('show', True):
+                continue
+
             iface_item = QTreeWidgetItem()
             ips = self._get_interface_ips(iface_name)
-            
-            # Column 0: Interface name
-            iface_item.setText(0, iface_name)
+            # Column 0: Interface display name (friendly hoặc comment:friendly)
+            friendly_name = iface_pref.get('friendly_name', interfaces.get(iface_name, iface_name))
+            comment = iface_pref.get('comment', '')
+            show_with_comment = iface_pref.get('show_with_comment', False)
+            display_name = f"{comment}:{friendly_name}" if show_with_comment and comment else friendly_name
+            iface_item.setText(0, display_name)
+            iface_item.setData(0, Qt.UserRole, iface_name)
             iface_item.setFirstColumnSpanned(False)
-
-            # Add row to tree first, then attach widgets to avoid disappearing widgets.
             self.iface_tree.addTopLevelItem(iface_item)
             self.iface_items[iface_name] = iface_item
-            
             # Column 1: Traffic (show sparkline)
-            pix = self._get_sparkline_pixmap(iface_name)
+            chart_width = max(40, self.iface_tree.columnWidth(1) - 8)
+            pix = self._get_sparkline_pixmap(iface_name, width=chart_width)
             traffic_label = QLabel()
             traffic_label.setPixmap(pix)
             traffic_label._traffic_bytes = traffic.get(iface_name, 0)
             self.iface_tree.setItemWidget(iface_item, 1, traffic_label)
             self.traffic_widgets[iface_name] = traffic_label
-            
             # Column 2: Link-layer Header (text, double-click to edit)
             iface_item.setText(2, "Ethernet")
             iface_item.setData(2, Qt.UserRole, "Ethernet")
-            
             # Column 3: Promiscuous (checkbox widget)
             promisc_cb = QCheckBox()
             promisc_cb.setChecked(True)
             self.promisc_checkboxes[iface_name] = promisc_cb
             promisc_cb.stateChanged.connect(lambda state, i=iface_name: self._on_promisc_changed(i, state))
             self.iface_tree.setItemWidget(iface_item, 3, promisc_cb)
-            
             # Column 4: Snaplen (text, double-click to edit)
             iface_item.setText(4, "default")
             iface_item.setData(4, Qt.UserRole, 262144)
-            
             # Column 5: Buffer (text, double-click to edit)
             iface_item.setText(5, "2")
             iface_item.setData(5, Qt.UserRole, 2)
-            
             # Column 6: Capture Filter (text, double-click to edit)
             iface_item.setText(6, "")
             iface_item.setData(6, Qt.UserRole, "")
-            
+            # Column 7: Comment (editable, double click)
+            iface_item.setText(7, comment)
+            iface_item.setData(7, Qt.UserRole, comment)
             # Add IP children (comma-separated for expand view)
             if ips:
                 ip_item = QTreeWidgetItem(iface_item)
@@ -598,7 +643,8 @@ class CaptureOptionsDialog(QDialog):
 
             label = self.traffic_widgets.get(iface_name)
             if label:
-                label.setPixmap(self._get_sparkline_pixmap(iface_name))
+                chart_width = max(40, self.iface_tree.columnWidth(1) - 8)
+                label.setPixmap(self._get_sparkline_pixmap(iface_name, width=chart_width))
                 label.setToolTip(f"{speed / 1024:.2f} KB/s")
 
         self.prev_traffic = current
@@ -627,7 +673,7 @@ class CaptureOptionsDialog(QDialog):
             cb.blockSignals(False)
     
     def _on_monitor_all_changed(self, state):
-        """Handle 'Enable monitor mode on all' checkbox"""
+        # Removed monitor mode logic (not needed)
         pass
     
     def _on_start_from_options(self):
@@ -655,22 +701,100 @@ class CaptureOptionsDialog(QDialog):
         if hasattr(self, 'start_btn'):
             self.start_btn.setEnabled(self._get_selected_interface_item() is not None)
 
+    def _validate_capture_filter_expression(self, expression, iface_name=None):
+        """Validate BPF capture filter syntax using libpcap-compatible compilers.
+
+        This keeps support broad for advanced BPF primitives/operators instead of
+        restricting users to a subset of protocol/IP/MAC/port patterns.
+        """
+        expr = (expression or '').strip()
+        if not expr:
+            return True, ''
+
+        compile_errors = []
+        compile_backends = []
+
+        # Backend 1: scapy.arch.pcapdnet.compile_filter (pcap_compile semantics).
+        try:
+            from scapy.arch.pcapdnet import compile_filter as pcap_compile_filter
+            compile_backends.append(lambda: pcap_compile_filter(expr, iface_name or None))
+        except Exception:
+            pass
+
+        # Backend 2: scapy.all.compile_filter (if available in installed Scapy).
+        try:
+            from scapy.all import compile_filter as scapy_compile_filter
+            compile_backends.append(lambda: scapy_compile_filter(expr, iface=iface_name or None))
+        except Exception:
+            pass
+
+        for backend in compile_backends:
+            try:
+                backend()
+                return True, ''
+            except Exception as exc:
+                compile_errors.append(str(exc))
+
+        if compile_backends:
+            return False, compile_errors[-1] if compile_errors else 'Unknown capture filter syntax error.'
+
+        # If no compiler backend is discoverable, do not apply custom regex restrictions
+        # that could reject valid BPF syntax. Runtime capture backend will validate.
+        return True, ''
+
     def _start_capture_with_item(self, item):
         """Start capture using selected interface and current Output/Options settings"""
-        from utils.network_utils import get_interfaces
-
         if not self._validate_output_settings() or not self._validate_options_settings():
             return
+        # Validate capture filter syntax (nếu có)
+        capture_filter = item.data(6, Qt.UserRole)
+        iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
+        is_valid_filter, filter_error = self._validate_capture_filter_expression(capture_filter, iface_name=iface_name)
+        if not is_valid_filter:
+            QMessageBox.warning(self, 'Invalid Capture Filter', f'Capture filter syntax error:\n{filter_error}')
+            return
+
         self._save_output_settings()
         self._save_options_settings()
 
-        iface_name = item.text(0).strip()
-        iface_display_name = get_interfaces().get(iface_name, iface_name)
-        capture_filter = item.text(6).strip()
+        iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
+        iface_display_name = item.text(0).strip()
+        # Gather all config from columns
+        link_layer = item.data(2, Qt.UserRole)
+        promisc = False
+        if iface_name in self.promisc_checkboxes:
+            promisc = self.promisc_checkboxes[iface_name].isChecked()
+        snaplen = item.data(4, Qt.UserRole)
+        buffer_mb = item.data(5, Qt.UserRole)
+        # Compose config dict
+        iface_config = {
+            'iface_name': iface_name,
+            'display_name': iface_display_name,
+            'link_layer': link_layer,
+            'promiscuous': promisc,
+            'snaplen': snaplen,
+            'buffer_mb': buffer_mb,
+            'capture_filter': capture_filter,
+        }
+        # Thêm thông tin pipes và remote interfaces từ settings nếu có
+        from PySide6.QtCore import QSettings
+        import json
+        settings = QSettings('Packetra', 'Packetra')
+        pipes = settings.value('pipes', '', str)
+        iface_config['pipes'] = [p.strip() for p in pipes.splitlines() if p.strip()]
+        remotes_json = settings.value('remote_interfaces', '[]', str)
+        try:
+            iface_config['remote_interfaces'] = json.loads(remotes_json)
+        except Exception:
+            iface_config['remote_interfaces'] = []
 
         parent_window = self.parent()
         if hasattr(parent_window, 'show_capture_view'):
             parent_window.show_capture_view(iface_name, iface_display_name, capture_filter)
+            if getattr(parent_window, 'capture_view', None):
+                parent_window.capture_view.interface_config = iface_config
+                parent_window.capture_view.set_output_settings(self.get_output_settings())
+                parent_window.capture_view.set_options_settings(self.get_options_settings())
             if hasattr(parent_window, '_apply_capture_defaults_to_view'):
                 parent_window._apply_capture_defaults_to_view()
             if hasattr(parent_window, '_on_start_capture'):
@@ -683,40 +807,67 @@ class CaptureOptionsDialog(QDialog):
             QMessageBox.warning(self, 'Capture Unavailable', 'Cannot start capture: capture view is not initialized.')
             return
 
+        self.capture_view.interface_config = iface_config
         self.capture_view.set_interface(iface_name, iface_display_name, capture_filter)
         self.capture_view.set_output_settings(self.get_output_settings())
         self.capture_view.set_options_settings(self.get_options_settings())
-        self.capture_view.start_capture()
+        self.capture_view.start_new_capture()
         self.accept()
     
     def _on_interface_double_clicked(self, index):
         """Handle double-click based on column - inline editing"""
         item = self.iface_tree.itemFromIndex(index)
-        if not item or item.parent() is not None:  # Skip child items
+        if not item or item.parent() is not None:
             return
-        
+
         column = index.column()
         # Column 0 (Interface name) - Start capture
         if column == 0:
             self.iface_tree.setCurrentItem(item)
             self._update_start_button_state()
             self._start_capture_with_item(item)
-        
-        # Column 2 (Link-layer Header) - Inline combo edit
+
+        # Column 2 (Link-layer Header) - Inline combo edit, chỉ cho phép các giá trị hợp lệ tùy loại interface
         elif column == 2:
-            self._edit_inline_combobox(item, column, ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC', 
-                                                       'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback'])
-        
+            iface_name = item.data(0, Qt.UserRole) or item.text(0)
+            # Lấy loại interface từ network_utils (nếu có)
+            from utils.network_utils import get_interface_details
+            details = get_interface_details().get(iface_name, {})
+            iface_type = details.get('type', '').lower()
+            # Mapping loại interface sang các header hợp lệ
+            if 'ethernet' in iface_type:
+                options = ['Ethernet', 'DOCSIS']
+            elif 'wifi' in iface_type or '802.11' in iface_type:
+                options = ['802.11']
+            elif 'ppp' in iface_type:
+                options = ['PPP over serial']
+            elif 'hdlc' in iface_type:
+                options = ['Cisco HDLC']
+            elif 'atm' in iface_type:
+                options = ['RFC 1483 IP-over-ATM', 'Sun raw ATM']
+            elif 'loopback' in iface_type:
+                options = ['BSD loopback']
+            elif 'raw' in iface_type:
+                options = ['Raw IP']
+            else:
+                # Nếu không xác định, cho phép tất cả
+                options = ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC',
+                           'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback']
+            self._edit_inline_combobox(item, column, options)
+
         # Column 4 (Snaplen) - Inline spinbox edit
         elif column == 4:
             self._edit_inline_spinbox(item, column, 0, 262144)
-        
+
         # Column 5 (Buffer) - Inline spinbox edit
         elif column == 5:
             self._edit_inline_spinbox(item, column, 1, 512)
-        
+
         # Column 6 (Capture Filter) - Inline text edit
         elif column == 6:
+            self._edit_inline_text(item, column)
+        # Column 7 (Comment) - Inline text edit
+        elif column == 7:
             self._edit_inline_text(item, column)
     
     def _edit_inline_combobox(self, item, column, options):
@@ -787,9 +938,25 @@ class CaptureOptionsDialog(QDialog):
         """Open Manage Interfaces dialog"""
         dialog = ManageInterfacesDialog(self)
         dialog.exec()
-        # Refresh interface list after changes
-        self._populate_interfaces()
+        # Always refresh after dialog closes
+        self._on_interface_preferences_changed()
         self._update_start_button_state()
+
+    def _on_interface_preferences_changed(self):
+        """Refresh Input tab and forward interface preference changes to main window."""
+        current_iface = None
+        current_item = self._get_selected_interface_item()
+        if current_item:
+            current_iface = current_item.data(0, Qt.UserRole)
+
+        self._populate_interfaces()
+
+        if current_iface and current_iface in self.iface_items:
+            self.iface_tree.setCurrentItem(self.iface_items[current_iface])
+
+        main_window = self.parent()
+        if main_window and hasattr(main_window, '_on_interface_preferences_changed'):
+            main_window._on_interface_preferences_changed()
     
     def _build_output_tab(self):
         """Build Output tab (Wireshark-style)"""
@@ -812,6 +979,8 @@ class CaptureOptionsDialog(QDialog):
         def on_browse():
             path, _ = QFileDialog.getSaveFileName(self, 'Select Capture File', '', 'PCAP Files (*.pcap *.pcapng);;All Files (*)')
             if path:
+                selected_format = 'pcapng' if self.fmt_pcapng.isChecked() else 'pcap'
+                path = normalize_capture_extension(path, selected_format)
                 self.file_path_input.setText(path)
         browse_btn.clicked.connect(on_browse)
         file_layout.addWidget(browse_btn)
@@ -1001,6 +1170,17 @@ class CaptureOptionsDialog(QDialog):
             self.output_state['format'] = 'pcapng'
         else:
             self.output_state['format'] = 'pcap'
+
+        # Keep permanent file path extension in sync with selected output format.
+        if hasattr(self, 'file_path_input'):
+            current_path = self.file_path_input.text().strip()
+            if current_path:
+                normalized_path = normalize_capture_extension(current_path, self.output_state['format'])
+                if normalized_path != current_path:
+                    self.file_path_input.blockSignals(True)
+                    self.file_path_input.setText(normalized_path)
+                    self.file_path_input.blockSignals(False)
+                    self.output_state['file_path'] = normalized_path
     
     def _on_compression_changed(self):
         """Handle Compression radio button change"""
@@ -1602,11 +1782,17 @@ class ApplicationWindow(QMainWindow):
             self.stacked_widget.addWidget(self.iface_selector_view)
 
         self.iface_selector_view.refresh_recent_files()
+        self.iface_selector_view.refresh_interface_preferences()
 
         self.stacked_widget.setCurrentWidget(self.iface_selector_view)
         self.setWindowTitle('Packetra - Select Interface')
         self._on_find_panel_visibility_changed(False)
         self._update_toolbar_state('selector')
+
+    def _on_interface_preferences_changed(self):
+        """Apply interface preference updates to start screen in real time."""
+        if self.iface_selector_view:
+            self.iface_selector_view.refresh_interface_preferences()
 
     def show_capture_view(self, iface: str, iface_display_name: str, capture_filter: str = ''):
         """Hiển thị màn hình capture"""
@@ -2309,4 +2495,24 @@ class ApplicationWindow(QMainWindow):
                 return
             # If Discard, just continue
 
+        # Reset Output and Options settings before closing app
+        self._reset_output_options_on_close()
+        
         event.accept()
+    
+    def _reset_output_options_on_close(self):
+        """Reset Output and Options tab settings to defaults when app closes."""
+        from PySide6.QtCore import QSettings
+        settings = QSettings('Packetra', 'Packetra')
+        
+        # Reset all output/* settings
+        for key in list(settings.allKeys()):
+            if key.startswith('output/'):
+                settings.remove(key)
+        
+        # Reset stop_* settings, but keep resolve_* and realtime/autoscroll
+        stop_keys = ['stop_packets_enabled', 'stop_packets_value', 'stop_files_enabled', 'stop_files_value',
+                     'stop_size_enabled', 'stop_size_value', 'stop_size_unit',
+                     'stop_duration_enabled', 'stop_duration_value', 'stop_duration_unit']
+        for key in stop_keys:
+            settings.remove(f'options/{key}')

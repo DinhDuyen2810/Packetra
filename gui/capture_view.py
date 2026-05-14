@@ -19,7 +19,12 @@ from core.parser import PacketParser
 from gui.hex_view import PacketHexView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
-from utils.pcap_io import load_pcap, save_pcap, save_pcapng_file_comment
+from utils.pcap_io import (
+    load_pcap,
+    normalize_capture_extension,
+    save_capture_file,
+    save_pcapng_file_comment,
+)
 
 log = logging.getLogger('capture_view')
 
@@ -61,6 +66,9 @@ class CaptureView(QWidget):
         self.capture_comments = ''
         self.capture_metadata = None  # pcapng metadata (interfaces, file comment, packet comments)
         self._is_dirty = False
+        self._auto_output_written_files = []
+        self._auto_output_base_path = ''
+        self._rollover_file_counter = 0
 
         self._build_ui()
         self._update_status('Ready')
@@ -125,6 +133,9 @@ class CaptureView(QWidget):
         self.capture_comments = ''
         self.capture_metadata = None
         self.loaded_file_path = None
+        self._auto_output_written_files = []
+        self._auto_output_base_path = ''
+        self._rollover_file_counter = 0
         self._set_dirty(False)
         self.capture_state_changed.emit(False)
         self._update_status('Ready')
@@ -138,6 +149,288 @@ class CaptureView(QWidget):
         self.options_settings = options_settings.copy() if options_settings else {}
         self.realtime_update_enabled = bool(self.options_settings.get('realtime', True))
         self.auto_scroll_enabled = bool(self.options_settings.get('autoscroll', True))
+
+    def _capture_output_format(self) -> str:
+        fmt = str((self.output_settings or {}).get('format', 'pcapng')).strip().lower()
+        return 'pcapng' if fmt == 'pcapng' else 'pcap'
+
+    def _capture_compression(self) -> str:
+        comp = str((self.output_settings or {}).get('compression', 'none')).strip().lower()
+        if comp in ('gzip', 'lz4'):
+            return comp
+        return 'none'
+
+    def _ensure_extension_for_output(self, path: str) -> str:
+        return normalize_capture_extension(path, self._capture_output_format())
+
+    def _compression_label_map(self):
+        return {
+            'none': 'Uncompressed',
+            'gzip': 'Compress with gzip',
+            'lz4': 'Compress with LZ4',
+        }
+
+    def _compression_value_from_label(self, label: str) -> str:
+        label = (label or '').strip().lower()
+        if 'gzip' in label:
+            return 'gzip'
+        if 'lz4' in label:
+            return 'lz4'
+        return 'none'
+
+    def _build_auto_output_path(self) -> str:
+        output = self.output_settings or {}
+        configured = str(output.get('file_path', '') or '').strip()
+
+        if configured:
+            return self._ensure_extension_for_output(configured)
+
+        default_name = f"capture_{time.strftime('%Y%m%d_%H%M%S')}"
+        temp_dir = str((self.options_settings or {}).get('temp_dir', '') or '').strip()
+        if not temp_dir:
+            temp_dir = os.getcwd()
+        return self._ensure_extension_for_output(os.path.join(temp_dir, default_name))
+
+    def _rollover_duration_seconds(self) -> int:
+        output = self.output_settings or {}
+        value = int(output.get('rollover_duration_value', 1) or 1)
+        unit = str(output.get('rollover_duration_unit', 'seconds')).strip().lower()
+        if unit == 'minutes':
+            return value * 60
+        if unit == 'hours':
+            return value * 3600
+        return value
+
+    def _rollover_size_bytes(self) -> int:
+        output = self.output_settings or {}
+        value = int(output.get('rollover_size_value', 1) or 1)
+        unit = str(output.get('rollover_size_unit', 'kilobytes')).strip().lower()
+        mult = {
+            'kilobytes': 1024,
+            'megabytes': 1024 * 1024,
+            'gigabytes': 1024 * 1024 * 1024,
+        }.get(unit, 1024)
+        return value * mult
+
+    def _rollover_wallclock_seconds(self) -> int:
+        output = self.output_settings or {}
+        value = int(output.get('rollover_wallclock_value', 1) or 1)
+        unit = str(output.get('rollover_wallclock_unit', 'hours')).strip().lower()
+        return value * (86400 if unit == 'days' else 3600)
+
+    def _has_auto_create_rollover_condition(self) -> bool:
+        output = self.output_settings or {}
+        return any([
+            bool(output.get('rollover_packets_enabled')),
+            bool(output.get('rollover_size_enabled')),
+            bool(output.get('rollover_duration_enabled')),
+            bool(output.get('rollover_wallclock_enabled')),
+        ])
+
+    def _next_output_target_path(self, chunk_records, auto_create_mode: bool) -> str:
+        base_path = self._auto_output_base_path or self._build_auto_output_path()
+        if not auto_create_mode:
+            return base_path
+
+        output = self.output_settings or {}
+        ring_enabled = bool(output.get('ring_buffer_enabled'))
+        ring_limit = max(2, int(output.get('ring_buffer_files', 2) or 2))
+        slot = (self._rollover_file_counter % ring_limit) if ring_enabled else None
+        target_path = self._build_rotated_file_path(base_path, self._rollover_file_counter, chunk_records, slot)
+        self._rollover_file_counter += 1
+        return target_path
+
+    def _should_rollover_chunk(self, chunk_records, chunk_bytes: int) -> bool:
+        output = self.output_settings or {}
+        if not chunk_records:
+            return False
+
+        if bool(output.get('rollover_packets_enabled')):
+            packet_limit = int(output.get('rollover_packets_value', 100000) or 100000)
+            if len(chunk_records) >= packet_limit:
+                return True
+
+        if bool(output.get('rollover_size_enabled')):
+            if chunk_bytes >= self._rollover_size_bytes():
+                return True
+
+        if bool(output.get('rollover_duration_enabled')):
+            first_epoch = float(chunk_records[0].epoch_time)
+            last_epoch = float(chunk_records[-1].epoch_time)
+            if (last_epoch - first_epoch) >= self._rollover_duration_seconds():
+                return True
+
+        if bool(output.get('rollover_wallclock_enabled')):
+            boundary = self._rollover_wallclock_seconds()
+            first_bucket = int(float(chunk_records[0].epoch_time) // boundary)
+            last_bucket = int(float(chunk_records[-1].epoch_time) // boundary)
+            if last_bucket > first_bucket:
+                return True
+
+        return False
+
+    def _split_records_for_rollover(self, records):
+        output = self.output_settings or {}
+        if not bool(output.get('auto_create')):
+            return [records]
+
+        has_any_condition = any([
+            bool(output.get('rollover_packets_enabled')),
+            bool(output.get('rollover_size_enabled')),
+            bool(output.get('rollover_duration_enabled')),
+            bool(output.get('rollover_wallclock_enabled')),
+        ])
+        if not has_any_condition:
+            return [records]
+
+        chunks = []
+        current_chunk = []
+        current_bytes = 0
+
+        for idx, rec in enumerate(records):
+            current_chunk.append(rec)
+            current_bytes += int(rec.length)
+
+            is_last = idx == len(records) - 1
+            if not is_last and self._should_rollover_chunk(current_chunk, current_bytes):
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_bytes = 0
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks if chunks else [records]
+
+    def _build_rotated_file_path(self, base_path: str, chunk_index: int, chunk_records, ring_slot=None) -> str:
+        root, ext = os.path.splitext(base_path)
+        if base_path.lower().endswith('.gz') or base_path.lower().endswith('.lz4'):
+            root, ext2 = os.path.splitext(root)
+            ext = ext2
+
+        output = self.output_settings or {}
+        pattern = str(output.get('infix_pattern', 'timestamp_first')).strip().lower()
+        counter = ring_slot if ring_slot is not None else chunk_index
+        ts = time.strftime('%Y%m%d%H%M%S', time.localtime(float(chunk_records[0].epoch_time)))
+
+        if pattern == 'counter_first':
+            infix = f'_{counter:05d}_{ts}'
+        else:
+            infix = f'_{ts}_{counter:05d}'
+
+        return f'{root}{infix}{ext}'
+
+    def _persist_capture_records(self, records, file_path: str, file_format: str, compression: str) -> str:
+        packets = [r.raw for r in records]
+        return save_capture_file(file_path, packets, file_format=file_format, compression=compression)
+
+    def _apply_ring_buffer_limit(self):
+        output = self.output_settings or {}
+        if not bool(output.get('ring_buffer_enabled')):
+            return
+        limit = int(output.get('ring_buffer_files', 2) or 2)
+        while len(self._auto_output_written_files) > limit:
+            oldest = self._auto_output_written_files.pop(0)
+            try:
+                if os.path.exists(oldest):
+                    os.remove(oldest)
+            except OSError:
+                pass
+
+    def _auto_save_capture_output(self) -> bool:
+        if not self.records:
+            return False
+
+        output = self.output_settings or {}
+        file_format = self._capture_output_format()
+        compression = self._capture_compression()
+        chunks = self._split_records_for_rollover(self.records)
+        auto_create_mode = bool(output.get('auto_create')) and self._has_auto_create_rollover_condition()
+
+        written = []
+
+        for chunk in chunks:
+            target_path = self._next_output_target_path(chunk, auto_create_mode)
+
+            actual_path = self._persist_capture_records(chunk, target_path, file_format, compression)
+            written.append(actual_path)
+            self._auto_output_written_files.append(actual_path)
+            self._apply_ring_buffer_limit()
+
+        if written:
+            self.loaded_file_path = written[-1]
+            self._remember_recent_file(self.loaded_file_path)
+            self._set_dirty(False)
+            if len(written) == 1:
+                self._update_status(f'Saved capture to {written[0]}')
+            else:
+                self._update_status(f'Saved capture to {len(written)} files. Last file: {written[-1]}')
+            return True
+
+        return False
+
+    def _show_save_with_options_dialog(self):
+        output = self.output_settings or {}
+        default_format = self._capture_output_format()
+        default_compression = self._capture_compression()
+
+        dialog = QFileDialog(self, 'Save Capture')
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+
+        if default_format == 'pcapng':
+            dialog.setNameFilters(['PCAPNG Files (*.pcapng)', 'PCAP Files (*.pcap)', 'All Files (*)'])
+            dialog.selectNameFilter('PCAPNG Files (*.pcapng)')
+            dialog.setDefaultSuffix('pcapng')
+        else:
+            dialog.setNameFilters(['PCAP Files (*.pcap)', 'PCAPNG Files (*.pcapng)', 'All Files (*)'])
+            dialog.selectNameFilter('PCAP Files (*.pcap)')
+            dialog.setDefaultSuffix('pcap')
+
+        initial_path = str(output.get('file_path', '') or '').strip()
+        if not initial_path:
+            initial_path = self.loaded_file_path or ''
+        if initial_path:
+            dialog.selectFile(initial_path)
+
+        compression_combo = QComboBox(dialog)
+        compression_combo.addItems([
+            'Uncompressed',
+            'Compress with gzip',
+            'Compress with LZ4',
+        ])
+        compression_combo.setCurrentText(self._compression_label_map().get(default_compression, 'Uncompressed'))
+
+        layout = dialog.layout()
+        if layout is not None:
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Compression options:'))
+            row.addWidget(compression_combo)
+            container = QWidget(dialog)
+            container.setLayout(row)
+            try:
+                layout.addWidget(container, layout.rowCount(), 0, 1, layout.columnCount())
+            except TypeError:
+                layout.addWidget(container)
+
+        if not dialog.exec():
+            return None, None, None
+
+        selected = dialog.selectedFiles()
+        if not selected:
+            return None, None, None
+
+        selected_path = selected[0]
+        selected_filter = dialog.selectedNameFilter()
+        if 'pcapng' in selected_filter.lower():
+            selected_format = 'pcapng'
+        elif 'pcap' in selected_filter.lower():
+            selected_format = 'pcap'
+        else:
+            selected_format = default_format
+
+        selected_compression = self._compression_value_from_label(compression_combo.currentText())
+        return selected_path, selected_format, selected_compression
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -312,6 +605,9 @@ class CaptureView(QWidget):
         self.sniffer = PacketSniffer(self.iface, self.capture_filter)
         self._capture_started_at = time.monotonic()
         self._captured_bytes = 0
+        self._auto_output_written_files = []
+        self._auto_output_base_path = self._build_auto_output_path()
+        self._rollover_file_counter = 0
         self.sniffer.packet_captured.connect(self.add_packet)
         self.sniffer.error_occurred.connect(self.on_sniffer_error)
         self.sniffer.status_changed.connect(self._update_status)
@@ -377,9 +673,50 @@ class CaptureView(QWidget):
         self._captured_bytes = 0
         self._capture_started_at = None
         self._last_live_status_count = 0
+        self._auto_output_written_files = []
+        self._auto_output_base_path = ''
+        self._rollover_file_counter = 0
         self._set_dirty(False)
         if reset_file_path:
             self.loaded_file_path = None
+
+    def _rollover_live_output_if_needed(self):
+        output = self.output_settings or {}
+        if not bool(output.get('auto_create')):
+            return
+        if not self._has_auto_create_rollover_condition():
+            return
+        if not self.records:
+            return
+
+        current_bytes = sum(int(r.length) for r in self.records)
+        if not self._should_rollover_chunk(self.records, current_bytes):
+            return
+
+        file_format = self._capture_output_format()
+        compression = self._capture_compression()
+        target_path = self._next_output_target_path(self.records, auto_create_mode=True)
+
+        saved_path = self._persist_capture_records(self.records, target_path, file_format, compression)
+        self._auto_output_written_files.append(saved_path)
+        self._apply_ring_buffer_limit()
+
+        # Switch GUI packet list to the new active file: clear old file packets from table.
+        self.records.clear()
+        self.visible_indices.clear()
+        self.table.setRowCount(0)
+        self.details_tree.show_packet(None)
+        self.hex_view.show_packet(None)
+        self.parser = PacketParser()
+        self.capture_metadata = None
+        self._captured_bytes = 0
+        self._last_live_status_count = 0
+        self._set_dirty(False)
+
+        # Keep window/file name as the last written file (newest completed file).
+        self.loaded_file_path = saved_path
+        self._remember_recent_file(saved_path)
+        self._update_status(f'Rollover completed. New file segment started after {saved_path}')
 
     def on_sniffer_error(self, msg):
         QMessageBox.critical(None, 'Capture error', msg)
@@ -388,6 +725,17 @@ class CaptureView(QWidget):
     def _on_sniffer_finished(self):
         self.sniffer = None
         self._is_stopping = False
+
+        file_path_cfg = str((self.output_settings or {}).get('file_path', '') or '').strip()
+        auto_create_cfg = bool((self.output_settings or {}).get('auto_create', False))
+        should_auto_save = bool(self.records) and (bool(file_path_cfg) or auto_create_cfg)
+
+        if should_auto_save:
+            try:
+                self._auto_save_capture_output()
+            except Exception as exc:
+                self._update_status(f'Auto-save failed: {exc}')
+
         if not self.realtime_update_enabled:
             self.apply_display_filter()
         self.capture_state_changed.emit(False)
@@ -413,6 +761,8 @@ class CaptureView(QWidget):
         if current_count - self._last_live_status_count >= 20:
             self._last_live_status_count = current_count
             self._update_status('Live capture')
+
+        self._rollover_live_output_if_needed()
 
         if self._should_stop_capture():
             self.stop_capture()
@@ -545,30 +895,39 @@ class CaptureView(QWidget):
             if not self._is_dirty:
                 self._update_status('No changes to save')
                 return True
-            save_pcap(self.loaded_file_path, [r.raw for r in self.records])
+            file_path = self.loaded_file_path
+            lowered = file_path.lower()
+            compression = 'none'
+            if lowered.endswith('.gz'):
+                compression = 'gzip'
+            elif lowered.endswith('.lz4'):
+                compression = 'lz4'
+
+            fmt_path = file_path
+            if compression != 'none':
+                fmt_path = os.path.splitext(file_path)[0]
+            file_format = 'pcapng' if fmt_path.lower().endswith('.pcapng') else 'pcap'
+
+            save_capture_file(file_path, [r.raw for r in self.records], file_format=file_format, compression=compression)
             self._remember_recent_file(self.loaded_file_path)
             self._set_dirty(False)
             self._update_status(f'Saved to {self.loaded_file_path}')
             return True
 
-        dialog = QFileDialog(self, 'Save PCAP')
-        dialog.setAcceptMode(QFileDialog.AcceptSave)
-        dialog.setNameFilter('PCAP Files (*.pcap)')
-        dialog.setDefaultSuffix('pcap')
-        dialog.resize(1100, 700)
-        self._fit_widget_90(dialog)
+        filename, selected_format, selected_compression = self._show_save_with_options_dialog()
+        if not filename:
+            return False
 
-        if not dialog.exec():
-            return False
-        selected = dialog.selectedFiles()
-        if not selected:
-            return False
-        filename = selected[0]
-        save_pcap(filename, [r.raw for r in self.records])
-        self.loaded_file_path = filename
-        self._remember_recent_file(filename)
+        saved_path = save_capture_file(
+            filename,
+            [r.raw for r in self.records],
+            file_format=selected_format,
+            compression=selected_compression,
+        )
+        self.loaded_file_path = saved_path
+        self._remember_recent_file(saved_path)
         self._set_dirty(False)
-        self._update_status(f'Saved to {filename}')
+        self._update_status(f'Saved to {saved_path}')
         return True
 
     def _load_capture_from_path(self, filename: str):
@@ -1613,3 +1972,6 @@ class CaptureView(QWidget):
         current_height = widget.height() if widget.height() > 0 else max_height
 
         widget.resize(min(current_width, max_width), min(current_height, max_height))
+
+
+

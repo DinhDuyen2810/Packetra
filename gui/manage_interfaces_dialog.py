@@ -73,18 +73,21 @@ class ManageInterfacesDialog(QDialog):
         
         # Tree widget - no gridlines, no headers like Capture Options Input tab
         self.local_tree = QTreeWidget()
-        self.local_tree.setColumnCount(4)
-        self.local_tree.setHeaderLabels(['Show', 'Friendly Name', 'Interface Name', 'Comment'])
+        self.local_tree.setColumnCount(5)
+        self.local_tree.setHeaderLabels(['Show', 'Friendly Name', 'Interface Name', 'Comment', 'Show with cmt'])
         self.local_tree.setColumnWidth(0, 60)
         self.local_tree.setColumnWidth(1, 180)
         self.local_tree.setColumnWidth(2, 350)
         self.local_tree.setColumnWidth(3, 200)
+        self.local_tree.setColumnWidth(4, 120)
         
         # Hide gridlines like Input tab
         self.local_tree.setStyleSheet("QTreeWidget { gridline-color: transparent; }")
         
         # Populate with interfaces
         self._populate_local_interfaces()
+
+        self.local_tree.itemChanged.connect(self._on_local_item_changed)
         
         layout.addWidget(self.local_tree)
     
@@ -110,12 +113,14 @@ class ManageInterfacesDialog(QDialog):
             
             # Create tree item
             item = QTreeWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             
             # Column 0: Show checkbox
             show_cb = QCheckBox()
             show_cb.setChecked(iface_config.get('show', True))
             self.local_tree.addTopLevelItem(item)
             self.local_tree.setItemWidget(item, 0, show_cb)
+            show_cb.stateChanged.connect(lambda _state, _item=item: self._on_local_show_changed(_item))
             
             # Column 1: Friendly Name (editable)
             friendly = iface_config.get('friendly_name', friendly_name or iface_name)
@@ -130,6 +135,52 @@ class ManageInterfacesDialog(QDialog):
             comment = iface_config.get('comment', description or '')
             item.setText(3, comment)
             item.setData(3, Qt.UserRole, comment)
+
+            # Column 4: Show with cmt checkbox
+            show_with_cmt_cb = QCheckBox()
+            show_with_cmt_cb.setChecked(iface_config.get('show_with_comment', False))
+            self.local_tree.setItemWidget(item, 4, show_with_cmt_cb)
+            show_with_cmt_cb.stateChanged.connect(lambda _state, _item=item: self._on_local_show_with_comment_changed(_item))
+
+    def _collect_local_interface_settings(self):
+        """Collect local interface settings from tree widget"""
+        interface_settings = {}
+        for i in range(self.local_tree.topLevelItemCount()):
+            item = self.local_tree.topLevelItem(i)
+            iface_name = item.data(2, Qt.UserRole) or item.text(2)
+            show_cb = self.local_tree.itemWidget(item, 0)
+            show_with_cmt_cb = self.local_tree.itemWidget(item, 4)
+            iface_key = f"interface_{iface_name}"
+            interface_settings[iface_key] = {
+                'show': bool(show_cb and show_cb.isChecked()),
+                'friendly_name': item.text(1),
+                'comment': item.text(3),
+                'show_with_comment': bool(show_with_cmt_cb and show_with_cmt_cb.isChecked()),
+            }
+        return interface_settings
+
+    def _save_local_interface_settings(self):
+        """Persist local interface settings"""
+        self._settings().setValue('interface_settings', json.dumps(self._collect_local_interface_settings()))
+
+    def _notify_preferences_changed(self):
+        """Notify parent dialogs/windows that interface preferences changed"""
+        parent = self.parent()
+        if parent and hasattr(parent, '_on_interface_preferences_changed'):
+            parent._on_interface_preferences_changed()
+
+    def _on_local_show_changed(self, _item):
+        self._save_local_interface_settings()
+        self._notify_preferences_changed()
+
+    def _on_local_show_with_comment_changed(self, _item):
+        self._save_local_interface_settings()
+        self._notify_preferences_changed()
+
+    def _on_local_item_changed(self, item, column):
+        if column in (1, 3):
+            self._save_local_interface_settings()
+            self._notify_preferences_changed()
     
     # ===== PIPES TAB =====
     
@@ -322,22 +373,7 @@ class ManageInterfacesDialog(QDialog):
     def accept(self):
         """Save settings and close"""
         # Save local interfaces from tree widget
-        interface_settings = {}
-        for i in range(self.local_tree.topLevelItemCount()):
-            item = self.local_tree.topLevelItem(i)
-            
-            # Get actual interface name from UserRole (stored in column 2)
-            iface_name = item.data(2, Qt.UserRole) or item.text(2)
-            show_cb = self.local_tree.itemWidget(item, 0)
-            
-            iface_key = f"interface_{iface_name}"
-            interface_settings[iface_key] = {
-                'show': show_cb.isChecked(),
-                'friendly_name': item.text(1),
-                'comment': item.text(3)
-            }
-        
-        self._settings().setValue('interface_settings', json.dumps(interface_settings))
+        self._save_local_interface_settings()
         
         # Save pipes
         self._settings().setValue('pipes', self.pipes_text.toPlainText())
@@ -358,5 +394,7 @@ class ManageInterfacesDialog(QDialog):
             })
         
         self._settings().setValue('remote_interfaces', json.dumps(remote_interfaces))
+
+        self._notify_preferences_changed()
         
         super().accept()

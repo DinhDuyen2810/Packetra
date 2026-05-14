@@ -2,6 +2,7 @@ import os
 import socket
 import time
 import psutil
+import json
 from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QEvent
 from PySide6.QtGui import QPainter, QPen, QPixmap, QColor
 from PySide6.QtWidgets import (
@@ -51,6 +52,27 @@ class InterfaceSelectorView(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_list)
         self.timer.start(1000)
+
+    def _load_interface_preferences(self):
+        """Load interface preferences saved from Manage Interfaces."""
+        settings_json = self._settings().value('interface_settings', '{}', str)
+        try:
+            return json.loads(settings_json)
+        except Exception:
+            return {}
+
+    def _is_interface_shown(self, iface_name: str) -> bool:
+        prefs = self._load_interface_preferences().get(f"interface_{iface_name}", {})
+        return bool(prefs.get('show', True))
+
+    def _display_name_for_interface(self, iface_name: str) -> str:
+        prefs = self._load_interface_preferences().get(f"interface_{iface_name}", {})
+        friendly = str(prefs.get('friendly_name', self.interfaces.get(iface_name, iface_name)))
+        comment = str(prefs.get('comment', '')).strip()
+        show_with_comment = bool(prefs.get('show_with_comment', False))
+        if show_with_comment and comment:
+            return f"{comment}:{friendly}"
+        return friendly
 
     def _settings(self):
         return QSettings('Packetra', 'Packetra')
@@ -173,20 +195,20 @@ class InterfaceSelectorView(QWidget):
 
     def _ordered_interfaces(self):
         choice = self.interface_scope_combo.currentText()
-        ordered = self.active_interfaces + self.inactive_interfaces
+        ordered = [n for n in (self.active_interfaces + self.inactive_interfaces) if self._is_interface_shown(n)]
         if choice == 'All interfaces shown':
             return ordered
         return [name for name in ordered if self._category_of_interface(name) == choice]
 
     def refresh_list_structure(self):
-        selected = self.get_selected_display_name()
+        selected = self.get_selected_interface_name()
         self.list_widget.clear()
-        for display_name in self._ordered_interfaces():
-            item = QTreeWidgetItem([display_name, '', '0.00 KB/s'])
-            item.setData(0, Qt.UserRole, display_name)
+        for iface_name in self._ordered_interfaces():
+            item = QTreeWidgetItem([self._display_name_for_interface(iface_name), '', '0.00 KB/s'])
+            item.setData(0, Qt.UserRole, iface_name)
             self.list_widget.addTopLevelItem(item)
         if selected:
-            self.select_display(selected)
+            self.select_interface(selected)
         elif self.list_widget.topLevelItemCount() > 0:
             self.list_widget.setCurrentItem(self.list_widget.topLevelItem(0))
 
@@ -270,7 +292,8 @@ class InterfaceSelectorView(QWidget):
             history = self.traffic_history.setdefault(name, [0.0] * 24)
             history.append(smooth)
             history[:] = history[-24:]
-            item.setText(0, f'{name}  ({self._category_of_interface(name)})')
+            display_name = self._display_name_for_interface(name)
+            item.setText(0, f'{display_name}  ({self._category_of_interface(name)})')
             item.setText(2, f'{speed / 1024:.2f} KB/s')
             chart = self.list_widget.itemWidget(item, 1)
             if chart is None:
@@ -280,20 +303,23 @@ class InterfaceSelectorView(QWidget):
             chart.setPixmap(self._sparkline_pixmap(history, width=max(40, trend_col_width-8)))
         self.prev_traffic = current
 
-    def get_selected_display_name(self):
+    def get_selected_interface_name(self):
         item = self.list_widget.currentItem()
         return item.data(0, Qt.UserRole) if item else None
 
-    def select_display(self, display_name):
+    def select_interface(self, iface_name):
         for i in range(self.list_widget.topLevelItemCount()):
             item = self.list_widget.topLevelItem(i)
-            if item.data(0, Qt.UserRole) == display_name:
+            if item.data(0, Qt.UserRole) == iface_name:
                 self.list_widget.setCurrentItem(item)
                 return
 
+    def get_selected_display_name(self):
+        item = self.list_widget.currentItem()
+        return item.text(0).strip() if item else None
+
     def get_selected_interface(self):
-        display = self.get_selected_display_name()
-        return self.interfaces.get(display)
+        return self.get_selected_interface_name()
 
     def get_capture_filter(self):
         return self.capture_filter_input.text().strip()
@@ -332,3 +358,7 @@ class InterfaceSelectorView(QWidget):
             QMessageBox.warning(None, 'Error', 'Vui lòng chọn interface.')
             return
         self.capture_started.emit(iface, display_name or iface, capture_filter)
+
+    def refresh_interface_preferences(self):
+        """Reload and apply latest interface preferences in real time."""
+        self.refresh_list_structure()
