@@ -8,9 +8,9 @@ from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-    QMenu, QStyle
+    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
 )
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QPainter, QColor, QPen, QPixmap
 
 from core.capture import PacketSniffer
 from core.filtering import DisplayFilter
@@ -27,6 +27,157 @@ from utils.pcap_io import (
 )
 
 log = logging.getLogger('capture_view')
+
+
+class _ProtocolSparkline(QLabel):
+    """Sparkline label for one protocol — identical style to interface traffic chart."""
+    HISTORY_LEN = 30
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._history = [0.0] * self.HISTORY_LEN
+        self.setFixedHeight(24)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def push(self, value: float):
+        self._history.append(value)
+        if len(self._history) > self.HISTORY_LEN:
+            self._history.pop(0)
+        self._redraw()
+
+    def _redraw(self):
+        w = max(60, self.width())
+        h = self.height()
+        pix = QPixmap(w, h)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        painter.setPen(QPen(QColor('#D9DEE6'), 1))
+        painter.drawLine(0, h - 2, w, h - 2)
+
+        values = self._history
+        if values and max(values) > 0:
+            max_val = max(values)
+            pen = QPen(QColor('#2C7FB8'), 2)
+            painter.setPen(pen)
+            x_step = max(1.0, (w - 4) / max(1, len(values) - 1))
+            pts = []
+            for i, v in enumerate(values):
+                x = int(2 + i * x_step)
+                y = int((h - 4) - (v / max_val) * (h - 8))
+                pts.append((x, y))
+            for i in range(1, len(pts)):
+                painter.drawLine(pts[i-1][0], pts[i-1][1], pts[i][0], pts[i][1])
+
+        painter.end()
+        self.setPixmap(pix)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._redraw()
+
+
+def _sparkline_pixmap(values, width=280, height=24):
+    """Standalone sparkline pixmap — same style as interface traffic chart."""
+    pix = QPixmap(width, height)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    painter.setPen(QPen(QColor('#D9DEE6'), 1))
+    painter.drawLine(0, height - 2, width, height - 2)
+
+    if values and max(values) > 0:
+        max_value = max(values)
+        pen = QPen(QColor('#2C7FB8'), 2)
+        painter.setPen(pen)
+        x_step = max(1.0, (width - 4) / max(1, len(values) - 1))
+        points = []
+        for i, v in enumerate(values):
+            x = int(2 + i * x_step)
+            y = int((height - 4) - (v / max_value) * (height - 8))
+            points.append((x, y))
+        for i in range(1, len(points)):
+            painter.drawLine(points[i-1][0], points[i-1][1], points[i][0], points[i][1])
+
+    painter.end()
+    return pix
+
+
+class CaptureInformationDialog(QDialog):
+    """Live capture statistics — sparkline per protocol, same style as Interface traffic chart."""
+
+    stop_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle('Capture Information')
+        self.setMinimumWidth(460)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self._row_map = {}       # protocol -> row index
+        self._sparkline_map = {} # protocol -> _ProtocolSparkline
+        self._counts = {}        # protocol -> cumulative count
+        self._prev_counts = {}   # protocol -> count at last tick
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        self.table = QTableWidget(0, 2, self)
+        self.table.horizontalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        layout.addWidget(self.table)
+
+        stop_btn = QPushButton('Stop Capture')
+        stop_btn.clicked.connect(self.stop_requested.emit)
+        layout.addWidget(stop_btn)
+
+        # Tick every 1 s — push delta counts into each sparkline
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick)
+
+    def update_protocol(self, protocol: str, count: int):
+        self._counts[protocol] = count
+        if protocol not in self._row_map:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(protocol))
+            spark = _ProtocolSparkline()
+            self.table.setCellWidget(row, 1, spark)
+            self._row_map[protocol] = row
+            self._sparkline_map[protocol] = spark
+            self._prev_counts[protocol] = 0
+
+    def _tick(self):
+        """Push per-second deltas into sparklines."""
+        for proto, spark in self._sparkline_map.items():
+            current = self._counts.get(proto, 0)
+            prev = self._prev_counts.get(proto, 0)
+            spark.push(float(current - prev))
+            self._prev_counts[proto] = current
+
+    def reset(self):
+        self._timer.stop()
+        self.table.setRowCount(0)
+        self._row_map.clear()
+        self._sparkline_map.clear()
+        self._counts.clear()
+        self._prev_counts.clear()
+
+    def show(self):
+        super().show()
+        self._timer.start()
+
+    def hide(self):
+        self._timer.stop()
+        super().hide()
+
 
 
 class CaptureView(QWidget):
@@ -54,6 +205,8 @@ class CaptureView(QWidget):
         self._is_stopping = False
         self._last_live_status_count = 0
         self._capture_started_at = None
+        self._capture_info_dialog = None
+        self._protocol_counts = {}
         self._captured_bytes = 0
         self.default_main_splitter_sizes = [500, 360]
         self.default_lower_splitter_sizes = [980, 650]
@@ -608,6 +761,7 @@ class CaptureView(QWidget):
         self._auto_output_written_files = []
         self._auto_output_base_path = self._build_auto_output_path()
         self._rollover_file_counter = 0
+        self._protocol_counts = {}
         self.sniffer.packet_captured.connect(self.add_packet)
         self.sniffer.error_occurred.connect(self.on_sniffer_error)
         self.sniffer.status_changed.connect(self._update_status)
@@ -615,6 +769,11 @@ class CaptureView(QWidget):
         self.sniffer.start()
         self.capture_state_changed.emit(True)
         self._update_status('Live capture')
+
+        # Open Capture Information window if enabled
+        if bool((self.options_settings or {}).get('show_info', False)):
+            self._open_capture_info_dialog()
+
 
     def stop_capture(self):
         if self.sniffer and self.sniffer.isRunning() and not self._is_stopping:
@@ -660,6 +819,19 @@ class CaptureView(QWidget):
 
     def has_packets(self) -> bool:
         return len(self.records) > 0
+
+    def _open_capture_info_dialog(self):
+        if self._capture_info_dialog is None:
+            self._capture_info_dialog = CaptureInformationDialog(self.window())
+            self._capture_info_dialog.stop_requested.connect(self.stop_capture)
+        self._capture_info_dialog.reset()
+        self._capture_info_dialog.show()
+        self._capture_info_dialog.raise_()
+
+    def _close_capture_info_dialog(self):
+        if self._capture_info_dialog is not None:
+            self._capture_info_dialog.hide()
+
 
     def clear_packets(self, reset_file_path: bool = False):
         self.records.clear()
@@ -740,6 +912,7 @@ class CaptureView(QWidget):
             self.apply_display_filter()
         self.capture_state_changed.emit(False)
         self._update_status('Capture stopped')
+        self._close_capture_info_dialog()
 
     def add_packet(self, packet):
         if self._is_stopping:
@@ -755,6 +928,12 @@ class CaptureView(QWidget):
             self.table.append_record(record)
             if self.auto_scroll_enabled:
                 self.table.scrollToBottom()
+
+        # Update Capture Information dialog
+        if self._capture_info_dialog is not None and self._capture_info_dialog.isVisible():
+            proto = getattr(record, 'protocol', None) or 'Other'
+            self._protocol_counts[proto] = self._protocol_counts.get(proto, 0) + 1
+            self._capture_info_dialog.update_protocol(proto, self._protocol_counts[proto])
 
         # Throttle expensive status recomputation during live capture.
         current_count = len(self.records)

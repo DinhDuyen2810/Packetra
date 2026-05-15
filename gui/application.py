@@ -101,7 +101,6 @@ class CaptureOptionsDialog(QDialog):
             'stop_duration_enabled': False,
             'stop_duration_value': 1,
             'stop_duration_unit': 'seconds',
-            'temp_dir': '',
         }
         
         layout = QVBoxLayout(self)
@@ -277,7 +276,6 @@ class CaptureOptionsDialog(QDialog):
             'stop_duration_enabled': False,
             'stop_duration_value': 1,
             'stop_duration_unit': 'seconds',
-            'temp_dir': tempfile.gettempdir(),
         }
 
         for key, default_value in defaults.items():
@@ -301,7 +299,6 @@ class CaptureOptionsDialog(QDialog):
             self.stop_duration_cb.setChecked(bool(self.options_state['stop_duration_enabled']))
             self.stop_duration_spin.setValue(int(self.options_state['stop_duration_value']))
             self.stop_duration_unit.setCurrentText(str(self.options_state['stop_duration_unit']))
-            self.temp_dir_input.setText(str(self.options_state['temp_dir']))
 
     def _save_options_settings(self):
         """Save Options tab settings to QSettings"""
@@ -380,20 +377,6 @@ class CaptureOptionsDialog(QDialog):
 
     def _validate_options_settings(self):
         """Validate Options tab settings"""
-        import os
-
-        if hasattr(self, 'temp_dir_input'):
-            temp_dir = self.temp_dir_input.text().strip()
-            if not temp_dir:
-                QMessageBox.warning(self, 'Invalid Temporary Directory', 'Temporary directory cannot be empty.')
-                return False
-            if not os.path.isdir(temp_dir):
-                QMessageBox.warning(self, 'Invalid Temporary Directory', f'Directory does not exist: {temp_dir}')
-                return False
-            if not os.access(temp_dir, os.W_OK):
-                QMessageBox.warning(self, 'Invalid Temporary Directory', f'Directory is not writable: {temp_dir}')
-                return False
-
         return True
     
     def _build_input_tab(self):
@@ -1277,7 +1260,6 @@ class CaptureOptionsDialog(QDialog):
             'stop_duration_enabled': self.stop_duration_cb.isChecked(),
             'stop_duration_value': self.stop_duration_spin.value(),
             'stop_duration_unit': self.stop_duration_unit.currentText(),
-            'temp_dir': self.temp_dir_input.text().strip(),
         })
         return self.options_state.copy()
     
@@ -1369,24 +1351,6 @@ class CaptureOptionsDialog(QDialog):
         stop_layout.addWidget(self.stop_duration_unit, 3, 2)
         stop_group.setLayout(stop_layout)
         layout.addWidget(stop_group)
-
-        # --- Directory for temporary files ---
-        temp_group = QGroupBox('Directory for temporary files')
-        temp_layout = QHBoxLayout()
-        self.temp_dir_input = QLineEdit()
-        import tempfile
-        self.temp_dir_input.setText(tempfile.gettempdir())
-        self.temp_dir_input.setToolTip('Stores temporary capture files.')
-        temp_layout.addWidget(self.temp_dir_input)
-        temp_browse_btn = QPushButton('Browse...')
-        def on_temp_browse():
-            path = QFileDialog.getExistingDirectory(self, 'Select Temporary Directory', self.temp_dir_input.text())
-            if path:
-                self.temp_dir_input.setText(path)
-        temp_browse_btn.clicked.connect(on_temp_browse)
-        temp_layout.addWidget(temp_browse_btn)
-        temp_group.setLayout(temp_layout)
-        layout.addWidget(temp_group)
 
         layout.addStretch()
 
