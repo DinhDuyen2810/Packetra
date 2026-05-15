@@ -1,11 +1,13 @@
 import os
 import json
+import base64
+import zipfile
 import psutil
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QCheckBox, QLineEdit, QTextEdit, QFileDialog,
-    QSpinBox, QRadioButton, QButtonGroup, QMessageBox, QComboBox, QTreeWidget,
+    QSpinBox, QMessageBox, QComboBox, QTreeWidget,
     QTreeWidgetItem, QHeaderView, QAbstractItemView
 )
 from PySide6.QtGui import QIcon
@@ -94,6 +96,280 @@ sniff(
     store=False
 )
 """
+
+    REMOTE_AGENT_TEMPLATE = r'''import argparse
+import logging
+import re
+import subprocess
+import sys
+
+
+def _ensure_scapy():
+    try:
+        from scapy.all import sniff, get_if_list, raw, Ether, IP, UDP, Raw
+        return sniff, get_if_list, raw, Ether, IP, UDP, Raw
+    except ModuleNotFoundError:
+        py = sys.executable
+        try:
+            subprocess.check_call([py, '-m', 'pip', 'install', 'scapy'])
+        except Exception as exc:
+            raise RuntimeError(f'Cannot install scapy with interpreter {py}: {exc}') from exc
+
+        from scapy.all import sniff, get_if_list, raw, Ether, IP, UDP, Raw
+        return sniff, get_if_list, raw, Ether, IP, UDP, Raw
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
+
+
+def list_interfaces():
+    sniff, get_if_list, _raw, _Ether, _IP, _UDP, _Raw = _ensure_scapy()
+
+    def _clean_name(value):
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        # Remove common Windows filter suffix noise.
+        text = re.sub(r'-(WFP|Fortinet NDIS|Npcap Packet Driver|VirtualBox NDIS|QoS Packet Scheduler|Native WiFi Filter|Virtual WiFi Filter).*$', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'-000\d+$', '', text, flags=re.IGNORECASE)
+        return text.strip()
+
+    def _is_noise(value):
+        low = str(value or '').lower()
+        blocked_keywords = (
+            'lightweight filter',
+            'wfp ',
+            'ndis',
+            'qos packet scheduler',
+            'npcap packet driver',
+            'virtual wifi filter',
+            'native wifi filter',
+            'miniport',
+            'teredo',
+            '6to4',
+            'ip-https',
+            'kernel debugger',
+        )
+        return any(k in low for k in blocked_keywords)
+
+    try:
+        from scapy.arch.windows import get_windows_if_list
+        merged = {}
+        for entry in get_windows_if_list():
+            if isinstance(entry, dict):
+                dev_name = entry.get('name') or ''
+                win_name = entry.get('win_name') or ''
+                desc = entry.get('description') or entry.get('friendly_name') or ''
+
+                # display = Windows friendly name (short, e.g. 'Wi-Fi')
+                # target  = Npcap device string used by scapy sniff()
+                display = _clean_name(win_name) or _clean_name(desc)
+                target = str(dev_name).strip() if dev_name else str(win_name).strip()
+
+                if not display:
+                    continue
+                if _is_noise(display) and _is_noise(target):
+                    continue
+
+                key = display.lower()
+                score = 0
+                if not _is_noise(display):
+                    score += 10
+                if 'virtual' not in display.lower():
+                    score += 2
+                prev = merged.get(key)
+                if prev is None or score > prev[0]:
+                    merged[key] = (score, display, target)
+                continue
+            try:
+                name, dev, _desc = entry
+                display = _clean_name(str(name).strip())
+                target = str(dev or name).strip()
+                if display and not (_is_noise(display) and _is_noise(target)):
+                    key = display.lower()
+                    prev = merged.get(key)
+                    if prev is None:
+                        merged[key] = (5, display, target)
+            except Exception:
+                pass
+
+        rows = sorted((v[1], v[2]) for v in merged.values())
+        print('testinterface || testinterface')
+        for display, target in rows:
+            print(f"{display} || {target}")
+        return
+    except Exception:
+        pass
+
+    print('testinterface || testinterface')
+    for iface in get_if_list():
+        print(f"{iface} || {iface}")
+
+
+def capture_to_stdout(iface, bpf_filter='', promiscuous=True):
+    import os
+    import struct
+    import time
+    # On Windows, stdout pipe opened by cmd.exe is in text mode by default.
+    # Set binary mode BEFORE writing any PCAP bytes to prevent \n -> \r\n corruption.
+    if sys.platform == 'win32':
+        try:
+            import msvcrt
+            msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+        except Exception:
+            pass  # If fileno() unsupported in this SSH context, continue anyway
+
+    sniff, _get_if_list, raw, Ether, IP, UDP, Raw = _ensure_scapy()
+
+    capture_iface = str(iface or '').strip()
+    if sys.platform == 'win32':
+        # Accept either friendly names (Wi-Fi/Ethernet) or raw NPF device strings.
+        # Resolve to NPF when possible because WinPcap/Npcap sniffing is most reliable with it.
+        try:
+            from scapy.arch.windows import get_windows_if_list
+            requested = capture_iface.lower()
+            for entry in get_windows_if_list():
+                if not isinstance(entry, dict):
+                    continue
+                dev_name = str(entry.get('name') or '').strip()
+                win_name = str(entry.get('win_name') or '').strip()
+                friendly = str(entry.get('friendly_name') or '').strip()
+                desc = str(entry.get('description') or '').strip()
+                candidates = [dev_name, win_name, friendly, desc]
+                if any(str(c or '').strip().lower() == requested for c in candidates):
+                    if dev_name:
+                        capture_iface = dev_name
+                    break
+        except Exception:
+            pass
+
+    out = getattr(sys.stdout, 'buffer', sys.stdout)
+    # PCAP global header (little-endian, LINKTYPE_ETHERNET=1).
+    out.write(struct.pack('<IHHIIII', 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+    out.flush()
+
+    def _emit(pkt_bytes):
+        now = time.time()
+        ts_sec = int(now)
+        ts_usec = int((now - ts_sec) * 1_000_000)
+        incl_len = len(pkt_bytes)
+        out.write(struct.pack('<IIII', ts_sec, ts_usec, incl_len, incl_len))
+        out.write(pkt_bytes)
+        out.flush()
+
+    if capture_iface.lower() == 'testinterface':
+        seq = 1
+        while True:
+            pkt = Ether(dst='ff:ff:ff:ff:ff:ff', src='02:00:00:00:00:01') / IP(src='10.10.10.1', dst='10.10.10.2') / UDP(sport=50000, dport=50001) / Raw(load=f'packetra-test-{seq}'.encode('ascii'))
+            _emit(raw(pkt))
+            seq += 1
+            time.sleep(0.25)
+
+    def _write(pkt):
+        _emit(raw(pkt))
+
+    sniff(
+        iface=capture_iface,
+        prn=_write,
+        store=False,
+        filter=bpf_filter or None,
+        promisc=bool(promiscuous),
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Packetra Remote Capture Agent')
+    parser.add_argument('--list', action='store_true')
+    parser.add_argument('--capture', action='store_true')
+    parser.add_argument('--iface', default='')
+    parser.add_argument('--stdout', action='store_true')
+    parser.add_argument('--filter', default='')
+    parser.add_argument('--promiscuous', action='store_true')
+    args = parser.parse_args()
+
+    if args.list:
+        list_interfaces()
+        return
+
+    if args.capture and args.stdout and args.iface:
+        try:
+            capture_to_stdout(args.iface, args.filter, args.promiscuous)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            sys.stderr.write(f'capture_to_stdout error: {exc}\n')
+            sys.stderr.flush()
+            sys.exit(1)
+        return
+
+    parser.print_help()
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+    REMOTE_INSTALL_PS1_TEMPLATE = r'''param(
+  [string]$InstallDir = "C:\RemoteCaptureAgent"
+)
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "Installing Packetra Remote Capture Agent into $InstallDir"
+New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
+
+$sourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$agentSource = Join-Path $sourceDir "remote_capture_agent.py"
+$agentTarget = Join-Path $InstallDir "remote_capture_agent.py"
+
+if (-not (Test-Path $agentSource)) {
+  throw "remote_capture_agent.py not found next to install-agent.ps1"
+}
+
+Copy-Item $agentSource $agentTarget -Force
+
+$cmdWrapper = "python `"$agentTarget`" $args"
+$cmdFile = Join-Path $InstallDir "RemoteCaptureAgent.cmd"
+Set-Content -Path $cmdFile -Value "@echo off`r`n$cmdWrapper" -Encoding ASCII
+
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+if ($machinePath -notlike "*$InstallDir*") {
+  [Environment]::SetEnvironmentVariable('Path', "$machinePath;$InstallDir", 'Machine')
+}
+
+Write-Host "Done. Use command: RemoteCaptureAgent.cmd --list"
+Write-Host "If PATH is not refreshed, open a new terminal session."
+'''
+
+    REMOTE_HOWTO_TEXT = '''Remote Capture How-To
+
+Linux remote host
+1) Ensure SSH server is running:
+    sudo systemctl enable ssh
+    sudo systemctl start ssh
+2) Ensure tcpdump exists:
+    which tcpdump
+3) In Packetra > Remote Interfaces:
+    - Add host, port 22, OS=linux, username/auth
+    - Select row and click Connect && Load Interfaces
+    - Tick interfaces to show
+4) Start capture from selected remote interface.
+
+Windows remote host
+1) Ensure OpenSSH Server is installed and running.
+2) In Packetra > Remote Interfaces click Download Agent.
+3) Copy generated files to remote host folder, e.g. C:\\Temp\\PacketraAgent
+4) Open PowerShell as Administrator and run:
+    Set-ExecutionPolicy -Scope Process Bypass
+    cd C:\\Temp\\PacketraAgent
+    .\\install-agent.ps1
+5) Verify command:
+    RemoteCaptureAgent.cmd --list
+6) Back in Packetra, set OS=windows, Connect && Load Interfaces.
+
+Notes
+- If command not found after install, open a new terminal session on remote host.
+- If auth is Password, ensure username/password are correctly set.
+'''
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -378,12 +654,15 @@ sniff(
         
         # Table for remote interfaces
         self.remote_table = QTableWidget()
-        self.remote_table.setColumnCount(4)
-        self.remote_table.setHorizontalHeaderLabels(['Show', 'Host / Device URL', 'Port', 'Auth Type'])
+        self.remote_table.setColumnCount(7)
+        self.remote_table.setHorizontalHeaderLabels(['Show', 'Host / Device URL', 'Port', 'OS', 'Username', 'Auth Type', 'Password'])
         self.remote_table.horizontalHeader().setStretchLastSection(True)
         self.remote_table.setColumnWidth(0, 50)
-        self.remote_table.setColumnWidth(1, 250)
+        self.remote_table.setColumnWidth(1, 220)
         self.remote_table.setColumnWidth(2, 80)
+        self.remote_table.setColumnWidth(3, 90)
+        self.remote_table.setColumnWidth(4, 120)
+        self.remote_table.setColumnWidth(5, 100)
         
         layout.addWidget(self.remote_table)
         
@@ -399,29 +678,34 @@ sniff(
         remove_btn.setFixedWidth(40)
         remove_btn.clicked.connect(self._on_remove_remote)
         btn_layout.addWidget(remove_btn)
+
+        load_btn = QPushButton('Connect && Load Interfaces')
+        load_btn.clicked.connect(self._on_load_remote_interfaces)
+        btn_layout.addWidget(load_btn)
+
+        download_btn = QPushButton('Download Agent')
+        download_btn.clicked.connect(self._on_download_agent)
+        btn_layout.addWidget(download_btn)
+
+        howto_btn = QPushButton('HowToRemote')
+        howto_btn.clicked.connect(self._show_remote_howto)
+        btn_layout.addWidget(howto_btn)
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
-        
-        # Authentication options (collapsible/detailed)
-        detail_layout = QHBoxLayout()
-        detail_layout.addWidget(QLabel('Authentication:'))
-        
-        auth_group = QButtonGroup(self)
-        self.auth_null = QRadioButton('Null')
-        self.auth_password = QRadioButton('Password')
-        self.auth_null.setChecked(True)
-        auth_group.addButton(self.auth_null)
-        auth_group.addButton(self.auth_password)
-        
-        detail_layout.addWidget(self.auth_null)
-        detail_layout.addWidget(self.auth_password)
-        detail_layout.addStretch()
-        
-        layout.addLayout(detail_layout)
+
+        self.remote_iface_tree = QTreeWidget()
+        self.remote_iface_tree.setColumnCount(2)
+        self.remote_iface_tree.setHeaderLabels(['Remote Host / Interface', 'Show'])
+        self.remote_iface_tree.setColumnWidth(0, 430)
+        self.remote_iface_tree.setColumnWidth(1, 80)
+        self.remote_iface_tree.header().setStretchLastSection(False)
+        layout.addWidget(QLabel('Discovered Interfaces'))
+        layout.addWidget(self.remote_iface_tree)
         
         # Populate remote interfaces
         self._populate_remote_interfaces()
+        self._refresh_remote_interface_tree()
     
     def _populate_remote_interfaces(self):
         """Populate remote interfaces table"""
@@ -443,16 +727,35 @@ sniff(
             
             # Port
             port = QSpinBox()
-            port.setMinimum(0)
+            port.setMinimum(1)
             port.setMaximum(65535)
-            port.setValue(remote.get('port', 2002))
+            port.setValue(remote.get('port', 22))
             self.remote_table.setCellWidget(row, 2, port)
+
+            # OS
+            os_combo = QComboBox()
+            os_combo.addItems(['linux', 'windows'])
+            os_combo.setCurrentText(str(remote.get('os_type', 'linux')).lower())
+            self.remote_table.setCellWidget(row, 3, os_combo)
+
+            # Username
+            username = QLineEdit()
+            username.setText(remote.get('username', ''))
+            self.remote_table.setCellWidget(row, 4, username)
             
             # Auth Type
             auth_combo = QComboBox()
             auth_combo.addItems(['Null', 'Password'])
             auth_combo.setCurrentText(remote.get('auth_type', 'Null'))
-            self.remote_table.setCellWidget(row, 3, auth_combo)
+            self.remote_table.setCellWidget(row, 5, auth_combo)
+
+            # Password
+            password = QLineEdit()
+            password.setEchoMode(QLineEdit.EchoMode.Password)
+            password.setText(remote.get('password', ''))
+            password.setEnabled(auth_combo.currentText() == 'Password')
+            auth_combo.currentTextChanged.connect(lambda text, pw=password: pw.setEnabled(text == 'Password'))
+            self.remote_table.setCellWidget(row, 6, password)
     
     def _on_add_remote(self):
         """Add new remote interface row"""
@@ -470,21 +773,315 @@ sniff(
         
         # Port
         port = QSpinBox()
-        port.setMinimum(0)
+        port.setMinimum(1)
         port.setMaximum(65535)
-        port.setValue(2002)
+        port.setValue(22)
         self.remote_table.setCellWidget(row, 2, port)
+
+        # OS
+        os_combo = QComboBox()
+        os_combo.addItems(['linux', 'windows'])
+        self.remote_table.setCellWidget(row, 3, os_combo)
+
+        # Username
+        username = QLineEdit()
+        self.remote_table.setCellWidget(row, 4, username)
         
         # Auth Type
         auth_combo = QComboBox()
         auth_combo.addItems(['Null', 'Password'])
-        self.remote_table.setCellWidget(row, 3, auth_combo)
+        self.remote_table.setCellWidget(row, 5, auth_combo)
+
+        # Password
+        password = QLineEdit()
+        password.setEchoMode(QLineEdit.EchoMode.Password)
+        password.setEnabled(False)
+        auth_combo.currentTextChanged.connect(lambda text, pw=password: pw.setEnabled(text == 'Password'))
+        self.remote_table.setCellWidget(row, 6, password)
     
     def _on_remove_remote(self):
         """Remove selected remote interface row"""
         current_row = self.remote_table.currentRow()
         if current_row >= 0:
             self.remote_table.removeRow(current_row)
+            self._refresh_remote_interface_tree()
+
+    def _remote_row_to_config(self, row):
+        show_cb = self.remote_table.cellWidget(row, 0)
+        host_input = self.remote_table.cellWidget(row, 1)
+        port_spin = self.remote_table.cellWidget(row, 2)
+        os_combo = self.remote_table.cellWidget(row, 3)
+        username_input = self.remote_table.cellWidget(row, 4)
+        auth_combo = self.remote_table.cellWidget(row, 5)
+        password_input = self.remote_table.cellWidget(row, 6)
+
+        auth_type = auth_combo.currentText() if auth_combo else 'Null'
+        return {
+            'show': bool(show_cb and show_cb.isChecked()),
+            'host': host_input.text().strip() if host_input else '',
+            'port': int(port_spin.value()) if port_spin else 22,
+            'os_type': (os_combo.currentText() if os_combo else 'linux').lower(),
+            'username': username_input.text().strip() if username_input else '',
+            'auth_type': auth_type,
+            'password': (password_input.text() if (password_input and auth_type == 'Password') else ''),
+        }
+
+    def _remote_host_key(self, config):
+        return f"{config.get('username', '').strip()}@{config.get('host', '').strip()}:{int(config.get('port', 22) or 22)}"
+
+    def _on_load_remote_interfaces(self):
+        row = self.remote_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, 'Remote Interfaces', 'Please select a remote host row first.')
+            return
+
+        config = self._remote_row_to_config(row)
+        if not config['host'] or not config['username']:
+            QMessageBox.warning(self, 'Missing Fields', 'Host and Username are required to connect.')
+            return
+
+        try:
+            from core.remote_capture import SSHRemoteCapture
+            client = SSHRemoteCapture(
+                host=config['host'],
+                port=config['port'],
+                username=config['username'],
+                password=config['password'] if config['auth_type'] == 'Password' else None,
+                key_path=None,
+                os_type=config['os_type'],
+                auth_type=config['auth_type'],
+            )
+            iface_names = client.list_interfaces()
+            client.close()
+        except Exception as exc:
+            QMessageBox.critical(self, 'Remote Connect Failed', f'Cannot load interfaces:\n{exc}')
+            return
+
+        interfaces = []
+        for iface in iface_names:
+            raw_value = str(iface).strip()
+            if not raw_value:
+                continue
+            if '||' in raw_value:
+                left_part, right_part = [part.strip() for part in raw_value.split('||', 1)]
+                # Backward/forward compatible parsing:
+                # - old agent:  "Intel... || Wi-Fi" => display Wi-Fi, target Wi-Fi
+                # - new agent:  "Wi-Fi || \\Device\\NPF_{...}" => display Wi-Fi, target NPF
+                if right_part.startswith('\\\\Device\\NPF'):
+                    display_name = left_part or right_part
+                    target_name = right_part
+                else:
+                    display_name = right_part or left_part
+                    target_name = right_part or left_part
+            else:
+                display_name = raw_value
+                target_name = raw_value
+            interfaces.append({'name': display_name, 'target': target_name, 'show': True})
+
+        config['interfaces'] = interfaces
+
+        # write back this row to settings model snapshot and refresh tree
+        remotes = self._collect_remote_interfaces_from_ui()
+        if row < len(remotes):
+            remotes[row] = config
+        self._apply_remote_interfaces_to_ui(remotes)
+        self._refresh_remote_interface_tree()
+        QMessageBox.information(self, 'Remote Interfaces', f'Loaded {len(interfaces)} interfaces from {self._remote_host_key(config)}')
+
+    def _refresh_remote_interface_tree(self):
+        self.remote_iface_tree.clear()
+        for config in self._collect_remote_interfaces_from_ui():
+            host = config.get('host', '').strip()
+            username = config.get('username', '').strip()
+            if not host:
+                continue
+            host_item = QTreeWidgetItem([self._remote_host_key(config), ''])
+            host_item.setFlags(host_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.remote_iface_tree.addTopLevelItem(host_item)
+
+            for iface in config.get('interfaces', []):
+                name = str(iface.get('name', '')).strip()
+                if not name:
+                    continue
+                child = QTreeWidgetItem([name, ''])
+                host_item.addChild(child)
+                cb = QCheckBox()
+                cb.setChecked(bool(iface.get('show', True)))
+                self.remote_iface_tree.setItemWidget(child, 1, cb)
+                cb.stateChanged.connect(self._on_remote_iface_show_changed)
+            host_item.setExpanded(True)
+
+    def _on_remote_iface_show_changed(self, _state):
+        remotes = self._collect_remote_interfaces_from_ui()
+        host_idx = 0
+        for i in range(self.remote_iface_tree.topLevelItemCount()):
+            host_item = self.remote_iface_tree.topLevelItem(i)
+            if host_idx >= len(remotes):
+                break
+            iface_entries = remotes[host_idx].get('interfaces', [])
+            for j in range(host_item.childCount()):
+                if j >= len(iface_entries):
+                    break
+                child = host_item.child(j)
+                cb = self.remote_iface_tree.itemWidget(child, 1)
+                iface_entries[j]['show'] = bool(cb and cb.isChecked())
+            host_idx += 1
+        self._apply_remote_interfaces_to_ui(remotes)
+
+    def _collect_remote_interfaces_from_ui(self):
+        remote_interfaces = []
+        for row in range(self.remote_table.rowCount()):
+            cfg = self._remote_row_to_config(row)
+            if not cfg['host']:
+                continue
+            existing = None
+            # keep previously discovered interface list if available in settings snapshot
+            remotes_json = self._settings().value('remote_interfaces', '[]', str)
+            try:
+                saved = json.loads(remotes_json)
+            except Exception:
+                saved = []
+            key = self._remote_host_key(cfg)
+            for item in saved:
+                if self._remote_host_key(item) == key:
+                    existing = item
+                    break
+            cfg['interfaces'] = list((existing or {}).get('interfaces', []))
+            remote_interfaces.append(cfg)
+        return remote_interfaces
+
+    def _apply_remote_interfaces_to_ui(self, remote_interfaces):
+        self._settings().setValue('remote_interfaces', json.dumps(remote_interfaces))
+
+    def _on_download_agent(self):
+        target_dir = QFileDialog.getExistingDirectory(self, 'Select folder to save Remote Agent package')
+        if not target_dir:
+            return
+
+        zip_path = os.path.join(target_dir, 'packetra-remote-agent.zip')
+
+        # Embed agent content in install script so .ps1 works even when copied alone.
+        agent_b64 = base64.b64encode(self.REMOTE_AGENT_TEMPLATE.encode('utf-8')).decode('ascii')
+        ps1_content = self._build_install_agent_script(agent_b64)
+
+        try:
+            with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('install-agent.ps1', ps1_content)
+        except OSError as exc:
+            QMessageBox.critical(self, 'Download Agent', f'Cannot write agent files:\n{exc}')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Download Agent - Instructions')
+        dialog.resize(760, 520)
+        layout = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(
+            'Agent package saved successfully.\n\n'
+            f'Zip file: {zip_path}\n\n'
+            'Windows remote setup:\n'
+            '1) Copy packetra-remote-agent.zip to remote host and extract it\n'
+            '2) You will get install-agent.ps1 and RemoteCaptureAgent.ps1/cmd after install\n'
+            '3) Run PowerShell as Administrator\n'
+            '3) Execute:\n'
+            '   Set-ExecutionPolicy -Scope Process Bypass\n'
+            '   cd <folder-containing-install-agent.ps1>\n'
+            '   .\\install-agent.ps1\n\n'
+            'The installer is self-contained: it recreates remote_capture_agent.py and installs scapy automatically.\n\n'
+            'Validation command:\n'
+            '   & "C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd" --list\n'
+        )
+        layout.addWidget(text)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dialog.exec()
+
+    def _build_install_agent_script(self, embedded_agent_b64: str) -> str:
+        return f'''param(
+  [string]$InstallDir = "C:\\RemoteCaptureAgent"
+)
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "Installing Packetra Remote Capture Agent into $InstallDir"
+New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
+
+$agentTarget = Join-Path $InstallDir "remote_capture_agent.py"
+$embeddedAgentB64 = "{embedded_agent_b64}"
+
+# Always deploy embedded agent to avoid stale side-by-side files.
+[System.IO.File]::WriteAllBytes($agentTarget, [Convert]::FromBase64String($embeddedAgentB64))
+
+# Resolve concrete Python executable path.
+$pythonResolved = $null
+if (Get-Command py -ErrorAction SilentlyContinue) {{
+    $candidate = (& py -3 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+    if ($candidate) {{ $pythonResolved = $candidate.Trim() }}
+}}
+if (-not $pythonResolved -and (Get-Command python -ErrorAction SilentlyContinue)) {{
+    $candidate = (& python -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+    if ($candidate) {{ $pythonResolved = $candidate.Trim() }}
+}}
+if (-not $pythonResolved) {{
+    throw "Python runtime not found. Install Python 3 first."
+}}
+if (-not (Test-Path $pythonResolved)) {{
+    throw "Resolved Python path does not exist: $pythonResolved"
+}}
+
+Write-Host "Using Python: $pythonResolved"
+
+Write-Host "Installing Python dependency: scapy"
+& "$pythonResolved" -m pip install --upgrade scapy
+if ($LASTEXITCODE -ne 0) {{
+    throw "Failed to install scapy. Check internet/proxy and Python pip setup on remote host."
+}}
+
+$cmdWrapper = "`"$pythonResolved`" `"$agentTarget`" %*"
+$cmdFile = Join-Path $InstallDir "RemoteCaptureAgent.cmd"
+Set-Content -Path $cmdFile -Value "@echo off`r`n$cmdWrapper" -Encoding ASCII
+
+$ps1Wrapper = @"
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]`$Args)
+& "$pythonResolved" "$agentTarget" @Args
+"@
+$ps1File = Join-Path $InstallDir "RemoteCaptureAgent.ps1"
+Set-Content -Path $ps1File -Value $ps1Wrapper -Encoding ASCII
+
+# Remove any previous RemoteCaptureAgent installation from Machine PATH,
+# then prepend the new location to guarantee we find the updated agent.
+$cleanedParts = ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') |
+    Where-Object {{ $_.Trim() -ne '' -and $_ -notlike '*RemoteCaptureAgent*' }}
+$newMachinePath = (@($InstallDir) + $cleanedParts) -join ';'
+[Environment]::SetEnvironmentVariable('Path', $newMachinePath, 'Machine')
+
+Write-Host "Done. Use one of these commands:"
+Write-Host "  & `"$cmdFile`" --list"
+Write-Host "  & `"$ps1File`" --list"
+Write-Host "If PATH is not refreshed, open a new terminal session or use full path with & and quotes."
+'''
+
+    def _show_remote_howto(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('HowToRemote')
+        dialog.resize(760, 560)
+        layout = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self.REMOTE_HOWTO_TEXT)
+        layout.addWidget(text)
+        row = QHBoxLayout()
+        row.addStretch()
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(dialog.accept)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+        dialog.exec()
     
     # ===== SAVE/LOAD =====
     
@@ -502,19 +1099,25 @@ sniff(
         self._settings().setValue('pipes', '\n'.join(self._pipe_paths()))
         
         # Save remote interfaces
-        remote_interfaces = []
-        for row in range(self.remote_table.rowCount()):
-            show_cb = self.remote_table.cellWidget(row, 0)
-            host_input = self.remote_table.cellWidget(row, 1)
-            port_spin = self.remote_table.cellWidget(row, 2)
-            auth_combo = self.remote_table.cellWidget(row, 3)
-            
-            remote_interfaces.append({
-                'show': show_cb.isChecked(),
-                'host': host_input.text(),
-                'port': port_spin.value(),
-                'auth_type': auth_combo.currentText()
-            })
+        remote_interfaces = self._collect_remote_interfaces_from_ui()
+
+        # Overlay per-interface show values from the discovery tree.
+        host_map = {self._remote_host_key(cfg): cfg for cfg in remote_interfaces}
+        for i in range(self.remote_iface_tree.topLevelItemCount()):
+            host_item = self.remote_iface_tree.topLevelItem(i)
+            host_key = host_item.text(0).strip()
+            cfg = host_map.get(host_key)
+            if not cfg:
+                continue
+            iface_map = {str(item.get('name', '')).strip(): item for item in cfg.get('interfaces', [])}
+            for j in range(host_item.childCount()):
+                child = host_item.child(j)
+                iface_name = child.text(0).strip()
+                if not iface_name:
+                    continue
+                cb = self.remote_iface_tree.itemWidget(child, 1)
+                iface_map.setdefault(iface_name, {'name': iface_name, 'show': True})['show'] = bool(cb and cb.isChecked())
+            cfg['interfaces'] = list(iface_map.values())
         
         self._settings().setValue('remote_interfaces', json.dumps(remote_interfaces))
 

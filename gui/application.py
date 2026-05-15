@@ -543,6 +543,31 @@ class CaptureOptionsDialog(QDialog):
         pipe_paths = [p.strip() for p in settings.value('pipes', '', str).splitlines() if p.strip()]
         for pipe_path in pipe_paths:
             interfaces[pipe_path] = pipe_path
+
+        remotes_json = settings.value('remote_interfaces', '[]', str)
+        try:
+            remote_cfgs = json.loads(remotes_json)
+        except Exception:
+            remote_cfgs = []
+
+        from urllib.parse import quote
+        for remote in remote_cfgs:
+            if not remote.get('show', True):
+                continue
+            host = str(remote.get('host', '')).strip()
+            username = str(remote.get('username', '')).strip()
+            port = int(remote.get('port', 22) or 22)
+            if not host or not username:
+                continue
+            for iface in remote.get('interfaces', []):
+                iface_name = str(iface.get('name', '')).strip()
+                iface_target = str(iface.get('target', iface_name)).strip()
+                iface_show = bool(iface.get('show', True))
+                if not iface_name or not iface_show:
+                    continue
+                key = f"remote://{quote(username, safe='')}@{host}:{port}/{quote(iface_target, safe='')}"
+                interfaces[key] = f"Remote: {username}@{host}:{iface_name}"
+
         settings_json = settings.value('interface_settings', '{}', str)
         try:
             saved_settings = json.loads(settings_json)

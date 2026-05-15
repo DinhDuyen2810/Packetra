@@ -755,7 +755,12 @@ class CaptureView(QWidget):
             return
         if self.sniffer and self.sniffer.isRunning():
             return
-        self.sniffer = PacketSniffer(self.iface, self.capture_filter)
+        # Use RemotePacketSniffer if iface is remote://
+        if str(self.iface).startswith('remote://'):
+            from core.capture import RemotePacketSniffer
+            self.sniffer = RemotePacketSniffer(self.iface, self.capture_filter)
+        else:
+            self.sniffer = PacketSniffer(self.iface, self.capture_filter)
         self._capture_started_at = time.monotonic()
         self._captured_bytes = 0
         self._auto_output_written_files = []

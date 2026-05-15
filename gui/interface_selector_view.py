@@ -3,6 +3,7 @@ import socket
 import time
 import psutil
 import json
+from urllib.parse import quote
 from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QEvent
 from PySide6.QtGui import QPainter, QPen, QPixmap, QColor
 from PySide6.QtWidgets import (
@@ -40,7 +41,7 @@ class InterfaceSelectorView(QWidget):
         self.prev_traffic = now
         self.active_interfaces = []
         self.inactive_interfaces = []
-        self._reload_capture_sources(prev, now)
+        self._reload_capture_sources(prev, now, refresh_remote=False)
 
         self.refresh_list_structure()
         self.update_list()
@@ -61,13 +62,45 @@ class InterfaceSelectorView(QWidget):
         pipes = self._settings().value('pipes', '', str)
         return [path.strip() for path in str(pipes).splitlines() if path.strip()]
 
-    def _reload_capture_sources(self, prev_traffic=None, current_traffic=None):
+    def _remote_sources_from_settings(self, refresh=False):
+        merged_remote = {}
+        settings = self._settings()
+        remotes_json = settings.value('remote_interfaces', '[]', str)
+        try:
+            remote_cfgs = json.loads(remotes_json)
+        except Exception:
+            remote_cfgs = []
+
+        for remote in remote_cfgs:
+            if not remote.get('show', True):
+                continue
+
+            host = str(remote.get('host', '')).strip()
+            username = str(remote.get('username', '')).strip()
+            if not host or not username:
+                continue
+
+            port = int(remote.get('port', 22) or 22)
+            interfaces = remote.get('interfaces', [])
+            for iface in interfaces:
+                iface_name = str(iface.get('name', '')).strip()
+                iface_target = str(iface.get('target', iface_name)).strip()
+                iface_show = bool(iface.get('show', True))
+                if not iface_name or not iface_show:
+                    continue
+                key = f'remote://{quote(username, safe="")}@{host}:{port}/{quote(iface_target, safe="")}'
+                merged_remote[key] = f'Remote: {username}@{host}:{iface_name}'
+        return merged_remote
+
+    def _reload_capture_sources(self, prev_traffic=None, current_traffic=None, refresh_remote=False):
         real_interfaces = get_interfaces()
         pipe_interfaces = self._load_pipe_interfaces()
 
         merged = dict(real_interfaces)
         for path in pipe_interfaces:
             merged[path] = path
+
+        merged.update(self._remote_sources_from_settings(refresh=refresh_remote))
 
         self.interfaces = merged
         self.active_interfaces = []
@@ -79,7 +112,7 @@ class InterfaceSelectorView(QWidget):
         for name in self.interfaces:
             self.traffic_history.setdefault(name, [0.0] * 24)
             self.smoothed_speed.setdefault(name, 0.0)
-            if name.startswith('\\\\.\\pipe\\'):
+            if name.startswith('\\\\.\\pipe\\') or name.startswith('remote://'):
                 self.inactive_interfaces.append(name)
             elif max(current_traffic.get(name, 0) - prev_traffic.get(name, 0), 0) > 0:
                 self.active_interfaces.append(name)
@@ -391,5 +424,5 @@ class InterfaceSelectorView(QWidget):
 
     def refresh_interface_preferences(self):
         """Reload and apply latest interface preferences in real time."""
-        self._reload_capture_sources(self.prev_traffic, self.prev_traffic)
+        self._reload_capture_sources(self.prev_traffic, self.prev_traffic, refresh_remote=False)
         self.refresh_list_structure()
