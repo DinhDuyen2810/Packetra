@@ -30,9 +30,9 @@ class InterfaceSelectorView(QWidget):
         self._build_capture_header()
         self._build_interface_list()
 
-        self.interfaces = get_interfaces()
-        self.traffic_history = {name: [0.0] * 24 for name in self.interfaces}
-        self.smoothed_speed = {name: 0.0 for name in self.interfaces}
+        self.interfaces = {}
+        self.traffic_history = {}
+        self.smoothed_speed = {}
 
         prev = get_traffic()
         time.sleep(0.25)
@@ -40,11 +40,7 @@ class InterfaceSelectorView(QWidget):
         self.prev_traffic = now
         self.active_interfaces = []
         self.inactive_interfaces = []
-        for name in self.interfaces:
-            if max(now.get(name, 0) - prev.get(name, 0), 0) > 0:
-                self.active_interfaces.append(name)
-            else:
-                self.inactive_interfaces.append(name)
+        self._reload_capture_sources(prev, now)
 
         self.refresh_list_structure()
         self.update_list()
@@ -61,11 +57,42 @@ class InterfaceSelectorView(QWidget):
         except Exception:
             return {}
 
+    def _load_pipe_interfaces(self):
+        pipes = self._settings().value('pipes', '', str)
+        return [path.strip() for path in str(pipes).splitlines() if path.strip()]
+
+    def _reload_capture_sources(self, prev_traffic=None, current_traffic=None):
+        real_interfaces = get_interfaces()
+        pipe_interfaces = self._load_pipe_interfaces()
+
+        merged = dict(real_interfaces)
+        for path in pipe_interfaces:
+            merged[path] = path
+
+        self.interfaces = merged
+        self.active_interfaces = []
+        self.inactive_interfaces = []
+
+        prev_traffic = prev_traffic or {}
+        current_traffic = current_traffic or {}
+
+        for name in self.interfaces:
+            self.traffic_history.setdefault(name, [0.0] * 24)
+            self.smoothed_speed.setdefault(name, 0.0)
+            if name.startswith('\\\\.\\pipe\\'):
+                self.inactive_interfaces.append(name)
+            elif max(current_traffic.get(name, 0) - prev_traffic.get(name, 0), 0) > 0:
+                self.active_interfaces.append(name)
+            else:
+                self.inactive_interfaces.append(name)
+
     def _is_interface_shown(self, iface_name: str) -> bool:
         prefs = self._load_interface_preferences().get(f"interface_{iface_name}", {})
         return bool(prefs.get('show', True))
 
     def _display_name_for_interface(self, iface_name: str) -> str:
+        if iface_name.startswith('\\\\.\\pipe\\'):
+            return iface_name
         prefs = self._load_interface_preferences().get(f"interface_{iface_name}", {})
         friendly = str(prefs.get('friendly_name', self.interfaces.get(iface_name, iface_name)))
         comment = str(prefs.get('comment', '')).strip()
@@ -183,6 +210,8 @@ class InterfaceSelectorView(QWidget):
 
     def _category_of_interface(self, name: str):
         low = name.lower()
+        if low.startswith('\\\\.\\pipe\\'):
+            return 'external capture'
         if any(k in low for k in ('bluetooth', 'bth', 'bt-')):
             return 'bluetooth'
         if any(k in low for k in ('wi-fi', 'wifi', 'wireless', 'wlan', '802.11')):
@@ -268,6 +297,7 @@ class InterfaceSelectorView(QWidget):
 
     def update_list(self):
         current = get_traffic()
+        self._reload_capture_sources(self.prev_traffic, current)
         promoted = []
         for name in list(self.inactive_interfaces):
             speed = max(current.get(name, 0) - self.prev_traffic.get(name, 0), 0)
@@ -361,4 +391,5 @@ class InterfaceSelectorView(QWidget):
 
     def refresh_interface_preferences(self):
         """Reload and apply latest interface preferences in real time."""
+        self._reload_capture_sources(self.prev_traffic, self.prev_traffic)
         self.refresh_list_structure()

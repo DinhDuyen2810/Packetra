@@ -380,7 +380,7 @@ class CaptureOptionsDialog(QDialog):
         return True
     
     def _build_input_tab(self):
-        """Build Input tab with interface tree (Wireshark-like)"""
+        """Build Input tab with interface tree (like)"""
         layout = QVBoxLayout(self.input_tab)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
@@ -540,6 +540,9 @@ class CaptureOptionsDialog(QDialog):
         
         interfaces = get_interfaces()
         settings = QSettings('Packetra', 'Packetra')
+        pipe_paths = [p.strip() for p in settings.value('pipes', '', str).splitlines() if p.strip()]
+        for pipe_path in pipe_paths:
+            interfaces[pipe_path] = pipe_path
         settings_json = settings.value('interface_settings', '{}', str)
         try:
             saved_settings = json.loads(settings_json)
@@ -560,7 +563,8 @@ class CaptureOptionsDialog(QDialog):
                 continue
 
             iface_item = QTreeWidgetItem()
-            ips = self._get_interface_ips(iface_name)
+            is_pipe = str(iface_name).startswith('\\\\.\\pipe\\')
+            ips = [] if is_pipe else self._get_interface_ips(iface_name)
             # Column 0: Interface display name (friendly hoặc comment:friendly)
             friendly_name = iface_pref.get('friendly_name', interfaces.get(iface_name, iface_name))
             comment = iface_pref.get('comment', '')
@@ -580,11 +584,12 @@ class CaptureOptionsDialog(QDialog):
             self.iface_tree.setItemWidget(iface_item, 1, traffic_label)
             self.traffic_widgets[iface_name] = traffic_label
             # Column 2: Link-layer Header (text, double-click to edit)
-            iface_item.setText(2, "Ethernet")
-            iface_item.setData(2, Qt.UserRole, "Ethernet")
+            iface_item.setText(2, "Named pipe" if is_pipe else "Ethernet")
+            iface_item.setData(2, Qt.UserRole, "Named pipe" if is_pipe else "Ethernet")
             # Column 3: Promiscuous (checkbox widget)
             promisc_cb = QCheckBox()
-            promisc_cb.setChecked(True)
+            promisc_cb.setChecked(False if is_pipe else True)
+            promisc_cb.setEnabled(not is_pipe)
             self.promisc_checkboxes[iface_name] = promisc_cb
             promisc_cb.stateChanged.connect(lambda state, i=iface_name: self._on_promisc_changed(i, state))
             self.iface_tree.setItemWidget(iface_item, 3, promisc_cb)
@@ -615,6 +620,11 @@ class CaptureOptionsDialog(QDialog):
         current = get_traffic()
         alpha = 0.35
         for iface_name, item in self.iface_items.items():
+            if str(iface_name).startswith('\\\\.\\pipe\\'):
+                label = self.traffic_widgets.get(iface_name)
+                if label:
+                    label.setToolTip('Named pipe source')
+                continue
             prev = self.prev_traffic.get(iface_name, 0)
             now = current.get(iface_name, 0)
             speed = max(now - prev, 0)

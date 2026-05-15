@@ -6,13 +6,94 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QCheckBox, QLineEdit, QTextEdit, QFileDialog,
     QSpinBox, QRadioButton, QButtonGroup, QMessageBox, QComboBox, QTreeWidget,
-    QTreeWidgetItem, QHeaderView
+    QTreeWidgetItem, QHeaderView, QAbstractItemView
 )
 from PySide6.QtGui import QIcon
 
 
 class ManageInterfacesDialog(QDialog):
     """Manage Interfaces dialog - Local Interfaces, Pipes, Remote Interfaces"""
+
+    PIPE_HELP_TEXT = """Tham khao: Windows Named Pipe publisher cho Packetra/Wireshark
+
+import time
+import struct
+import win32pipe
+import win32file
+
+from scapy.all import sniff, raw
+
+PIPE_NAME = r'\\\\.\\pipe\\packetra'
+
+# Create Named Pipe
+pipe = win32pipe.CreateNamedPipe(
+    PIPE_NAME,
+    win32pipe.PIPE_ACCESS_OUTBOUND,
+    win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_WAIT,
+    1,
+    65536,
+    65536,
+    0,
+    None
+)
+
+print(f"Waiting for Packetra to connect to {PIPE_NAME} ...")
+win32pipe.ConnectNamedPipe(pipe, None)
+print("Packetra connected!")
+
+# Write PCAP Global Header
+pcap_global_header = struct.pack(
+    '<IHHIIII',
+    0xa1b2c3d4,
+    2,
+    4,
+    0,
+    0,
+    65535,
+    1
+)
+win32file.WriteFile(pipe, pcap_global_header)
+
+counter = 1
+
+def handle_packet(pkt):
+    global counter
+    try:
+        pkt_bytes = raw(pkt)
+
+        ts = time.time()
+        ts_sec = int(ts)
+        ts_usec = int((ts - ts_sec) * 1_000_000)
+
+        incl_len = len(pkt_bytes)
+        orig_len = len(pkt_bytes)
+
+        pkt_header = struct.pack(
+            '<IIII',
+            ts_sec,
+            ts_usec,
+            incl_len,
+            orig_len
+        )
+
+        win32file.WriteFile(pipe, pkt_header)
+        win32file.WriteFile(pipe, pkt_bytes)
+
+        print(f"Forwarded packet #{counter} ({incl_len} bytes)")
+        counter += 1
+
+    except Exception as e:
+        print("Pipe closed or error:", e)
+        exit(0)
+
+print("Starting live capture from Wi-Fi...")
+
+sniff(
+    iface="Wi-Fi",
+    prn=handle_packet,
+    store=False
+)
+"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -190,60 +271,102 @@ class ManageInterfacesDialog(QDialog):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         
-        label = QLabel('Local Pipe Path')
+        label = QLabel('Local Pipe Paths')
         layout.addWidget(label)
-        
-        # Text area
-        self.pipes_text = QTextEdit()
-        self.pipes_text.setPlaceholderText('Enter pipe paths (one per line)\nExample: \\\\.\\pipe\\MyPipe')
-        layout.addWidget(self.pipes_text)
+
+        self.pipes_table = QTableWidget()
+        self.pipes_table.setColumnCount(1)
+        self.pipes_table.setHorizontalHeaderLabels(['Pipe Path'])
+        self.pipes_table.horizontalHeader().setStretchLastSection(True)
+        self.pipes_table.verticalHeader().setVisible(False)
+        self.pipes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.pipes_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.pipes_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        layout.addWidget(self.pipes_table)
         
         # Buttons
         btn_layout = QHBoxLayout()
-        
+
         add_btn = QPushButton('+')
         add_btn.setFixedWidth(40)
         add_btn.clicked.connect(self._on_add_pipe)
         btn_layout.addWidget(add_btn)
-        
+
         remove_btn = QPushButton('-')
         remove_btn.setFixedWidth(40)
         remove_btn.clicked.connect(self._on_remove_pipe)
         btn_layout.addWidget(remove_btn)
-        
-        browse_btn = QPushButton('Browse')
-        browse_btn.clicked.connect(self._on_browse_pipe)
-        btn_layout.addWidget(browse_btn)
+
+        help_btn = QPushButton('Help')
+        help_btn.clicked.connect(self._show_pipe_help)
+        btn_layout.addWidget(help_btn)
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
     
     def _on_add_pipe(self):
         """Add a new pipe"""
-        text = self.pipes_text.toPlainText().strip()
-        if text and not text.endswith('\n'):
-            self.pipes_text.setText(text + '\n')
+        row = self.pipes_table.rowCount()
+        self.pipes_table.insertRow(row)
+        item = QTableWidgetItem('')
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.pipes_table.setItem(row, 0, item)
+        self.pipes_table.setCurrentCell(row, 0)
+        self.pipes_table.editItem(item)
     
     def _on_remove_pipe(self):
         """Remove selected pipe line"""
-        cursor = self.pipes_text.textCursor()
-        cursor.select(cursor.SelectionType.LineUnderCursor)
-        cursor.removeSelectedText()
+        row = self.pipes_table.currentRow()
+        if row >= 0:
+            self.pipes_table.removeRow(row)
     
-    def _on_browse_pipe(self):
-        """Browse for a pipe"""
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            'Select Pipe',
-            '',
-            'All Files (*)'
-        )
-        if path:
-            text = self.pipes_text.toPlainText().strip()
-            if text:
-                self.pipes_text.setText(text + '\n' + path)
-            else:
-                self.pipes_text.setText(path)
+    def _show_pipe_help(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Pipes Help')
+        dialog.resize(760, 600)
+
+        layout = QVBoxLayout(dialog)
+        label = QLabel('Tham khảo: script publisher cho Windows named pipe (PCAP stream).')
+        layout.addWidget(label)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self.PIPE_HELP_TEXT)
+        layout.addWidget(text)
+
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(dialog.accept)
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+        dialog.exec()
+
+    def _pipe_paths(self):
+        paths = []
+        seen = set()
+        for row in range(self.pipes_table.rowCount()):
+            item = self.pipes_table.item(row, 0)
+            path = (item.text() if item else '').strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+        return paths
+
+    def _set_pipe_paths(self, paths):
+        self.pipes_table.setRowCount(0)
+        for path in paths:
+            row = self.pipes_table.rowCount()
+            self.pipes_table.insertRow(row)
+            item = QTableWidgetItem(path)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            self.pipes_table.setItem(row, 0, item)
     
     # ===== REMOTE INTERFACES TAB =====
     
@@ -368,7 +491,7 @@ class ManageInterfacesDialog(QDialog):
     def _load_settings(self):
         """Load saved settings"""
         pipes = self._settings().value('pipes', '', str)
-        self.pipes_text.setText(pipes)
+        self._set_pipe_paths([p.strip() for p in pipes.splitlines() if p.strip()])
     
     def accept(self):
         """Save settings and close"""
@@ -376,7 +499,7 @@ class ManageInterfacesDialog(QDialog):
         self._save_local_interface_settings()
         
         # Save pipes
-        self._settings().setValue('pipes', self.pipes_text.toPlainText())
+        self._settings().setValue('pipes', '\n'.join(self._pipe_paths()))
         
         # Save remote interfaces
         remote_interfaces = []
