@@ -742,6 +742,14 @@ class CaptureView(QWidget):
             action.triggered.connect(lambda checked=False, value=expr: self._apply_filter_from_history(value))
             self.filter_history_menu.addAction(action)
 
+    def _set_packet_panes_updates_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        self.main_splitter.setUpdatesEnabled(enabled)
+        self.lower_splitter.setUpdatesEnabled(enabled)
+        self.table.setUpdatesEnabled(enabled)
+        self.details_tree.setUpdatesEnabled(enabled)
+        self.hex_view.setUpdatesEnabled(enabled)
+
     def _show_filter_history_menu(self):
         pos = self.display_filter_input.mapToGlobal(self.display_filter_input.rect().bottomRight())
         self.filter_history_menu.exec(pos)
@@ -1122,32 +1130,32 @@ class CaptureView(QWidget):
         self.loaded_file_path = filename
         packets, metadata = load_pcap(filename)
         self.capture_metadata = metadata
-        self._all_packets = packets
-        self._parse_batch_index = 0
-        self._parse_batch_size = 100
-        self._parse_batch_timer = QTimer(self)
-        self._parse_batch_timer.timeout.connect(self._parse_next_batch)
-        self._parse_next_batch(initial=True)
+        batch_size = 1000
+        total = len(packets)
 
-    def _parse_next_batch(self, initial=False):
-        batch_size = self._parse_batch_size
-        start = self._parse_batch_index
-        end = min(start + batch_size, len(self._all_packets))
-        for idx in range(start, end):
-            packet = self._all_packets[idx]
-            self.records.append(self.parser.parse(packet, idx + 1))
-        self._parse_batch_index = end
-        self._set_dirty(False)
-        self.apply_display_filter()
-        if initial and self.visible_indices:
-            self.goto_first_packet()
-        self._update_status(f'Loaded {len(self.records)} packets...')
-        if self._parse_batch_index < len(self._all_packets):
-            self._parse_batch_timer.start(10)
-        else:
-            self._parse_batch_timer.stop()
+        self._set_packet_panes_updates_enabled(False)
+        try:
+            for start in range(0, total, batch_size):
+                end = min(start + batch_size, total)
+                for idx in range(start, end):
+                    self.records.append(self.parser.parse(packets[idx], idx + 1))
+                self._update_status(f'Loaded {end}/{total} packets...')
+                if end < total:
+                    QApplication.processEvents()
+
+            self._set_dirty(False)
+            self.apply_display_filter()
+            if self.visible_indices:
+                self.goto_first_packet()
             self._remember_recent_file(self.loaded_file_path)
             self._update_status(f'Loaded {len(self.records)} packets from {self.loaded_file_path}')
+        finally:
+            self._set_packet_panes_updates_enabled(True)
+
+    def _parse_next_batch(self, initial=False):
+        # Legacy incremental loader kept for compatibility.
+        # File loading now uses 1000-packet batches in _load_capture_from_path.
+        return
 
     def load_file(self, file_path: str = ''):
         filename = (file_path or '').strip()
@@ -1175,11 +1183,16 @@ class CaptureView(QWidget):
         packets = [r.raw for r in self.records]
         self.stop_capture()
         self.clear_packets(reset_file_path=False)
-        for idx, packet in enumerate(packets, start=1):
-            self.records.append(self.parser.parse(packet, idx, self.iface))
-        self.apply_display_filter()
-        self.goto_first_packet()
-        self._update_status(f'Reloaded analysis for {len(self.records)} packets in current capture')
+        self._set_packet_panes_updates_enabled(False)
+        try:
+            for idx, packet in enumerate(packets, start=1):
+                self.records.append(self.parser.parse(packet, idx, self.iface))
+            self.apply_display_filter()
+            if self.visible_indices:
+                self.goto_first_packet()
+            self._update_status(f'Reloaded analysis for {len(self.records)} packets in current capture')
+        finally:
+            self._set_packet_panes_updates_enabled(True)
 
     def set_auto_scroll_enabled(self, enabled: bool):
         self.auto_scroll_enabled = bool(enabled)

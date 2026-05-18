@@ -247,8 +247,8 @@ def capture_to_stdout(iface, bpf_filter='', promiscuous=True):
     out.write(struct.pack('<IHHIIII', 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
     out.flush()
 
-    def _emit(pkt_bytes):
-        now = time.time()
+    def _emit(pkt_bytes, pkt_time=None):
+        now = float(pkt_time) if pkt_time is not None else time.time()
         ts_sec = int(now)
         ts_usec = int((now - ts_sec) * 1_000_000)
         incl_len = len(pkt_bytes)
@@ -260,12 +260,12 @@ def capture_to_stdout(iface, bpf_filter='', promiscuous=True):
         seq = 1
         while True:
             pkt = Ether(dst='ff:ff:ff:ff:ff:ff', src='02:00:00:00:00:01') / IP(src='10.10.10.1', dst='10.10.10.2') / UDP(sport=50000, dport=50001) / Raw(load=f'packetra-test-{seq}'.encode('ascii'))
-            _emit(raw(pkt))
+            _emit(raw(pkt), pkt_time=time.time())
             seq += 1
             time.sleep(0.25)
 
     def _write(pkt):
-        _emit(raw(pkt))
+        _emit(raw(pkt), pkt_time=getattr(pkt, 'time', None))
 
     sniff(
         iface=capture_iface,

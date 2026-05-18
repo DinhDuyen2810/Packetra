@@ -4,10 +4,13 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
-from scapy.all import rdpcap, wrpcap
+from scapy.all import ARP, Ether, bind_layers, rdpcap, wrpcap
 from scapy.utils import PcapNgWriter
 
 from utils.pcapng_parser import PcapngParser, PcapngMetadata, PcapngFileWriter
+
+
+bind_layers(Ether, ARP, type=0x8035)
 
 
 @dataclass
