@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import ipaddress
 from typing import Any, Dict, List
 
 
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
-from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS
+from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS, IPv6ExtHdrHopByHop, in6_chksum
 from scapy.layers.l2 import Dot3, LLC, SNAP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 from scapy.layers.tls.record import TLSApplicationData
 
 PRINTABLE = set(range(32, 127))
+PACKET_BYTE_SOURCE = 'packet'
+TCP_REASSEMBLED_BYTE_SOURCE = 'tcp_reassembled'
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -70,6 +73,30 @@ def hex_dump(packet) -> str:
         )
 
     return '\n'.join(lines)
+
+
+def _byte_mapping(
+    base_offset: int,
+    relative_offset: int,
+    length: int,
+    byte_source: str = PACKET_BYTE_SOURCE,
+) -> Dict[str, Any]:
+    try:
+        start = int(relative_offset)
+        size = int(length)
+    except Exception:
+        return {}
+
+    if start < 0 or size <= 0:
+        return {}
+
+    data: Dict[str, Any] = {
+        'offset': int(base_offset + start) if byte_source == PACKET_BYTE_SOURCE else start,
+        'length': size,
+    }
+    if byte_source != PACKET_BYTE_SOURCE:
+        data['byte_source'] = byte_source
+    return data
 
 
 def _internet_checksum(data: bytes) -> int:
@@ -266,6 +293,8 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
     effective_ip_layer = _effective_ip_layer(packet)
     effective_tcp_layer = _effective_tcp_layer(packet, effective_ip_layer)
     effective_udp_layer = _effective_udp_layer(packet, effective_ip_layer)
+    capwap_transport = str(metadata.get('capwap_transport', '') or '')
+    is_capwap = capwap_transport in {'control', 'data'}
 
     def _idx(name: str) -> int:
         val = metadata.get(name, -1)
@@ -401,15 +430,29 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
     if packet.haslayer(IPv6):
 
-        sections.append(
-            _ipv6_section(
-                packet[IPv6],
-                offset,
-                ipv6_stream_index,
-            )
+        ipv6_section = _ipv6_section(
+            packet[IPv6],
+            offset,
+            ipv6_stream_index,
         )
+        sections.append(ipv6_section)
 
         offset += 40
+
+        if packet.haslayer(IPv6ExtHdrHopByHop):
+            hopopts_layer = packet[IPv6ExtHdrHopByHop]
+            ipv6_section.setdefault('children', []).append(_ipv6_hopopts_section(hopopts_layer, offset))
+            offset += max(8, (int(getattr(hopopts_layer, 'len', 0) or 0) + 1) * 8)
+
+        if getattr(record, 'protocol', '') in {'ICMPV6', 'ICMPv6'}:
+            if packet.haslayer(IPv6ExtHdrHopByHop):
+                icmpv6_payload = bytes(getattr(packet[IPv6ExtHdrHopByHop], 'payload', b''))
+            else:
+                icmpv6_payload = bytes(getattr(packet[IPv6], 'payload', b''))
+            if icmpv6_payload:
+                sections.append(_icmpv6_section(icmpv6_payload, offset, record))
+                payload_handled = True
+                offset += len(icmpv6_payload)
 
     if effective_tcp_layer is not None:
 
@@ -430,12 +473,21 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += tcp_len
 
+        tcp_reassembly_section = _tcp_reassembly_section(record)
+        if tcp_reassembly_section is not None:
+            sections.append(tcp_reassembly_section)
+
         tcp_payload = _tcp_payload_bytes(getattr(record, 'raw', None), tcp_layer)
         if getattr(record, 'protocol', '') == 'BGP' and tcp_payload:
             sections.append(_bgp_section(tcp_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'LDP' and tcp_payload:
             sections.append(_ldp_section(tcp_payload, offset))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'HTTP' and tcp_payload:
+            sections.append(_http_section(tcp_payload, offset, record))
+            if bool(metadata.get('http_has_line_based_text', False)):
+                sections.append(_http_line_based_text_section(record, offset))
             payload_handled = True
         elif bool(metadata.get('tcp_is_retransmission', False)) and tcp_payload:
             payload_handled = True
@@ -461,7 +513,14 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         except Exception:
             sport = dport = 0
 
-        if sport == 646 or dport == 646:
+        if getattr(record, 'protocol', '') in {'CAPWAP-Control', 'CAPWAP-Data', '802.11'} or is_capwap:
+            capwap_payload = bytes(getattr(udp_layer, 'payload', b''))
+            sections.append(_capwap_section(capwap_payload, offset, record))
+            wlan = metadata.get('wlan', {}) if isinstance(metadata, dict) else {}
+            if isinstance(wlan, dict) and wlan:
+                sections.extend(_wlan_sections(wlan, offset))
+            payload_handled = True
+        elif sport == 646 or dport == 646:
             ldp_payload = bytes(getattr(udp_layer, 'payload', b''))
             sections.append(_ldp_section(ldp_payload, offset))
             payload_handled = True
@@ -538,7 +597,15 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += len(bootp_layer)
 
-    if packet.haslayer(HTTPRequest):
+    suppress_http_fallback = bool(metadata.get('http_incomplete', False)) or bool(
+        metadata.get('tcp_reassembled_pdu_in_frame', False)
+    )
+
+    if (
+        getattr(record, 'protocol', '') != 'HTTP'
+        and not suppress_http_fallback
+        and packet.haslayer(HTTPRequest)
+    ):
 
         http_layer = packet[HTTPRequest]
 
@@ -553,7 +620,11 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += len(http_layer)
 
-    if packet.haslayer(HTTPResponse):
+    if (
+        getattr(record, 'protocol', '') != 'HTTP'
+        and not suppress_http_fallback
+        and packet.haslayer(HTTPResponse)
+    ):
 
         http_layer = packet[HTTPResponse]
 
@@ -625,8 +696,19 @@ def _frame_section(record) -> Dict[str, Any]:
     )
 
     frame_len = int(getattr(record, 'length', 0) or 0)
+    metadata = getattr(record, 'metadata', {}) or {}
 
-    iface = getattr(record, 'iface', None) or ''
+    interface_id = int(
+        getattr(record, 'interface_id', 0)
+        or metadata.get('frame_interface_id', 0)
+        or 0
+    )
+
+    iface = (
+        str(metadata.get('frame_interface_name', '') or '').strip()
+        or getattr(record, 'iface', None)
+        or ''
+    )
     if not iface:
         try:
             iface = getattr(record.raw, 'sniffed_on', None) or ''
@@ -640,13 +722,13 @@ def _frame_section(record) -> Dict[str, Any]:
     if not iface:
         iface = 'Unknown'
 
+    interface_description = str(metadata.get('frame_interface_description', '') or '').strip() or 'Ethernet'
+
     frame_number = getattr(record, 'number', 0)
 
     relative_time = float(
         getattr(record, 'relative_time', 0.0) or 0.0
     )
-
-    metadata = getattr(record, 'metadata', {}) or {}
 
     delta_time = float(
         getattr(record, 'time_delta', None)
@@ -661,6 +743,11 @@ def _frame_section(record) -> Dict[str, Any]:
     )
 
     protocol = getattr(record, 'protocol', 'UNKNOWN')
+    if protocol not in {'CAPWAP-Control', 'CAPWAP-Data', '802.11'}:
+        if str(metadata.get('capwap_transport', '') or '') == 'control':
+            protocol = 'CAPWAP-Control'
+        elif str(metadata.get('capwap_transport', '') or '') == 'data':
+            protocol = 'CAPWAP-Data'
 
     layers = getattr(record, 'layers', [])
 
@@ -736,6 +823,17 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ip:ospf'
     elif protocol == 'CDP':
         protocol_string = 'eth:llc:cdp'
+    elif protocol == 'CAPWAP-Control':
+        protocol_string = 'eth:ethertype:ip:udp:capwap'
+    elif protocol == 'CAPWAP-Data':
+        protocol_string = 'eth:ethertype:ip:udp:capwap.data'
+    elif protocol == '802.11' and str(metadata.get('capwap_transport', '') or '') == 'data':
+        protocol_string = 'eth:ethertype:ip:udp:capwap.data:wlan'
+    elif protocol in {'ICMPV6', 'ICMPv6'}:
+        has_hopopts = any(str(layer).lower() == 'ipv6exthdrhopbyhop' for layer in layers)
+        protocol_string = 'eth:ethertype:ipv6:ipv6.hopopts:icmpv6' if has_hopopts else 'eth:ethertype:ipv6:icmpv6'
+    elif protocol == 'HTTP':
+        protocol_string = 'eth:ethertype:ip:tcp:http:data-text-lines' if bool(metadata.get('http_has_line_based_text', False)) else 'eth:ethertype:ip:tcp:http'
     elif protocol == 'TCP':
         if eth_type == 0x8847:
             protocol_string = 'eth:ethertype:mpls:tcp'
@@ -752,6 +850,12 @@ def _frame_section(record) -> Dict[str, Any]:
     if protocol == 'RARP':
         coloring_name = 'ARP'
         coloring_string = 'arp'
+    elif protocol in {'HTTP', 'TCP'} and (
+        int(getattr(record, 'sport', 0) or 0) in {80, 3128, 8080}
+        or int(getattr(record, 'dport', 0) or 0) in {80, 3128, 8080}
+    ):
+        coloring_name = 'HTTP'
+        coloring_string = 'http || tcp.port == 80 || http2'
     elif protocol == 'LDP':
         if metadata.get('tcp_stream_index', None) is not None and int(metadata.get('tcp_stream_index', -1)) >= 0:
             coloring_name = 'TCP'
@@ -759,9 +863,15 @@ def _frame_section(record) -> Dict[str, Any]:
         else:
             coloring_name = 'UDP'
             coloring_string = 'udp'
+    elif protocol in {'CAPWAP-Control', 'CAPWAP-Data'} or (protocol == '802.11' and str(metadata.get('capwap_transport', '') or '') == 'data'):
+        coloring_name = 'UDP'
+        coloring_string = 'udp'
     elif protocol in {'OSPF', 'CDP', 'BGP'}:
         coloring_name = 'Routing'
         coloring_string = 'hsrp || eigrp || ospf || bgp || cdp || vrrp || carp || gvrp || igmp || ismp'
+    elif protocol in {'ICMPV6', 'ICMPv6'}:
+        coloring_name = 'ICMP'
+        coloring_string = 'icmp || icmpv6'
     elif protocol == 'TCP' and (
         bool(metadata.get('tcp_is_retransmission', False))
         or bool(metadata.get('tcp_is_duplicate_ack', False))
@@ -779,7 +889,7 @@ def _frame_section(record) -> Dict[str, Any]:
         },
 
         {
-            'title': f'Interface id: 0 ({iface})',
+            'title': f'Interface id: {interface_id} ({iface})',
 
             'children': [
 
@@ -790,7 +900,7 @@ def _frame_section(record) -> Dict[str, Any]:
 
                 {
                     'title':
-                        'Interface description: Ethernet'
+                        f'Interface description: {interface_description}'
                 }
             ]
         },
@@ -905,7 +1015,7 @@ def _frame_section(record) -> Dict[str, Any]:
             f'({frame_len * 8} bits), '
             f'{frame_len} bytes captured '
             f'({frame_len * 8} bits) '
-            f'on interface {iface}, id 0',
+            f'on interface {iface}, id {interface_id}',
 
         'offset': 0,
         'length': frame_len,
@@ -1010,7 +1120,7 @@ def _ether_section(
                 },
                 {
                     'title': f'.... ...{"1" if dst_group else "0"} .... .... .... .... = IG bit: {"Group" if dst_group else "Individual"} address ({"multicast/broadcast" if dst_group else "unicast"})',
-                    'offset': offset,
+
                     'length': 3,
                 }
             ]
@@ -1199,6 +1309,205 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
         'title': 'Internet Control Message Protocol',
         'offset': offset,
         'length': len(raw),
+        'children': children,
+    }
+
+
+def _ipv6_next_header_name(next_header: int) -> str:
+    return {
+        0: 'IPv6 Hop-by-Hop Option',
+        6: 'TCP',
+        17: 'UDP',
+        58: 'ICMPv6',
+    }.get(int(next_header), f'Next Header {int(next_header)}')
+
+
+def _ipv6_address_text(data: bytes) -> str:
+    try:
+        return str(ipaddress.IPv6Address(bytes(data[:16])))
+    except Exception:
+        return '::'
+
+
+def _ipv6_hopopts_section(layer, offset: int) -> Dict[str, Any]:
+    header_length = max(8, (int(getattr(layer, 'len', 0) or 0) + 1) * 8)
+    raw = bytes(layer)[:header_length]
+    next_header = int(raw[0]) if len(raw) >= 1 else int(getattr(layer, 'nh', 0) or 0)
+    length_field = int(raw[1]) if len(raw) >= 2 else int(getattr(layer, 'len', 0) or 0)
+    children: List[Dict[str, Any]] = [
+        {'title': f'Next Header: {_ipv6_next_header_name(next_header)} ({next_header})', 'offset': offset, 'length': 1},
+        {'title': f'Length: {length_field}', 'offset': offset + 1, 'length': 1},
+        {'title': f'[Length: {header_length} bytes]'},
+    ]
+
+    cursor = 2
+    while cursor < len(raw):
+        option_type = int(raw[cursor])
+        option_offset = offset + cursor
+        if option_type == 0:
+            children.append({'title': 'Pad1', 'offset': option_offset, 'length': 1})
+            cursor += 1
+            continue
+        if cursor + 2 > len(raw):
+            break
+        option_length = int(raw[cursor + 1])
+        available_length = max(0, len(raw) - (cursor + 2))
+        actual_length = min(option_length, available_length)
+        option_data = raw[cursor + 2:cursor + 2 + actual_length]
+
+        if option_type == 5:
+            router_alert = int.from_bytes(option_data[:2].ljust(2, b'\x00'), 'big') if option_data else 0
+            router_alert_name = {
+                0: 'MLD',
+                1: 'RSVP',
+                2: 'Active Networks',
+            }.get(router_alert, f'Value {router_alert}')
+            children.append(
+                {
+                    'title': 'Router Alert',
+                    'offset': option_offset,
+                    'length': 2 + actual_length,
+                    'children': [
+                        {
+                            'title': 'Type: Router Alert (0x05)',
+                            'offset': option_offset,
+                            'length': 1,
+                            'children': [
+                                {'title': '00.. .... = Action: Skip and continue (0)', 'offset': option_offset, 'length': 1},
+                                {'title': '..0. .... = May Change: No', 'offset': option_offset, 'length': 1},
+                                {'title': '...0 0101 = Low-Order Bits: 0x05', 'offset': option_offset, 'length': 1},
+                            ],
+                        },
+                        {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                        {'title': f'Router Alert: {router_alert_name} ({router_alert})', 'offset': option_offset + 2, 'length': min(2, actual_length)},
+                    ],
+                }
+            )
+        elif option_type == 1:
+            children.append(
+                {
+                    'title': 'PadN',
+                    'offset': option_offset,
+                    'length': 2 + actual_length,
+                    'children': [
+                        {
+                            'title': 'Type: PadN (0x01)',
+                            'offset': option_offset,
+                            'length': 1,
+                            'children': [
+                                {'title': '00.. .... = Action: Skip and continue (0)', 'offset': option_offset, 'length': 1},
+                                {'title': '..0. .... = May Change: No', 'offset': option_offset, 'length': 1},
+                                {'title': '...0 0001 = Low-Order Bits: 0x01', 'offset': option_offset, 'length': 1},
+                            ],
+                        },
+                        {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                        {'title': 'PadN: <none>', 'offset': option_offset + 2, 'length': actual_length},
+                    ],
+                }
+            )
+        cursor += 2 + option_length
+
+    return {
+        'title': 'IPv6 Hop-by-Hop Option',
+        'offset': offset,
+        'length': header_length,
+        'children': children,
+    }
+
+
+def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    icmpv6_type = int(payload[0]) if len(payload) >= 1 else 0
+    code = int(payload[1]) if len(payload) >= 2 else 0
+    checksum = int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0
+    checksum_status = 'Good'
+
+    try:
+        raw_packet = getattr(record, 'raw', None)
+        upper_layer = None
+        if raw_packet is not None and raw_packet.haslayer(IPv6ExtHdrHopByHop):
+            upper_layer = raw_packet[IPv6ExtHdrHopByHop].payload
+        elif raw_packet is not None and raw_packet.haslayer(IPv6):
+            upper_layer = raw_packet[IPv6].payload
+        if upper_layer is not None and len(payload) >= 4:
+            checksum_bytes = bytearray(payload)
+            checksum_bytes[2:4] = b'\x00\x00'
+            if in6_chksum(58, upper_layer, bytes(checksum_bytes)) != checksum:
+                checksum_status = 'Bad'
+    except Exception:
+        checksum_status = 'Good'
+
+    type_name = {
+        128: 'Echo (ping) request',
+        129: 'Echo (ping) reply',
+        130: 'Multicast Listener Query',
+        131: 'Multicast Listener Report',
+        132: 'Multicast Listener Done',
+        133: 'Router Solicitation',
+        134: 'Router Advertisement',
+        135: 'Neighbor Solicitation',
+        136: 'Neighbor Advertisement',
+        143: 'Multicast Listener Report Message v2',
+    }.get(icmpv6_type, f'ICMPv6 Type {icmpv6_type}')
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'Type: {type_name} ({icmpv6_type})', 'offset': offset, 'length': 1},
+        {'title': f'Code: {code}', 'offset': offset + 1, 'length': 1},
+        {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
+        {'title': f'[Checksum Status: {checksum_status}]'},
+    ]
+
+    if icmpv6_type == 143:
+        reserved = int.from_bytes(payload[4:6], 'big') if len(payload) >= 6 else 0
+        record_count = int.from_bytes(payload[6:8], 'big') if len(payload) >= 8 else 0
+        children.extend([
+            {'title': f'Reserved: {reserved:04x}', 'offset': offset + 4, 'length': 2 if len(payload) >= 6 else 0},
+            {'title': f'Number of Multicast Address Records: {record_count}', 'offset': offset + 6, 'length': 2 if len(payload) >= 8 else 0},
+        ])
+
+        cursor = 8
+        record_type_names = {
+            1: 'Mode is include',
+            2: 'Mode is exclude',
+            3: 'Changed to include',
+            4: 'Changed to exclude',
+            5: 'Allow new sources',
+            6: 'Block old sources',
+        }
+        for _ in range(record_count):
+            if cursor + 20 > len(payload):
+                break
+            record_type = int(payload[cursor])
+            aux_data_len = int(payload[cursor + 1])
+            source_count = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+            multicast_address = _ipv6_address_text(payload[cursor + 4:cursor + 20])
+            record_length = 20 + (source_count * 16) + (aux_data_len * 4)
+            record_label = record_type_names.get(record_type, f'Record Type {record_type}')
+            children.append(
+                {
+                    'title': f'Multicast Address Record {record_label}: {multicast_address}',
+                    'offset': offset + cursor,
+                    'length': min(record_length, max(0, len(payload) - cursor)),
+                    'children': [
+                        {'title': f'Record Type: {record_label} ({record_type})', 'offset': offset + cursor, 'length': 1},
+                        {'title': f'Aux Data Len: {aux_data_len}', 'offset': offset + cursor + 1, 'length': 1},
+                        {'title': f'Number of Sources: {source_count}', 'offset': offset + cursor + 2, 'length': 2},
+                        {'title': f'Multicast Address: {multicast_address}', 'offset': offset + cursor + 4, 'length': 16},
+                    ],
+                }
+            )
+            cursor += record_length
+    elif icmpv6_type == 135:
+        reserved = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
+        target = _ipv6_address_text(payload[8:24]) if len(payload) >= 24 else '::'
+        children.extend([
+            {'title': f'Reserved: {reserved:08x}', 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0},
+            {'title': f'Target Address: {target}', 'offset': offset + 8, 'length': 16 if len(payload) >= 24 else 0},
+        ])
+
+    return {
+        'title': 'Internet Control Message Protocol v6',
+        'offset': offset,
+        'length': len(payload),
         'children': children,
     }
 
@@ -1441,6 +1750,8 @@ def _ip_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
         f'{frag_bits[12:16]}'
     )
 
+    flags_bits = f'{reserved}{df}{mf}'
+
     children = [
 
         {
@@ -1513,7 +1824,7 @@ def _ip_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
 
         {
             'title':
-                    f'000. .... = Flags: 0x{flags:x}',
+                    f'{flags_bits}. .... = Flags: 0x{flags:x}',
                 'offset': offset + 6,
                 'length': 1,
                 'children': [
@@ -1617,6 +1928,73 @@ def _ip_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
         'children': children,
     }
 
+def _ipv6_multicast_scope_name(scope: int) -> str:
+    return {
+        0: 'Reserved scope',
+        1: 'Interface-Local scope',
+        2: 'Link-Local scope',
+        3: 'Realm-Local scope',
+        4: 'Admin-Local scope',
+        5: 'Site-Local scope',
+        8: 'Organization-Local scope',
+        14: 'Global scope',
+    }.get(int(scope), f'Scope {int(scope)}')
+
+
+def _ipv6_address_children(address: str, offset: int, is_source: bool) -> List[Dict[str, Any]]:
+    addr_text = str(address or '')
+    lower = addr_text.lower()
+    try:
+        packed = ipaddress.IPv6Address(addr_text).packed
+    except Exception:
+        packed = b'\x00' * 16
+
+    if addr_text == '::':
+        return [
+            {'title': '[Address Space: Reserved by IETF]', 'offset': offset, 'length': 16},
+            {
+                'title': '[Special-Purpose Allocation: Unspecified Address]',
+                'offset': offset,
+                'length': 16,
+                'children': [
+                    {'title': f'[Source: {"True" if is_source else "False"}]', 'offset': offset, 'length': 16},
+                    {'title': f'[Destination: {"False" if is_source else "True"}]', 'offset': offset, 'length': 16},
+                    {'title': '[Forwardable: False]', 'offset': offset, 'length': 16},
+                    {'title': '[Globally Reachable: False]', 'offset': offset, 'length': 16},
+                    {'title': '[Reserved-by-Protocol: True]', 'offset': offset, 'length': 16},
+                ],
+            },
+        ]
+
+    if lower.startswith('ff'):
+        flags = (packed[1] >> 4) & 0x0F
+        scope = packed[1] & 0x0F
+        return [
+            {'title': '[Address Space: Multicast]', 'offset': offset, 'length': 16},
+            {
+                'title': f'[.... .... {flags:04b} .... = Multicast Flags: 0x{flags:x}]',
+                'offset': offset + 1,
+                'length': 1,
+                'children': [
+                    {'title': f'.... .... {(flags >> 3) & 0x1}... .... = Reserved: {(flags >> 3) & 0x1}', 'offset': offset + 1, 'length': 1},
+                    {'title': f'.... .... .{(flags >> 2) & 0x1}.. .... = Rendezvous Point (RP): {"True" if ((flags >> 2) & 0x1) else "False"}', 'offset': offset + 1, 'length': 1},
+                    {'title': f'.... .... ..{(flags >> 1) & 0x1}. .... = Network Prefix: {"True" if ((flags >> 1) & 0x1) else "False"}', 'offset': offset + 1, 'length': 1},
+                    {'title': f'.... .... ...{flags & 0x1} .... = Transient: {"True" if (flags & 0x1) else "False"}', 'offset': offset + 1, 'length': 1},
+                ],
+            },
+            {
+                'title': f'[.... .... .... {scope:04b} = Multicast Scope: {_ipv6_multicast_scope_name(scope)} (0x{scope:x})]',
+                'offset': offset + 1,
+                'length': 1,
+            },
+        ]
+
+    if lower.startswith('fe80'):
+        return [{'title': '[Address Space: Link-local Unicast]', 'offset': offset, 'length': 16}]
+
+    return [{'title': '[Address Space: Global Unicast]', 'offset': offset, 'length': 16}]
+
+
 def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
 
     version = int(getattr(layer, 'version', 6) or 6)
@@ -1658,6 +2036,7 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
     ecn_name = ecn_names.get(ecn, str(ecn))
 
     next_header_names = {
+        0: 'IPv6 Hop-by-Hop Option',
         6: 'TCP',
         17: 'UDP',
         58: 'ICMPv6',
@@ -1665,21 +2044,13 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
 
     nh_name = next_header_names.get(nh, str(nh))
 
-    def ipv6_scope(addr: str):
-
-        if addr.startswith('fe80'):
-            return 'Link-local Unicast'
-
-        if addr.startswith('ff'):
-            return 'Multicast'
-
-        return 'Global Unicast'
-
     children = [
 
         {
             'title':
-                f'0110 .... = Version: {version}'
+                f'0110 .... = Version: {version}',
+            'offset': offset,
+            'length': 1,
         },
 
         {
@@ -1689,6 +2060,8 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
                 f'Traffic Class: '
                 f'0x{tc:02x} '
                 f'(DSCP: {dscp_name}, ECN: {ecn_name})',
+            'offset': offset,
+            'length': 2,
 
             'children': [
 
@@ -1697,7 +2070,9 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
                         f'.... {format(dscp, "06b")}.. '
                         f'.... .... .... .... .... = '
                         f'Differentiated Services Codepoint: '
-                        f'{dscp_name} ({dscp})'
+                        f'{dscp_name} ({dscp})',
+                    'offset': offset,
+                    'length': 2,
                 },
 
                 {
@@ -1705,7 +2080,9 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
                         f'.... .... ..{ecn:02b} '
                         f'.... .... .... .... .... = '
                         f'Explicit Congestion Notification: '
-                        f'{ecn_name} ({ecn})'
+                        f'{ecn_name} ({ecn})',
+                    'offset': offset,
+                    'length': 2,
                 }
             ]
         },
@@ -1713,50 +2090,48 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
         {
             'title':
                 f'.... {format(fl, "020b")} = '
-                f'Flow Label: 0x{fl:05x}'
+                f'Flow Label: 0x{fl:05x}',
+            'offset': offset + 1,
+            'length': 3,
         },
 
         {
             'title':
-                f'Payload Length: {plen}'
+                f'Payload Length: {plen}',
+            'offset': offset + 4,
+            'length': 2,
         },
 
         {
             'title':
-                f'Next Header: {nh_name} ({nh})'
+                f'Next Header: {nh_name} ({nh})',
+            'offset': offset + 6,
+            'length': 1,
         },
 
         {
             'title':
-                f'Hop Limit: {hlim}'
+                f'Hop Limit: {hlim}',
+            'offset': offset + 7,
+            'length': 1,
         },
 
         {
             'title':
                 f'Source Address: {src}',
+            'offset': offset + 8,
+            'length': 16,
 
-            'children': [
-
-                {
-                    'title':
-                        f'[Address Space: '
-                        f'{ipv6_scope(src)}]'
-                }
-            ]
+            'children': _ipv6_address_children(src, offset + 8, True),
         },
 
         {
             'title':
                 f'Destination Address: {dst}',
+            'offset': offset + 24,
+            'length': 16,
 
-            'children': [
-
-                {
-                    'title':
-                        f'[Address Space: '
-                        f'{ipv6_scope(dst)}]'
-                }
-            ]
+            'children': _ipv6_address_children(dst, offset + 24, False),
         },
     ]
 
@@ -1776,6 +2151,27 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
         'children': children,
     }
 
+def _tcp_option_length(option) -> int:
+    try:
+        name, value = option
+    except Exception:
+        return 1
+
+    if name == 'MSS':
+        return 4
+    if name == 'NOP':
+        return 1
+    if name == 'WScale':
+        return 3
+    if name == 'SAckOK':
+        return 2
+    if name == 'EOL':
+        return 1
+    if isinstance(value, (bytes, bytearray)):
+        return 2 + len(value)
+    return 1
+
+
 def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str, Any]:
 
     sport = int(getattr(layer, 'sport', 0) or 0)
@@ -1786,12 +2182,13 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
     metadata = getattr(record, 'metadata', {}) if record else {}
     stream_pkt_num = int(metadata.get('tcp_stream_packet_number', 1) or 1)
-    relative_seq = int(metadata.get('tcp_relative_seq', 1) or 1)
+    relative_seq = int(metadata['tcp_relative_seq']) if 'tcp_relative_seq' in metadata else 1
     relative_ack = int(metadata.get('tcp_relative_ack', 0) or 0)
+    options = getattr(layer, 'options', [])
 
     dataofs = int(getattr(layer, 'dataofs', 5) or 5)
 
-    tcp_header_len = dataofs * 4
+    tcp_header_len = max(dataofs * 4, 20 + sum(_tcp_option_length(option) for option in options))
 
     window = int(getattr(layer, 'window', 0) or 0)
 
@@ -1826,7 +2223,8 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
     flags_text = ', '.join(set_flags) if set_flags else 'None'
 
-    next_seq = int(metadata.get('tcp_next_seq', relative_seq + payload_len) or (relative_seq + payload_len))
+    next_seq_fallback = relative_seq + payload_len + (1 if flag_bits['SYN'] else 0) + (1 if flag_bits['FIN'] else 0)
+    next_seq = int(metadata.get('tcp_next_seq', next_seq_fallback) or next_seq_fallback)
 
     stream_completeness = int(metadata.get('tcp_completeness_flags', 0) or 0)
     completeness_rst = 32 if (stream_completeness & 32) else 0
@@ -1847,13 +2245,17 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     completeness_label = f'Incomplete ({completeness_flags})'
     if completeness_flags == 63:
         completeness_label = 'Complete (63)'
+    elif completeness_flags == 31:
+        completeness_label = 'Complete, WITH_DATA (31)'
+    elif completeness_flags == 15:
+        completeness_label = 'Incomplete, DATA (15)'
 
     completeness_marks = ''.join([
         'R' if completeness_rst else '·',
         'F' if completeness_fin else '·',
         'D' if completeness_data else '·',
         'A' if completeness_ack else '·',
-        'K' if completeness_synack else '·',
+        'S' if completeness_synack else '·',
         'S' if completeness_syn else '·',
     ])
 
@@ -1889,6 +2291,20 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     bytes_since_last_psh = metadata.get('tcp_bytes_since_last_psh', None)
     is_retransmission = bool(metadata.get('tcp_is_retransmission', False))
     protocol_name = str(getattr(record, 'protocol', '') or '').upper() if record else ''
+    has_ack_flag = bool(flag_bits['ACK'])
+    is_syn_packet = bool(flag_bits['SYN'])
+    window_scale_shift = metadata.get('tcp_window_scale_shift', None)
+    window_scaling_disabled = bool(metadata.get('tcp_window_scaling_disabled', False))
+    calculated_window = int(window)
+    window_scale_title = '[Window size scaling factor: -1 (unknown)]'
+    if is_syn_packet:
+        window_scale_title = ''
+    elif window_scale_shift is not None:
+        multiplier = 1 << int(window_scale_shift)
+        calculated_window = int(window) * multiplier
+        window_scale_title = f'[Window size scaling factor: {multiplier}]'
+    elif window_scaling_disabled:
+        window_scale_title = '[Window size scaling factor: -2 (no window scaling used)]'
 
     children = [
 
@@ -1917,7 +2333,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
         },
 
         {
-            'title': f'Acknowledgment Number: {relative_ack}    (relative ack number)',
+            'title': f'Acknowledgment Number: {relative_ack}    (relative ack number)' if has_ack_flag else f'Acknowledgment Number: {ack}',
             'offset': offset + 8,
             'length': 4,
         },
@@ -2030,11 +2446,11 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
         },
 
         {
-            'title': f'[Calculated window size: {window}]',
+            'title': f'[Calculated window size: {calculated_window}]',
         },
 
         {
-            'title': '[Window size scaling factor: -1 (unknown)]',
+            'title': window_scale_title,
         },
 
         {
@@ -2112,7 +2528,10 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
         children[7],
         children[8],
         children[9],
-        children[10],
+    ])
+    if children[10].get('title'):
+        ordered_children.append(children[10])
+    ordered_children.extend([
         children[11],
         children[12],
         children[13],
@@ -2243,21 +2662,72 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
     # ---- TCP OPTIONS ----
 
-    options = getattr(layer, 'options', [])
-
     if options:
 
         option_children = []
+        option_titles = []
+        option_offset = offset + 20
 
         for opt in options:
 
             try:
 
                 name, value = opt
-
-                option_children.append({
-                    'title': f'{name}: {value}'
-                })
+                if name == 'MSS':
+                    option_titles.append('Maximum segment size')
+                    option_children.append({
+                        'title': f'TCP Option - Maximum segment size: {int(value)} bytes',
+                        'offset': option_offset,
+                        'length': 4,
+                        'children': [
+                            {'title': 'Kind: Maximum Segment Size (2)', 'offset': option_offset, 'length': 1},
+                            {'title': 'Length: 4', 'offset': option_offset + 1, 'length': 1},
+                            {'title': f'MSS Value: {int(value)}', 'offset': option_offset + 2, 'length': 2},
+                        ],
+                    })
+                    option_offset += 4
+                elif name == 'NOP':
+                    option_titles.append('No-Operation (NOP)')
+                    option_children.append({
+                        'title': 'TCP Option - No-Operation (NOP)',
+                        'offset': option_offset,
+                        'length': 1,
+                        'children': [
+                            {'title': 'Kind: No-Operation (1)', 'offset': option_offset, 'length': 1},
+                        ],
+                    })
+                    option_offset += 1
+                elif name == 'WScale':
+                    multiplier = 1 << int(value)
+                    option_titles.append('Window scale')
+                    option_children.append({
+                        'title': f'TCP Option - Window scale: {int(value)} (multiply by {multiplier})',
+                        'offset': option_offset,
+                        'length': 3,
+                        'children': [
+                            {'title': 'Kind: Window Scale (3)', 'offset': option_offset, 'length': 1},
+                            {'title': 'Length: 3', 'offset': option_offset + 1, 'length': 1},
+                            {'title': f'Shift count: {int(value)}', 'offset': option_offset + 2, 'length': 1},
+                            {'title': f'[Multiplier: {multiplier}]'},
+                        ],
+                    })
+                    option_offset += 3
+                elif name == 'SAckOK':
+                    option_titles.append('SACK permitted')
+                    option_children.append({
+                        'title': 'TCP Option - SACK permitted',
+                        'offset': option_offset,
+                        'length': 2,
+                        'children': [
+                            {'title': 'Kind: SACK Permitted (4)', 'offset': option_offset, 'length': 1},
+                            {'title': 'Length: 2', 'offset': option_offset + 1, 'length': 1},
+                        ],
+                    })
+                    option_offset += 2
+                else:
+                    option_children.append({
+                        'title': f'{name}: {value}'
+                    })
 
             except Exception:
 
@@ -2267,7 +2737,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
         children.append({
 
-            'title': 'Options',
+            'title': f'Options: ({max(0, tcp_header_len - 20)} bytes), ' + ', '.join(option_titles) if option_titles else 'Options',
 
             'offset': offset + 20,
 
@@ -2290,24 +2760,296 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                 'offset': offset + tcp_header_len,
                 'length': payload_len,
             })
+        elif metadata.get('tcp_reassembled_pdu_in_frame', None) is not None:
+            children.append({
+                'title': f'[Reassembled PDU in frame: {int(metadata.get("tcp_reassembled_pdu_in_frame"))}]',
+            })
+            children.append({
+                'title': f'TCP segment data ({payload_len} bytes)',
+                'offset': offset + tcp_header_len,
+                'length': payload_len,
+            })
+        elif metadata.get('tcp_reassembled_segments', None) or metadata.get('http_reassembled_segments', None):
+            children.append({
+                'title': f'TCP segment data ({payload_len} bytes)',
+                'offset': offset + tcp_header_len,
+                'length': payload_len,
+            })
         elif protocol_name == 'BGP':
             children.append({
                 'title': f'[PDU Size: {payload_len}]',
             })
 
+    tcp_title = (
+        f'Transmission Control Protocol, '
+        f'Src Port: {sport}, '
+        f'Dst Port: {dport}, '
+        f'Seq: {relative_seq}, '
+        + (f'Ack: {relative_ack}, ' if has_ack_flag else '')
+        + f'Len: {payload_len}'
+    )
+
     return {
 
-        'title':
-            f'Transmission Control Protocol, '
-            f'Src Port: {sport}, '
-            f'Dst Port: {dport}, '
-            f'Seq: {relative_seq}, '
-            f'Ack: {relative_ack}, '
-            f'Len: {payload_len}',
+        'title': tcp_title,
 
         'offset': offset,
         'length': tcp_header_len,
         'children': children,
+    }
+
+
+def _tcp_reassembly_section(record) -> Dict[str, Any] | None:
+    metadata = getattr(record, 'metadata', {}) or {}
+    segments = list(
+        metadata.get('tcp_reassembled_segments', [])
+        or metadata.get('http_reassembled_segments', [])
+        or []
+    )
+    if not segments:
+        return None
+
+    reassembled_len = int(
+        metadata.get('tcp_reassembled_length', 0)
+        or metadata.get('http_reassembled_length', 0)
+        or 0
+    )
+    if reassembled_len <= 0:
+        reassembled_len = int(sum(int(segment.get('payload_length', 0) or 0) for segment in segments))
+
+    segment_summary = ', '.join(
+        f"#{int(segment.get('frame_number', 0) or 0)}({int(segment.get('payload_length', 0) or 0)})"
+        for segment in segments
+    )
+    children = []
+    for segment in segments:
+        start_pos = int(segment.get('payload_start', 0) or 0)
+        seg_len = int(segment.get('payload_length', 0) or 0)
+        end_pos = max(start_pos, start_pos + seg_len - 1)
+        children.append({
+            'title': f"[Frame: {int(segment.get('frame_number', 0) or 0)}, payload: {start_pos}-{end_pos} ({seg_len} bytes)]",
+            **_byte_mapping(0, start_pos, seg_len, TCP_REASSEMBLED_BYTE_SOURCE),
+        })
+    children.append({'title': f'[Segment count: {len(segments)}]'})
+    children.append({
+        'title': f'[Reassembled TCP length: {reassembled_len}]',
+        **_byte_mapping(0, 0, reassembled_len, TCP_REASSEMBLED_BYTE_SOURCE),
+    })
+
+    reassembly_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+    if not reassembly_hex:
+        reassembly_payload = bytes(metadata.get('http_reassembled_payload', b'') or b'')
+        reassembly_hex = reassembly_payload.hex() if reassembly_payload else ''
+    if reassembly_hex:
+        children.append({
+            'title': f'[Reassembled TCP Data […]: {reassembly_hex[:160]}]',
+            **_byte_mapping(0, 0, reassembled_len, TCP_REASSEMBLED_BYTE_SOURCE),
+        })
+
+    return {
+        'title': f'[{len(segments)} Reassembled TCP Segments ({reassembled_len} bytes): {segment_summary}]',
+        **_byte_mapping(0, 0, reassembled_len, TCP_REASSEMBLED_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _http_payload_lines(payload: bytes) -> List[tuple[str, int, int, bytes]]:
+    lines = []
+    pos = 0
+    while pos < len(payload):
+        end = payload.find(b'\r\n', pos)
+        if end == -1:
+            raw_line = payload[pos:]
+            lines.append((raw_line.decode(errors='ignore'), pos, len(raw_line), raw_line))
+            break
+        raw_line = payload[pos:end]
+        total_len = (end + 2) - pos
+        lines.append((raw_line.decode(errors='ignore') + '\\r\\n', pos, total_len, raw_line))
+        pos = end + 2
+        if raw_line == b'':
+            break
+    return lines
+
+
+def _http_body_lines(payload: bytes) -> List[str]:
+    if not payload:
+        return []
+    body_lines = []
+    for raw_line in payload.splitlines(keepends=True):
+        text = raw_line.decode(errors='ignore')
+        text = text.replace('\t', '\\t').replace('\r', '\\r').replace('\n', '\\n')
+        body_lines.append(text)
+    return body_lines
+
+
+def _http_status_description(code: str) -> str:
+    return {
+        '200': 'OK',
+        '301': 'Moved Permanently',
+        '302': 'Found',
+        '400': 'Bad Request',
+        '404': 'Not Found',
+        '500': 'Internal Server Error',
+    }.get(str(code), '')
+
+
+def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    http_payload = metadata.get('http_reassembled_payload', payload)
+    lines = _http_payload_lines(http_payload)
+    children = []
+    use_offsets = not bool(metadata.get('http_is_reassembled', False))
+    byte_source = PACKET_BYTE_SOURCE if use_offsets else TCP_REASSEMBLED_BYTE_SOURCE
+    header_length = int(metadata.get('http_header_len', 0) or 0)
+
+    if lines:
+        first_text, first_offset, first_length, first_raw = lines[0]
+        first_line = first_raw.decode(errors='ignore')
+        if first_line.startswith('HTTP/'):
+            parts = first_line.split(' ', 2)
+            response_children = []
+            if len(parts) >= 2:
+                version = parts[0]
+                status_code = parts[1]
+                reason = parts[2] if len(parts) > 2 else ''
+                response_children = [
+                    {
+                        'title': f'Response Version: {version}',
+                        **_byte_mapping(offset, first_offset, len(version), byte_source),
+                    },
+                    {
+                        'title': f'Status Code: {status_code}',
+                        **_byte_mapping(offset, first_offset + len(version) + 1, len(status_code), byte_source),
+                    },
+                ]
+                description = _http_status_description(status_code)
+                if description:
+                    response_children.append({'title': f'[Status Code Description: {description}]'})
+                if reason:
+                    response_children.append({
+                        'title': f'Response Phrase: {reason}',
+                        **_byte_mapping(
+                            offset,
+                            first_offset + len(version) + 1 + len(status_code) + 1,
+                            len(reason),
+                            byte_source,
+                        ),
+                    })
+            children.append({
+                'title': first_text,
+                **_byte_mapping(offset, first_offset, first_length, byte_source),
+                'children': response_children,
+            })
+        else:
+            parts = first_line.split(' ', 2)
+            request_children = []
+            if len(parts) == 3:
+                method, uri, version = parts
+                method_len = len(method)
+                uri_len = len(uri)
+                version_len = len(version)
+                request_children = [
+                    {
+                        'title': f'Request Method: {method}',
+                        **_byte_mapping(offset, first_offset, method_len, byte_source),
+                    },
+                    {
+                        'title': f'Request URI: {uri}',
+                        **_byte_mapping(offset, first_offset + method_len + 1, uri_len, byte_source),
+                    },
+                    {
+                        'title': f'Request Version: {version}',
+                        **_byte_mapping(
+                            offset,
+                            first_offset + method_len + 1 + uri_len + 1,
+                            version_len,
+                            byte_source,
+                        ),
+                    },
+                ]
+            children.append({
+                'title': first_text,
+                **_byte_mapping(offset, first_offset, first_length, byte_source),
+                'children': request_children,
+            })
+
+        for line_text, line_offset, line_length, line_raw in lines[1:]:
+            title = line_text if line_raw != b'' else '\\r\\n'
+            item = {
+                'title': title,
+                **_byte_mapping(offset, line_offset, line_length, byte_source),
+            }
+            if line_raw.lower().startswith(b'content-length:'):
+                try:
+                    content_length = int(line_raw.split(b':', 1)[1].strip() or b'0')
+                    value_offset = int(line_raw.find(b':')) + 1
+                    while value_offset < len(line_raw) and line_raw[value_offset:value_offset + 1] == b' ':
+                        value_offset += 1
+                    item['children'] = [{
+                        'title': f'[Content length: {content_length}]',
+                        **_byte_mapping(offset, line_offset + value_offset, len(line_raw) - value_offset, byte_source),
+                    }]
+                except Exception:
+                    pass
+            children.append(item)
+
+    response_frame = metadata.get('http_response_frame', None)
+    if response_frame is not None:
+        children.append({'title': f'[Response in frame: {int(response_frame)}]'})
+
+    request_frame = metadata.get('http_request_frame', None)
+    if request_frame is not None:
+        children.append({'title': f'[Request in frame: {int(request_frame)}]'})
+
+    time_since_request = metadata.get('http_time_since_request_ms', None)
+    if time_since_request is not None:
+        children.append({'title': f'[Time since request: {float(time_since_request):.6f} milliseconds]'})
+
+    request_uri = str(metadata.get('http_request_uri', '') or '').strip()
+    if request_uri:
+        children.append({'title': f'[Request URI: {request_uri}]'})
+
+    full_request_uri = metadata.get('http_full_request_uri', '')
+    if full_request_uri:
+        children.append({'title': f'[Full request URI: {full_request_uri}]'})
+
+    content_length = metadata.get('http_content_length', None)
+    if content_length is not None and int(content_length) > 0:
+        body = bytes(metadata.get('http_body', b'') or b'')
+        body_offset = int(metadata.get('http_header_len', 0) or 0)
+        body_len = len(body) if body else int(content_length)
+        children.append({
+            'title': f'File Data: {int(content_length)} bytes',
+            **_byte_mapping(offset, body_offset, body_len, byte_source),
+        })
+
+    return {
+        'title': 'Hypertext Transfer Protocol',
+        **_byte_mapping(offset, 0, header_length or len(http_payload), byte_source),
+        'children': children,
+    }
+
+
+def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) or {}
+    content_type = str(metadata.get('http_content_type', '') or '').strip() or 'text/plain'
+    body = bytes(metadata.get('http_body', b'') or b'')
+    byte_source = PACKET_BYTE_SOURCE if not bool(metadata.get('http_is_reassembled', False)) else TCP_REASSEMBLED_BYTE_SOURCE
+    body_offset = int(metadata.get('http_header_len', 0) or 0)
+    lines = []
+    cursor = 0
+    for raw_line in body.splitlines(keepends=True):
+        text = raw_line.decode(errors='ignore')
+        text = text.replace('\t', '\\t').replace('\r', '\\r').replace('\n', '\\n')
+        lines.append({
+            'title': text,
+            **_byte_mapping(offset, body_offset + cursor, len(raw_line), byte_source),
+        })
+        cursor += len(raw_line)
+    return {
+        'title': f'Line-based text data: {content_type} ({len(lines)} lines)',
+        **_byte_mapping(offset, body_offset, len(body), byte_source),
+        'children': lines,
     }
 
 
@@ -2329,6 +3071,12 @@ def _udp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     stream_pkt_num = int(metadata.get('udp_stream_packet_number', 1) or 1)
     udp_time_since_first = float(metadata.get('udp_time_since_first', 0.0) or 0.0)
     udp_time_since_prev = float(metadata.get('udp_time_since_prev', 0.0) or 0.0)
+
+    checksum_title = f'Checksum: 0x{checksum:04x} [unverified]'
+    checksum_status = '[Checksum Status: Unverified]'
+    if checksum == 0:
+        checksum_title = f'Checksum: 0x{checksum:04x} [zero-value ignored]'
+        checksum_status = '[Checksum Status: Not present]'
 
     children = [
 
@@ -2354,17 +3102,14 @@ def _udp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
         },
 
         {
-            'title':
-                f'Checksum: 0x{checksum:04x} '
-                f'[unverified]',
+            'title': checksum_title,
 
             'offset': offset + 6,
             'length': 2,
         },
 
         {
-            'title':
-                '[Checksum Status: Unverified]',
+            'title': checksum_status,
         },
     ]
 
@@ -2425,6 +3170,1316 @@ def _udp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
         'offset': offset,
         'length': 8,
 
+        'children': children,
+    }
+
+
+def _capwap_vendor_display(vendor_name: str, vendor_id: int) -> str:
+    name = str(vendor_name or '').strip()
+    if name and name != 'Unknown':
+        return f'{name} ({vendor_id})'
+    return f'Unknown ({vendor_id})'
+
+
+def _capwap_tree_node(
+    title: str,
+    offset: int | None = None,
+    length: int | None = None,
+    children: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    node: Dict[str, Any] = {'title': title}
+    if offset is not None and length is not None:
+        node['offset'] = offset
+        node['length'] = length
+    if children is not None:
+        node['children'] = children
+    return node
+
+
+def _wlan_bits_pattern(width: int, start_bit: int, bit_length: int, value: int) -> str:
+    chars = ['.'] * max(0, int(width))
+    width = len(chars)
+    start_bit = int(start_bit)
+    bit_length = int(bit_length)
+    if bit_length <= 0 or start_bit < 0 or start_bit + bit_length > width:
+        return ' '.join(''.join(chars[index:index + 4]) for index in range(0, width, 4))
+    bits = format(int(value), f'0{bit_length}b')
+    left_index = width - (start_bit + bit_length)
+    chars[left_index:left_index + bit_length] = list(bits)
+    return ' '.join(''.join(chars[index:index + 4]) for index in range(0, width, 4))
+
+
+def _wlan_mac_display(mac: str) -> str:
+    mac_text = str(mac or '')
+    vendor = get_mac_vendor(mac_text)
+    if vendor:
+        suffix = ':'.join(mac_text.split(':')[-3:])
+        return f'{vendor}_{suffix} ({mac_text})'
+    return f'{mac_text} ({mac_text})'
+
+
+def _wlan_mac_bit_children(mac: str, offset: int) -> List[Dict[str, Any]]:
+    mac_text = str(mac or '')
+    try:
+        first_octet = int(mac_text.split(':', 1)[0], 16)
+    except Exception:
+        first_octet = 0
+    local = bool(first_octet & 0x02)
+    group = bool(first_octet & 0x01)
+    return [
+        {
+            'title': f'.... ..{"1" if local else "0"}. .... .... .... .... = LG bit: {"Locally administered" if local else "Globally unique"} address ({"this is NOT the factory default" if local else "factory default"})',
+            'offset': offset,
+            'length': 3,
+        },
+        {
+            'title': f'.... ...{"1" if group else "0"} .... .... .... .... = IG bit: {"Group" if group else "Individual"} address ({"multicast/broadcast" if group else "unicast"})',
+            'offset': offset,
+            'length': 3,
+        },
+    ]
+
+
+def _wlan_address_node(title: str, mac: str, offset: int) -> Dict[str, Any]:
+    return {
+        'title': f'{title}: {_wlan_mac_display(mac)}',
+        'offset': offset,
+        'length': 6,
+        'children': _wlan_mac_bit_children(mac, offset),
+    }
+
+
+def _wlan_flag_children(flags: int, offset: int) -> List[Dict[str, Any]]:
+    ds_status = int(flags) & 0x03
+    ds_status_label = {
+        0: 'Not leaving DS or network is operating in AD-HOC mode (To DS: 0 From DS: 0)',
+        1: 'Frame destined for distribution system (To DS: 1 From DS: 0)',
+        2: 'Frame exiting distribution system (To DS: 0 From DS: 1)',
+        3: 'WDS frame being distributed from one AP to another AP (To DS: 1 From DS: 1)',
+    }.get(ds_status, 'Unknown DS status')
+    return [
+        {'title': f'{_wlan_bits_pattern(8, 0, 2, ds_status)} = DS status: {ds_status_label} (0x{ds_status:x})', 'offset': offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 2, 1, 1 if int(flags) & 0x04 else 0)} = More Fragments: {"This is not the last fragment" if int(flags) & 0x04 else "This is the last fragment"}', 'offset': offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 3, 1, 1 if int(flags) & 0x08 else 0)} = Retry: {"Frame is being retransmitted" if int(flags) & 0x08 else "Frame is not being retransmitted"}', 'offset': offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 4, 1, 1 if int(flags) & 0x10 else 0)} = PWR MGT: {"STA will go to sleep" if int(flags) & 0x10 else "STA will stay up"}', 'offset': offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 5, 1, 1 if int(flags) & 0x20 else 0)} = More Data: {"Data is buffered for STA at AP" if int(flags) & 0x20 else "No data buffered"}', 'offset': offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 6, 1, 1 if int(flags) & 0x40 else 0)} = Protected flag: {"Data is protected" if int(flags) & 0x40 else "Data is not protected"}', 'offset': offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 7, 1, 1 if int(flags) & 0x80 else 0)} = +HTC/Order flag: {"Strictly ordered" if int(flags) & 0x80 else "Not strictly ordered"}', 'offset': offset, 'length': 1},
+    ]
+
+
+def _wlan_capability_children(capabilities: int, offset: int) -> List[Dict[str, Any]]:
+    value = int(capabilities)
+    items = [
+        (0, 'ESS capabilities', 'Transmitter is an AP' if value & 0x0001 else 'Transmitter is a STA'),
+        (1, 'IBSS status', 'Transmitter belongs to an IBSS' if value & 0x0002 else 'Transmitter belongs to a BSS'),
+        (2, 'Reserved', '0'),
+        (3, 'Reserved', '0'),
+        (4, 'Privacy', 'Data confidentiality required' if value & 0x0010 else 'Data confidentiality not required'),
+        (5, 'Short Preamble', 'Allowed' if value & 0x0020 else 'Not Allowed'),
+        (6, 'Critical Update Flag', 'True' if value & 0x0040 else 'False'),
+        (7, 'Nontransmitted BSSIDs Critical Update Flag', 'True' if value & 0x0080 else 'False'),
+        (8, 'Spectrum Management', 'Implemented' if value & 0x0100 else 'Not Implemented'),
+        (9, 'QoS', 'Implemented' if value & 0x0200 else 'Not Implemented'),
+        (10, 'Short Slot Time', 'In use' if value & 0x0400 else 'Not in use'),
+        (11, 'Automatic Power Save Delivery', 'Implemented' if value & 0x0800 else 'Not Implemented'),
+        (12, 'Radio Measurement', 'Implemented' if value & 0x1000 else 'Not Implemented'),
+        (13, 'EPD', 'Implemented' if value & 0x2000 else 'Not Implemented'),
+        (14, 'Reserved', '0'),
+        (15, 'Reserved', '0'),
+    ]
+    return [
+        {
+            'title': f'{_wlan_bits_pattern(16, bit, 1, 1 if value & (1 << bit) else 0)} = {label}: {description}',
+            'offset': offset,
+            'length': 2,
+        }
+        for bit, label, description in items
+    ]
+
+
+def _wlan_ht_control_node(ht_control: Dict[str, Any], offset: int) -> Dict[str, Any]:
+    value = int(ht_control.get('value', 0) or 0)
+    lac = int(ht_control.get('link_adaptation_control', 0) or 0)
+    calibration_position = int(ht_control.get('calibration_position', 0) or 0)
+    calibration_position_label = {
+        0: 'No calibration',
+        1: 'Calibration Start',
+        2: 'Calibration Response',
+        3: 'Reserved',
+    }.get(calibration_position, f'Calibration Position {calibration_position}')
+    csi_steering = int(ht_control.get('csi_steering', 0) or 0)
+    csi_label = {
+        0: 'No feedback required',
+        1: 'Reserved',
+        2: 'Reserved',
+        3: 'Reserved',
+    }.get(csi_steering, f'Value {csi_steering}')
+    return {
+        'title': f'HT Control (+HTC): 0x{value:08x}',
+        'offset': offset,
+        'length': 4,
+        'children': [
+            {'title': f'{_wlan_bits_pattern(32, 0, 1, 1 if bool(ht_control.get("vht", False)) else 0)} = VHT: {bool(ht_control.get("vht", False))}', 'offset': offset, 'length': 4},
+            {
+                'title': f'{_wlan_bits_pattern(32, 1, 15, lac)} = Link Adaptation Control (LAC): 0x{lac:04x}',
+                'offset': offset,
+                'length': 4,
+                'children': [
+                    {'title': f'{_wlan_bits_pattern(16, 11, 1, int(ht_control.get("training_request", 0) or 0))} = Training Request (TRQ): {"Want sounding PPDU" if int(ht_control.get("training_request", 0) or 0) else "Do not want sounding PPDU"}'},
+                    {'title': f'{_wlan_bits_pattern(16, 10, 1, int(ht_control.get("mcs_request", 0) or 0))} = MCS Request (MRQ): {"MCS feedback requested" if int(ht_control.get("mcs_request", 0) or 0) else "No MCS feedback requested"}'},
+                    {'title': f'{_wlan_bits_pattern(16, 7, 3, int(ht_control.get("lac_reserved", 0) or 0))} = Reserved: 0x{int(ht_control.get("lac_reserved", 0) or 0):x}'},
+                    {'title': f'{_wlan_bits_pattern(16, 4, 3, int(ht_control.get("mfsi", 0) or 0))} = MCS Feedback Sequence Identifier (MFSI): {int(ht_control.get("mfsi", 0) or 0)}'},
+                    {'title': f'{_wlan_bits_pattern(16, 0, 4, int(ht_control.get("mfb", 0) or 0))} = MCS Feedback (MFB): 0x{int(ht_control.get("mfb", 0) or 0):02x}'},
+                ],
+            },
+            {'title': f'{_wlan_bits_pattern(32, 16, 2, calibration_position)} = Calibration Position: {calibration_position_label} ({calibration_position})', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 18, 2, int(ht_control.get("calibration_sequence", 0) or 0))} = Calibration Sequence Identifier: {int(ht_control.get("calibration_sequence", 0) or 0)}', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 20, 2, int(ht_control.get("reserved_mid", 0) or 0))} = Reserved: 0x{int(ht_control.get("reserved_mid", 0) or 0):x}', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 22, 2, csi_steering)} = CSI/Steering: {csi_label} ({csi_steering})', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 24, 1, 1 if bool(ht_control.get("ndp_announcement", False)) else 0)} = NDP Announcement: {"NDP will follow" if bool(ht_control.get("ndp_announcement", False)) else "No NDP will follow"}', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 25, 5, int(ht_control.get("reserved_upper", 0) or 0))} = Reserved: 0x{int(ht_control.get("reserved_upper", 0) or 0):02x}', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 30, 1, 1 if bool(ht_control.get("ac_constraint", False)) else 0)} = AC Constraint: {bool(ht_control.get("ac_constraint", False))}', 'offset': offset, 'length': 4},
+            {'title': f'{_wlan_bits_pattern(32, 31, 1, 1 if bool(ht_control.get("rdg_more_ppdu", False)) else 0)} = RDG/More PPDU: {bool(ht_control.get("rdg_more_ppdu", False))}', 'offset': offset, 'length': 4},
+        ],
+    }
+
+
+def _wlan_tag_node(tag: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    tag_number = int(tag.get('number', 0) or 0)
+    tag_offset = payload_offset + int(tag.get('offset', 0) or 0)
+    tag_length = int(tag.get('declared_length', 0) or 0)
+    actual_length = int(tag.get('length', 0) or 0)
+    value_offset = payload_offset + int(tag.get('value_offset', 0) or 0)
+    name = str(tag.get('name', f'Tag {tag_number}') or f'Tag {tag_number}')
+
+    tag_length_node: Dict[str, Any] = {
+        'title': f'Tag length: {tag_length}',
+        'offset': tag_offset + 1,
+        'length': 1,
+    }
+    if bool(tag.get('malformed_length', False)):
+        tag_length_node['children'] = [
+            {
+                'title': '[Expert Info (Error/Malformed): Tag Length is longer than remaining payload]',
+                'children': [
+                    {'title': '[Tag Length is longer than remaining payload]'},
+                    {'title': '[Severity level: Error]'},
+                    {'title': '[Group: Malformed]'},
+                ],
+            }
+        ]
+
+    children: List[Dict[str, Any]] = [
+        {
+            'title': f'Tag Number: {name} ({tag_number})',
+            'offset': tag_offset,
+            'length': 1,
+        },
+        tag_length_node,
+    ]
+
+    if tag_number == 0:
+        children.append(
+            {
+                'title': f'SSID: "{str(tag.get("ssid", "") or "")}"',
+                'offset': value_offset,
+                'length': actual_length,
+            }
+        )
+    elif tag_number in {1, 50}:
+        rate_prefix = 'Extended Supported Rates' if tag_number == 50 else 'Supported Rates'
+        for entry_index, entry in enumerate(tag.get('rates', [])):
+            children.append(
+                {
+                    'title': f'{rate_prefix}: {str(entry.get("child_text", "") or "")} (0x{int(entry.get("value", 0) or 0):02x})',
+                    'offset': value_offset + entry_index,
+                    'length': 1,
+                }
+            )
+
+    return {
+        'title': str(tag.get('title', f'Tag: {name}') or f'Tag: {name}'),
+        'offset': tag_offset,
+        'length': 2 + actual_length,
+        'children': children,
+    }
+
+
+def _wlan_malformed_node(summary: str) -> Dict[str, Any]:
+    return {
+        'title': summary,
+        'children': [
+            {
+                'title': '[Expert Info (Error/Malformed): Malformed Packet (Exception occurred)]',
+                'children': [
+                    {'title': '[Malformed Packet (Exception occurred)]'},
+                    {'title': '[Severity level: Error]'},
+                    {'title': '[Group: Malformed]'},
+                ],
+            }
+        ],
+    }
+
+
+def _wlan_sections(wlan: Dict[str, Any], payload_offset: int) -> List[Dict[str, Any]]:
+    frame_offset = payload_offset + int(wlan.get('offset', 0) or 0)
+    frame_control = int(wlan.get('frame_control', 0) or 0)
+    flags = int(wlan.get('flags', 0) or 0)
+    frame_control_low_offset = payload_offset + int(wlan.get('frame_control_low_offset', int(wlan.get('offset', 0) or 0)) or int(wlan.get('offset', 0) or 0))
+    flags_offset = payload_offset + int(wlan.get('flags_offset', int(wlan.get('offset', 0) or 0) + 1) or (int(wlan.get('offset', 0) or 0) + 1))
+    duration = int(wlan.get('duration', 0) or 0)
+    fragment_number = int(wlan.get('fragment_number', 0) or 0)
+    sequence_number = int(wlan.get('sequence_number', 0) or 0)
+    flags_display = str(wlan.get('flags_display', '') or '')
+    subtype_name = str(wlan.get('subtype_name', 'IEEE 802.11') or 'IEEE 802.11')
+    management = wlan.get('management', {}) if isinstance(wlan.get('management', {}), dict) else {}
+    flag_children = _wlan_flag_children(flags, flags_offset)
+    fixed_offset = payload_offset + int(management.get('fixed_offset', 0) or 0)
+    association_length = max(24, fixed_offset - frame_offset) if fixed_offset > frame_offset else (28 if wlan.get('ht_control', None) is not None else 24)
+
+    frame_control_children: List[Dict[str, Any]] = [
+        {'title': f'{_wlan_bits_pattern(8, 0, 2, 0)} = Version: 0', 'offset': frame_control_low_offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 2, 2, int(wlan.get("type", 0) or 0))} = Type: {str(wlan.get("type_name", "Management frame") or "Management frame")} ({int(wlan.get("type", 0) or 0)})', 'offset': frame_control_low_offset, 'length': 1},
+        {'title': f'{_wlan_bits_pattern(8, 4, 4, int(wlan.get("subtype", 0) or 0))} = Subtype: {int(wlan.get("subtype", 0) or 0)}', 'offset': frame_control_low_offset, 'length': 1},
+        {
+            'title': f'Flags: 0x{flags:02x}',
+            'offset': flags_offset,
+            'length': 1,
+            'children': flag_children,
+        },
+    ]
+
+    sections: List[Dict[str, Any]] = [
+        {
+            'title': f'IEEE 802.11 {subtype_name}, Flags: {flags_display}',
+            'offset': frame_offset,
+            'length': association_length,
+            'children': [
+                {
+                    'title': f'Type/Subtype: {subtype_name} (0x{((int(wlan.get("subtype", 0) or 0) << 4) | (int(wlan.get("type", 0) or 0) << 2)):04x})',
+                    'offset': frame_control_low_offset,
+                    'length': 1,
+                },
+                {
+                    'title': f'Frame Control Field: 0x{frame_control:04x}(Swapped)',
+                    'offset': frame_offset,
+                    'length': 2,
+                    'selectable_bytes': True,
+                    'children': frame_control_children,
+                },
+                {
+                    'title': f'{_wlan_bits_pattern(16, 0, 16, duration)} = Duration: {duration} microseconds',
+                    'offset': frame_offset + 2,
+                    'length': 2,
+                },
+                _wlan_address_node('Receiver address', str(wlan.get('receiver', '') or ''), frame_offset + 4),
+                _wlan_address_node('Destination address', str(wlan.get('destination', '') or ''), frame_offset + 4),
+                _wlan_address_node('Transmitter address', str(wlan.get('transmitter', '') or ''), frame_offset + 10),
+                _wlan_address_node('Source address', str(wlan.get('source', '') or ''), frame_offset + 10),
+                _wlan_address_node('BSS Id', str(wlan.get('bssid', '') or ''), frame_offset + 16),
+                {
+                    'title': f'{_wlan_bits_pattern(16, 0, 4, fragment_number)} = Fragment number: {fragment_number}',
+                    'offset': frame_offset + 22,
+                    'length': 2,
+                },
+                {
+                    'title': f'{_wlan_bits_pattern(16, 4, 12, sequence_number)} = Sequence number: {sequence_number}',
+                    'offset': frame_offset + 22,
+                    'length': 2,
+                },
+                {
+                    'title': f'[WLAN Flags: {flags_display}]',
+                },
+            ] + ([_wlan_ht_control_node(wlan.get('ht_control', {}) or {}, frame_offset + 24)] if wlan.get('ht_control', None) is not None else []),
+        }
+    ]
+
+    fixed_length = int(management.get('fixed_length', 0) or 0)
+    tags = management.get('tags', []) if isinstance(management.get('tags', []), list) else []
+    tags_length = int(management.get('tags_length', 0) or 0)
+    management_children: List[Dict[str, Any]] = [
+        {
+            'title': 'Fixed parameters (4 bytes)',
+            'offset': fixed_offset,
+            'length': fixed_length,
+            'children': [
+                {
+                    'title': f'Capabilities Information: 0x{int(management.get("capabilities", 0) or 0):04x}',
+                    'offset': fixed_offset,
+                    'length': min(2, fixed_length),
+                    'children': _wlan_capability_children(int(management.get('capabilities', 0) or 0), fixed_offset),
+                },
+            ] + ([{
+                'title': f'Listen Interval: 0x{int(management.get("listen_interval", 0) or 0):04x}',
+                'offset': fixed_offset + 2,
+                'length': 2,
+            }] if management.get('listen_interval', None) is not None else []),
+        }
+    ]
+
+    if tags:
+        tags_offset = payload_offset + int(management.get('tags_offset', 0) or 0)
+        management_children.append(
+            {
+                'title': f'Tagged parameters ({tags_length} bytes)',
+                'offset': tags_offset,
+                'length': tags_length,
+                'children': [_wlan_tag_node(tag, payload_offset) for tag in tags],
+            }
+        )
+
+    sections.append(
+        {
+            'title': 'IEEE 802.11 Wireless Management',
+            'offset': fixed_offset,
+            'length': fixed_length + tags_length,
+            'children': management_children,
+        }
+    )
+
+    malformed = wlan.get('malformed', {}) if isinstance(wlan.get('malformed', {}), dict) else {}
+    summary = str(malformed.get('summary', '') or '')
+    if summary:
+        sections.append(_wlan_malformed_node(summary))
+
+    return sections
+
+
+def _capwap_element_base_children(element: Dict[str, Any], payload_offset: int) -> List[Dict[str, Any]]:
+    element_offset = payload_offset + int(element.get('offset', 0) or 0)
+    element_length = int(element.get('length', 0) or 0)
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    value_hex = str(element.get('value_hex', '') or '')
+    element_name = str(element.get('name', f'Element {int(element.get("type", 0) or 0)}') or '')
+    return [
+        {
+            'title': f'Type: {element_name} ({int(element.get("type", 0) or 0)})',
+            'offset': element_offset,
+            'length': 2,
+        },
+        {
+            'title': f'Length: {element_length}',
+            'offset': element_offset + 2,
+            'length': 2,
+        },
+        {
+            'title': f'Value: {value_hex}',
+            'offset': value_offset,
+            'length': element_length,
+        },
+    ]
+
+
+def _capwap_location_data_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    value_length = int(element.get('length', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(_capwap_tree_node(f'Location Data: {str(parsed.get("text", "") or "")}', value_offset, value_length))
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_board_data_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    element_value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(
+        _capwap_tree_node(
+            f'WTP Board Data Vendor: {_capwap_vendor_display(str(parsed.get("vendor_name", "Unknown") or "Unknown"), int(parsed.get("vendor_id", 0) or 0))}',
+            element_value_offset,
+            4,
+        )
+    )
+
+    for subelement in parsed.get('subelements', []) or []:
+        sub_offset = payload_offset + int(subelement.get('offset', 0) or 0)
+        sub_length = int(subelement.get('length', 0) or 0)
+        sub_value_offset = payload_offset + int(subelement.get('value_offset', 0) or 0)
+        sub_name = str(subelement.get('name', '') or '')
+        sub_children = [
+            {
+                'title': f'Board Data Type: {sub_name} ({int(subelement.get("type", 0) or 0)})',
+                'offset': sub_offset,
+                'length': 2,
+            },
+            {
+                'title': f'Board Data Length: {sub_length}',
+                'offset': sub_offset + 2,
+                'length': 2,
+            },
+            {
+                'title': f'Board Data Value: {str(subelement.get("value_hex", "") or "")}',
+                'offset': sub_value_offset,
+                'length': sub_length,
+            },
+        ]
+        display_value = str(subelement.get('display_value', '') or '')
+        if display_value:
+            sub_children.append(
+                _capwap_tree_node(
+                    f'{str(subelement.get("display_name", sub_name) or sub_name)}: {display_value}',
+                    sub_value_offset,
+                    sub_length,
+                )
+            )
+        children.append({
+            'title': f'WTP Board Data: (t={int(subelement.get("type", 0) or 0)},l={sub_length}) {sub_name}',
+            'offset': sub_offset,
+            'length': 4 + sub_length,
+            'children': sub_children,
+        })
+
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_descriptor_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.extend([
+        _capwap_tree_node(f'Max Radios: {int(parsed.get("max_radios", 0) or 0)}', value_offset, 1),
+        _capwap_tree_node(f'Radio in use: {int(parsed.get("radios_in_use", 0) or 0)}', value_offset + 1, 1),
+    ])
+
+    encryption_children = []
+
+    for encryption in parsed.get('encryptions', []) or []:
+        encryption_offset = payload_offset + int(encryption.get('offset', 0) or 0)
+        reserved = int(encryption.get('reserved', 0) or 0)
+        wbid = int(encryption.get('wbid', 0) or 0)
+        capabilities = int(encryption.get('capabilities', 0) or 0)
+        wbid_bits = format(wbid, '05b')
+        encryption_children.append({
+            'title': f'Encryption Capabilities: (WBID {wbid}) {capabilities}',
+            'offset': encryption_offset,
+            'length': 3,
+            'children': [
+                {
+                    'title': f'{reserved:03b}. .... = Reserved (Encrypt): {reserved}',
+                    'offset': encryption_offset,
+                    'length': 1,
+                },
+                {
+                    'title': f'...{wbid_bits[0]} {wbid_bits[1:]} = Encrypt WBID: {str(encryption.get("wbid_name", "Unknown") or "Unknown")} ({wbid})',
+                    'offset': encryption_offset,
+                    'length': 1,
+                },
+                {
+                    'title': f'Encryption Capabilities: {capabilities}',
+                    'offset': encryption_offset + 1,
+                    'length': 2,
+                },
+            ],
+        })
+
+    children.append(
+        _capwap_tree_node(
+            f'Encryption Capabilities (Number): {int(parsed.get("num_encrypt", 0) or 0)}',
+            value_offset + 2,
+            1,
+            encryption_children,
+        )
+    )
+
+    for descriptor in parsed.get('descriptors', []) or []:
+        descriptor_offset = payload_offset + int(descriptor.get('offset', 0) or 0)
+        descriptor_length = int(descriptor.get('length', 0) or 0)
+        descriptor_value_offset = payload_offset + int(descriptor.get('value_offset', 0) or 0)
+        descriptor_name = str(descriptor.get('name', '') or '')
+        descriptor_children = [
+            {
+                'title': f'WTP Descriptor Vendor: {_capwap_vendor_display(str(descriptor.get("vendor_name", "Unknown") or "Unknown"), int(descriptor.get("vendor_id", 0) or 0))}',
+                'offset': descriptor_offset,
+                'length': 4,
+            },
+            {
+                'title': f'Descriptor Type: {descriptor_name} ({int(descriptor.get("type", 0) or 0)})',
+                'offset': descriptor_offset + 4,
+                'length': 2,
+            },
+            {
+                'title': f'Descriptor Length: {descriptor_length}',
+                'offset': descriptor_offset + 6,
+                'length': 2,
+            },
+            {
+                'title': f'Descriptor Value: {str(descriptor.get("value_hex", "") or "")}',
+                'offset': descriptor_value_offset,
+                'length': descriptor_length,
+            },
+        ]
+        text_value = str(descriptor.get('text', '') or '')
+        if text_value:
+            descriptor_children.append(
+                _capwap_tree_node(
+                    f'{descriptor_name}: {text_value}',
+                    descriptor_value_offset,
+                    descriptor_length,
+                )
+            )
+        children.append({
+            'title': f'WTP Descriptor: (t={int(descriptor.get("type", 0) or 0)},l={descriptor_length}) {descriptor_name}',
+            'offset': descriptor_offset,
+            'length': 8 + descriptor_length,
+            'children': descriptor_children,
+        })
+
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_simple_value_node(element: Dict[str, Any], payload_offset: int, label: str, value: str) -> Dict[str, Any]:
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    value_length = int(element.get('length', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(_capwap_tree_node(f'{label}: {value}', value_offset, value_length))
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_frame_tunnel_mode_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    mode_value = int(parsed.get('value', 0) or 0)
+    reserved_value = ((mode_value >> 4) << 1) | (mode_value & 0x01)
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(
+        _capwap_tree_node(
+            f'WTP Frame Tunnel Mode: 0x{mode_value:02x}',
+            value_offset,
+            1,
+            [
+                _capwap_tree_node(
+                    f'.... {1 if bool(parsed.get("native_frame_tunnel_mode", False)) else 0}... = Native Frame Tunnel Mode: {bool(parsed.get("native_frame_tunnel_mode", False))}',
+                    value_offset,
+                    1,
+                ),
+                _capwap_tree_node(
+                    f'.... .{1 if bool(parsed.get("dot3_frame_tunnel_mode", False)) else 0}.. = 802.3 Frame Tunnel Mode: {bool(parsed.get("dot3_frame_tunnel_mode", False))}',
+                    value_offset,
+                    1,
+                ),
+                _capwap_tree_node(
+                    f'.... ..{1 if bool(parsed.get("local_bridging", False)) else 0}. = Local Bridging: {bool(parsed.get("local_bridging", False))}',
+                    value_offset,
+                    1,
+                ),
+                _capwap_tree_node(
+                    f'{mode_value >> 4:04b} ...{mode_value & 0x01} = Reserved: 0x{reserved_value:02x}',
+                    value_offset,
+                    1,
+                ),
+            ],
+        )
+    )
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_radio_information_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.extend([
+        _capwap_tree_node(f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', value_offset, 1),
+        _capwap_tree_node(f'Radio Type Reserved: {str(parsed.get("reserved_bits", "000000") or "000000")}', value_offset + 1, 4),
+        _capwap_tree_node(f'0... = Radio Type 802.11n: {bool(parsed.get("radio_type_80211n", False))}', value_offset + 1, 4),
+        _capwap_tree_node(f'.{1 if bool(parsed.get("radio_type_80211g", False)) else 0}.. = Radio Type 802.11g: {bool(parsed.get("radio_type_80211g", False))}', value_offset + 1, 4),
+        _capwap_tree_node(f'..{1 if bool(parsed.get("radio_type_80211a", False)) else 0}. = Radio Type 802.11a: {bool(parsed.get("radio_type_80211a", False))}', value_offset + 1, 4),
+        _capwap_tree_node(f'...{1 if bool(parsed.get("radio_type_80211b", False)) else 0} = Radio Type 802.11b: {bool(parsed.get("radio_type_80211b", False))}', value_offset + 1, 4),
+    ])
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_reboot_statistics_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.extend([
+        _capwap_tree_node(f'Reboot  Count: {int(parsed.get("reboot_count", 0) or 0)}', value_offset, 2),
+        _capwap_tree_node(f'AC Initiated Count: {int(parsed.get("ac_initiated_count", 0) or 0)}', value_offset + 2, 2),
+        _capwap_tree_node(f'Link Failure Count: {int(parsed.get("link_failure_count", 0) or 0)}', value_offset + 4, 2),
+        _capwap_tree_node(f'SW Failure Count: {int(parsed.get("sw_failure_count", 0) or 0)}', value_offset + 6, 2),
+        _capwap_tree_node(f'HW Failure Count: {int(parsed.get("hw_failure_count", 0) or 0)}', value_offset + 8, 2),
+        _capwap_tree_node(f'Other Failure Count: {int(parsed.get("other_failure_count", 0) or 0)}', value_offset + 10, 2),
+        _capwap_tree_node(f'Unknown Failure Count: {int(parsed.get("unknown_failure_count", 0) or 0)}', value_offset + 12, 2),
+        _capwap_tree_node(f'Last Failure Type: {str(parsed.get("last_failure_name", "Not Supported") or "Not Supported")} ({int(parsed.get("last_failure_type", 0) or 0)})', value_offset + 14, 1),
+    ])
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_element_node(element: Dict[str, Any], payload_offset: int, children: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        'title': f'Type: (t={int(element.get("type", 0) or 0)},l={int(element.get("length", 0) or 0)}) {str(element.get("name", "") or "")}',
+        'offset': payload_offset + int(element.get('offset', 0) or 0),
+        'length': 4 + int(element.get('length', 0) or 0),
+        'children': children,
+    }
+
+
+def _capwap_extend_field_nodes(children: List[Dict[str, Any]], value_offset: int, field_specs: List[tuple[str, int, int]]) -> None:
+    for title, relative_offset, length in field_specs:
+        children.append(_capwap_tree_node(title, value_offset + relative_offset, length))
+
+
+def _capwap_ac_descriptor_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Stations: {int(parsed.get("stations", 0) or 0)}', 0, 2),
+        (f'Limit Stations: {int(parsed.get("limit_stations", 0) or 0)}', 2, 2),
+        (f'Active WTPs: {int(parsed.get("active_wtps", 0) or 0)}', 4, 2),
+        (f'Max WTPs: {int(parsed.get("max_wtps", 0) or 0)}', 6, 2),
+    ])
+
+    security_flags = int(parsed.get('security_flags', 0) or 0)
+    security_reserved = int(parsed.get('security_reserved', 0) or 0)
+    children.append(
+        _capwap_tree_node(
+            f'Security Flags: 0x{security_flags:02x}',
+            value_offset + 8,
+            1,
+            [
+                _capwap_tree_node(f'{security_reserved:04b} 0..0 = Reserved: {"Set" if security_reserved else "Not set"}', value_offset + 8, 1),
+                _capwap_tree_node(f'.... .{1 if bool(parsed.get("security_pre_shared", False)) else 0}.. = AC supports the pre-shared: {bool(parsed.get("security_pre_shared", False))}', value_offset + 8, 1),
+                _capwap_tree_node(f'.... ..{1 if bool(parsed.get("security_x509", False)) else 0}. = AC supports X.509 Certificate: {bool(parsed.get("security_x509", False))}', value_offset + 8, 1),
+            ],
+        )
+    )
+    children.append(_capwap_tree_node(f'R-MAC Field: {str(parsed.get("r_mac_field_name", "Unknown") or "Unknown")} ({int(parsed.get("r_mac_field", 0) or 0)})', value_offset + 9, 1))
+    children.append(_capwap_tree_node(f'Reserved: {int(parsed.get("reserved", 0) or 0)}', value_offset + 10, 1))
+
+    dtls_policy_flags = int(parsed.get('dtls_policy_flags', 0) or 0)
+    dtls_reserved = int(parsed.get('dtls_reserved', 0) or 0)
+    children.append(
+        _capwap_tree_node(
+            f'DTLS Policy Flags: 0x{dtls_policy_flags:02x}',
+            value_offset + 11,
+            1,
+            [
+                _capwap_tree_node(f'{dtls_reserved:04b} 0..0 = Reserved: 0x{dtls_reserved:02x}', value_offset + 11, 1),
+                _capwap_tree_node(f'.... .{1 if bool(parsed.get("dtls_data_channel_supported", False)) else 0}.. = DTLS-Enabled Data Channel Supported: {bool(parsed.get("dtls_data_channel_supported", False))}', value_offset + 11, 1),
+                _capwap_tree_node(f'.... ..{1 if bool(parsed.get("dtls_clear_text_supported", False)) else 0}. = Clear Text Data Channel Supported: {bool(parsed.get("dtls_clear_text_supported", False))}', value_offset + 11, 1),
+            ],
+        )
+    )
+
+    for info in parsed.get('ac_information', []) or []:
+        info_offset = payload_offset + int(info.get('offset', 0) or 0)
+        info_length = int(info.get('length', 0) or 0)
+        info_value_offset = payload_offset + int(info.get('value_offset', 0) or 0)
+        info_name = str(info.get('name', '') or '')
+        info_children = [
+            _capwap_tree_node(f'AC Information Vendor: {_capwap_vendor_display(str(info.get("vendor_name", "Unknown") or "Unknown"), int(info.get("vendor_id", 0) or 0))}', info_offset, 4),
+            _capwap_tree_node(f'AC Information Type: {info_name} ({int(info.get("type", 0) or 0)})', info_offset + 4, 2),
+            _capwap_tree_node(f'AC Information Length: {info_length}', info_offset + 6, 2),
+            _capwap_tree_node(f'AC Information Value: {str(info.get("value_hex", "") or "")}', info_value_offset, info_length),
+        ]
+        info_text = str(info.get('text', '') or '')
+        if info_text:
+            info_children.append(_capwap_tree_node(f'{info_name}: {info_text}', info_value_offset, info_length))
+        children.append({
+            'title': f'AC Information: (t={int(info.get("type", 0) or 0)},l={info_length}) {info_name}',
+            'offset': info_offset,
+            'length': 8 + info_length,
+            'children': info_children,
+        })
+
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_control_ipv4_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'CAPWAP Control IP Address: {str(parsed.get("address", "") or "")}', 0, 4),
+        (f'CAPWAP Control WTP Count: {int(parsed.get("wtp_count", 0) or 0)}', 4, 2),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_timers_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'CAPWAP Timers Discovery (Sec): {int(parsed.get("discovery_seconds", 0) or 0)}', 0, 1),
+        (f'CAPWAP Timers Echo Request (Sec): {int(parsed.get("echo_request_seconds", 0) or 0)}', 1, 1),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_decryption_error_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Decryption Error Report Period Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Decryption Error Report Period Interval (Sec): {int(parsed.get("interval_seconds", 0) or 0)}', 1, 2),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_radio_admin_state_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio Administrative ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Radio Administrative State: {str(parsed.get("state_name", "Unknown") or "Unknown")} ({int(parsed.get("state", 0) or 0)})', 1, 1),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_radio_operational_state_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio Operational ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Radio Operational State: {str(parsed.get("state_name", "Unknown") or "Unknown")} ({int(parsed.get("state", 0) or 0)})', 1, 1),
+        (f'Radio Operational Cause: {str(parsed.get("cause_name", "Unknown") or "Unknown")} ({int(parsed.get("cause", 0) or 0)})', 2, 1),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_result_code_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(_capwap_tree_node(f'Result Code: {str(parsed.get("name", "Unknown") or "Unknown")} ({int(parsed.get("value", 0) or 0)})', value_offset, 4))
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_statistics_timer_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(_capwap_tree_node(f'Statistics Timer (Sec): {int(parsed.get("seconds", 0) or 0)}', value_offset, 2))
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_wtp_fallback_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(_capwap_tree_node(f'WTP Fallback: {str(parsed.get("name", "Unknown") or "Unknown")} ({int(parsed.get("value", 0) or 0)})', value_offset, 1))
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_add_wlan_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+
+    capability = int(parsed.get('capability', 0) or 0)
+    capability_bits = parsed.get('capability_bits', {}) or {}
+    capability_children = [
+        _capwap_tree_node(f'{1 if bool(capability_bits.get("ess", False)) else 0}... .... .... .... = ESS: {"Yes" if bool(capability_bits.get("ess", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.{1 if bool(capability_bits.get("ibss", False)) else 0}.. .... .... .... = IBSS: {"Yes" if bool(capability_bits.get("ibss", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'..{1 if bool(capability_bits.get("cf_pollable", False)) else 0}. .... .... .... = CF-Pollable: {"Yes" if bool(capability_bits.get("cf_pollable", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'...{1 if bool(capability_bits.get("cf_poll_request", False)) else 0} .... .... .... = CF-Poll Request: {"Yes" if bool(capability_bits.get("cf_poll_request", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... {1 if bool(capability_bits.get("privacy", False)) else 0}... .... .... = Privacy: {"Yes" if bool(capability_bits.get("privacy", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .{1 if bool(capability_bits.get("short_preamble", False)) else 0}.. .... .... = Short Preamble: {"Yes" if bool(capability_bits.get("short_preamble", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... ..{1 if bool(capability_bits.get("pbcc", False)) else 0}. .... .... = PBCC: {"Yes" if bool(capability_bits.get("pbcc", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... ...{1 if bool(capability_bits.get("channel_agility", False)) else 0} .... .... = Channel Agility: {"Yes" if bool(capability_bits.get("channel_agility", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... {1 if bool(capability_bits.get("spectrum_management", False)) else 0}... .... = Spectrum Management: {"Yes" if bool(capability_bits.get("spectrum_management", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... .{1 if bool(capability_bits.get("qos", False)) else 0}.. .... = QoS: {"Yes" if bool(capability_bits.get("qos", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... ..{1 if bool(capability_bits.get("short_slot_time", False)) else 0}. .... = Short Slot Time: {"Yes" if bool(capability_bits.get("short_slot_time", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... ...{1 if bool(capability_bits.get("apsd", False)) else 0} .... = APSD: {"Yes" if bool(capability_bits.get("apsd", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... .... {1 if bool(capability_bits.get("reserved", False)) else 0}... = Reserved: {"Yes" if bool(capability_bits.get("reserved", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... .... .{1 if bool(capability_bits.get("dsss_ofdm", False)) else 0}.. = DSSS-OFDM: {"Yes" if bool(capability_bits.get("dsss_ofdm", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... .... ..{1 if bool(capability_bits.get("delayed_block_ack", False)) else 0}. = Delayed Block ACK: {"Yes" if bool(capability_bits.get("delayed_block_ack", False)) else "No"}', value_offset + 2, 2),
+        _capwap_tree_node(f'.... .... .... ...{1 if bool(capability_bits.get("immediate_block_ack", False)) else 0} = Immediate Block ACK: {"Yes" if bool(capability_bits.get("immediate_block_ack", False)) else "No"}', value_offset + 2, 2),
+    ]
+
+    children.extend([
+        _capwap_tree_node(f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', value_offset, 1),
+        _capwap_tree_node(f'WLAN ID: {int(parsed.get("wlan_id", 0) or 0)}', value_offset + 1, 1),
+        _capwap_tree_node(f'Capability: 0x{capability:04x}', value_offset + 2, 2, capability_children),
+        _capwap_tree_node(f'Key-Index: {int(parsed.get("key_index", 0) or 0)}', value_offset + 4, 1),
+        _capwap_tree_node(f'Key Status: {str(parsed.get("key_status_name", "Unknown") or "Unknown")} ({int(parsed.get("key_status", 0) or 0)})', value_offset + 5, 1),
+        _capwap_tree_node(f'Key Length: {int(parsed.get("key_length", 0) or 0)}', value_offset + 6, 2),
+    ])
+
+    key_length = int(parsed.get('key_length', 0) or 0)
+    key_offset = int(parsed.get('key_offset', 8) or 8)
+    if key_length > 0:
+        children.append(_capwap_tree_node(f'Key: {str(parsed.get("key_value_hex", "") or "")}', value_offset + key_offset, key_length))
+    else:
+        children.append(_capwap_tree_node('Key: <MISSING>', value_offset + key_offset, 0))
+
+    group_tsc_length = int(parsed.get('group_tsc_length', 0) or 0)
+    if group_tsc_length > 0:
+        children.append(_capwap_tree_node(f'Group TSC: 0x{int(parsed.get("group_tsc", 0) or 0):0{group_tsc_length * 2}x}', value_offset + int(parsed.get('group_tsc_offset', 0) or 0), group_tsc_length))
+
+    children.extend([
+        _capwap_tree_node(f'QoS: {str(parsed.get("qos_name", "Unknown") or "Unknown")} ({int(parsed.get("qos", 0) or 0)})', value_offset + int(parsed.get('qos_offset', 0) or 0), 1),
+        _capwap_tree_node(f'Authentication Type: {str(parsed.get("auth_type_name", "Unknown") or "Unknown")} ({int(parsed.get("auth_type", 0) or 0)})', value_offset + int(parsed.get('auth_offset', 0) or 0), 1),
+        _capwap_tree_node(f'MAC Mode: {str(parsed.get("mac_mode_name", "Unknown") or "Unknown")} ({int(parsed.get("mac_mode", 0) or 0)})', value_offset + int(parsed.get('mac_mode_offset', 0) or 0), 1),
+        _capwap_tree_node(f'Tunnel Mode: {str(parsed.get("tunnel_mode_name", "Unknown") or "Unknown")} ({int(parsed.get("tunnel_mode", 0) or 0)})', value_offset + int(parsed.get('tunnel_mode_offset', 0) or 0), 1),
+        _capwap_tree_node(f'.... ...{1 if bool(parsed.get("suppress_ssid", False)) else 0} = Suppress SSID: {"Yes" if bool(parsed.get("suppress_ssid", False)) else "No"}', value_offset + int(parsed.get('suppress_offset', 0) or 0), 1),
+    ])
+
+    ssid_offset = int(parsed.get('ssid_offset', 0) or 0)
+    ssid_length = max(0, int(element.get('length', 0) or 0) - ssid_offset)
+    if ssid_length > 0:
+        children.append(_capwap_tree_node(f'SSID: {str(parsed.get("ssid", "") or "")}', value_offset + ssid_offset, ssid_length))
+
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_antenna_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Diversity: {str(parsed.get("diversity_name", "Unknown") or "Unknown")} ({int(parsed.get("diversity", 0) or 0)})', 1, 1),
+        (f'Combiner: {str(parsed.get("combiner_name", "Unknown") or "Unknown")} ({int(parsed.get("combiner", 0) or 0)})', 2, 1),
+        (f'Antenna Count: {int(parsed.get("antenna_count", 0) or 0)}', 3, 1),
+        (f'Selection: {str(parsed.get("selection_name", "Unknown") or "Unknown")} ({int(parsed.get("selection", 0) or 0)})', 4, 1),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_assigned_bssid_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'WLAN ID: {int(parsed.get("wlan_id", 0) or 0)}', 1, 1),
+        (f'BSSID: {str(parsed.get("bssid", "") or "")} ({str(parsed.get("bssid", "") or "")})', 2, 6),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_direct_sequence_control_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Reserved: {int(parsed.get("reserved", 0) or 0)}', 1, 1),
+        (f'Current Channel: {int(parsed.get("current_channel", 0) or 0)}', 2, 1),
+        (f'Current CCA: {int(parsed.get("current_cca", 0) or 0)}', 3, 1),
+        (f'Energy Detect Threshold: {int(parsed.get("energy_detect_threshold", 0) or 0)}', 4, 4),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_mac_operation_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Reserved: 0x{int(parsed.get("reserved", 0) or 0):02x}', 1, 1),
+        (f'RTS Threshold: {int(parsed.get("rts_threshold", 0) or 0)}', 2, 2),
+        (f'Short Retry: {int(parsed.get("short_retry", 0) or 0)}', 4, 1),
+        (f'Long Retry: {int(parsed.get("long_retry", 0) or 0)}', 5, 1),
+        (f'Fragmentation Threshold: {int(parsed.get("fragmentation_threshold", 0) or 0)}', 6, 2),
+        (f'Tx MDSU Lifetime: {int(parsed.get("tx_msdu_lifetime", 0) or 0)}', 8, 4),
+        (f'Rx MDSU Lifetime: {int(parsed.get("rx_msdu_lifetime", 0) or 0)}', 12, 4),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_multi_domain_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Reserved: 0x{int(parsed.get("reserved", 0) or 0):02x}', 1, 1),
+        (f'First Channel: {int(parsed.get("first_channel", 0) or 0)}', 2, 2),
+        (f'Number of  Channels: {int(parsed.get("number_of_channels", 0) or 0)}', 4, 2),
+        (f'Max TX Power Level: {int(parsed.get("max_tx_power_level", 0) or 0)}', 6, 2),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_supported_rates_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    children.append(_capwap_tree_node(f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', value_offset, 1))
+    for index, rate in enumerate(parsed.get('rates', []) or []):
+        raw_values = parsed.get('rate_values', []) or []
+        raw_value = int(raw_values[index]) if index < len(raw_values) else int(rate * 2)
+        children.append(_capwap_tree_node(f'Rates: {rate} (0x{raw_value:02x})', value_offset + 1 + index, 1))
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_tx_power_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Reserved: 0x{int(parsed.get("reserved", 0) or 0):02x}', 1, 1),
+        (f'Current TX Power: {int(parsed.get("current_tx_power", 0) or 0)}', 2, 2),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_tx_power_level_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Num Levels: {int(parsed.get("num_levels", 0) or 0)}', 1, 1),
+        (f'Power Level: {int(parsed.get("power_level", 0) or 0)}', 2, 2),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_wtp_radio_configuration_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Short Preamble: {int(parsed.get("short_preamble", 0) or 0)}', 1, 1),
+        (f'Num of BSSIDs: {int(parsed.get("num_bssids", 0) or 0)}', 2, 1),
+        (f'DTIM Period: {int(parsed.get("dtim_period", 0) or 0)}', 3, 1),
+        (f'BSSID: {str(parsed.get("bssid", "") or "")} ({str(parsed.get("bssid", "") or "")})', 4, 6),
+        (f'Beacon Period: {int(parsed.get("beacon_period", 0) or 0)}', 10, 2),
+        (f'Country String: {str(parsed.get("country_string", "") or "")}', 12, 4),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_message_element_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    element_type = int(element.get('type', 0) or 0)
+    parsed = element.get('parsed', {}) or {}
+    if element_type == 1:
+        return _capwap_ac_descriptor_node(element, payload_offset)
+    if element_type == 2:
+        return _capwap_simple_value_node(element, payload_offset, 'AC IPv4 List', str(parsed.get('address', '') or ''))
+    if element_type == 4:
+        return _capwap_simple_value_node(element, payload_offset, 'AC Name', str(parsed.get('name', '') or ''))
+    if element_type == 10:
+        return _capwap_control_ipv4_node(element, payload_offset)
+    if element_type == 12:
+        return _capwap_timers_node(element, payload_offset)
+    if element_type == 16:
+        return _capwap_decryption_error_node(element, payload_offset)
+    if element_type == 23:
+        return _capwap_simple_value_node(element, payload_offset, 'Idle Timeout (Sec)', str(int(parsed.get('timeout_seconds', 0) or 0)))
+    if element_type == 28:
+        return _capwap_location_data_node(element, payload_offset)
+    if element_type == 38:
+        return _capwap_board_data_node(element, payload_offset)
+    if element_type == 39:
+        return _capwap_descriptor_node(element, payload_offset)
+    if element_type == 31:
+        return _capwap_radio_admin_state_node(element, payload_offset)
+    if element_type == 32:
+        return _capwap_radio_operational_state_node(element, payload_offset)
+    if element_type == 33:
+        return _capwap_result_code_node(element, payload_offset)
+    if element_type == 45:
+        return _capwap_simple_value_node(element, payload_offset, 'WTP Name', str(parsed.get('name', '') or ''))
+    if element_type == 35:
+        return _capwap_simple_value_node(element, payload_offset, 'Session ID', str(parsed.get('session_id', '') or ''))
+    if element_type == 36:
+        return _capwap_statistics_timer_node(element, payload_offset)
+    if element_type == 40:
+        return _capwap_wtp_fallback_node(element, payload_offset)
+    if element_type == 41:
+        return _capwap_frame_tunnel_mode_node(element, payload_offset)
+    if element_type == 44:
+        return _capwap_simple_value_node(element, payload_offset, 'WTP MAC Type', f'{str(parsed.get("name", "Unknown") or "Unknown")} ({int(parsed.get("value", 0) or 0)})')
+    if element_type == 1048:
+        return _capwap_radio_information_node(element, payload_offset)
+    if element_type == 53:
+        return _capwap_simple_value_node(element, payload_offset, 'ECN Support', f'{str(parsed.get("name", "Unknown") or "Unknown")} ({int(parsed.get("value", 0) or 0)})')
+    if element_type == 30:
+        return _capwap_simple_value_node(element, payload_offset, 'CAPWAP Local IPv4 Address', str(parsed.get('address', '') or ''))
+    if element_type == 51:
+        return _capwap_simple_value_node(element, payload_offset, 'CAPWAP Transport Protocol', f'{str(parsed.get("name", "Unknown") or "Unknown")} ({int(parsed.get("value", 0) or 0)})')
+    if element_type == 48:
+        return _capwap_reboot_statistics_node(element, payload_offset)
+    if element_type == 1024:
+        return _capwap_add_wlan_node(element, payload_offset)
+    if element_type == 1025:
+        return _capwap_antenna_node(element, payload_offset)
+    if element_type == 1026:
+        return _capwap_assigned_bssid_node(element, payload_offset)
+    if element_type == 1028:
+        return _capwap_direct_sequence_control_node(element, payload_offset)
+    if element_type == 1030:
+        return _capwap_mac_operation_node(element, payload_offset)
+    if element_type == 1032:
+        return _capwap_multi_domain_node(element, payload_offset)
+    if element_type == 1040:
+        return _capwap_supported_rates_node(element, payload_offset)
+    if element_type == 1041:
+        return _capwap_tx_power_node(element, payload_offset)
+    if element_type == 1042:
+        return _capwap_tx_power_level_node(element, payload_offset)
+    if element_type == 1046:
+        return _capwap_wtp_radio_configuration_node(element, payload_offset)
+    return _capwap_element_node(element, payload_offset, _capwap_element_base_children(element, payload_offset))
+
+
+def _capwap_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    capwap = metadata.get('capwap', {}) if isinstance(metadata, dict) else {}
+    preamble = capwap.get('preamble', {}) if isinstance(capwap, dict) else {}
+    header = capwap.get('header', {}) if isinstance(capwap, dict) else {}
+    control_header = capwap.get('control_header', {}) if isinstance(capwap, dict) else {}
+    data_header = capwap.get('data_header', {}) if isinstance(capwap, dict) else {}
+    elements = capwap.get('message_elements', []) if isinstance(capwap, dict) else []
+    transport = str(capwap.get('transport', 'control') or 'control')
+
+    version = int(preamble.get('version', 0) or 0)
+    preamble_type = int(preamble.get('type', 0) or 0)
+    header_length = int(header.get('header_length', 0) or 0)
+    header_length_bytes = int(header.get('header_length_bytes', 0) or 0)
+    radio_id = int(header.get('radio_id', 0) or 0)
+    wbid = int(header.get('wireless_binding_id', 0) or 0)
+    wbid_name = str(header.get('wireless_binding_name', 'Reserved') or 'Reserved')
+    header_flags_value = int(header.get('header_flags_value', 0) or 0)
+    fragment_id = int(header.get('fragment_id', 0) or 0)
+    fragment_offset = int(header.get('fragment_offset', 0) or 0)
+    fragment_reserved = int(header.get('fragment_reserved', 0) or 0)
+    message_type = int(control_header.get('message_type', 0) or 0)
+    enterprise_number = int(control_header.get('message_type_enterprise', 0) or 0)
+    enterprise_name = str(control_header.get('message_type_enterprise_name', 'Reserved') or 'Reserved')
+    message_name = str(control_header.get('message_name', f'Control Message ({message_type})') or f'Control Message ({message_type})')
+    sequence_number = int(control_header.get('sequence_number', 0) or 0)
+    message_element_length_declared = int(control_header.get('message_element_length', 0) or 0)
+    message_element_length = int(control_header.get('message_element_actual_length', message_element_length_declared) or 0)
+    flags = int(control_header.get('flags', 0) or 0)
+    control_header_offset = offset + int(control_header.get('offset', 0) or 0)
+    control_header_length = int(control_header.get('length', 0) or 0)
+    message_type_length = 4 if control_header_length >= 8 else 1
+    enterprise_offset = control_header_offset
+    enterprise_length = 3 if control_header_length >= 8 else 1
+    enterprise_specific_offset = control_header_offset + (3 if control_header_length >= 8 else 0)
+    sequence_offset = control_header_offset + (4 if control_header_length >= 8 else 1)
+    message_element_length_offset = control_header_offset + (5 if control_header_length >= 8 else 2)
+    flags_offset = control_header_offset + control_header_length - 1
+
+    hlen_bits = format(header_length, '05b') if header_length >= 0 else '00000'
+    radio_bits = format(radio_id, '05b')
+    wbid_bits = format(wbid, '05b')
+    fragment_offset_bits = format(fragment_offset, '013b')
+    header_flags_bits = format(header_flags_value & 0x1FF, '09b')
+    payload_type_label = 'Native frame format (see Wireless Binding ID field)' if bool(header.get('payload_type_native', False)) else 'IEEE 802.3 frame'
+    fragment_label = 'Fragment' if bool(header.get('fragment', False)) else "Don't Fragment"
+    last_fragment_label = 'This is the last fragment' if bool(header.get('last_fragment', False)) else 'More fragments follow'
+    wireless_header_label = 'Wireless Specific Information Present' if bool(header.get('wireless_header', False)) else 'No Wireless Specific Information'
+    radio_mac_header_label = 'Radio MAC Address Present' if bool(header.get('radio_mac_header', False)) else 'No Radio MAC Address'
+    keep_alive_label = 'Keep-Alive' if bool(header.get('keep_alive', False)) else 'No Keep-Alive'
+
+    message_element_children = [
+        _capwap_message_element_node(element, offset)
+        for element in elements
+    ]
+
+    children = [
+        {
+            'title': 'Preamble',
+            'offset': offset,
+            'length': 1,
+            'children': [
+                {
+                    'title': f'{version:04b} .... = Version: {version}',
+                    'offset': offset,
+                    'length': 1,
+                },
+                {
+                    'title': f'.... {preamble_type:04b} = Type: CAPWAP Header ({preamble_type})',
+                    'offset': offset,
+                    'length': 1,
+                },
+            ],
+        },
+        {
+            'title': 'Header',
+            'offset': offset + 1,
+            'length': max(0, header_length_bytes - 1),
+            'children': [
+                {
+                    'title': f'{hlen_bits[:4]} {hlen_bits[4]}... .... .... .... .... = Header Length: {header_length} ({header_length_bytes})',
+                    'offset': offset + 1,
+                    'length': 3,
+                },
+                {
+                    'title': f'.... .{radio_bits[:3]} {radio_bits[3:]}.. .... .... .... = Radio ID: {radio_id}',
+                    'offset': offset + 1,
+                    'length': 3,
+                },
+                {
+                    'title': f'.... .... ..{wbid_bits[:2]} {wbid_bits[2:]}. .... .... = Wireless Binding ID: {wbid_name} ({wbid})',
+                    'offset': offset + 1,
+                    'length': 3,
+                },
+                {
+                    'title': (
+                        f'.... .... .... ...{header_flags_bits[0]} {header_flags_bits[1:5]} {header_flags_bits[5:9]} '
+                        f'= Header Flags: 0x{header_flags_value:03x}'
+                        + (
+                            ', ' + ', '.join(
+                                flag_name
+                                for flag_name, enabled in (
+                                    ('Payload Type', bool(header.get('payload_type_native', False))),
+                                    ('Keep-Alive', bool(header.get('keep_alive', False))),
+                                )
+                                if enabled
+                            )
+                            if any(
+                                enabled
+                                for _, enabled in (
+                                    ('Payload Type', bool(header.get('payload_type_native', False))),
+                                    ('Keep-Alive', bool(header.get('keep_alive', False))),
+                                )
+                            )
+                            else ''
+                        )
+                    ),
+                    'offset': offset + 2,
+                    'length': 2,
+                    'children': [
+                        _capwap_tree_node(f'.... .... .... ...{1 if bool(header.get("payload_type_native", False)) else 0} .... .... = Payload Type: {payload_type_label}', offset + 2, 2),
+                        _capwap_tree_node(f'.... .... .... .... {1 if bool(header.get("fragment", False)) else 0}... .... = Fragment: {fragment_label}', offset + 2, 2),
+                        _capwap_tree_node(f'.... .... .... .... .{1 if bool(header.get("last_fragment", False)) else 0}.. .... = Last Fragment: {last_fragment_label}', offset + 2, 2),
+                        _capwap_tree_node(f'.... .... .... .... ..{1 if bool(header.get("wireless_header", False)) else 0}. .... = Wireless header: {wireless_header_label}', offset + 2, 2),
+                        _capwap_tree_node(f'.... .... .... .... ...{1 if bool(header.get("radio_mac_header", False)) else 0} .... = Radio MAC header: {radio_mac_header_label}', offset + 2, 2),
+                        _capwap_tree_node(f'.... .... .... .... .... {1 if bool(header.get("keep_alive", False)) else 0}... = Keep-Alive: {keep_alive_label}', offset + 2, 2),
+                        _capwap_tree_node(f'.... .... .... .... .... .{int(header.get("reserved_flags", 0) or 0):03b} = Reserved: 0x{int(header.get("reserved_flags", 0) or 0):x}', offset + 2, 2),
+                    ],
+                },
+                {
+                    'title': f'Fragment ID: {fragment_id}',
+                    'offset': offset + 4,
+                    'length': 2,
+                },
+                {
+                    'title': f'{fragment_offset_bits[:4]} {fragment_offset_bits[4:8]} {fragment_offset_bits[8:12]} {fragment_offset_bits[12]}... = Fragment Offset: {fragment_offset}',
+                    'offset': offset + 6,
+                    'length': 2,
+                },
+                {
+                    'title': f'.... .... .... .{fragment_reserved:03b} = Reserved: {fragment_reserved}',
+                    'offset': offset + 7,
+                    'length': 1,
+                },
+            ],
+        },
+    ]
+
+    if transport == 'data':
+        keepalive_offset = offset + int(data_header.get('offset', header_length_bytes) or header_length_bytes)
+        keepalive_length = int(data_header.get('length', max(0, len(payload) - header_length_bytes)) or max(0, len(payload) - header_length_bytes))
+        keepalive_declared_length = int(data_header.get('message_element_length', 0) or 0)
+        keepalive_kind = str(data_header.get('kind', '') or '')
+        if keepalive_kind == 'native_80211':
+            return {
+                'title': 'Control And Provisioning of Wireless Access Points - Data',
+                'offset': offset,
+                'length': len(payload),
+                'children': children,
+            }
+        children.append(
+            {
+                'title': 'Keep-Alive' if keepalive_kind == 'keep_alive' else 'Data',
+                'offset': keepalive_offset,
+                'length': keepalive_length,
+                'children': [
+                    _capwap_tree_node(f'Message Element Length: {keepalive_declared_length}', keepalive_offset, 2),
+                    *message_element_children,
+                ],
+            }
+        )
+        return {
+            'title': 'Control And Provisioning of Wireless Access Points - Data',
+            'offset': offset,
+            'length': len(payload),
+            'children': children,
+        }
+
+    children.extend([
+        {
+            'title': 'Control Header',
+            'offset': control_header_offset,
+            'length': control_header_length,
+            'children': [
+                _capwap_tree_node(
+                    f'Message Type: {message_type}',
+                    control_header_offset,
+                    message_type_length,
+                    [
+                        _capwap_tree_node(
+                            f'Message Type (Enterprise Number): {enterprise_name} ({enterprise_number})',
+                            enterprise_offset,
+                            enterprise_length,
+                        ),
+                        _capwap_tree_node(
+                            f'Message Type (Enterprise Specific): {message_name} ({message_type})',
+                            enterprise_specific_offset,
+                            1,
+                        ),
+                    ],
+                ),
+                _capwap_tree_node(f'Sequence Number: {sequence_number}', sequence_offset, 1),
+                _capwap_tree_node(f'Message Element Length: {message_element_length_declared}', message_element_length_offset, 2),
+                _capwap_tree_node(f'Flags: {flags}', flags_offset, 1),
+            ],
+        },
+        {
+            'title': 'Message Element',
+            'offset': offset + int(control_header.get('offset', 0) or 0) + int(control_header.get('length', 0) or 0),
+            'length': message_element_length,
+            'children': message_element_children,
+        },
+    ])
+
+    return {
+        'title': 'Control And Provisioning of Wireless Access Points - Control',
+        'offset': offset,
+        'length': len(payload),
         'children': children,
     }
 
@@ -2597,17 +4652,13 @@ def _dns_section(layer, offset: int) -> Dict[str, Any]:
     questions = []
 
     try:
-
         qd = getattr(layer, 'qd', None)
-
         if qd:
 
             qname = getattr(qd, 'qname', b'')
 
             if isinstance(qname, bytes):
-                qname = qname.decode(
-                    errors='ignore'
-                ).rstrip('.')
+                qname = qname.decode(errors='ignore').rstrip('.')
 
             qtype = getattr(qd, 'qtype', '-')
             qclass = getattr(qd, 'qclass', '-')
@@ -3682,6 +5733,12 @@ def _ldp_status_data_name(status_data: int) -> str:
     }.get(status_data, f'Unknown (0x{status_data:X})')
 
 
+def _ldp_generic_label_bits(label_value: int) -> str:
+    bits = format(label_value & 0xFFFFF, '020b')
+    groups = [bits[0:4], bits[4:8], bits[8:12], bits[12:16], bits[16:20]]
+    return f'.... .... .... {groups[0]} {groups[1]} {groups[2]} {groups[3]} {groups[4]}'
+
+
 def _ldp_section(payload: bytes, offset: int) -> Dict[str, Any]:
     version = int.from_bytes(payload[0:2], 'big') if len(payload) >= 2 else 0
     pdu_len = int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0
@@ -3812,6 +5869,66 @@ def _ldp_section(payload: bytes, offset: int) -> Dict[str, Any]:
                                 {'title': f'Session Receiver Label Space Identifier: {receiver_label_space}', 'offset': offset + tlv_pos + 16, 'length': 2},
                             ],
                         },
+                    ],
+                })
+            elif tlv_type == 0x0100 and tlv_len >= 1:
+                fec_elements_children = []
+                fec_pos = 0
+                fec_index = 1
+                while fec_pos < len(tlv_val):
+                    fec_type = int(tlv_val[fec_pos])
+                    if fec_type == 2 and fec_pos + 4 <= len(tlv_val):
+                        fec_address_type = int.from_bytes(tlv_val[fec_pos + 1:fec_pos + 3], 'big')
+                        fec_length = int(tlv_val[fec_pos + 3])
+                        prefix_byte_len = (fec_length + 7) // 8
+                        prefix_end = fec_pos + 4 + prefix_byte_len
+                        if prefix_end > len(tlv_val):
+                            break
+                        prefix_raw = tlv_val[fec_pos + 4:prefix_end]
+                        if fec_address_type == 1:
+                            padded_prefix = prefix_raw + (b'\x00' * max(0, 4 - len(prefix_raw)))
+                            prefix_text = '.'.join(str(b) for b in padded_prefix[:4])
+                            fec_address_type_name = 'IPv4'
+                        else:
+                            prefix_text = prefix_raw.hex()
+                            fec_address_type_name = f'Unknown ({fec_address_type})'
+                        fec_elements_children.append({
+                            'title': f'FEC Element {fec_index}',
+                            'offset': offset + tlv_pos + 4 + fec_pos,
+                            'length': prefix_end - fec_pos,
+                            'children': [
+                                {'title': f'FEC Element Type: Prefix FEC ({fec_type})', 'offset': offset + tlv_pos + 4 + fec_pos, 'length': 1},
+                                {'title': f'FEC Element Address Type: {fec_address_type_name} ({fec_address_type})', 'offset': offset + tlv_pos + 4 + fec_pos + 1, 'length': 2},
+                                {'title': f'FEC Element Length: {fec_length}', 'offset': offset + tlv_pos + 4 + fec_pos + 3, 'length': 1},
+                                {'title': f'Prefix: {prefix_text}', 'offset': offset + tlv_pos + 4 + fec_pos + 4, 'length': prefix_byte_len},
+                            ],
+                        })
+                        fec_pos = prefix_end
+                        fec_index += 1
+                    else:
+                        break
+                msg_children.append({
+                    'title': 'FEC',
+                    'offset': offset + tlv_pos,
+                    'length': tlv_len + 4,
+                    'children': [
+                        {'title': _ldp_tlv_unknown_bits_title(tlv_unknown_bits), 'offset': offset + tlv_pos, 'length': 1},
+                        {'title': f'TLV Type: FEC (0x{tlv_type:x})', 'offset': offset + tlv_pos, 'length': 2},
+                        {'title': f'TLV Length: {tlv_len}', 'offset': offset + tlv_pos + 2, 'length': 2},
+                        {'title': 'FEC Elements', 'offset': offset + tlv_pos + 4, 'length': tlv_len, 'children': fec_elements_children},
+                    ],
+                })
+            elif tlv_type == 0x0200 and tlv_len == 4:
+                generic_label = int.from_bytes(tlv_val[0:4], 'big') & 0xFFFFF
+                msg_children.append({
+                    'title': 'Generic Label',
+                    'offset': offset + tlv_pos,
+                    'length': tlv_len + 4,
+                    'children': [
+                        {'title': _ldp_tlv_unknown_bits_title(tlv_unknown_bits), 'offset': offset + tlv_pos, 'length': 1},
+                        {'title': f'TLV Type: Generic Label (0x{tlv_type:x})', 'offset': offset + tlv_pos, 'length': 2},
+                        {'title': f'TLV Length: {tlv_len}', 'offset': offset + tlv_pos + 2, 'length': 2},
+                        {'title': f'{_ldp_generic_label_bits(generic_label)} = Generic Label: {generic_label} (0x{generic_label:05x})', 'offset': offset + tlv_pos + 4, 'length': 4},
                     ],
                 })
             elif tlv_type == 0x0101 and tlv_len >= 2:

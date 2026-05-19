@@ -1466,11 +1466,14 @@ class ApplicationWindow(QMainWindow):
         self.properties_btn.setIcon(QIcon(str(status_icon_dir / 'cap_properties.png')))
         self.properties_btn.setAutoRaise(True)
 
+        self.detail_field_label = QLabel('Field: - | Bytes: 0')
+        self.detail_field_label.setMinimumWidth(260)
         self.packet_label = QLabel('Packet: 0')
         self.dropped_label = QLabel('dropped: 0')
 
         self.statusbar.addWidget(self.expert_btn)
         self.statusbar.addWidget(self.properties_btn)
+        self.statusbar.addWidget(self.detail_field_label)
         self.statusbar.addWidget(self.packet_label)
         self.statusbar.addWidget(self.dropped_label)
 
@@ -1800,6 +1803,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.status_changed.connect(self._on_capture_status_changed)
             self.capture_view.capture_state_changed.connect(lambda _running: self._sync_capture_buttons())
             self.capture_view.find_panel_visibility_changed.connect(self._on_find_panel_visibility_changed)
+            self.capture_view.detail_status_changed.connect(self._on_detail_status_changed)
             self.stacked_widget.addWidget(self.capture_view)
 
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
@@ -2210,6 +2214,12 @@ class ApplicationWindow(QMainWindow):
             dropped = int(metrics.get('dropped', 0) or 0)
         self.packet_label.setText(f'Packet: {packets}')
         self.dropped_label.setText(f'dropped: {dropped}')
+
+    def _on_detail_status_changed(self, field_name: str, byte_count: int):
+        if field_name and byte_count > 0:
+            self.detail_field_label.setText(f'Field: {field_name} | Bytes: {byte_count}')
+            return
+        self.detail_field_label.setText('Field: - | Bytes: 0')
 
     def _on_open_expert_information(self):
         if not self.capture_view:

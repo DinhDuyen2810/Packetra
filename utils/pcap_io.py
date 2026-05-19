@@ -21,6 +21,7 @@ class CaptureMetadata:
     section_os: str = ''
     section_application: str = ''
     interfaces: List[Dict] = field(default_factory=list)
+    packet_interfaces: Dict[int, int] = field(default_factory=dict)
     packet_comments: Dict[int, str] = field(default_factory=dict)
 
 
@@ -138,6 +139,7 @@ def load_pcap(filename) -> Tuple:
 
             # Transfer metadata
             metadata.file_comment = pcapng_metadata.file_comment
+            metadata.packet_interfaces = pcapng_metadata.packet_interfaces
             metadata.packet_comments = pcapng_metadata.packet_comments
 
             # Convert interface info to dict format for easier access

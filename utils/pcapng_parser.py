@@ -38,6 +38,7 @@ class PcapngMetadata:
     section_os: str = ''
     section_application: str = ''
     interfaces: List[InterfaceInfo] = field(default_factory=list)
+    packet_interfaces: Dict[int, int] = field(default_factory=dict)  # packet_number -> interface_id
     packet_comments: Dict[int, str] = field(default_factory=dict)  # packet_number -> comment
 
 
@@ -208,6 +209,8 @@ class PcapngParser:
         # captured_len (4), packet_len (4), packet_data, options
         interface_id = struct.unpack(self.byte_order + 'I', data[0:4])[0]
         captured_len = struct.unpack(self.byte_order + 'I', data[12:16])[0]
+        packet_number = self.packet_count + 1
+        self.metadata.packet_interfaces[packet_number] = interface_id
         
         # Packet data starts at offset 20, ends at 20 + captured_len
         # Options start after packet data (with padding to 4-byte boundary)
@@ -217,7 +220,7 @@ class PcapngParser:
         
         if options_start <= len(data):
             option_data = data[options_start:]
-            self._parse_epb_options(option_data, self.packet_count, interface_id)
+            self._parse_epb_options(option_data, packet_number, interface_id)
         
         self.packet_count += 1
     

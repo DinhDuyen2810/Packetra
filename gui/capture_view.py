@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
+    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStackedWidget
 )
 from PySide6.QtGui import QAction, QPainter, QColor, QPen, QPixmap
 
@@ -16,7 +16,7 @@ from core.capture import PacketSniffer
 from core.filtering import DisplayFilter
 from core.formatters import packet_summary_tree
 from core.parser import PacketParser
-from gui.hex_view import PacketHexView
+from gui.hex_view import PacketBytesView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
 from utils.pcap_io import (
@@ -184,6 +184,7 @@ class CaptureView(QWidget):
     status_changed = Signal(str)
     capture_state_changed = Signal(bool)
     find_panel_visibility_changed = Signal(bool)
+    detail_status_changed = Signal(str, int)
 
     def __init__(self, iface: str = '', iface_display_name: str = '', capture_filter: str = ''):
         super().__init__()
@@ -473,6 +474,60 @@ class CaptureView(QWidget):
 
         return f'{root}{infix}{ext}'
 
+    def _apply_capture_metadata_to_record(self, record, packet_number: int):
+        if record is None or self.capture_metadata is None:
+            return record
+
+        packet_number = int(packet_number)
+        packet_comments = getattr(self.capture_metadata, 'packet_comments', {}) or {}
+        packet_comment = str(packet_comments.get(packet_number, '') or '')
+        if packet_comment:
+            record.packet_comment = packet_comment
+
+        interfaces = list(getattr(self.capture_metadata, 'interfaces', []) or [])
+        if not interfaces:
+            return record
+
+        selected_interface = None
+        packet_interfaces = getattr(self.capture_metadata, 'packet_interfaces', {}) or {}
+        packet_interface_id = packet_interfaces.get(packet_number, None)
+        if packet_interface_id is not None:
+            for interface in interfaces:
+                if int(interface.get('interface_id', -1) or -1) == int(packet_interface_id):
+                    selected_interface = interface
+                    break
+
+        iface_text = str(getattr(record, 'iface', '') or '').strip().lower()
+        if selected_interface is None and iface_text:
+            for interface in interfaces:
+                name = str(interface.get('name', '') or '').strip().lower()
+                description = str(interface.get('description', '') or '').strip().lower()
+                if iface_text and iface_text in {name, description}:
+                    selected_interface = interface
+                    break
+
+        if selected_interface is None and len(interfaces) == 1:
+            selected_interface = interfaces[0]
+
+        if selected_interface is None:
+            return record
+
+        interface_id = int(selected_interface.get('interface_id', 0) or 0)
+        interface_name = str(selected_interface.get('name', '') or '').strip()
+        interface_description = str(selected_interface.get('description', '') or '').strip()
+
+        record.interface_id = interface_id
+        if not str(getattr(record, 'iface', '') or '').strip() and interface_name:
+            record.iface = interface_name
+
+        record.metadata['frame_interface_id'] = interface_id
+        if interface_name:
+            record.metadata['frame_interface_name'] = interface_name
+        if interface_description:
+            record.metadata['frame_interface_description'] = interface_description
+
+        return record
+
     def _persist_capture_records(self, records, file_path: str, file_format: str, compression: str) -> str:
         packets = [r.raw for r in records]
         return save_capture_file(file_path, packets, file_format=file_format, compression=compression)
@@ -683,7 +738,7 @@ class CaptureView(QWidget):
         # Packet table
         self.table = PacketTable()
         self.details_tree = PacketDetailsTree()
-        self.hex_view = PacketHexView()
+        self.hex_view = PacketBytesView()
         self._base_fonts = {
             'table': self.table.font().pointSizeF(),
             'details': self.details_tree.font().pointSizeF(),
@@ -704,7 +759,15 @@ class CaptureView(QWidget):
         self.main_splitter.setSizes(self.default_main_splitter_sizes)
         self.main_splitter.setChildrenCollapsible(False)
 
-        root_layout.addWidget(self.main_splitter, 1)
+        self.packet_panes_placeholder = QWidget()
+        self.packet_panes_placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.packet_panes_stack = QStackedWidget()
+        self.packet_panes_stack.addWidget(self.main_splitter)
+        self.packet_panes_stack.addWidget(self.packet_panes_placeholder)
+        self.packet_panes_stack.setCurrentWidget(self.main_splitter)
+
+        root_layout.addWidget(self.packet_panes_stack, 1)
 
         # Connect signals
         self.apply_filter_btn.clicked.connect(self.apply_display_filter)
@@ -721,7 +784,8 @@ class CaptureView(QWidget):
         self.find_input.textChanged.connect(self._on_find_query_changed)
         self.filter_history_action.triggered.connect(self._show_filter_history_menu)
         self.table.cellClicked.connect(self.show_details)
-        self.details_tree.item_selected.connect(self.hex_view.highlight_bytes)
+        self.details_tree.detail_field_selected.connect(self._on_detail_field_selected)
+        self.details_tree.item_bytes_selected.connect(self.hex_view.highlight_bytes)
         self.hex_view.bytes_range_selected.connect(self._on_bytes_range_selected)
         self.hex_view.bytes_hovered.connect(self._on_bytes_hovered)
         self.hex_view.hover_left.connect(self._on_hex_hover_left)
@@ -749,6 +813,9 @@ class CaptureView(QWidget):
         self.table.setUpdatesEnabled(enabled)
         self.details_tree.setUpdatesEnabled(enabled)
         self.hex_view.setUpdatesEnabled(enabled)
+
+    def _set_packet_panes_visible(self, visible: bool):
+        self.packet_panes_stack.setCurrentWidget(self.main_splitter if bool(visible) else self.packet_panes_placeholder)
 
     def _show_filter_history_menu(self):
         pos = self.display_filter_input.mapToGlobal(self.display_filter_input.rect().bottomRight())
@@ -993,14 +1060,15 @@ class CaptureView(QWidget):
         return False
 
     def apply_display_filter(self):
-        self.table.setRowCount(0)
         self.visible_indices.clear()
         expr = self.display_filter_input.text()
         self._remember_filter(expr)
+        visible_records = []
         for idx, record in enumerate(self.records):
             if self.display_filter.matches(record, expr):
                 self.visible_indices.append(idx)
-                self.table.append_record(record)
+                visible_records.append(record)
+        self.table.replace_records(visible_records)
         self.table.set_color_rules_enabled(self.color_rules_enabled)
         self._update_status('Display filter applied')
 
@@ -1014,35 +1082,40 @@ class CaptureView(QWidget):
         record = self.records[self.visible_indices[row]]
         self.details_tree.show_packet(record)
         self.hex_view.show_packet(record)
+        self.detail_status_changed.emit('', 0)
         self._update_status(f'Selected frame {record.number}')
 
-    def _on_bytes_range_selected(self, offset: int, length: int):
+    def _on_detail_field_selected(self, field_name: str, byte_count: int):
+        self.detail_status_changed.emit(str(field_name or ''), int(byte_count or 0))
+
+    def _on_bytes_range_selected(self, offset: int, length: int, byte_source: str):
         """Handle bytes range selection from hex view -> select and highlight detail"""
-        best_item = self._resolve_detail_item_for_range(offset, length)
+        best_item = self._resolve_detail_item_for_range(offset, length, byte_source)
         if best_item:
             self.details_tree.setCurrentItem(best_item)
 
-    def _on_bytes_hovered(self, offset: int):
+    def _on_bytes_hovered(self, offset: int, byte_source: str):
         """Hover over bytes should preview full detail field in hex/ascii without changing selection."""
-        best_item = self._resolve_detail_item_for_range(offset, 1)
+        best_item = self._resolve_detail_item_for_range(offset, 1, byte_source)
         if not best_item:
             self.hex_view.clear_hover_range()
             return
 
         from PySide6.QtCore import Qt
         data = best_item.data(0, Qt.ItemDataRole.UserRole)
+        item_source = str(best_item.data(0, self.details_tree.BYTE_SOURCE_ROLE) or 'packet')
         if isinstance(data, tuple):
             start, item_length = data
             if start >= 0 and item_length > 0:
-                self.hex_view.set_hover_range(start, item_length)
+                self.hex_view.set_hover_range(start, item_length, item_source)
                 return
 
         self.hex_view.clear_hover_range()
 
-    def _on_hex_hover_left(self):
-        self.hex_view.clear_hover_range()
+    def _on_hex_hover_left(self, byte_source: str):
+        self.hex_view.clear_hover_range(byte_source)
 
-    def _resolve_detail_item_for_range(self, offset: int, length: int):
+    def _resolve_detail_item_for_range(self, offset: int, length: int, byte_source: str = 'packet'):
         """Resolve deepest detail node for a byte range, excluding Frame subtree and bracketed analysis nodes."""
         best_item = None
         best_depth = -1
@@ -1055,11 +1128,11 @@ class CaptureView(QWidget):
                 return
 
             data = item.data(0, Qt.ItemDataRole.UserRole)
+            item_source = str(item.data(0, self.details_tree.BYTE_SOURCE_ROLE) or 'packet')
+            selectable = bool(item.data(0, self.details_tree.BYTE_SELECTABLE_ROLE))
             if isinstance(data, tuple):
                 start, item_length = data
-                title = item.text(0).strip().lower()
-                is_bracketed = title.startswith('[') and title.endswith(']')
-                if start >= 0 and item_length > 0 and not is_bracketed:
+                if selectable and item_source == byte_source and start >= 0 and item_length > 0:
                     if start == offset and item_length == length:
                         best_item = item
                         best_depth = depth + 1000
@@ -1126,19 +1199,21 @@ class CaptureView(QWidget):
         if not filename:
             return
         self.stop_capture()
-        self.clear_packets(reset_file_path=False)
-        self.loaded_file_path = filename
-        packets, metadata = load_pcap(filename)
-        self.capture_metadata = metadata
-        batch_size = 1000
-        total = len(packets)
-
+        self._set_packet_panes_visible(False)
         self._set_packet_panes_updates_enabled(False)
         try:
+            self.clear_packets(reset_file_path=False)
+            self.loaded_file_path = filename
+            packets, metadata = load_pcap(filename)
+            self.capture_metadata = metadata
+            batch_size = 1000
+            total = len(packets)
+
             for start in range(0, total, batch_size):
                 end = min(start + batch_size, total)
                 for idx in range(start, end):
-                    self.records.append(self.parser.parse(packets[idx], idx + 1))
+                    record = self.parser.parse(packets[idx], idx + 1)
+                    self.records.append(self._apply_capture_metadata_to_record(record, idx + 1))
                 self._update_status(f'Loaded {end}/{total} packets...')
                 if end < total:
                     QApplication.processEvents()
@@ -1151,6 +1226,7 @@ class CaptureView(QWidget):
             self._update_status(f'Loaded {len(self.records)} packets from {self.loaded_file_path}')
         finally:
             self._set_packet_panes_updates_enabled(True)
+            self._set_packet_panes_visible(True)
 
     def _parse_next_batch(self, initial=False):
         # Legacy incremental loader kept for compatibility.
@@ -1182,17 +1258,20 @@ class CaptureView(QWidget):
 
         packets = [r.raw for r in self.records]
         self.stop_capture()
-        self.clear_packets(reset_file_path=False)
+        self._set_packet_panes_visible(False)
         self._set_packet_panes_updates_enabled(False)
         try:
+            self.clear_packets(reset_file_path=False)
             for idx, packet in enumerate(packets, start=1):
-                self.records.append(self.parser.parse(packet, idx, self.iface))
+                record = self.parser.parse(packet, idx, self.iface)
+                self.records.append(self._apply_capture_metadata_to_record(record, idx))
             self.apply_display_filter()
             if self.visible_indices:
                 self.goto_first_packet()
             self._update_status(f'Reloaded analysis for {len(self.records)} packets in current capture')
         finally:
             self._set_packet_panes_updates_enabled(True)
+            self._set_packet_panes_visible(True)
 
     def set_auto_scroll_enabled(self, enabled: bool):
         self.auto_scroll_enabled = bool(enabled)

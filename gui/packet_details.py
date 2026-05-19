@@ -7,6 +7,10 @@ from core.formatters import packet_summary_tree
 
 class PacketDetailsTree(QTreeWidget):
     item_selected = Signal(int, int)  # offset, length
+    item_bytes_selected = Signal(int, int, str)  # offset, length, byte_source
+    detail_field_selected = Signal(str, int)  # field name, byte count
+    BYTE_SOURCE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+    BYTE_SELECTABLE_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
     def __init__(self):
         super().__init__()
@@ -24,22 +28,38 @@ class PacketDetailsTree(QTreeWidget):
         selected_items = self.selectedItems()
         if not selected_items:
             self.item_selected.emit(-1, 0)
+            self.item_bytes_selected.emit(-1, 0, 'packet')
+            self.detail_field_selected.emit('', 0)
             return
 
         item = selected_items[0]
         title = item.text(0)
         offset, length = item.data(0, Qt.ItemDataRole.UserRole)
+        byte_source = str(item.data(0, self.BYTE_SOURCE_ROLE) or 'packet')
+        selectable = bool(item.data(0, self.BYTE_SELECTABLE_ROLE))
+        is_top_level_frame_section = item.parent() is None and title.lower().startswith('frame')
 
-        # Do not highlight Frame or bracketed analysis fields; clear old highlight.
-        if (
-            offset >= 0
-            and not title.lower().startswith('frame')
-            and not (title.startswith('[') and title.endswith(']'))
-        ):
+        detail_name = self._detail_field_name(title)
+        detail_length = int(length) if length > 0 and not is_top_level_frame_section else 0
+        self.detail_field_selected.emit(detail_name if detail_length > 0 else '', detail_length)
+
+        if selectable and offset >= 0 and length > 0 and not is_top_level_frame_section:
             self.item_selected.emit(offset, length)
+            self.item_bytes_selected.emit(offset, length, byte_source)
             return
 
         self.item_selected.emit(-1, 0)
+        self.item_bytes_selected.emit(-1, 0, byte_source)
+
+    def _detail_field_name(self, title: str) -> str:
+        text = str(title or '').strip()
+        if not text:
+            return ''
+        if ' = ' in text:
+            text = text.split(' = ', 1)[1].strip()
+        if ':' in text:
+            text = text.split(':', 1)[0].strip()
+        return text
 
     def _show_context_menu(self, position):
         menu = QMenu(self)
@@ -63,7 +83,7 @@ class PacketDetailsTree(QTreeWidget):
         clipboard = QApplication.clipboard()
         clipboard.setText('\n'.join(details))
 
-    def select_offset(self, offset: int):
+    def select_offset(self, offset: int, byte_source: str = 'packet'):
         best_item = None
         best_depth = -1
 
@@ -76,15 +96,16 @@ class PacketDetailsTree(QTreeWidget):
                 return
 
             data = item.data(0, Qt.ItemDataRole.UserRole)
+            item_source = str(item.data(0, self.BYTE_SOURCE_ROLE) or 'packet')
+            selectable = bool(item.data(0, self.BYTE_SELECTABLE_ROLE))
             if isinstance(data, tuple):
                 start, length = data
-                title = item.text(0).strip().lower()
-                is_bracketed = title.startswith('[') and title.endswith(']')
                 if (
-                    start >= 0
+                    selectable
+                    and start >= 0
                     and length > 0
+                    and item_source == byte_source
                     and start <= offset < start + length
-                    and not is_bracketed
                 ):
                     if depth > best_depth:
                         best_item = item
@@ -109,6 +130,8 @@ class PacketDetailsTree(QTreeWidget):
         self.clear()
         if not record:
             self.item_selected.emit(-1, 0)
+            self.item_bytes_selected.emit(-1, 0, 'packet')
+            self.detail_field_selected.emit('', 0)
             return
 
         for node in packet_summary_tree(record.raw, record):
@@ -121,9 +144,16 @@ class PacketDetailsTree(QTreeWidget):
     def _add_node(self, parent, data):
         item = QTreeWidgetItem([data['title']])
         parent_offset, parent_length = parent.data(0, Qt.ItemDataRole.UserRole) if parent is not self.invisibleRootItem() else (-1, 0)
-        offset = data.get('offset', parent_offset)
-        length = data.get('length', parent_length if data.get('length', 0) == 0 else data.get('length', 0))
+        parent_source = parent.data(0, self.BYTE_SOURCE_ROLE) if parent is not self.invisibleRootItem() else 'packet'
+        offset = int(data['offset']) if 'offset' in data else parent_offset
+        length = int(data['length']) if 'length' in data else parent_length
+        byte_source = str(data.get('byte_source', parent_source) or parent_source or 'packet')
+        selectable = bool(data.get('selectable_bytes', False))
+        if 'offset' in data and 'length' in data and offset >= 0 and length > 0:
+            selectable = True
         item.setData(0, Qt.ItemDataRole.UserRole, (offset, length))
+        item.setData(0, self.BYTE_SOURCE_ROLE, byte_source)
+        item.setData(0, self.BYTE_SELECTABLE_ROLE, selectable)
         parent.addChild(item)
 
         # Default: all top-level sections collapsed unless saved state says otherwise.
