@@ -583,6 +583,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             ip_proto = int(getattr(effective_ip_layer, 'proto', 0) or 0)
         except Exception:
             ip_proto = 0
+        if ip_proto == 2:
+            igmp_payload = _ip_payload_bytes(packet, effective_ip_layer)
+            sections.append(_igmp_section(igmp_payload, offset))
+            payload_handled = True
         if ip_proto == 89:
             ospf_payload = bytes(getattr(effective_ip_layer, 'payload', b''))
             sections.append(_ospf_section(ospf_payload, offset))
@@ -616,7 +620,8 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         sections.append(
             _dns_section(
                 dns_layer,
-                offset
+                offset,
+                record,
             )
         )
 
@@ -699,7 +704,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         tls_layer = packet[TLS]
 
         sections.append(
-            _tls_section(
+            _tls_section_precise(
                 packet,
                 offset,
                 tcp_stream_index
@@ -1373,6 +1378,219 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
         'length': len(raw),
         'children': children,
     }
+
+
+def _igmp_type_name(igmp_type: int) -> str:
+    return {
+        0x11: 'Membership Query',
+        0x12: 'Version 1 Membership Report',
+        0x16: 'Version 2 Membership Report',
+        0x17: 'Leave Group',
+        0x22: 'Version 3 Membership Report',
+    }.get(int(igmp_type or 0), f'Type 0x{int(igmp_type or 0):02x}')
+
+
+def _igmp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    igmp_type = int(payload[0]) if len(payload) >= 1 else 0
+    max_resp = int(payload[1]) if len(payload) >= 2 else 0
+    checksum = int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0
+    group_addr = str(ipaddress.IPv4Address(payload[4:8])) if len(payload) >= 8 else '0.0.0.0'
+
+    checksum_status = 'Unverified'
+    if len(payload) >= 4:
+        checksum_bytes = bytearray(payload)
+        checksum_bytes[2:4] = b'\x00\x00'
+        checksum_status = 'Good' if _internet_checksum(bytes(checksum_bytes)) == checksum else 'Bad'
+
+    children = [
+        {'title': f'[IGMP Version: {3 if igmp_type == 0x11 and len(payload) >= 12 else 2}]'},
+        {'title': f'Type: {_igmp_type_name(igmp_type)} (0x{igmp_type:02x})', 'offset': offset, 'length': 1},
+        {'title': f'Max Resp Time: {max_resp / 10.0:.1f} sec (0x{max_resp:02x})', 'offset': offset + 1, 'length': 1},
+        {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
+        {'title': f'[Checksum Status: {checksum_status}]'},
+        {'title': f'Multicast Address: {group_addr}', 'offset': offset + 4, 'length': 4},
+    ]
+
+    if igmp_type == 0x11 and len(payload) >= 12:
+        s_flag = (payload[8] >> 3) & 0x1
+        qrv = payload[8] & 0x07
+        qqic = int(payload[9])
+        num_src = int.from_bytes(payload[10:12], 'big')
+        children.extend([
+            {'title': f'.... {s_flag}... = S: {"Suppress router side processing" if s_flag else "Do not suppress router side processing"}', 'offset': offset + 8, 'length': 1},
+            {'title': f'.... .{qrv:03b} = QRV: {qrv}', 'offset': offset + 8, 'length': 1},
+            {'title': f'QQIC: {qqic}', 'offset': offset + 9, 'length': 1},
+            {'title': f'Num Src: {num_src}', 'offset': offset + 10, 'length': 2},
+        ])
+        if num_src > 0:
+            source_children = []
+            base = 12
+            for index in range(num_src):
+                entry_offset = base + (index * 4)
+                if entry_offset + 4 > len(payload):
+                    break
+                source_children.append({
+                    'title': f'Source Address [{index + 1}]: {ipaddress.IPv4Address(payload[entry_offset:entry_offset + 4])}',
+                    'offset': offset + entry_offset,
+                    'length': 4,
+                })
+            if source_children:
+                children.append({'title': f'Source Addresses ({len(source_children)})', 'children': source_children})
+
+    title = 'Internet Group Management Protocol'
+    if igmp_type == 0x11 and len(payload) >= 12:
+        title = 'Internet Group Management Protocol'
+    return {
+        'title': title,
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _tls_clienthello_ja3(record_payload: bytes) -> Dict[str, str] | None:
+    if len(record_payload) < 42 or int(record_payload[0]) != 1:
+        return None
+
+    grease_values = {
+        0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a,
+        0x8a8a, 0x9a9a, 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
+    }
+
+    cursor = 4
+    version = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+    cursor += 2 + 32
+    if cursor >= len(record_payload):
+        return None
+    session_id_len = int(record_payload[cursor])
+    cursor += 1 + session_id_len
+    if cursor + 2 > len(record_payload):
+        return None
+    cipher_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+    cursor += 2
+    ciphers = []
+    cipher_end = min(len(record_payload), cursor + cipher_len)
+    while cursor + 2 <= cipher_end:
+        val = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+        if val not in grease_values:
+            ciphers.append(str(val))
+        cursor += 2
+    if cursor >= len(record_payload):
+        return None
+    comp_len = int(record_payload[cursor])
+    cursor += 1 + comp_len
+    if cursor + 2 > len(record_payload):
+        exts = []
+        groups = []
+        point_formats = []
+    else:
+        ext_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+        cursor += 2
+        ext_end = min(len(record_payload), cursor + ext_len)
+        exts = []
+        groups = []
+        point_formats = []
+        while cursor + 4 <= ext_end:
+            ext_type = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+            ext_size = int.from_bytes(record_payload[cursor + 2:cursor + 4], 'big')
+            data_start = cursor + 4
+            data_end = min(ext_end, data_start + ext_size)
+            if ext_type not in grease_values:
+                exts.append(str(ext_type))
+            ext_payload = record_payload[data_start:data_end]
+            if ext_type == 10 and len(ext_payload) >= 2:
+                list_len = int.from_bytes(ext_payload[:2], 'big')
+                p = 2
+                while p + 2 <= min(len(ext_payload), 2 + list_len):
+                    group = int.from_bytes(ext_payload[p:p + 2], 'big')
+                    if group not in grease_values:
+                        groups.append(str(group))
+                    p += 2
+            elif ext_type == 11 and len(ext_payload) >= 1:
+                list_len = int(ext_payload[0])
+                for i in range(min(list_len, max(0, len(ext_payload) - 1))):
+                    point_formats.append(str(int(ext_payload[1 + i])))
+            cursor = data_end
+
+    import hashlib
+    full = f'{version},{ "-".join(ciphers)},{ "-".join(exts)},{ "-".join(groups)},{ "-".join(point_formats)}'
+    return {'full': full, 'hash': hashlib.md5(full.encode('ascii')).hexdigest()}
+
+
+def _tls_clienthello_ja4(record_payload: bytes) -> Dict[str, str] | None:
+    if len(record_payload) < 42 or int(record_payload[0]) != 1:
+        return None
+
+    grease_values = {
+        0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a,
+        0x8a8a, 0x9a9a, 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
+    }
+
+    cursor = 4
+    version = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+    version_token = {
+        0x0301: '10',
+        0x0302: '11',
+        0x0303: '12',
+        0x0304: '13',
+    }.get(version, '00')
+    cursor += 2 + 32
+    if cursor >= len(record_payload):
+        return None
+    session_id_len = int(record_payload[cursor])
+    cursor += 1 + session_id_len
+    if cursor + 2 > len(record_payload):
+        return None
+    cipher_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+    cursor += 2
+    cipher_hex = []
+    cipher_end = min(len(record_payload), cursor + cipher_len)
+    while cursor + 2 <= cipher_end:
+        val = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+        if val not in grease_values:
+            cipher_hex.append(f'{val:04x}')
+        cursor += 2
+    if cursor >= len(record_payload):
+        return None
+    comp_len = int(record_payload[cursor])
+    cursor += 1 + comp_len
+    ext_hex = []
+    has_sni = False
+    alpn_count = 0
+    if cursor + 2 <= len(record_payload):
+        ext_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+        cursor += 2
+        ext_end = min(len(record_payload), cursor + ext_len)
+        while cursor + 4 <= ext_end:
+            ext_type = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+            ext_size = int.from_bytes(record_payload[cursor + 2:cursor + 4], 'big')
+            data_start = cursor + 4
+            data_end = min(ext_end, data_start + ext_size)
+            if ext_type not in grease_values:
+                ext_hex.append(f'{ext_type:04x}')
+            if ext_type == 0:
+                has_sni = True
+            if ext_type == 16 and data_start + 2 <= data_end:
+                try:
+                    alpn_block_len = int.from_bytes(record_payload[data_start:data_start + 2], 'big')
+                    p = data_start + 2
+                    end = min(data_end, p + alpn_block_len)
+                    while p < end:
+                        ln = int(record_payload[p])
+                        p += 1 + ln
+                        alpn_count += 1
+                except Exception:
+                    alpn_count = 0
+            cursor = data_end
+
+    import hashlib
+    prefix = f't{version_token}{"d" if has_sni else "i"}{len(cipher_hex):02d}{len(ext_hex):02d}{alpn_count:02d}'
+    cipher_hash = hashlib.sha256(','.join(cipher_hex).encode('ascii')).hexdigest()[:12] if cipher_hex else '0' * 12
+    ext_hash = hashlib.sha256(','.join(ext_hex).encode('ascii')).hexdigest()[:12] if ext_hex else '0' * 12
+    raw = f'{prefix}_' + ','.join(cipher_hex)
+    if ext_hex:
+        raw += '_' + ','.join(ext_hex)
+    return {'value': f'{prefix}_{cipher_hash}_{ext_hash}', 'raw': raw}
 
 
 def _ipv6_next_header_name(next_header: int) -> str:
@@ -4781,20 +4999,86 @@ def _capwap_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         'children': children,
     }
 
-def _dns_section(layer, offset: int) -> Dict[str, Any]:
+def _dns_type_name(value: int) -> str:
+    return {
+        1: 'A',
+        2: 'NS',
+        5: 'CNAME',
+        12: 'PTR',
+        15: 'MX',
+        16: 'TXT',
+        28: 'AAAA',
+    }.get(int(value or 0), str(int(value or 0)))
 
-    transaction_id = int(getattr(layer, 'id', 0) or 0)
 
-    flags = int(getattr(layer, 'flags', 0) or 0)
+def _dns_class_name(value: int) -> str:
+    return {1: 'IN'}.get(int(value or 0), f'0x{int(value or 0):04x}')
 
-    qdcount = int(getattr(layer, 'qdcount', 0) or 0)
-    ancount = int(getattr(layer, 'ancount', 0) or 0)
-    nscount = int(getattr(layer, 'nscount', 0) or 0)
-    arcount = int(getattr(layer, 'arcount', 0) or 0)
 
-    dns_len = len(layer)
+def _dns_read_name(data: bytes, start: int, _depth: int = 0) -> tuple[str, int]:
+    if start >= len(data) or _depth > 10:
+        return '', start
 
-    # ---- FLAGS ----
+    labels = []
+    pos = start
+    consumed = start
+    jumped = False
+
+    while pos < len(data):
+        length = data[pos]
+        if length == 0:
+            if not jumped:
+                consumed = pos + 1
+            break
+        if (length & 0xC0) == 0xC0:
+            if pos + 1 >= len(data):
+                break
+            pointer = ((length & 0x3F) << 8) | data[pos + 1]
+            label, _ = _dns_read_name(data, pointer, _depth + 1)
+            if label:
+                labels.append(label)
+            if not jumped:
+                consumed = pos + 2
+            jumped = True
+            break
+        pos += 1
+        label_bytes = data[pos:pos + length]
+        labels.append(label_bytes.decode(errors='ignore'))
+        pos += length
+        if not jumped:
+            consumed = pos
+
+    return '.'.join(part for part in labels if part), consumed
+
+
+def _dns_rdata_text(data: bytes, rr_type: int) -> str:
+    if rr_type == 1 and len(data) == 4:
+        return str(ipaddress.IPv4Address(data))
+    if rr_type == 28 and len(data) == 16:
+        return str(ipaddress.IPv6Address(data))
+    if rr_type in {2, 5, 12}:
+        name, _ = _dns_read_name(data, 0)
+        return name
+    return data.hex()
+
+
+def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
+    raw = bytes(layer)
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    if len(raw) < 12:
+        return {
+            'title': 'Domain Name System',
+            'offset': offset,
+            'length': len(raw),
+            'children': [],
+        }
+
+    transaction_id = int.from_bytes(raw[0:2], 'big')
+    flags = int.from_bytes(raw[2:4], 'big')
+    qdcount = int.from_bytes(raw[4:6], 'big')
+    ancount = int.from_bytes(raw[6:8], 'big')
+    nscount = int.from_bytes(raw[8:10], 'big')
+    arcount = int.from_bytes(raw[10:12], 'big')
 
     qr = (flags >> 15) & 0x1
     opcode = (flags >> 11) & 0xF
@@ -4804,287 +5088,157 @@ def _dns_section(layer, offset: int) -> Dict[str, Any]:
     ra = (flags >> 7) & 0x1
     rcode = flags & 0xF
 
-    opcode_names = {
-        0: 'Standard query',
-        1: 'Inverse query',
-        2: 'Server status request',
-    }
+    opcode_name = {0: 'Standard query', 1: 'Inverse query', 2: 'Server status request'}.get(opcode, str(opcode))
+    rcode_name = {0: 'No error', 1: 'Format error', 2: 'Server failure', 3: 'Name Error'}.get(rcode, str(rcode))
+    z_bit = (flags >> 6) & 0x1
+    ad_bit = (flags >> 5) & 0x1
+    cd_bit = (flags >> 4) & 0x1
 
-    rcode_names = {
-        0: 'No error',
-        1: 'Format error',
-        2: 'Server failure',
-        3: 'Name Error',
-    }
-
-    opcode_name = opcode_names.get(opcode, str(opcode))
-    rcode_name = rcode_names.get(rcode, str(rcode))
-
-    info = 'response' if qr else 'query'
+    flag_children = [
+        {'title': f'{qr}... .... .... .... = Response: {"Message is a response" if qr else "Message is a query"}', 'offset': offset + 2, 'length': 2},
+        {'title': f'.{opcode:04b} .... .... .... = Opcode: {opcode_name} ({opcode})', 'offset': offset + 2, 'length': 2},
+    ]
+    if qr:
+        flag_children.append({'title': f'.... .{aa}.. .... .... = Authoritative: {"Server is an authority for domain" if aa else "Server is not an authority for domain"}', 'offset': offset + 2, 'length': 2})
+    flag_children.extend([
+        {'title': f'.... ..{tc}. .... .... = Truncated: {"Message is truncated" if tc else "Message is not truncated"}', 'offset': offset + 2, 'length': 2},
+        {'title': f'.... ...{rd} .... .... = Recursion desired: {"Do query recursively" if rd else "Do not query recursively"}', 'offset': offset + 2, 'length': 2},
+    ])
+    if qr:
+        flag_children.append({'title': f'.... .... {ra}... .... = Recursion available: {"Server can do recursive queries" if ra else "Server cannot do recursive queries"}', 'offset': offset + 2, 'length': 2})
+    flag_children.append({'title': f'.... .... .{z_bit}.. .... = Z: reserved ({z_bit})', 'offset': offset + 2, 'length': 2})
+    if qr:
+        flag_children.append({'title': f'.... .... ..{ad_bit}. .... = Answer authenticated: {"Answer/authority portion was authenticated by the server" if ad_bit else "Answer/authority portion was not authenticated by the server"}', 'offset': offset + 2, 'length': 2})
+    flag_children.append({'title': f'.... .... ...{cd_bit} .... = Non-authenticated data: {"Acceptable" if cd_bit else "Unacceptable"}', 'offset': offset + 2, 'length': 2})
+    if qr:
+        flag_children.append({'title': f'.... .... .... {rcode:04b} = Reply code: {rcode_name} ({rcode})', 'offset': offset + 2, 'length': 2})
 
     children = [
-
+        {'title': f'Transaction ID: 0x{transaction_id:04x}', 'offset': offset, 'length': 2},
         {
-            'title':
-                f'Transaction ID: 0x{transaction_id:04x}',
-
-            'offset': offset,
-            'length': 2,
-        },
-
-        {
-            'title':
-                f'Flags: 0x{flags:04x} '
-                f'({"Response" if qr else "Query"})',
-
+            'title': f'Flags: 0x{flags:04x} {("Standard query response, " + rcode_name) if qr and opcode == 0 else (opcode_name if not qr else opcode_name + ", " + rcode_name)}',
             'offset': offset + 2,
             'length': 2,
-
-            'children': [
-
-                {
-                    'title':
-                        f'{qr}... .... .... .... = '
-                        f'Response: '
-                        f'{"Message is a response" if qr else "Message is a query"}',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'.{opcode:04b} .... .... .... = '
-                        f'Opcode: {opcode_name} ({opcode})',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'..... {aa}... .... .... = '
-                        f'Authoritative: '
-                        f'{"Server is authoritative" if aa else "Server is not authoritative"}',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'...... {tc}.. .... .... = '
-                        f'Truncated: '
-                        f'{"Message is truncated" if tc else "Message is not truncated"}',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'....... {rd}. .... .... = '
-                        f'Recursion desired: '
-                        f'{"Do query recursively" if rd else "Do not query recursively"}',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'........ {ra} .... .... = '
-                        f'Recursion available: '
-                        f'{"Server can do recursive queries" if ra else "Server cannot do recursive queries"}',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'.... .... .... {rcode:04b} = '
-                        f'Reply code: {rcode_name} ({rcode})',
-
-                    'offset': offset + 2,
-                    'length': 2,
-                }
-            ]
+            'children': flag_children,
         },
-
-        {
-            'title':
-                f'Questions: {qdcount}',
-
-            'offset': offset + 4,
-            'length': 2,
-        },
-
-        {
-            'title':
-                f'Answer RRs: {ancount}',
-
-            'offset': offset + 6,
-            'length': 2,
-        },
-
-        {
-            'title':
-                f'Authority RRs: {nscount}',
-
-            'offset': offset + 8,
-            'length': 2,
-        },
-
-        {
-            'title':
-                f'Additional RRs: {arcount}',
-
-            'offset': offset + 10,
-            'length': 2,
-        },
+        {'title': f'Questions: {qdcount}', 'offset': offset + 4, 'length': 2},
+        {'title': f'Answer RRs: {ancount}', 'offset': offset + 6, 'length': 2},
+        {'title': f'Authority RRs: {nscount}', 'offset': offset + 8, 'length': 2},
+        {'title': f'Additional RRs: {arcount}', 'offset': offset + 10, 'length': 2},
     ]
 
-    # ---- QUESTIONS ----
+    pos = 12
+    question_children = []
+    for _ in range(qdcount):
+        name, next_pos = _dns_read_name(raw, pos)
+        if next_pos + 4 > len(raw):
+            break
+        qtype = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
+        qclass = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+        name_len = max(0, len(name.encode('utf-8')))
+        label_count = len([part for part in name.split('.') if part])
+        type_title = f'Type: {_dns_type_name(qtype)} ({qtype})'
+        if qtype == 1:
+            type_title += ' (Host Address)'
+        question_children.append({
+            'title': f'{name}: type {_dns_type_name(qtype)}, class {_dns_class_name(qclass)}',
+            'offset': offset + pos,
+            'length': next_pos + 4 - pos,
+            'children': [
+                {'title': f'Name: {name}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                {'title': f'[Name Length: {name_len}]'},
+                {'title': f'[Label Count: {label_count}]'},
+                {'title': type_title, 'offset': offset + next_pos, 'length': 2},
+                {'title': f'Class: {_dns_class_name(qclass)} (0x{qclass:04x})', 'offset': offset + next_pos + 2, 'length': 2},
+            ],
+        })
+        pos = next_pos + 4
 
-    questions = []
+    if question_children:
+        query_start = question_children[0].get('offset', offset)
+        query_end = max(
+            int(item.get('offset', query_start) or query_start) + int(item.get('length', 0) or 0)
+            for item in question_children
+        )
+        children.append({
+            'title': 'Queries',
+            'offset': query_start,
+            'length': max(0, query_end - query_start),
+            'children': question_children,
+        })
 
-    try:
-        qd = getattr(layer, 'qd', None)
-        if qd:
-
-            qname = getattr(qd, 'qname', b'')
-
-            if isinstance(qname, bytes):
-                qname = qname.decode(errors='ignore').rstrip('.')
-
-            qtype = getattr(qd, 'qtype', '-')
-            qclass = getattr(qd, 'qclass', '-')
-
-            questions.append({
-
-                'title':
-                    f'{qname}: type {qtype}, class {qclass}',
-
+    def parse_rr_section(count: int, section_title: str) -> tuple[list[dict], int]:
+        nonlocal pos
+        items = []
+        for _ in range(count):
+            name, next_pos = _dns_read_name(raw, pos)
+            if next_pos + 10 > len(raw):
+                break
+            rr_type = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
+            rr_class = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+            ttl = int.from_bytes(raw[next_pos + 4:next_pos + 8], 'big')
+            rdlen = int.from_bytes(raw[next_pos + 8:next_pos + 10], 'big')
+            rdata_start = next_pos + 10
+            rdata_end = rdata_start + rdlen
+            if rdata_end > len(raw):
+                break
+            rdata_bytes = raw[rdata_start:rdata_end]
+            rdata_text = _dns_rdata_text(rdata_bytes, rr_type)
+            type_title = f'Type: {_dns_type_name(rr_type)} ({rr_type})'
+            if rr_type == 1:
+                type_title += ' (Host Address)'
+            items.append({
+                'title': f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}, addr {rdata_text}',
+                'offset': offset + pos,
+                'length': rdata_end - pos,
                 'children': [
-
-                    {
-                        'title':
-                            f'Name: {qname}'
-                    },
-
-                    {
-                        'title':
-                            f'Type: {qtype}'
-                    },
-
-                    {
-                        'title':
-                            f'Class: {qclass}'
-                    }
-                ]
+                    {'title': f'Name: {name}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                    {'title': type_title, 'offset': offset + next_pos, 'length': 2},
+                    {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2},
+                    {'title': f'Time to live: {ttl} ({ttl} seconds)', 'offset': offset + next_pos + 4, 'length': 4},
+                    {'title': f'Data length: {rdlen}', 'offset': offset + next_pos + 8, 'length': 2},
+                    {'title': f'Address: {rdata_text}', 'offset': offset + rdata_start, 'length': rdlen},
+                ],
             })
+            pos = rdata_end
+        return items, pos
 
-    except Exception:
-        pass
-
-    if questions:
-
-        children.append({
-
-            'title':
-                f'Queries ({len(questions)})',
-
-            'children': questions
-        })
-
-    # ---- ANSWERS ----
-
-    answers = []
-
-    try:
-
-        an = getattr(layer, 'an', None)
-
-        if an:
-
-            current = an
-
-            while current:
-
-                rrname = getattr(current, 'rrname', b'')
-
-                if isinstance(rrname, bytes):
-                    rrname = rrname.decode(
-                        errors='ignore'
-                    ).rstrip('.')
-
-                rrtype = getattr(current, 'type', '-')
-
-                ttl = getattr(current, 'ttl', '-')
-
-                rdata = getattr(current, 'rdata', '-')
-
-                answers.append({
-
-                    'title':
-                        f'{rrname}: {rdata}',
-
-                    'children': [
-
-                        {
-                            'title':
-                                f'Name: {rrname}'
-                        },
-
-                        {
-                            'title':
-                                f'Type: {rrtype}'
-                        },
-
-                        {
-                            'title':
-                                f'TTL: {ttl}'
-                        },
-
-                        {
-                            'title':
-                                f'Address: {rdata}'
-                        }
-                    ]
-                })
-
-                current = getattr(
-                    current,
-                    'payload',
-                    None
-                )
-
-                if not current or current.__class__.__name__ == 'NoPayload':
-                    break
-
-    except Exception:
-        pass
-
+    answers, _ = parse_rr_section(ancount, 'Answers')
     if answers:
-
+        answer_start = answers[0].get('offset', offset)
+        answer_end = max(
+            int(item.get('offset', answer_start) or answer_start) + int(item.get('length', 0) or 0)
+            for item in answers
+        )
         children.append({
-
-            'title':
-                f'Answers ({len(answers)})',
-
-            'children': answers
+            'title': 'Answers',
+            'offset': answer_start,
+            'length': max(0, answer_end - answer_start),
+            'children': answers,
         })
+
+    authorities, _ = parse_rr_section(nscount, 'Authorities')
+    if authorities:
+        children.append({'title': 'Authorities', 'children': authorities})
+
+    additionals, _ = parse_rr_section(arcount, 'Additional records')
+    if additionals:
+        children.append({'title': 'Additional records', 'children': additionals})
+
+    response_frame = metadata.get('dns_response_frame')
+    if response_frame is not None:
+        children.append({'title': f'[Response In: {int(response_frame)}]'})
+    request_frame = metadata.get('dns_request_frame')
+    if request_frame is not None:
+        children.append({'title': f'[Request In: {int(request_frame)}]'})
+    dns_time_ms = metadata.get('dns_time_ms')
+    if dns_time_ms is not None:
+        children.append({'title': f'[Time: {float(dns_time_ms):.6f} milliseconds]'})
 
     return {
-
-        'title':
-            f'Domain Name System '
-            f'({info})',
-
+        'title': f'Domain Name System ({"response" if qr else "query"})',
         'offset': offset,
-        'length': dns_len,
-
+        'length': len(raw),
         'children': children,
     }
 
@@ -5714,6 +5868,381 @@ def _tls_section(packet, offset: int, stream_index: int) -> Dict[str, Any]:
         'title':
             'Transport Layer Security',
 
+        'offset': offset,
+        'length': tls_len,
+        'children': children,
+    }
+
+def _tls_section_precise(packet, offset: int, stream_index: int) -> Dict[str, Any]:
+    tcp_layer = _effective_tcp_layer(packet)
+    tls_bytes = _tcp_payload_bytes(packet, tcp_layer) if tcp_layer is not None else bytes(packet[TLS])
+    tls_len = len(tls_bytes)
+
+    content_type_map = {
+        20: 'Change Cipher Spec',
+        21: 'Alert',
+        22: 'Handshake',
+        23: 'Application Data',
+    }
+    version_map = {
+        0x0300: 'SSL 3.0',
+        0x0301: 'TLS 1.0',
+        0x0302: 'TLS 1.1',
+        0x0303: 'TLS 1.2',
+        0x0304: 'TLS 1.3',
+    }
+    handshake_type_map = {
+        1: 'Client Hello',
+        2: 'Server Hello',
+        4: 'New Session Ticket',
+        11: 'Certificate',
+        12: 'Server Key Exchange',
+        13: 'Certificate Request',
+        14: 'Server Hello Done',
+        15: 'Certificate Verify',
+        16: 'Client Key Exchange',
+        20: 'Finished',
+    }
+    cipher_suite_map = {
+        0x002f: 'TLS_RSA_WITH_AES_128_CBC_SHA',
+        0x0035: 'TLS_RSA_WITH_AES_256_CBC_SHA',
+        0x0033: 'TLS_DHE_RSA_WITH_AES_128_CBC_SHA',
+        0x0032: 'TLS_DHE_DSS_WITH_AES_128_CBC_SHA',
+        0x0038: 'TLS_DHE_DSS_WITH_AES_256_CBC_SHA',
+        0x0039: 'TLS_DHE_RSA_WITH_AES_256_CBC_SHA',
+        0x003c: 'TLS_RSA_WITH_AES_128_CBC_SHA256',
+        0x003d: 'TLS_RSA_WITH_AES_256_CBC_SHA256',
+        0x0040: 'TLS_DHE_DSS_WITH_AES_128_CBC_SHA256',
+        0x0041: 'TLS_RSA_WITH_CAMELLIA_128_CBC_SHA',
+        0x0044: 'TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA',
+        0x0045: 'TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA',
+        0x0067: 'TLS_DHE_RSA_WITH_AES_128_CBC_SHA256',
+        0x006a: 'TLS_DHE_DSS_WITH_AES_256_CBC_SHA256',
+        0x006b: 'TLS_DHE_RSA_WITH_AES_256_CBC_SHA256',
+        0x0084: 'TLS_RSA_WITH_CAMELLIA_256_CBC_SHA',
+        0x0087: 'TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA',
+        0x0088: 'TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA',
+        0x0096: 'TLS_RSA_WITH_SEED_CBC_SHA',
+        0x0099: 'TLS_DHE_DSS_WITH_SEED_CBC_SHA',
+        0x009a: 'TLS_DHE_RSA_WITH_SEED_CBC_SHA',
+        0x000a: 'TLS_RSA_WITH_3DES_EDE_CBC_SHA',
+        0x0009: 'TLS_RSA_WITH_DES_CBC_SHA',
+        0x0005: 'TLS_RSA_WITH_RC4_128_SHA',
+        0x0004: 'TLS_RSA_WITH_RC4_128_MD5',
+        0x0012: 'TLS_DHE_DSS_WITH_DES_CBC_SHA',
+        0x0013: 'TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA',
+        0x0015: 'TLS_DHE_RSA_WITH_DES_CBC_SHA',
+        0x0016: 'TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA',
+        0x009c: 'TLS_RSA_WITH_AES_128_GCM_SHA256',
+        0x009d: 'TLS_RSA_WITH_AES_256_GCM_SHA384',
+        0x009e: 'TLS_DHE_RSA_WITH_AES_128_GCM_SHA256',
+        0x009f: 'TLS_DHE_RSA_WITH_AES_256_GCM_SHA384',
+        0x00a2: 'TLS_DHE_DSS_WITH_AES_128_GCM_SHA256',
+        0x00a3: 'TLS_DHE_DSS_WITH_AES_256_GCM_SHA384',
+        0x00ff: 'TLS_EMPTY_RENEGOTIATION_INFO_SCSV',
+        0xc002: 'TLS_ECDH_ECDSA_WITH_RC4_128_SHA',
+        0xc003: 'TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA',
+        0xc004: 'TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA',
+        0xc005: 'TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA',
+        0xc007: 'TLS_ECDHE_ECDSA_WITH_RC4_128_SHA',
+        0xc008: 'TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA',
+        0xc009: 'TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA',
+        0xc00a: 'TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA',
+        0xc00c: 'TLS_ECDH_RSA_WITH_RC4_128_SHA',
+        0xc00d: 'TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA',
+        0xc00e: 'TLS_ECDH_RSA_WITH_AES_128_CBC_SHA',
+        0xc00f: 'TLS_ECDH_RSA_WITH_AES_256_CBC_SHA',
+        0xc011: 'TLS_ECDHE_RSA_WITH_RC4_128_SHA',
+        0xc012: 'TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA',
+        0xc013: 'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA',
+        0xc014: 'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA',
+        0xc023: 'TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256',
+        0xc024: 'TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384',
+        0xc025: 'TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256',
+        0xc026: 'TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384',
+        0xc027: 'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256',
+        0xc028: 'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384',
+        0xc029: 'TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256',
+        0xc02a: 'TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384',
+        0xc02b: 'TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256',
+        0xc02c: 'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384',
+        0xc02d: 'TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256',
+        0xc02e: 'TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384',
+        0xc02f: 'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256',
+        0xc030: 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384',
+        0xc031: 'TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256',
+        0xc032: 'TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384',
+    }
+    extension_name_map = {
+        0: 'server_name',
+        5: 'status_request',
+        10: 'supported_groups',
+        11: 'ec_point_formats',
+        13: 'signature_algorithms',
+        15: 'heartbeat',
+        16: 'application_layer_protocol_negotiation',
+        18: 'signed_certificate_timestamp',
+        21: 'padding',
+        23: 'extended_master_secret',
+        35: 'session_ticket',
+        43: 'supported_versions',
+        45: 'psk_key_exchange_modes',
+        51: 'key_share',
+    }
+
+    def record_version_name(value: int) -> str:
+        mapping = {
+            0x0301: 'TLSv1.0',
+            0x0302: 'TLSv1.1',
+            0x0303: 'TLSv1.2',
+            0x0304: 'TLSv1.3',
+        }
+        return mapping.get(int(value or 0), f'0x{int(value or 0):04x}')
+
+    def version_name(value: int) -> str:
+        return version_map.get(int(value or 0), f'0x{int(value or 0):04x}')
+
+    def tls_clienthello_version_name(value: int) -> str:
+        return version_name(value)
+
+    def _fmt_epoch_local(epoch_value: int) -> str:
+        try:
+            return datetime.fromtimestamp(int(epoch_value), tz=timezone.utc).astimezone().strftime('%b %d, %Y %H:%M:%S.000000000 %Z')
+        except Exception:
+            return f'{int(epoch_value)}'
+
+    children = []
+    if stream_index >= 0:
+        children.append({'title': f'[Stream index: {stream_index}]'})
+
+    pos = 0
+    while pos + 5 <= len(tls_bytes):
+        content_type = int(tls_bytes[pos])
+        version = int.from_bytes(tls_bytes[pos + 1:pos + 3], 'big')
+        record_len = int.from_bytes(tls_bytes[pos + 3:pos + 5], 'big')
+        payload_start = pos + 5
+        payload_end = min(len(tls_bytes), payload_start + record_len)
+        record_payload = tls_bytes[payload_start:payload_end]
+        content_name = content_type_map.get(content_type, str(content_type))
+
+        record_children = [
+            {'title': f'Content Type: {content_name} ({content_type})', 'offset': offset + pos, 'length': 1},
+            {'title': f'Version: {version_name(version)} (0x{version:04x})', 'offset': offset + pos + 1, 'length': 2},
+            {'title': f'Length: {record_len}', 'offset': offset + pos + 3, 'length': 2},
+        ]
+        record_title = f'{record_version_name(version)} Record Layer: {content_name} Protocol'
+
+        if content_type == 22 and len(record_payload) >= 4:
+            hs_type = int(record_payload[0])
+            hs_len = int.from_bytes(record_payload[1:4], 'big')
+            hs_name = handshake_type_map.get(hs_type, f'Handshake ({hs_type})')
+            title_version_name = record_version_name(version)
+
+            handshake_children = [
+                {'title': f'Handshake Type: {hs_name} ({hs_type})', 'offset': offset + payload_start, 'length': 1},
+                {'title': f'Length: {hs_len}', 'offset': offset + payload_start + 1, 'length': 3},
+            ]
+
+            if hs_type == 1 and len(record_payload) >= 42:
+                cursor = 4
+                hello_version = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+                title_version_name = record_version_name(hello_version)
+                record_title = f'{title_version_name} Record Layer: Handshake Protocol: {hs_name}'
+                handshake_children.append({'title': f'Version: {tls_clienthello_version_name(hello_version)} (0x{hello_version:04x})', 'offset': offset + payload_start + cursor, 'length': 2})
+                cursor += 2
+                random_bytes = record_payload[cursor:cursor + 32]
+                gmt_unix = int.from_bytes(random_bytes[:4], 'big') if len(random_bytes) >= 4 else 0
+                handshake_children.append({
+                    'title': f'Random: {random_bytes.hex()}',
+                    'offset': offset + payload_start + cursor,
+                    'length': 32,
+                    'children': [
+                        {'title': f'GMT Unix Time: {_fmt_epoch_local(gmt_unix)}', 'offset': offset + payload_start + cursor, 'length': 4},
+                        {'title': f'Random Bytes: {random_bytes[4:].hex()}', 'offset': offset + payload_start + cursor + 4, 'length': max(0, len(random_bytes) - 4)},
+                    ],
+                })
+                cursor += 32
+            else:
+                record_title = f'{title_version_name} Record Layer: Handshake Protocol: {hs_name}'
+
+            if cursor < len(record_payload):
+                session_id_len = int(record_payload[cursor])
+                handshake_children.append({'title': f'Session ID Length: {session_id_len}', 'offset': offset + payload_start + cursor, 'length': 1})
+                cursor += 1
+                if session_id_len > 0:
+                    handshake_children.append({'title': f'Session ID: {record_payload[cursor:cursor + session_id_len].hex()}', 'offset': offset + payload_start + cursor, 'length': session_id_len})
+                cursor += session_id_len
+
+            if cursor + 2 <= len(record_payload):
+                cipher_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+                handshake_children.append({'title': f'Cipher Suites Length: {cipher_len}', 'offset': offset + payload_start + cursor, 'length': 2})
+                cursor += 2
+                cipher_start = cursor
+                cipher_children = []
+                while cursor + 2 <= cipher_start + cipher_len and cursor + 2 <= len(record_payload):
+                    suite = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+                    cipher_children.append({
+                        'title': f'Cipher Suite: {cipher_suite_map.get(suite, f"0x{suite:04x}")} (0x{suite:04x})',
+                        'offset': offset + payload_start + cursor,
+                        'length': 2,
+                    })
+                    cursor += 2
+                handshake_children.append({'title': f'Cipher Suites ({len(cipher_children)} suites)', 'offset': offset + payload_start + cipher_start, 'length': cipher_len, 'children': cipher_children})
+
+            if cursor < len(record_payload):
+                compression_len = int(record_payload[cursor])
+                handshake_children.append({'title': f'Compression Methods Length: {compression_len}', 'offset': offset + payload_start + cursor, 'length': 1})
+                cursor += 1
+                comp_start = cursor
+                compression_children = []
+                for _ in range(compression_len):
+                    if cursor >= len(record_payload):
+                        break
+                    method = int(record_payload[cursor])
+                    compression_children.append({
+                        'title': f'Compression Method: {"null" if method == 0 else method} ({method})',
+                        'offset': offset + payload_start + cursor,
+                        'length': 1,
+                    })
+                    cursor += 1
+                handshake_children.append({'title': f'Compression Methods ({len(compression_children)} methods)', 'offset': offset + payload_start + comp_start, 'length': compression_len, 'children': compression_children})
+
+            if cursor + 2 <= len(record_payload):
+                ext_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+                handshake_children.append({'title': f'Extensions Length: {ext_len}', 'offset': offset + payload_start + cursor, 'length': 2})
+                cursor += 2
+                ext_start = cursor
+                ext_children = []
+                while cursor + 4 <= ext_start + ext_len and cursor + 4 <= len(record_payload):
+                    ext_type = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+                    ext_size = int.from_bytes(record_payload[cursor + 2:cursor + 4], 'big')
+                    data_start = cursor + 4
+                    data_end = min(len(record_payload), data_start + ext_size)
+                    ext_name = extension_name_map.get(ext_type, ext_type)
+                    ext_node = {
+                        'title': f'Extension: {ext_name} (len={ext_size})',
+                        'offset': offset + payload_start + cursor,
+                        'length': min(len(record_payload) - cursor, 4 + ext_size),
+                        'children': [
+                            {'title': f'Type: {ext_name} ({ext_type})', 'offset': offset + payload_start + cursor, 'length': 2},
+                            {'title': f'Length: {ext_size}', 'offset': offset + payload_start + cursor + 2, 'length': 2},
+                        ],
+                    }
+                    ext_payload = record_payload[data_start:data_end]
+                    if ext_type == 11 and len(ext_payload) >= 1:
+                        list_len = int(ext_payload[0])
+                        formats_map = {0: 'uncompressed', 1: 'ansiX962_compressed_prime', 2: 'ansiX962_compressed_char2'}
+                        point_children = []
+                        for i in range(min(list_len, max(0, len(ext_payload) - 1))):
+                            fmt = int(ext_payload[1 + i])
+                            point_children.append({'title': f'EC point format: {formats_map.get(fmt, fmt)} ({fmt})', 'offset': offset + payload_start + data_start + 1 + i, 'length': 1})
+                        ext_node['children'].extend([
+                            {'title': f'EC point formats Length: {list_len}', 'offset': offset + payload_start + data_start, 'length': 1},
+                            {'title': f'Elliptic curves point formats ({len(point_children)})', 'offset': offset + payload_start + data_start + 1, 'length': max(0, len(ext_payload) - 1), 'children': point_children},
+                        ])
+                    elif ext_type == 10 and len(ext_payload) >= 2:
+                        group_map = {
+                            0x0001: 'sect163k1', 0x0002: 'sect163r1', 0x0003: 'sect163r2', 0x0004: 'sect193r1', 0x0005: 'sect193r2',
+                            0x0006: 'sect233k1', 0x0007: 'sect233r1', 0x0008: 'sect239k1', 0x0009: 'sect283k1', 0x000a: 'sect283r1',
+                            0x000b: 'sect409k1', 0x000c: 'sect409r1', 0x000d: 'sect571k1', 0x000e: 'sect571r1', 0x000f: 'secp160k1',
+                            0x0010: 'secp160r1', 0x0011: 'secp160r2', 0x0012: 'secp192k1', 0x0013: 'secp192r1', 0x0014: 'secp224k1',
+                            0x0015: 'secp224r1', 0x0016: 'secp256k1', 0x0017: 'secp256r1', 0x0018: 'secp384r1', 0x0019: 'secp521r1',
+                        }
+                        list_len = int.from_bytes(ext_payload[:2], 'big')
+                        group_children = []
+                        p = 2
+                        while p + 2 <= min(len(ext_payload), 2 + list_len):
+                            group = int.from_bytes(ext_payload[p:p + 2], 'big')
+                            group_children.append({'title': f'Supported Group: {group_map.get(group, f"0x{group:04x}")} (0x{group:04x})', 'offset': offset + payload_start + data_start + p, 'length': 2})
+                            p += 2
+                        ext_node['children'].extend([
+                            {'title': f'Supported Groups List Length: {list_len}', 'offset': offset + payload_start + data_start, 'length': 2},
+                            {'title': f'Supported Groups ({len(group_children)} groups)', 'offset': offset + payload_start + data_start + 2, 'length': max(0, list_len), 'children': group_children},
+                        ])
+                    elif ext_type == 35:
+                        ext_node['children'].append({'title': 'Session Ticket: <MISSING>'})
+                    elif ext_type == 13 and len(ext_payload) >= 2:
+                        sig_map = {
+                            0x0601: 'rsa_pkcs1_sha512', 0x0602: 'SHA512 DSA', 0x0603: 'ecdsa_secp521r1_sha512',
+                            0x0501: 'rsa_pkcs1_sha384', 0x0502: 'SHA384 DSA', 0x0503: 'ecdsa_secp384r1_sha384',
+                            0x0401: 'rsa_pkcs1_sha256', 0x0402: 'SHA256 DSA', 0x0403: 'ecdsa_secp256r1_sha256',
+                            0x0301: 'SHA224 RSA', 0x0302: 'SHA224 DSA', 0x0303: 'SHA224 ECDSA',
+                            0x0201: 'rsa_pkcs1_sha1', 0x0202: 'SHA1 DSA', 0x0203: 'ecdsa_sha1',
+                        }
+                        hash_map = {2: 'SHA1', 3: 'SHA224', 4: 'SHA256', 5: 'SHA384', 6: 'SHA512'}
+                        sign_map = {1: 'RSA', 2: 'DSA', 3: 'ECDSA'}
+                        list_len = int.from_bytes(ext_payload[:2], 'big')
+                        sig_children = []
+                        p = 2
+                        while p + 2 <= min(len(ext_payload), 2 + list_len):
+                            sig = int.from_bytes(ext_payload[p:p + 2], 'big')
+                            hash_id = ext_payload[p]
+                            sign_id = ext_payload[p + 1]
+                            sig_children.append({
+                                'title': f'Signature Algorithm: {sig_map.get(sig, f"0x{sig:04x}")} (0x{sig:04x})',
+                                'offset': offset + payload_start + data_start + p,
+                                'length': 2,
+                                'children': [
+                                    {
+                                        'title': f'Signature Hash Algorithm Hash: {hash_map.get(hash_id, hash_id)} ({hash_id})',
+                                        'offset': offset + payload_start + data_start + p,
+                                        'length': 1,
+                                    },
+                                    {
+                                        'title': f'Signature Hash Algorithm Signature: {sign_map.get(sign_id, sign_id)} ({sign_id})',
+                                        'offset': offset + payload_start + data_start + p + 1,
+                                        'length': 1,
+                                    },
+                                ],
+                            })
+                            p += 2
+                        ext_node['children'].extend([
+                            {'title': f'Signature Hash Algorithms Length: {list_len}', 'offset': offset + payload_start + data_start, 'length': 2},
+                            {'title': f'Signature Hash Algorithms ({len(sig_children)} algorithms)', 'offset': offset + payload_start + data_start + 2, 'length': max(0, list_len), 'children': sig_children},
+                        ])
+                    elif ext_type == 15 and len(ext_payload) >= 1:
+                        mode = int(ext_payload[0])
+                        ext_node['children'].append({'title': f'Mode: {"Peer allowed to send requests" if mode == 1 else mode} ({mode})', 'offset': offset + payload_start + data_start, 'length': 1})
+                    else:
+                        ext_node['children'].append({'title': f'Data: {ext_payload.hex()}', 'offset': offset + payload_start + data_start, 'length': max(0, len(ext_payload))})
+                    ext_children.append(ext_node)
+                    cursor = data_end
+                handshake_children.append({'title': f'Extensions ({len(ext_children)})', 'offset': offset + payload_start + ext_start, 'length': ext_len, 'children': ext_children})
+
+                try:
+                    ja3 = _tls_clienthello_ja3(record_payload)
+                    if ja3:
+                        ja4 = _tls_clienthello_ja4(record_payload)
+                        if ja4:
+                            handshake_children.append({'title': f'[JA4: {ja4["value"]}]'})
+                            handshake_children.append({'title': f'[JA4_r: {ja4["raw"]}]'})
+                        handshake_children.append({'title': f'[JA3 Fullstring: {ja3["full"]}]'})
+                        handshake_children.append({'title': f'[JA3: {ja3["hash"]}]'})
+                except Exception:
+                    pass
+
+            record_children.append({
+                'title': f'Handshake Protocol: {hs_name}',
+                'offset': offset + payload_start,
+                'length': min(len(record_payload), 4 + hs_len),
+                'children': handshake_children,
+            })
+        elif record_payload:
+            record_children.append({'title': f'Record Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
+
+        children.append({
+            'title': record_title,
+            'offset': offset + pos,
+            'length': min(len(tls_bytes) - pos, 5 + record_len),
+            'children': record_children,
+        })
+
+        if payload_end <= pos:
+            break
+        pos = payload_end
+
+    return {
+        'title': 'Transport Layer Security',
         'offset': offset,
         'length': tls_len,
         'children': children,

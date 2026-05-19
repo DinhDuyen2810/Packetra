@@ -63,17 +63,23 @@ class DisplayFilter:
             return True
 
         aliases = {
-            'tcp', 'udp', 'dns', 'mdns', 'arp', 'icmp', 'icmpv6', 'tls', 'quic', 'http', 'dhcp', 'ip', 'ipv6', 'eth'
+            'tcp', 'udp', 'dns', 'mdns', 'arp', 'icmp', 'icmpv6', 'igmp', 'tls', 'quic', 'http', 'dhcp', 'ip', 'ipv6', 'eth'
         }
         if low in aliases:
-            return record.protocol.lower() == low or low in {layer.lower() for layer in record.layers}
+            proto_low = str(record.protocol or '').lower()
+            layer_lows = {layer.lower() for layer in record.layers}
+            if low == 'tls':
+                return proto_low.startswith('tls') or 'tls' in layer_lows
+            if low == 'igmp':
+                return proto_low.startswith('igmp') or 'igmp' in layer_lows
+            return proto_low == low or low in layer_lows
 
         checks = {
             'ip.addr==': lambda v: v in {record.src, record.dst},
             'ip.src==': lambda v: record.src == v,
             'ip.dst==': lambda v: record.dst == v,
-            'tcp.port==': lambda v: record.protocol in {'TCP', 'TLS', 'HTTP'} and self._port_match(record, v),
-            'udp.port==': lambda v: record.protocol in {'UDP', 'DNS', 'MDNS', 'QUIC', 'DHCP'} and self._port_match(record, v),
+            'tcp.port==': lambda v: 'tcp' in {layer.lower() for layer in record.layers} and self._port_match(record, v),
+            'udp.port==': lambda v: 'udp' in {layer.lower() for layer in record.layers} and self._port_match(record, v),
             'frame.number==': lambda v: str(record.number) == v,
             'frame.len==': lambda v: str(record.length) == v,
             'contains==': lambda v: self._contains(record, v),

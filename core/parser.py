@@ -28,6 +28,7 @@ class PacketParser:
         self.transport_stream_state = {}
         self.icmp_echo_pending = {}
         self.http_request_pending = {}
+        self.dns_request_pending = {}
         self.layer_stream_maps = {
             'ethernet': {},
             'ipv4': {},
@@ -152,6 +153,7 @@ class PacketParser:
         self._track_transport_record(record)
         self._update_http_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
+        self._update_dns_metadata(packet, record)
 
         return record
 
@@ -2517,6 +2519,9 @@ class PacketParser:
             if qname.endswith('.local'):
                 return 'MDNS'
             return 'DNS'
+        igmp_summary = self._igmp_summary(packet)
+        if igmp_summary is not None:
+            return str(igmp_summary.get('version', 'IGMP'))
         if effective_tcp is not None:
             sport = int(getattr(effective_tcp, 'sport', 0) or 0)
             dport = int(getattr(effective_tcp, 'dport', 0) or 0)
@@ -2533,6 +2538,9 @@ class PacketParser:
         ):
             return 'HTTP'
         if packet.haslayer(TLSClientHello) or packet.haslayer(TLS):
+            tls_summary = self._tls_record_summary(packet)
+            if tls_summary is not None:
+                return str(tls_summary.get('version_name', 'TLS'))
             return 'TLS'
         if packet.haslayer(QUIC):
             return 'QUIC'
@@ -2560,6 +2568,99 @@ class PacketParser:
             return str(qname).rstrip('.')
         except Exception:
             return ''
+
+    def _tls_version_name(self, version: int) -> str:
+        return {
+            0x0301: 'TLSv1.0',
+            0x0302: 'TLSv1.1',
+            0x0303: 'TLSv1.2',
+            0x0304: 'TLSv1.3',
+        }.get(int(version or 0), 'TLS')
+
+    def _tls_handshake_type_name(self, handshake_type: int) -> str:
+        return {
+            1: 'Client Hello',
+            2: 'Server Hello',
+            4: 'New Session Ticket',
+            8: 'Encrypted Extensions',
+            11: 'Certificate',
+            12: 'Server Key Exchange',
+            13: 'Certificate Request',
+            14: 'Server Hello Done',
+            15: 'Certificate Verify',
+            16: 'Client Key Exchange',
+            20: 'Finished',
+        }.get(int(handshake_type or -1), f'Handshake ({int(handshake_type or 0)})')
+
+    def _tls_record_summary(self, packet) -> dict | None:
+        payload = self._payload_bytes(packet)
+        if len(payload) < 5:
+            return None
+
+        content_type = int(payload[0])
+        version = int.from_bytes(payload[1:3], 'big')
+        record_len = int.from_bytes(payload[3:5], 'big')
+        summary = {
+            'content_type': content_type,
+            'version': version,
+            'version_name': self._tls_version_name(version),
+            'record_len': record_len,
+        }
+
+        if content_type == 22 and len(payload) >= 9:
+            handshake_type = int(payload[5])
+            summary['handshake_type'] = handshake_type
+            summary['handshake_name'] = self._tls_handshake_type_name(handshake_type)
+            summary['handshake_len'] = int.from_bytes(payload[6:9], 'big')
+            if handshake_type == 1 and len(payload) >= 11:
+                hello_version = int.from_bytes(payload[9:11], 'big')
+                summary['handshake_version'] = hello_version
+                summary['version_name'] = self._tls_version_name(hello_version)
+
+        return summary
+
+    def _igmp_summary(self, packet) -> dict | None:
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None:
+            return None
+        try:
+            if int(getattr(effective_ip, 'proto', 0) or 0) != 2:
+                return None
+        except Exception:
+            return None
+
+        payload = self._ip_payload_bytes(packet, effective_ip)
+        if len(payload) < 8:
+            return None
+
+        igmp_type = int(payload[0])
+        group_address = '.'.join(str(int(b)) for b in payload[4:8])
+        summary = {
+            'type': igmp_type,
+            'group_address': group_address,
+            'version': 'IGMP',
+            'info': 'Internet Group Management Protocol',
+        }
+
+        if igmp_type == 0x11 and len(payload) >= 12:
+            summary['version'] = 'IGMPv3'
+            summary['qrv'] = int(payload[8] & 0x07)
+            summary['qqic'] = int(payload[9])
+            summary['num_src'] = int.from_bytes(payload[10:12], 'big')
+            if group_address == '0.0.0.0':
+                summary['info'] = 'Membership Query, general'
+            else:
+                summary['info'] = f'Membership Query, specific for {group_address}'
+            return summary
+
+        summary['info'] = {
+            0x11: 'Membership Query',
+            0x12: 'Version 1 Membership Report',
+            0x16: 'Version 2 Membership Report',
+            0x17: 'Leave Group',
+            0x22: 'Version 3 Membership Report',
+        }.get(igmp_type, f'IGMP Type 0x{igmp_type:02x}')
+        return summary
 
     def _tcp_window_scale_shift(self, tcp_layer) -> int | None:
         for option in getattr(tcp_layer, 'options', []) or []:
@@ -2897,9 +2998,43 @@ class PacketParser:
             if protocol in {'DNS', 'MDNS'}:
                 dns = packet[DNS]
                 qname = self._dns_qname(packet)
+                qtype_name = ''
+                try:
+                    qtype_value = int(getattr(getattr(dns, 'qd', None), 'qtype', 0) or 0)
+                    qtype_name = {
+                        1: 'A',
+                        2: 'NS',
+                        5: 'CNAME',
+                        12: 'PTR',
+                        15: 'MX',
+                        16: 'TXT',
+                        28: 'AAAA',
+                    }.get(qtype_value, str(qtype_value))
+                except Exception:
+                    qtype_name = ''
                 if getattr(dns, 'qr', 0) == 0:
-                    return f'Standard query 0x{getattr(dns, "id", 0):04x} {qname or "(unknown)"}'
-                return f'Standard query response 0x{getattr(dns, "id", 0):04x} {qname or "(unknown)"}'
+                    qtype_prefix = f'{qtype_name} ' if qtype_name else ''
+                    return f'Standard query 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}'
+                answer_suffix = ''
+                try:
+                    first_answer = getattr(dns, 'an', None)
+                    answer_type = int(getattr(first_answer, 'type', 0) or 0) if first_answer is not None else 0
+                    answer_data = getattr(first_answer, 'rdata', '') if first_answer is not None else ''
+                    answer_type_name = {
+                        1: 'A',
+                        2: 'NS',
+                        5: 'CNAME',
+                        12: 'PTR',
+                        15: 'MX',
+                        16: 'TXT',
+                        28: 'AAAA',
+                    }.get(answer_type, str(answer_type)) if answer_type else ''
+                    if answer_type_name and answer_data:
+                        answer_suffix = f' {answer_type_name} {answer_data}'
+                except Exception:
+                    answer_suffix = ''
+                qtype_prefix = f'{qtype_name} ' if qtype_name else ''
+                return f'Standard query response 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}{answer_suffix}'
             if protocol == 'DHCPv6':
                 return self._dhcpv6_info_text(packet) or 'DHCPv6'
             if protocol == 'DHCP':
@@ -2939,8 +3074,24 @@ class PacketParser:
                             return f'{response_text}  ({content_type})'
                         return f'{response_text} '
                 return 'HTTP'
-            if protocol == 'TLS':
-                return 'Application Data'
+            if protocol.startswith('TLS'):
+                tls_summary = self._tls_record_summary(packet)
+                if tls_summary is None:
+                    return 'Transport Layer Security'
+                content_type = int(tls_summary.get('content_type', 0) or 0)
+                if content_type == 22 and tls_summary.get('handshake_name'):
+                    return str(tls_summary.get('handshake_name'))
+                return {
+                    20: 'Change Cipher Spec',
+                    21: 'Alert',
+                    22: 'Handshake',
+                    23: 'Application Data',
+                }.get(content_type, 'Transport Layer Security')
+            if protocol in {'IGMP', 'IGMPv3'}:
+                igmp_summary = self._igmp_summary(packet)
+                if igmp_summary is not None:
+                    return str(igmp_summary.get('info', 'Internet Group Management Protocol'))
+                return 'Internet Group Management Protocol'
             if protocol == 'QUIC':
                 return 'QUIC'
             if protocol == 'TCP':
@@ -3066,6 +3217,39 @@ class PacketParser:
             return
 
         record.info = self._icmp_echo_info_text(packet)
+
+    def _update_dns_metadata(self, packet, record: PacketRecord) -> None:
+        if not packet.haslayer(DNS):
+            return
+
+        dns = packet[DNS]
+        qname = self._dns_qname(packet)
+        try:
+            qtype = int(getattr(getattr(dns, 'qd', None), 'qtype', 0) or 0)
+        except Exception:
+            qtype = 0
+
+        dns_id = int(getattr(dns, 'id', 0) or 0)
+        src = str(getattr(record, 'src', '') or '')
+        dst = str(getattr(record, 'dst', '') or '')
+        sport = int(getattr(record, 'sport', 0) or 0)
+        dport = int(getattr(record, 'dport', 0) or 0)
+        is_response = bool(int(getattr(dns, 'qr', 0) or 0))
+
+        if not is_response:
+            key = (dns_id, qname, qtype, src, dst, sport, dport)
+            self.dns_request_pending[key] = record
+            return
+
+        reverse_key = (dns_id, qname, qtype, dst, src, dport, sport)
+        request_record = self.dns_request_pending.pop(reverse_key, None)
+        if request_record is None:
+            return
+
+        request_record.metadata['dns_response_frame'] = int(record.number)
+        record.metadata['dns_request_frame'] = int(request_record.number)
+        response_ms = max(0.0, (float(record.epoch_time) - float(request_record.epoch_time)) * 1000.0)
+        record.metadata['dns_time_ms'] = float(response_ms)
 
     def _to_text(self, value):
         if isinstance(value, bytes):
