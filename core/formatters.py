@@ -33,9 +33,11 @@ MAC_VENDORS = {
     '00:17:42': 'Parallels',
     '00:1c:14': 'VMware',
     '00:1c:42': 'Parallels',
+    '00:21:6a': 'Intel',
     '00:21:f6': 'Virtual Iron Software',
     '00:24:0e': 'Apple',
     '00:50:56': 'VMware',
+    'd4:21:22': 'Sercomm',
     '00:e0:4c': 'Realtek',
     '08:00:27': 'Oracle',
     '0a:00:27': 'Unknown',
@@ -107,6 +109,53 @@ def _internet_checksum(data: bytes) -> int:
         total += (data[index] << 8) | data[index + 1]
         total = (total & 0xFFFF) + (total >> 16)
     return (~total) & 0xFFFF
+
+
+def _mac_display(mac: str) -> str:
+    mac_text = str(mac or '')
+    vendor = get_mac_vendor(mac_text)
+    if vendor:
+        suffix = ':'.join(mac_text.split(':')[-3:])
+        return f'{vendor}_{suffix} ({mac_text})'
+    return mac_text
+
+
+def _mac_text_from_bytes(data: bytes) -> str:
+    if len(data) < 6:
+        return ''
+    return ':'.join(f'{byte:02x}' for byte in data[:6])
+
+
+def _ipv6_slaac_mac(address: str) -> str:
+    try:
+        packed = ipaddress.IPv6Address(str(address or '')).packed
+    except Exception:
+        return ''
+
+    if packed[:8] != b'\xfe\x80\x00\x00\x00\x00\x00\x00':
+        return ''
+
+    interface_identifier = packed[8:]
+    if interface_identifier[3:5] != b'\xff\xfe':
+        return ''
+
+    mac_bytes = bytes([
+        interface_identifier[0] ^ 0x02,
+        interface_identifier[1],
+        interface_identifier[2],
+        interface_identifier[5],
+        interface_identifier[6],
+        interface_identifier[7],
+    ])
+    return _mac_text_from_bytes(mac_bytes)
+
+
+def _icmpv6_lifetime_text(seconds: int) -> str:
+    value = int(seconds)
+    if value > 0 and value % 86400 == 0:
+        days = value // 86400
+        return f'{days} day' if days == 1 else f'{days} days'
+    return f'{value} second' if value == 1 else f'{value} seconds'
 
 
 def _is_cdp_packet(packet) -> bool:
@@ -520,6 +569,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             if isinstance(wlan, dict) and wlan:
                 sections.extend(_wlan_sections(wlan, offset))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'DHCPv6':
+            dhcpv6_payload = bytes(getattr(udp_layer, 'payload', b''))
+            sections.append(_dhcpv6_section(dhcpv6_payload, offset))
+            payload_handled = True
         elif sport == 646 or dport == 646:
             ldp_payload = bytes(getattr(udp_layer, 'payload', b''))
             sections.append(_ldp_section(ldp_payload, offset))
@@ -572,15 +625,17 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
     if packet.haslayer(DHCP):
 
         dhcp_layer = packet[DHCP]
+        bootp_layer = packet[BOOTP] if packet.haslayer(BOOTP) else None
 
         sections.append(
             _dhcp_section(
+                bootp_layer,
                 dhcp_layer,
                 offset
             )
         )
 
-        offset += len(dhcp_layer)
+        offset += len(bytes(bootp_layer)) if bootp_layer is not None else len(dhcp_layer)
 
     elif packet.haslayer(BOOTP):
 
@@ -829,6 +884,10 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ip:udp:capwap.data'
     elif protocol == '802.11' and str(metadata.get('capwap_transport', '') or '') == 'data':
         protocol_string = 'eth:ethertype:ip:udp:capwap.data:wlan'
+    elif protocol == 'DHCP':
+        protocol_string = 'eth:ethertype:ip:udp:dhcp'
+    elif protocol == 'DHCPv6':
+        protocol_string = 'eth:ethertype:ipv6:udp:dhcpv6'
     elif protocol in {'ICMPV6', 'ICMPv6'}:
         has_hopopts = any(str(layer).lower() == 'ipv6exthdrhopbyhop' for layer in layers)
         protocol_string = 'eth:ethertype:ipv6:ipv6.hopopts:icmpv6' if has_hopopts else 'eth:ethertype:ipv6:icmpv6'
@@ -864,6 +923,9 @@ def _frame_section(record) -> Dict[str, Any]:
             coloring_name = 'UDP'
             coloring_string = 'udp'
     elif protocol in {'CAPWAP-Control', 'CAPWAP-Data'} or (protocol == '802.11' and str(metadata.get('capwap_transport', '') or '') == 'data'):
+        coloring_name = 'UDP'
+        coloring_string = 'udp'
+    elif protocol == 'DHCPv6':
         coloring_name = 'UDP'
         coloring_string = 'udp'
     elif protocol in {'OSPF', 'CDP', 'BGP'}:
@@ -1415,6 +1477,155 @@ def _ipv6_hopopts_section(layer, offset: int) -> Dict[str, Any]:
     }
 
 
+def _icmpv6_na_flag_children(flags: int, offset: int) -> List[Dict[str, Any]]:
+    router = bool(int(flags) & 0x80000000)
+    solicited = bool(int(flags) & 0x40000000)
+    override = bool(int(flags) & 0x20000000)
+    reserved = int(flags) & 0x1FFFFFFF
+    reserved_bits = format(reserved, '029b')
+    reserved_groups = ' '.join(reserved_bits[1 + (index * 4):1 + ((index + 1) * 4)] for index in range(7))
+    return [
+        {'title': f'{"1" if router else "0"}... .... .... .... .... .... .... .... = Router: {"Set" if router else "Not set"}', 'offset': offset, 'length': 4},
+        {'title': f'.{"1" if solicited else "0"}.. .... .... .... .... .... .... .... = Solicited: {"Set" if solicited else "Not set"}', 'offset': offset, 'length': 4},
+        {'title': f'..{"1" if override else "0"}. .... .... .... .... .... .... .... = Override: {"Set" if override else "Not set"}', 'offset': offset, 'length': 4},
+        {'title': f'...{reserved_bits[0]} {reserved_groups} = Reserved: {reserved}', 'offset': offset, 'length': 4},
+    ]
+
+
+def _icmpv6_ra_flag_children(flags: int, offset: int) -> List[Dict[str, Any]]:
+    managed = bool(int(flags) & 0x80)
+    other = bool(int(flags) & 0x40)
+    home_agent = bool(int(flags) & 0x20)
+    prf = (int(flags) >> 3) & 0x03
+    nd_proxy = bool(int(flags) & 0x04)
+    snac_router = bool(int(flags) & 0x02)
+    reserved = int(flags) & 0x01
+    prf_name = {
+        0: 'Medium',
+        1: 'High',
+        2: 'Reserved',
+        3: 'Low',
+    }.get(prf, f'Value {prf}')
+    return [
+        {'title': f'{"1" if managed else "0"}... .... = Managed address configuration: {"Set" if managed else "Not set"}', 'offset': offset, 'length': 1},
+        {'title': f'.{"1" if other else "0"}.. .... = Other configuration: {"Set" if other else "Not set"}', 'offset': offset, 'length': 1},
+        {'title': f'..{"1" if home_agent else "0"}. .... = Home Agent: {"Set" if home_agent else "Not set"}', 'offset': offset, 'length': 1},
+        {'title': f'...{(prf >> 1) & 0x1} {prf & 0x1}... = Prf (Default Router Preference): {prf_name} ({prf})', 'offset': offset, 'length': 1},
+        {'title': f'.... {"1" if nd_proxy else "0"}... = ND Proxy: {"Set" if nd_proxy else "Not set"}', 'offset': offset, 'length': 1},
+        {'title': f'.... .{"1" if snac_router else "0"}.. = SNAC Router: {"Set" if snac_router else "Not set"}', 'offset': offset, 'length': 1},
+        {'title': f'.... ...{reserved} = Reserved: {reserved}', 'offset': offset, 'length': 1},
+    ]
+
+
+def _icmpv6_nd_option_nodes(payload: bytes, offset: int) -> List[Dict[str, Any]]:
+    children: List[Dict[str, Any]] = []
+    cursor = 0
+
+    while cursor + 2 <= len(payload):
+        option_type = int(payload[cursor])
+        option_units = int(payload[cursor + 1])
+        if option_units <= 0:
+            break
+
+        option_length = option_units * 8
+        actual_length = min(option_length, len(payload) - cursor)
+        option_offset = offset + cursor
+        body = payload[cursor + 2:cursor + actual_length]
+
+        if option_type in {1, 2}:
+            label = 'Source link-layer address' if option_type == 1 else 'Target link-layer address'
+            mac = _mac_text_from_bytes(body)
+            children.append(
+                {
+                    'title': f'ICMPv6 Option ({label} : {mac})' if mac else f'ICMPv6 Option ({label})',
+                    'offset': option_offset,
+                    'length': actual_length,
+                    'children': [
+                        {'title': f'Type: {label} ({option_type})', 'offset': option_offset, 'length': 1},
+                        {'title': f'Length: {option_units} ({option_length} bytes)', 'offset': option_offset + 1, 'length': 1},
+                        {'title': f'Link-layer address: {_mac_display(mac)}', 'offset': option_offset + 2, 'length': min(6, len(body))} if mac else {'title': 'Link-layer address', 'offset': option_offset + 2, 'length': len(body)},
+                    ],
+                }
+            )
+        elif option_type == 3 and actual_length >= 32:
+            prefix_length = int(payload[cursor + 2])
+            flags = int(payload[cursor + 3])
+            valid_lifetime = int.from_bytes(payload[cursor + 4:cursor + 8], 'big')
+            preferred_lifetime = int.from_bytes(payload[cursor + 8:cursor + 12], 'big')
+            prefix = _ipv6_address_text(payload[cursor + 16:cursor + 32])
+            flag_labels: List[str] = []
+            if flags & 0x80:
+                flag_labels.append('On-link Flag (L)')
+            if flags & 0x40:
+                flag_labels.append('Autonomous Address Configuration Flag (A)')
+            if flags & 0x20:
+                flag_labels.append('Router Address Flag (R)')
+            if flags & 0x10:
+                flag_labels.append('DHCPv6-PD Preferred Flag (P)')
+            flag_title = f'Flag: 0x{flags:02x}'
+            if flag_labels:
+                flag_title += f', {", ".join(flag_labels)}'
+            children.append(
+                {
+                    'title': f'ICMPv6 Option (Prefix information : {prefix}/{prefix_length})',
+                    'offset': option_offset,
+                    'length': actual_length,
+                    'children': [
+                        {'title': 'Type: Prefix information (3)', 'offset': option_offset, 'length': 1},
+                        {'title': f'Length: {option_units} ({option_length} bytes)', 'offset': option_offset + 1, 'length': 1},
+                        {'title': f'Prefix Length: {prefix_length}', 'offset': option_offset + 2, 'length': 1},
+                        {
+                            'title': flag_title,
+                            'offset': option_offset + 3,
+                            'length': 1,
+                            'children': [
+                                {'title': f'{"1" if flags & 0x80 else "0"}... .... = On-link Flag (L): {"Set" if flags & 0x80 else "Not set"}', 'offset': option_offset + 3, 'length': 1},
+                                {'title': f'.{"1" if flags & 0x40 else "0"}.. .... = Autonomous Address Configuration Flag (A): {"Set" if flags & 0x40 else "Not set"}', 'offset': option_offset + 3, 'length': 1},
+                                {'title': f'..{"1" if flags & 0x20 else "0"}. .... = Router Address Flag (R): {"Set" if flags & 0x20 else "Not set"}', 'offset': option_offset + 3, 'length': 1},
+                                {'title': f'...{"1" if flags & 0x10 else "0"} .... = DHCPv6-PD Preferred Flag (P): {"Set" if flags & 0x10 else "Not set"}', 'offset': option_offset + 3, 'length': 1},
+                                {'title': f'.... {flags & 0x0F:04b} = Reserved: {flags & 0x0F}', 'offset': option_offset + 3, 'length': 1},
+                            ],
+                        },
+                        {'title': f'Valid Lifetime: {valid_lifetime} ({_icmpv6_lifetime_text(valid_lifetime)})', 'offset': option_offset + 4, 'length': 4},
+                        {'title': f'Preferred Lifetime: {preferred_lifetime} ({_icmpv6_lifetime_text(preferred_lifetime)})', 'offset': option_offset + 8, 'length': 4},
+                        {'title': 'Reserved', 'offset': option_offset + 12, 'length': 4},
+                        {'title': f'Prefix: {prefix}', 'offset': option_offset + 16, 'length': 16},
+                    ],
+                }
+            )
+        elif option_type == 5 and actual_length >= 8:
+            mtu = int.from_bytes(payload[cursor + 4:cursor + 8], 'big')
+            children.append(
+                {
+                    'title': f'ICMPv6 Option (MTU : {mtu})',
+                    'offset': option_offset,
+                    'length': actual_length,
+                    'children': [
+                        {'title': 'Type: MTU (5)', 'offset': option_offset, 'length': 1},
+                        {'title': f'Length: {option_units} ({option_length} bytes)', 'offset': option_offset + 1, 'length': 1},
+                        {'title': 'Reserved', 'offset': option_offset + 2, 'length': 2},
+                        {'title': f'MTU: {mtu}', 'offset': option_offset + 4, 'length': 4},
+                    ],
+                }
+            )
+        else:
+            children.append(
+                {
+                    'title': f'ICMPv6 Option (Type {option_type})',
+                    'offset': option_offset,
+                    'length': actual_length,
+                    'children': [
+                        {'title': f'Type: {option_type}', 'offset': option_offset, 'length': 1},
+                        {'title': f'Length: {option_units} ({option_length} bytes)', 'offset': option_offset + 1, 'length': 1},
+                    ],
+                }
+            )
+
+        cursor += option_length
+
+    return children
+
+
 def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     icmpv6_type = int(payload[0]) if len(payload) >= 1 else 0
     code = int(payload[1]) if len(payload) >= 2 else 0
@@ -1496,6 +1707,51 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 }
             )
             cursor += record_length
+    elif icmpv6_type == 133:
+        reserved = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
+        children.extend([
+            {'title': f'Reserved: {reserved:08x}', 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0},
+        ])
+        if len(payload) > 8:
+            children.extend(_icmpv6_nd_option_nodes(payload[8:], offset + 8))
+    elif icmpv6_type == 134:
+        cur_hop_limit = int(payload[4]) if len(payload) >= 5 else 0
+        flags = int(payload[5]) if len(payload) >= 6 else 0
+        router_lifetime = int.from_bytes(payload[6:8], 'big') if len(payload) >= 8 else 0
+        reachable_time = int.from_bytes(payload[8:12], 'big') if len(payload) >= 12 else 0
+        retrans_timer = int.from_bytes(payload[12:16], 'big') if len(payload) >= 16 else 0
+        prf = (flags >> 3) & 0x03
+        prf_name = {
+            0: 'Medium',
+            1: 'High',
+            2: 'Reserved',
+            3: 'Low',
+        }.get(prf, f'Value {prf}')
+        flag_labels: List[str] = []
+        if flags & 0x80:
+            flag_labels.append('Managed address configuration')
+        if flags & 0x40:
+            flag_labels.append('Other configuration')
+        if flags & 0x20:
+            flag_labels.append('Home Agent')
+        if prf != 0:
+            flag_labels.append(f'Prf (Default Router Preference): {prf_name}')
+        if flags & 0x04:
+            flag_labels.append('ND Proxy')
+        if flags & 0x02:
+            flag_labels.append('SNAC Router')
+        flags_title = f'Flags: 0x{flags:02x}'
+        if flag_labels:
+            flags_title += f', {", ".join(flag_labels)}'
+        children.extend([
+            {'title': f'Cur hop limit: {cur_hop_limit}', 'offset': offset + 4, 'length': 1 if len(payload) >= 5 else 0},
+            {'title': flags_title, 'offset': offset + 5, 'length': 1 if len(payload) >= 6 else 0, 'children': _icmpv6_ra_flag_children(flags, offset + 5)},
+            {'title': f'Router lifetime (s): {router_lifetime}', 'offset': offset + 6, 'length': 2 if len(payload) >= 8 else 0},
+            {'title': f'Reachable time (ms): {reachable_time}', 'offset': offset + 8, 'length': 4 if len(payload) >= 12 else 0},
+            {'title': f'Retrans timer (ms): {retrans_timer}', 'offset': offset + 12, 'length': 4 if len(payload) >= 16 else 0},
+        ])
+        if len(payload) > 16:
+            children.extend(_icmpv6_nd_option_nodes(payload[16:], offset + 16))
     elif icmpv6_type == 135:
         reserved = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
         target = _ipv6_address_text(payload[8:24]) if len(payload) >= 24 else '::'
@@ -1503,6 +1759,27 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             {'title': f'Reserved: {reserved:08x}', 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0},
             {'title': f'Target Address: {target}', 'offset': offset + 8, 'length': 16 if len(payload) >= 24 else 0},
         ])
+        if len(payload) > 24:
+            children.extend(_icmpv6_nd_option_nodes(payload[24:], offset + 24))
+    elif icmpv6_type == 136:
+        flags = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
+        target = _ipv6_address_text(payload[8:24]) if len(payload) >= 24 else '::'
+        flag_labels: List[str] = []
+        if flags & 0x80000000:
+            flag_labels.append('Router')
+        if flags & 0x40000000:
+            flag_labels.append('Solicited')
+        if flags & 0x20000000:
+            flag_labels.append('Override')
+        flags_title = f'Flags: 0x{flags:08x}'
+        if flag_labels:
+            flags_title += f', {", ".join(flag_labels)}'
+        children.extend([
+            {'title': flags_title, 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0, 'children': _icmpv6_na_flag_children(flags, offset + 4)},
+            {'title': f'Target Address: {target}', 'offset': offset + 8, 'length': 16 if len(payload) >= 24 else 0},
+        ])
+        if len(payload) > 24:
+            children.extend(_icmpv6_nd_option_nodes(payload[24:], offset + 24))
 
     return {
         'title': 'Internet Control Message Protocol v6',
@@ -1990,7 +2267,21 @@ def _ipv6_address_children(address: str, offset: int, is_source: bool) -> List[D
         ]
 
     if lower.startswith('fe80'):
-        return [{'title': '[Address Space: Link-local Unicast]', 'offset': offset, 'length': 16}]
+        return [
+            {'title': '[Address Space: Link-Local Unicast]', 'offset': offset, 'length': 16},
+            {
+                'title': '[Special-Purpose Allocation: Link-Local Unicast]',
+                'offset': offset,
+                'length': 16,
+                'children': [
+                    {'title': '[Source: True]', 'offset': offset, 'length': 16},
+                    {'title': '[Destination: True]', 'offset': offset, 'length': 16},
+                    {'title': '[Forwardable: False]', 'offset': offset, 'length': 16},
+                    {'title': '[Globally Reachable: False]', 'offset': offset, 'length': 16},
+                    {'title': '[Reserved-by-Protocol: True]', 'offset': offset, 'length': 16},
+                ],
+            },
+        ]
 
     return [{'title': '[Address Space: Global Unicast]', 'offset': offset, 'length': 16}]
 
@@ -2134,6 +2425,13 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
             'children': _ipv6_address_children(dst, offset + 24, False),
         },
     ]
+
+    source_slaac_mac = _ipv6_slaac_mac(src)
+    destination_slaac_mac = _ipv6_slaac_mac(dst)
+    if source_slaac_mac:
+        children.append({'title': f'[Source SLAAC MAC: {_mac_display(source_slaac_mac)}]', 'offset': offset + 8, 'length': 16})
+    if destination_slaac_mac:
+        children.append({'title': f'[Destination SLAAC MAC: {_mac_display(destination_slaac_mac)}]', 'offset': offset + 24, 'length': 16})
 
     if stream_index >= 0:
         children.append({
@@ -4791,14 +5089,58 @@ def _dns_section(layer, offset: int) -> Dict[str, Any]:
     }
 
 
-def _dhcp_section(layer, offset: int) -> Dict[str, Any]:
+def _dhcp_section(bootp_layer, layer, offset: int) -> Dict[str, Any]:
 
-    options = getattr(layer, 'options', [])
+    raw = bytes(bootp_layer) if bootp_layer is not None else bytes(layer)
+    raw_length = len(raw)
 
-    option_children = []
+    def _ipv4_text(data: bytes) -> str:
+        return '.'.join(str(int(byte)) for byte in data[:4]) if len(data) >= 4 else '0.0.0.0'
+
+    def _text_or_not_given(data: bytes, title: str, field_offset: int, field_length: int) -> Dict[str, Any]:
+        text = bytes(data[:field_length]).rstrip(b'\x00').decode('utf-8', errors='ignore')
+        if text:
+            return {'title': f'{title}: {text}', 'offset': field_offset, 'length': field_length}
+        return {'title': f'{title} not given', 'offset': field_offset, 'length': field_length}
+
+    def _duration_text(seconds: int) -> str:
+        value = int(seconds)
+        if value > 0 and value % 86400 == 0:
+            days = value // 86400
+            return f'{days} day ({value})' if days == 1 else f'{days} days ({value})'
+        return str(value)
+
+    def _padding_title(padding: bytes) -> str:
+        padding_hex = padding.hex()
+        if len(padding) > 16:
+            return f'Padding […]: {padding_hex}'
+        return f'Padding: {padding_hex}'
+
+    def _param_request_name(code: int) -> str:
+        return {
+            1: 'Subnet Mask',
+            2: 'Time Offset',
+            3: 'Router',
+            6: 'Domain Name Server',
+            12: 'Host Name',
+            15: 'Domain Name',
+            26: 'Interface MTU',
+            28: 'Broadcast Address',
+            33: 'Static Route',
+            42: 'Network Time Protocol Servers',
+            44: 'NetBIOS over TCP/IP Name Server',
+            47: 'NetBIOS over TCP/IP Scope',
+            50: 'Requested IP Address',
+            51: 'IP Address Lease Time',
+            54: 'DHCP Server Identifier',
+            55: 'Parameter Request List',
+            119: 'Domain Search',
+            121: 'Classless Static Route',
+            249: 'Private/Classless Static Route (Microsoft)',
+            252: 'Private/Proxy autodiscovery',
+        }.get(int(code), f'Option {int(code)}')
 
     dhcp_type_names = {
-
         1: 'Discover',
         2: 'Offer',
         3: 'Request',
@@ -4809,146 +5151,419 @@ def _dhcp_section(layer, offset: int) -> Dict[str, Any]:
         8: 'Inform',
     }
 
-    for item in options:
+    op = int(getattr(bootp_layer, 'op', 0) or 0) if bootp_layer is not None else 0
+    htype = int(getattr(bootp_layer, 'htype', 0) or 0) if bootp_layer is not None else 0
+    hlen = int(getattr(bootp_layer, 'hlen', 0) or 0) if bootp_layer is not None else 0
+    hops = int(getattr(bootp_layer, 'hops', 0) or 0) if bootp_layer is not None else 0
+    xid = int(getattr(bootp_layer, 'xid', 0) or 0) if bootp_layer is not None else 0
+    secs = int(getattr(bootp_layer, 'secs', 0) or 0) if bootp_layer is not None else 0
+    flags = int(getattr(bootp_layer, 'flags', 0) or 0) if bootp_layer is not None else 0
+    ciaddr = str(getattr(bootp_layer, 'ciaddr', '0.0.0.0') or '0.0.0.0') if bootp_layer is not None else '0.0.0.0'
+    yiaddr = str(getattr(bootp_layer, 'yiaddr', '0.0.0.0') or '0.0.0.0') if bootp_layer is not None else '0.0.0.0'
+    siaddr = str(getattr(bootp_layer, 'siaddr', '0.0.0.0') or '0.0.0.0') if bootp_layer is not None else '0.0.0.0'
+    giaddr = str(getattr(bootp_layer, 'giaddr', '0.0.0.0') or '0.0.0.0') if bootp_layer is not None else '0.0.0.0'
 
-        if not isinstance(item, tuple):
+    chaddr_field = raw[28:44] if len(raw) >= 44 else b''
+    client_mac = _mac_text_from_bytes(chaddr_field[:hlen]) if hlen > 0 else ''
+    client_padding = chaddr_field[hlen:16] if len(chaddr_field) >= 16 else b''
+    hardware_name = {1: 'Ethernet'}.get(htype, f'Hardware type {htype}')
+    op_name = {1: 'Boot Request', 2: 'Boot Reply'}.get(op, f'Operation {op}')
+    flag_name = 'Broadcast' if flags & 0x8000 else 'Unicast'
+    magic_cookie = raw[236:240] if len(raw) >= 240 else b''
 
-            option_children.append({
-                'title': str(item)
-            })
+    message_type = None
+    children: List[Dict[str, Any]] = [
+        {'title': f'Message type: {op_name} ({op})', 'offset': offset, 'length': 1 if raw_length >= 1 else 0},
+        {'title': f'Hardware type: {hardware_name} (0x{htype:02x})', 'offset': offset + 1, 'length': 1 if raw_length >= 2 else 0},
+        {'title': f'Hardware address length: {hlen}', 'offset': offset + 2, 'length': 1 if raw_length >= 3 else 0},
+        {'title': f'Hops: {hops}', 'offset': offset + 3, 'length': 1 if raw_length >= 4 else 0},
+        {'title': f'Transaction ID: 0x{xid:08x}', 'offset': offset + 4, 'length': 4 if raw_length >= 8 else 0},
+        {'title': f'Seconds elapsed: {secs}', 'offset': offset + 8, 'length': 2 if raw_length >= 10 else 0},
+        {
+            'title': f'Bootp flags: 0x{flags:04x} ({flag_name})',
+            'offset': offset + 10,
+            'length': 2 if raw_length >= 12 else 0,
+            'children': [
+                {
+                    'title': f'{"1" if (flags & 0x8000) else "0"}... .... .... .... = Broadcast flag: {"Broadcast" if (flags & 0x8000) else "Unicast"}',
+                    'offset': offset + 10,
+                    'length': 2 if raw_length >= 12 else 0,
+                },
+                {
+                    'title': f'.{format(flags & 0x7FFF, "015b")[:3]} {format(flags & 0x7FFF, "015b")[3:7]} {format(flags & 0x7FFF, "015b")[7:11]} {format(flags & 0x7FFF, "015b")[11:15]} = Reserved flags: 0x{flags & 0x7FFF:04x}',
+                    'offset': offset + 10,
+                    'length': 2 if raw_length >= 12 else 0,
+                },
+            ],
+        },
+        {'title': f'Client IP address: {ciaddr}', 'offset': offset + 12, 'length': 4 if raw_length >= 16 else 0},
+        {'title': f'Your (client) IP address: {yiaddr}', 'offset': offset + 16, 'length': 4 if raw_length >= 20 else 0},
+        {'title': f'Next server IP address: {siaddr}', 'offset': offset + 20, 'length': 4 if raw_length >= 24 else 0},
+        {'title': f'Relay agent IP address: {giaddr}', 'offset': offset + 24, 'length': 4 if raw_length >= 28 else 0},
+        {'title': f'Client MAC address: {_mac_display(client_mac)}', 'offset': offset + 28, 'length': min(max(hlen, 0), 16) if raw_length >= 29 else 0},
+    ]
 
+    if client_padding:
+        children.append({'title': f'Client hardware address padding: {client_padding.hex()}', 'offset': offset + 28 + hlen, 'length': len(client_padding)})
+
+    if raw_length >= 44:
+        children.append(_text_or_not_given(raw[44:108], 'Server host name', offset + 44, 64))
+    if raw_length >= 108:
+        children.append(_text_or_not_given(raw[108:236], 'Boot file name', offset + 108, 128))
+    if magic_cookie:
+        cookie_title = 'Magic cookie: DHCP' if magic_cookie == b'\x63\x82\x53\x63' else f'Magic cookie: {magic_cookie.hex()}'
+        children.append({'title': cookie_title, 'offset': offset + 236, 'length': len(magic_cookie)})
+
+    option_children: List[Dict[str, Any]] = []
+    cursor = 240 if raw_length >= 240 else raw_length
+    while cursor < raw_length:
+        option_code = int(raw[cursor])
+        option_offset = offset + cursor
+
+        if option_code == 0:
+            cursor += 1
             continue
 
-        key = item[0]
-
-        value = item[1] if len(item) > 1 else None
-
-        # ---- MESSAGE TYPE ----
-
-        if key == 'message-type':
-
-            msg_name = dhcp_type_names.get(
-                value,
-                str(value)
+        if option_code == 255:
+            option_children.append(
+                {
+                    'title': 'Option: (255) End',
+                    'offset': option_offset,
+                    'length': 1,
+                    'children': [
+                        {'title': 'Option End: 255', 'offset': option_offset, 'length': 1},
+                    ],
+                }
             )
+            cursor += 1
+            if cursor < raw_length:
+                padding = raw[cursor:]
+                if padding:
+                    option_children.append({'title': _padding_title(padding), 'offset': offset + cursor, 'length': len(padding)})
+            break
 
-            option_children.append({
+        if cursor + 2 > raw_length:
+            break
 
-                'title':
-                    f'Option: (53) DHCP Message Type '
-                    f'({msg_name})'
-            })
+        option_length = int(raw[cursor + 1])
+        actual_length = min(option_length, raw_length - (cursor + 2))
+        value = raw[cursor + 2:cursor + 2 + actual_length]
+        option_node: Dict[str, Any]
 
-        # ---- HOSTNAME ----
-
-        elif key == 'hostname':
-
-            option_children.append({
-
-                'title':
-                    f'Option: (12) Host Name = {value}'
-            })
-
-        # ---- SERVER ID ----
-
-        elif key == 'server_id':
-
-            option_children.append({
-
-                'title':
-                    f'Option: (54) DHCP Server Identifier = {value}'
-            })
-
-        # ---- LEASE TIME ----
-
-        elif key == 'lease_time':
-
-            option_children.append({
-
-                'title':
-                    f'Option: (51) IP Address Lease Time = '
-                    f'{value} seconds'
-            })
-
-        # ---- PARAM REQUEST LIST ----
-
-        elif key == 'param_req_list':
-
-            params = ', '.join(
-                str(v)
-                for v in value
-            ) if isinstance(value, list) else str(value)
-
-            option_children.append({
-
-                'title':
-                    f'Option: (55) Parameter Request List',
-
+        if option_code == 53:
+            message_type = int(value[0]) if value else 0
+            message_name = dhcp_type_names.get(message_type, str(message_type))
+            option_node = {
+                'title': f'Option: (53) DHCP Message Type ({message_name})',
+                'offset': option_offset,
+                'length': 2 + actual_length,
                 'children': [
-
-                    {
-                        'title':
-                            f'Parameter Request List Item: {params}'
-                    }
-                ]
-            })
-
-        # ---- VENDOR CLASS ----
-
-        elif key == 'vendor_class_id':
-
-            option_children.append({
-
-                'title':
-                    f'Option: (60) Vendor class identifier = {value}'
-            })
-
-        # ---- ROUTER ----
-
-        elif key == 'router':
-
-            option_children.append({
-
-                'title':
-                    f'Option: (3) Router = {value}'
-            })
-
-        # ---- DNS ----
-
-        elif key == 'name_server':
-
-            option_children.append({
-
-                'title':
-                    f'Option: (6) Domain Name Server = {value}'
-            })
-
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'DHCP: {message_name} ({message_type})', 'offset': option_offset + 2, 'length': 1 if actual_length >= 1 else 0},
+                ],
+            }
+        elif option_code == 12:
+            host_name = value.decode('utf-8', errors='ignore')
+            option_node = {
+                'title': 'Option: (12) Host Name',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'Host Name: {host_name}', 'offset': option_offset + 2, 'length': actual_length},
+                ],
+            }
+        elif option_code == 50:
+            requested_ip = _ipv4_text(value)
+            option_node = {
+                'title': f'Option: (50) Requested IP Address ({requested_ip})',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'Requested IP Address: {requested_ip}', 'offset': option_offset + 2, 'length': 4 if actual_length >= 4 else actual_length},
+                ],
+            }
+        elif option_code == 51:
+            lease_time = int.from_bytes(value[:4], 'big') if len(value) >= 4 else 0
+            option_node = {
+                'title': 'Option: (51) IP Address Lease Time',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'IP Address Lease Time: {_duration_text(lease_time)}', 'offset': option_offset + 2, 'length': 4 if actual_length >= 4 else actual_length},
+                ],
+            }
+        elif option_code == 54:
+            server_id = _ipv4_text(value)
+            option_node = {
+                'title': f'Option: (54) DHCP Server Identifier ({server_id})',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'DHCP Server Identifier: {server_id}', 'offset': option_offset + 2, 'length': 4 if actual_length >= 4 else actual_length},
+                ],
+            }
+        elif option_code == 55:
+            item_children = [
+                {'title': f'Parameter Request List Item: ({int(code)}) {_param_request_name(int(code))}', 'offset': option_offset + 2 + index, 'length': 1}
+                for index, code in enumerate(value)
+            ]
+            option_node = {
+                'title': 'Option: (55) Parameter Request List',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                ] + item_children,
+            }
+        elif option_code == 1:
+            subnet_mask = _ipv4_text(value)
+            option_node = {
+                'title': f'Option: (1) Subnet Mask ({subnet_mask})',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'Subnet Mask: {subnet_mask}', 'offset': option_offset + 2, 'length': 4 if actual_length >= 4 else actual_length},
+                ],
+            }
+        elif option_code == 3:
+            routers = [_ipv4_text(value[index:index + 4]) for index in range(0, len(value), 4) if len(value[index:index + 4]) == 4]
+            option_node = {
+                'title': 'Option: (3) Router',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                ] + [
+                    {'title': f'Router: {router}', 'offset': option_offset + 2 + (index * 4), 'length': 4}
+                    for index, router in enumerate(routers)
+                ],
+            }
+        elif option_code == 6:
+            name_servers = [_ipv4_text(value[index:index + 4]) for index in range(0, len(value), 4) if len(value[index:index + 4]) == 4]
+            option_node = {
+                'title': 'Option: (6) Domain Name Server',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                ] + [
+                    {'title': f'Domain Name Server: {server}', 'offset': option_offset + 2 + (index * 4), 'length': 4}
+                    for index, server in enumerate(name_servers)
+                ],
+            }
+        elif option_code == 15:
+            domain_name = value.decode('utf-8', errors='ignore')
+            option_node = {
+                'title': 'Option: (15) Domain Name',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'Domain Name: {domain_name}', 'offset': option_offset + 2, 'length': actual_length},
+                ],
+            }
         else:
+            option_node = {
+                'title': f'Option: ({option_code}) {_param_request_name(option_code)}',
+                'offset': option_offset,
+                'length': 2 + actual_length,
+                'children': [
+                    {'title': f'Length: {option_length}', 'offset': option_offset + 1, 'length': 1},
+                    {'title': f'Value: {value.hex()}', 'offset': option_offset + 2, 'length': actual_length},
+                ],
+            }
 
-            option_children.append({
+        option_children.append(option_node)
+        cursor += 2 + option_length
 
-                'title':
-                    f'{key}: {value}'
-            })
+    message_name = dhcp_type_names.get(int(message_type or 0), 'DHCP')
 
     return {
-
-        'title':
-            'Dynamic Host Configuration Protocol',
-
+        'title': f'Dynamic Host Configuration Protocol ({message_name})',
         'offset': offset,
-        'length': len(layer),
+        'length': raw_length,
+        'children': children + option_children,
+    }
 
-        'children':
 
-            option_children
+def _dhcpv6_message_name(msg_type: int) -> str:
+    return {
+        1: 'Solicit',
+        2: 'Advertise',
+        3: 'Request',
+        4: 'Confirm',
+        5: 'Renew',
+        6: 'Rebind',
+        7: 'Reply',
+        8: 'Release',
+        9: 'Decline',
+        10: 'Reconfigure',
+        11: 'Information-request',
+        12: 'Relay-forward',
+        13: 'Relay-reply',
+    }.get(int(msg_type), f'DHCPv6 Type {int(msg_type)}')
 
-            if option_children else [
 
+def _dhcpv6_option_name(code: int) -> str:
+    return {
+        1: 'Client Identifier',
+        2: 'Server Identifier',
+        6: 'Option Request',
+        8: 'Elapsed time',
+        23: 'DNS recursive name server',
+        39: 'Client Fully Qualified Domain Name',
+    }.get(int(code), f'Option {int(code)}')
+
+
+def _dhcpv6_duid_type_name(duid_type: int) -> str:
+    return {
+        1: 'link-layer address plus time',
+        2: 'enterprise number',
+        3: 'link-layer address',
+        4: 'Universally Unique IDentifier (UUID)',
+    }.get(int(duid_type), f'DUID Type {int(duid_type)}')
+
+
+def _dhcpv6_hardware_type_name(hw_type: int) -> str:
+    return {
+        1: 'Ethernet',
+    }.get(int(hw_type), f'Hardware type {int(hw_type)}')
+
+
+def _dhcpv6_requested_option_name(code: int) -> str:
+    return {
+        1: 'Client Identifier',
+        2: 'Server Identifier',
+        23: 'DNS recursive name server',
+        24: 'Domain Search List',
+    }.get(int(code), _dhcpv6_option_name(code))
+
+
+def _dhcpv6_duid_time_text(raw_time: int) -> str:
+    signed_time = int(raw_time)
+    if signed_time & 0x80000000:
+        signed_time -= 0x100000000
+    try:
+        dt = datetime.fromtimestamp(946684800 + signed_time, tz=timezone.utc).astimezone()
+        return f'{dt.strftime("%b")} {dt.day:2d}, {dt.year} {dt.strftime("%H:%M:%S")}.000000000 {dt.tzname() or "UTC"}'
+    except Exception:
+        return str(int(raw_time))
+
+
+def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    msg_type = int(payload[0]) if len(payload) >= 1 else 0
+    xid = int.from_bytes(payload[1:4], 'big') if len(payload) >= 4 else 0
+    children: List[Dict[str, Any]] = [
+        {'title': f'Message type: {_dhcpv6_message_name(msg_type)} ({msg_type})', 'offset': offset, 'length': 1 if len(payload) >= 1 else 0},
+        {'title': f'Transaction ID: 0x{xid:06x}', 'offset': offset + 1, 'length': 3 if len(payload) >= 4 else 0},
+    ]
+
+    cursor = 4
+    while cursor + 4 <= len(payload):
+        option_code = int.from_bytes(payload[cursor:cursor + 2], 'big')
+        option_length = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+        value_start = cursor + 4
+        value_end = value_start + option_length
+        if value_end > len(payload):
+            break
+
+        option_offset = offset + cursor
+        option_value_offset = offset + value_start
+        option_value = payload[value_start:value_end]
+        option_name = _dhcpv6_option_name(option_code)
+        option_children: List[Dict[str, Any]] = [
+            {'title': f'Option: {option_name} ({option_code})', 'offset': option_offset, 'length': 2},
+            {'title': f'Length: {option_length}', 'offset': option_offset + 2, 'length': 2},
+        ]
+
+        if option_code in {1, 2}:
+            duid_type = int.from_bytes(option_value[0:2], 'big') if len(option_value) >= 2 else 0
+            option_children.extend([
+                {'title': f'DUID: {option_value.hex()}', 'offset': option_value_offset, 'length': len(option_value)},
+                {'title': f'DUID Type: {_dhcpv6_duid_type_name(duid_type)} ({duid_type})', 'offset': option_value_offset, 'length': min(2, len(option_value))},
+            ])
+            if duid_type == 1 and len(option_value) >= 14:
+                hardware_type = int.from_bytes(option_value[2:4], 'big')
+                duid_time = int.from_bytes(option_value[4:8], 'big')
+                link_layer = _mac_text_from_bytes(option_value[8:14])
+                option_children.extend([
+                    {'title': f'Hardware type: {_dhcpv6_hardware_type_name(hardware_type)} ({hardware_type})', 'offset': option_value_offset + 2, 'length': 2},
+                    {'title': f'DUID Time: {_dhcpv6_duid_time_text(duid_time)}', 'offset': option_value_offset + 4, 'length': 4},
+                    {'title': f'Link-layer address: {link_layer}', 'offset': option_value_offset + 8, 'length': 6},
+                    {'title': f'Link-layer address (Ethernet): {_mac_display(link_layer)}', 'offset': option_value_offset + 8, 'length': 6},
+                ])
+            elif duid_type == 4 and len(option_value) >= 18:
+                option_children.append({'title': f'UUID: {option_value[2:18].hex()}', 'offset': option_value_offset + 2, 'length': 16})
+        elif option_code == 6:
+            for index in range(0, len(option_value), 2):
+                if index + 2 > len(option_value):
+                    break
+                requested_code = int.from_bytes(option_value[index:index + 2], 'big')
+                option_children.append(
+                    {
+                        'title': f'Requested Option code: {_dhcpv6_requested_option_name(requested_code)} ({requested_code})',
+                        'offset': option_value_offset + index,
+                        'length': 2,
+                    }
+                )
+        elif option_code == 8:
+            elapsed = int.from_bytes(option_value[:2], 'big') if len(option_value) >= 2 else 0
+            option_children.append({'title': f'Elapsed time: {elapsed * 10}ms', 'offset': option_value_offset, 'length': min(2, len(option_value))})
+        elif option_code == 23:
+            for index in range(0, len(option_value), 16):
+                if index + 16 > len(option_value):
+                    break
+                option_children.append(
+                    {
+                        'title': f' {1 + (index // 16)} DNS server address: {_ipv6_address_text(option_value[index:index + 16])}',
+                        'offset': option_value_offset + index,
+                        'length': 16,
+                    }
+                )
+        elif option_code == 39:
+            option_children.append(
                 {
-                    'title': 'No DHCP options'
+                    'title': 'Only the following message types are permitted to use OPTION_CLIENT_FQDN:\nSOLICIT, REQUEST, RENEW, REBIND, ADVERTISE, and REPLY',
+                    'children': [
+                        {
+                            'title': 'This message type is not permitted to use OPTION_CLIENT_FQDN',
+                            'children': [
+                                {
+                                    'title': '[Expert Info (Error/Protocol): This message type is not permitted to use OPTION_CLIENT_FQDN]',
+                                    'children': [
+                                        {'title': '[This message type is not permitted to use OPTION_CLIENT_FQDN]'},
+                                        {'title': '[Severity level: Error]'},
+                                        {'title': '[Group: Protocol]'},
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
                 }
-            ]
+            )
+        else:
+            option_children.append({'title': f'Value: {option_value.hex()}', 'offset': option_value_offset, 'length': len(option_value)})
+
+        children.append(
+            {
+                'title': option_name,
+                'offset': option_offset,
+                'length': 4 + len(option_value),
+                'children': option_children,
+            }
+        )
+        cursor = value_end
+
+    return {
+        'title': 'DHCPv6',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
     }
 
 

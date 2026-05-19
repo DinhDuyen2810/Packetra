@@ -123,6 +123,9 @@ class PacketParser:
             stream_hint = f'{src} -> {dst}' if src or dst else ''
             if 'WLAN' not in layers:
                 layers.append('WLAN')
+        elif protocol == 'DHCPv6':
+            if not any(str(layer).upper().startswith('DHCP6') or str(layer).upper() == 'DHCPV6' for layer in layers):
+                layers.append('DHCPV6')
         info = self._build_info(packet, protocol, metadata)
 
         if sport is not None or dport is not None:
@@ -2307,18 +2310,53 @@ class PacketParser:
         payload = self._icmpv6_payload_bytes(packet)
         if len(payload) < 4:
             return None
+
+        def _link_layer_address(options: bytes, expected_type: int) -> str | None:
+            cursor = 0
+            while cursor + 2 <= len(options):
+                option_type = int(options[cursor])
+                option_units = int(options[cursor + 1])
+                if option_units <= 0:
+                    break
+                option_length = option_units * 8
+                actual_length = min(option_length, len(options) - cursor)
+                if option_type == expected_type and actual_length >= 8:
+                    return ':'.join(f'{byte:02x}' for byte in options[cursor + 2:cursor + 8])
+                cursor += option_length
+            return None
+
         icmpv6_type = int(payload[0])
         if icmpv6_type == 143:
             return 'Multicast Listener Report Message v2'
+        if icmpv6_type == 133:
+            source_mac = _link_layer_address(payload[8:], 1) if len(payload) > 8 else None
+            return f'Router Solicitation from {source_mac}' if source_mac else 'Router Solicitation'
+        if icmpv6_type == 134:
+            return 'Router Advertisement'
         if icmpv6_type == 135:
             if len(payload) >= 24:
                 target = str(ipaddress.IPv6Address(payload[8:24]))
-                return f'Neighbor Solicitation for {target}'
+                source_mac = _link_layer_address(payload[24:], 1) if len(payload) > 24 else None
+                return f'Neighbor Solicitation for {target} from {source_mac}' if source_mac else f'Neighbor Solicitation for {target}'
             return 'Neighbor Solicitation'
         if icmpv6_type == 136:
             if len(payload) >= 24:
                 target = str(ipaddress.IPv6Address(payload[8:24]))
-                return f'Neighbor Advertisement {target}'
+                flags = int.from_bytes(payload[4:8], 'big')
+                flag_labels = []
+                if flags & 0x80000000:
+                    flag_labels.append('rtr')
+                if flags & 0x40000000:
+                    flag_labels.append('sol')
+                if flags & 0x20000000:
+                    flag_labels.append('ovr')
+                target_mac = _link_layer_address(payload[24:], 2) if len(payload) > 24 else None
+                info = f'Neighbor Advertisement {target}'
+                if flag_labels:
+                    info += f' ({", ".join(flag_labels)})'
+                if target_mac:
+                    info += f' is at {target_mac}'
+                return info
             return 'Neighbor Advertisement'
         return {
             128: 'Echo (ping) request',
@@ -2326,9 +2364,70 @@ class PacketParser:
             130: 'Multicast Listener Query',
             131: 'Multicast Listener Report',
             132: 'Multicast Listener Done',
-            133: 'Router Solicitation',
-            134: 'Router Advertisement',
         }.get(icmpv6_type, f'ICMPv6 Type {icmpv6_type}')
+
+    def _dhcpv6_message_name(self, msg_type: int) -> str:
+        return {
+            1: 'Solicit',
+            2: 'Advertise',
+            3: 'Request',
+            4: 'Confirm',
+            5: 'Renew',
+            6: 'Rebind',
+            7: 'Reply',
+            8: 'Release',
+            9: 'Decline',
+            10: 'Reconfigure',
+            11: 'Information-request',
+            12: 'Relay-forward',
+            13: 'Relay-reply',
+        }.get(int(msg_type), f'DHCPv6 Type {int(msg_type)}')
+
+    def _dhcpv6_payload_bytes(self, packet) -> bytes:
+        udp_layer = self._effective_udp_layer(packet)
+        if udp_layer is None or not packet.haslayer(IPv6):
+            return b''
+        return bytes(udp_layer.payload)
+
+    def _is_dhcpv6_packet(self, packet) -> bool:
+        udp_layer = self._effective_udp_layer(packet)
+        if udp_layer is None or not packet.haslayer(IPv6):
+            return False
+        try:
+            sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            dport = int(getattr(udp_layer, 'dport', 0) or 0)
+        except Exception:
+            return False
+        if sport not in {546, 547} and dport not in {546, 547}:
+            return False
+        payload = bytes(udp_layer.payload)
+        return len(payload) >= 4 and int(payload[0]) in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+
+    def _dhcpv6_client_id(self, payload: bytes) -> str:
+        cursor = 4
+        while cursor + 4 <= len(payload):
+            option_code = int.from_bytes(payload[cursor:cursor + 2], 'big')
+            option_length = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+            value_start = cursor + 4
+            value_end = value_start + option_length
+            if value_end > len(payload):
+                break
+            if option_code == 1:
+                return payload[value_start:value_end].hex()
+            cursor = value_end
+        return ''
+
+    def _dhcpv6_info_text(self, packet) -> str | None:
+        payload = self._dhcpv6_payload_bytes(packet)
+        if len(payload) < 4:
+            return None
+        msg_type = int(payload[0])
+        xid = int.from_bytes(payload[1:4], 'big')
+        info = f'{self._dhcpv6_message_name(msg_type)} XID: 0x{xid:06x}'
+        client_id = self._dhcpv6_client_id(payload)
+        if client_id:
+            info += f' CID: {client_id} '
+        return info
 
     def _guess_protocol(self, packet, metadata: dict | None = None):
         metadata = metadata or {}
@@ -2409,6 +2508,8 @@ class PacketParser:
                 return 'HTTP'
         if packet.haslayer(ARP) and eth_type != 0x8035:
             return 'ARP'
+        if self._is_dhcpv6_packet(packet):
+            return 'DHCPv6'
         if packet.haslayer(DHCP) or packet.haslayer(BOOTP):
             return 'DHCP'
         if packet.haslayer(DNS):
@@ -2799,8 +2900,29 @@ class PacketParser:
                 if getattr(dns, 'qr', 0) == 0:
                     return f'Standard query 0x{getattr(dns, "id", 0):04x} {qname or "(unknown)"}'
                 return f'Standard query response 0x{getattr(dns, "id", 0):04x} {qname or "(unknown)"}'
+            if protocol == 'DHCPv6':
+                return self._dhcpv6_info_text(packet) or 'DHCPv6'
             if protocol == 'DHCP':
-                return 'DHCP Request'  # Simplified
+                bootp_layer = packet[BOOTP] if packet.haslayer(BOOTP) else None
+                dhcp_layer = packet[DHCP] if packet.haslayer(DHCP) else None
+                xid = int(getattr(bootp_layer, 'xid', 0) or 0) if bootp_layer is not None else 0
+                message_type = None
+                if dhcp_layer is not None:
+                    for option in getattr(dhcp_layer, 'options', []):
+                        if isinstance(option, tuple) and option and option[0] == 'message-type':
+                            message_type = int(option[1])
+                            break
+                message_name = {
+                    1: 'Discover',
+                    2: 'Offer',
+                    3: 'Request',
+                    4: 'Decline',
+                    5: 'ACK',
+                    6: 'NAK',
+                    7: 'Release',
+                    8: 'Inform',
+                }.get(message_type, 'Request')
+                return f'DHCP {message_name:<8} - Transaction ID 0x{xid:08x}'
             if protocol == 'HTTP':
                 payload = metadata.get('http_reassembled_payload', self._payload_bytes(packet))
                 kind = str(metadata.get('http_kind', '') or '') or self._http_payload_kind(payload)

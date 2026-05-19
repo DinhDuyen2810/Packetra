@@ -19,6 +19,7 @@ class PacketTable(QTableWidget):
         'QUIC': QColor(216, 237, 255),
         'HTTP': QColor(255, 245, 219),
         'DHCP': QColor(229, 245, 238),
+        'DHCPv6': QColor(229, 245, 238),
     }
 
     def __init__(self):
