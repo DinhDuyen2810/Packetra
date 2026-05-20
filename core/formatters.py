@@ -3414,21 +3414,36 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
             children.append({
                 'title': f'[Reassembled PDU in frame: {int(_pdu_frame)}]',
             })
-            # Use the actual contribution length, not the full TCP payload length
+            # Only map the bytes this frame actually contributes to the reassembled PDU.
             _seg_data_len = int(metadata.get('tls_segment_data_length') or metadata.get('tcp_segment_data_length') or payload_len)
-            # Use the actual start offset within TCP payload (fragment may start after earlier complete records)
             _seg_data_off = int(metadata.get('tls_segment_data_offset') or metadata.get('tcp_segment_data_offset') or 0)
+            _seg_data_off = max(0, min(_seg_data_off, payload_len))
+            _seg_data_len = max(0, min(_seg_data_len, payload_len - _seg_data_off))
             children.append({
                 'title': f'TCP segment data ({_seg_data_len} bytes)',
                 'offset': offset + tcp_header_len + _seg_data_off,
                 'length': _seg_data_len,
             })
         elif metadata.get('tcp_reassembled_segments', None) or metadata.get('http_reassembled_segments', None) or metadata.get('tls_reassembled_segments', None):
-            # For the completing frame: only the first N bytes go towards the reassembled PDU
-            _tls_segs = metadata.get('tls_reassembled_segments') or []
-            _last_seg = _tls_segs[-1] if _tls_segs else {}
-            _seg_data_len = int(_last_seg.get('payload_length', payload_len))
-            _seg_data_off = int(_last_seg.get('tcp_start_offset_in_payload', 0))
+            # For the completing frame, map only this frame's contribution.
+            _frame_no = int(metadata.get('frame_number', 0) or 0)
+            _all_segs = (
+                metadata.get('tls_reassembled_segments')
+                or metadata.get('http_reassembled_segments')
+                or metadata.get('tcp_reassembled_segments')
+                or []
+            )
+            _seg_match = None
+            for _seg in _all_segs:
+                if int(_seg.get('frame_number', 0) or 0) == _frame_no:
+                    _seg_match = _seg
+                    break
+            if _seg_match is None and _all_segs:
+                _seg_match = _all_segs[-1]
+            _seg_data_len = int((_seg_match or {}).get('payload_length', payload_len))
+            _seg_data_off = int((_seg_match or {}).get('tcp_start_offset_in_payload', 0))
+            _seg_data_off = max(0, min(_seg_data_off, payload_len))
+            _seg_data_len = max(0, min(_seg_data_len, payload_len - _seg_data_off))
             children.append({
                 'title': f'TCP segment data ({_seg_data_len} bytes)',
                 'offset': offset + tcp_header_len + _seg_data_off,
@@ -5200,13 +5215,15 @@ def _dns_read_name(data: bytes, start: int, _depth: int = 0) -> tuple[str, int]:
     return '.'.join(part for part in labels if part), consumed
 
 
-def _dns_rdata_text(data: bytes, rr_type: int) -> str:
+def _dns_rdata_text(data: bytes, rr_type: int, full_raw: bytes | None = None, rdata_offset: int = 0) -> str:
     if rr_type == 1 and len(data) == 4:
         return str(ipaddress.IPv4Address(data))
     if rr_type == 28 and len(data) == 16:
         return str(ipaddress.IPv6Address(data))
     if rr_type in {2, 5, 12}:
-        name, _ = _dns_read_name(data, 0)
+        source = full_raw if full_raw is not None else data
+        start = rdata_offset if full_raw is not None else 0
+        name, _ = _dns_read_name(source, start)
         return name
     return data.hex()
 
@@ -5332,10 +5349,17 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             if rdata_end > len(raw):
                 break
             rdata_bytes = raw[rdata_start:rdata_end]
-            rdata_text = _dns_rdata_text(rdata_bytes, rr_type)
+            rdata_text = _dns_rdata_text(rdata_bytes, rr_type, raw, rdata_start)
             type_title = f'Type: {_dns_type_name(rr_type)} ({rr_type})'
             if rr_type == 1:
                 type_title += ' (Host Address)'
+            value_title = 'Address'
+            if rr_type in {2, 5, 12}:
+                value_title = {
+                    2: 'Name Server',
+                    5: 'Canonical Name',
+                    12: 'Domain Name',
+                }.get(rr_type, 'Name')
             items.append({
                 'title': f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}, addr {rdata_text}',
                 'offset': offset + pos,
@@ -5346,7 +5370,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                     {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2},
                     {'title': f'Time to live: {ttl} ({ttl} seconds)', 'offset': offset + next_pos + 4, 'length': 4},
                     {'title': f'Data length: {rdlen}', 'offset': offset + next_pos + 8, 'length': 2},
-                    {'title': f'Address: {rdata_text}', 'offset': offset + rdata_start, 'length': rdlen},
+                    {'title': f'{value_title}: {rdata_text}', 'offset': offset + rdata_start, 'length': rdlen},
                 ],
             })
             pos = rdata_end
@@ -5368,11 +5392,31 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
 
     authorities, _ = parse_rr_section(nscount, 'Authorities')
     if authorities:
-        children.append({'title': 'Authorities', 'children': authorities})
+        authority_start = authorities[0].get('offset', offset)
+        authority_end = max(
+            int(item.get('offset', authority_start) or authority_start) + int(item.get('length', 0) or 0)
+            for item in authorities
+        )
+        children.append({
+            'title': 'Authorities',
+            'offset': authority_start,
+            'length': max(0, authority_end - authority_start),
+            'children': authorities,
+        })
 
     additionals, _ = parse_rr_section(arcount, 'Additional records')
     if additionals:
-        children.append({'title': 'Additional records', 'children': additionals})
+        additional_start = additionals[0].get('offset', offset)
+        additional_end = max(
+            int(item.get('offset', additional_start) or additional_start) + int(item.get('length', 0) or 0)
+            for item in additionals
+        )
+        children.append({
+            'title': 'Additional records',
+            'offset': additional_start,
+            'length': max(0, additional_end - additional_start),
+            'children': additionals,
+        })
 
     response_frame = metadata.get('dns_response_frame')
     if response_frame is not None:
@@ -6093,47 +6137,81 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
     }
 
     # ─── Build Name (issuer/subject) tree ────────────────────────────────────
-    def _build_name_tree(name_raw_der: bytes, label: str) -> dict:
+    def _build_name_tree(name_raw_der: bytes, label: str, tlv_start: int, tlv_len: int, val_start: int) -> dict:
         rdn_items, name_parts = [], []
-        for set_tag, set_val in _der_tlv(name_raw_der):
+        for set_tag, set_val, set_start, set_len_tlv, set_val_start in _der_tlv_pos(name_raw_der, base=val_start):
             if set_tag != 0x31:
                 continue
-            for seq_tag, seq_val in _der_tlv(set_val):
+            set_children = []
+            for seq_tag, seq_val, seq_start, seq_len_tlv, seq_val_start in _der_tlv_pos(set_val, base=set_val_start):
                 if seq_tag != 0x30:
                     continue
-                items = _der_tlv(seq_val)
+                items = _der_tlv_pos(seq_val, base=seq_val_start)
                 if len(items) < 2 or items[0][0] != 0x06:
                     continue
-                oid = _decode_oid(items[0][1])
+                _, oid_val, oid_start, oid_len_tlv, oid_val_start = items[0]
+                str_tag, str_val, str_start, str_len_tlv, str_val_start = items[1]
+                oid = _decode_oid(oid_val)
                 attr_name = OID_ATTR.get(oid, oid)
-                str_tag, str_val = items[1]
                 try:
                     val = str_val.decode('utf-8')
                 except Exception:
                     val = str_val.hex()
                 name_parts.append(f'{attr_name}={val}')
                 str_type_name = TAG_STR_NAME.get(str_tag, 'uTF8String')
-                str_type_id   = TAG_STR_ID.get(str_tag, 4)
+                str_type_id = TAG_STR_ID.get(str_tag, 4)
                 if oid == '2.5.4.6':
-                    value_node = {'title': f'CountryName: {val}'}
+                    value_node = {
+                        'title': f'CountryName: {val}',
+                        'offset': str_val_start,
+                        'length': len(str_val),
+                    }
                 else:
                     value_node = {
                         'title': f'DirectoryString: {str_type_name} ({str_type_id})',
-                        'children': [{'title': f'{str_type_name}: {val}'}],
+                        'offset': str_start,
+                        'length': str_len_tlv,
+                        'children': [{
+                            'title': f'{str_type_name}: {val}',
+                            'offset': str_val_start,
+                            'length': len(str_val),
+                        }],
                     }
+                set_children.append({
+                    'title': f'RelativeDistinguishedName item ({attr_name}={val})',
+                    'offset': seq_start,
+                    'length': seq_len_tlv,
+                    'children': [
+                        {
+                            'title': f'Object Id: {oid} ({attr_name})',
+                            'offset': oid_val_start,
+                            'length': len(oid_val),
+                        },
+                        value_node,
+                    ],
+                })
+            if set_children:
                 rdn_items.append({
-                    'title': f'RDNSequence item: 1 item ({attr_name}={val})',
-                    'children': [{'title': f'RelativeDistinguishedName item ({attr_name}={val})',
-                                  'children': [{'title': f'Object Id: {oid} ({attr_name})'}, value_node]}],
+                    'title': f'RDNSequence item: {len(set_children)} item{"s" if len(set_children) != 1 else ""}',
+                    'offset': set_start,
+                    'length': set_len_tlv,
+                    'children': set_children,
                 })
         name_str = ','.join(reversed(name_parts))
         return {
             'title': f'{label}: rdnSequence (0)',
-            'children': [{'title': f'rdnSequence: {len(rdn_items)} items ({name_str})', 'children': rdn_items}],
+            'offset': tlv_start,
+            'length': tlv_len,
+            'children': [{
+                'title': f'rdnSequence: {len(rdn_items)} items ({name_str})',
+                'offset': val_start,
+                'length': max(0, tlv_len - (val_start - tlv_start)),
+                'children': rdn_items,
+            }],
         }
 
     # ─── Build Validity tree ─────────────────────────────────────────────────
-    def _build_validity_tree(validity_raw: bytes) -> dict:
+    def _build_validity_tree(validity_raw: bytes, tlv_start: int, tlv_len: int, val_start: int) -> dict:
         import datetime
         def _parse_time(tag, val):
             s = val.decode('ascii', errors='replace').rstrip('Z')
@@ -6147,55 +6225,110 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
                 return dt.strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 return s
-        items = _der_tlv(validity_raw)
+        items = _der_tlv_pos(validity_raw, base=val_start)
         nb_str = _parse_time(items[0][0], items[0][1]) if len(items) >= 1 else '?'
         na_str = _parse_time(items[1][0], items[1][1]) if len(items) >= 2 else '?'
         nb_type = 'utcTime' if (items[0][0] if items else 0x17) == 0x17 else 'generalTime'
         na_type = 'utcTime' if (items[1][0] if len(items) > 1 else 0x17) == 0x17 else 'generalTime'
+        nb_start = items[0][4] if len(items) >= 1 else tlv_start
+        nb_len = len(items[0][1]) if len(items) >= 1 else 0
+        na_start = items[1][4] if len(items) >= 2 else tlv_start
+        na_len = len(items[1][1]) if len(items) >= 2 else 0
         return {
             'title': 'validity',
+            'offset': tlv_start,
+            'length': tlv_len,
             'children': [
-                {'title': f'notBefore: {nb_type} (0)', 'children': [{'title': f'{nb_type}: {nb_str} (UTC)'}]},
-                {'title': f'notAfter: {na_type} (0)',  'children': [{'title': f'{na_type}: {na_str} (UTC)'}]},
+                {
+                    'title': f'notBefore: {nb_type} (0)',
+                    'offset': nb_start,
+                    'length': nb_len,
+                    'children': [{'title': f'{nb_type}: {nb_str} (UTC)', 'offset': nb_start, 'length': nb_len}],
+                },
+                {
+                    'title': f'notAfter: {na_type} (0)',
+                    'offset': na_start,
+                    'length': na_len,
+                    'children': [{'title': f'{na_type}: {na_str} (UTC)', 'offset': na_start, 'length': na_len}],
+                },
             ],
         }
 
     # ─── Build SubjectPublicKeyInfo tree ─────────────────────────────────────
-    def _build_spki_tree(spki_raw: bytes) -> dict:
-        items = _der_tlv(spki_raw)
+    def _build_spki_tree(spki_raw: bytes, tlv_start: int, tlv_len: int, val_start: int) -> dict:
+        items = _der_tlv_pos(spki_raw, base=val_start)
         alg_oid_str = ''
+        alg_tlv_start = tlv_start
+        alg_tlv_len = 0
+        alg_oid_start = tlv_start
+        alg_oid_len = 0
+        bit_tlv_start = tlv_start
+        bit_tlv_len = 0
+        bit_val_start = val_start
         if items and items[0][0] == 0x30:
-            alg_items = _der_tlv(items[0][1])
+            _, alg_val, alg_tlv_start, alg_tlv_len, alg_val_start = items[0]
+            alg_items = _der_tlv_pos(alg_val, base=alg_val_start)
             if alg_items and alg_items[0][0] == 0x06:
-                alg_oid_str = _decode_oid(alg_items[0][1])
+                _, alg_oid_val, _, _, alg_oid_start = alg_items[0]
+                alg_oid_len = len(alg_oid_val)
+                alg_oid_str = _decode_oid(alg_oid_val)
         alg_name = OID_ALG.get(alg_oid_str, alg_oid_str)
         spki_children = [
-            {'title': f'algorithm ({alg_name})', 'children': [{'title': f'Algorithm Id: {alg_oid_str} ({alg_name})'}]},
-            {'title': 'Padding: 0'},
+            {
+                'title': f'algorithm ({alg_name})',
+                'offset': alg_tlv_start,
+                'length': alg_tlv_len,
+                'children': [{
+                    'title': f'Algorithm Id: {alg_oid_str} ({alg_name})',
+                    'offset': alg_oid_start,
+                    'length': alg_oid_len,
+                }],
+            },
         ]
         if len(items) >= 2 and items[1][0] == 0x03:
-            bitstr = items[1][1]
+            _, bitstr, bit_tlv_start, bit_tlv_len, bit_val_start = items[1]
+            spki_children.append({'title': f'Padding: {bitstr[0] if bitstr else 0}', 'offset': bit_val_start, 'length': min(1, len(bitstr))})
             pk_content = bitstr[1:] if bitstr else b''  # skip unused-bits byte
             pk_hex = pk_content.hex()
-            pk_items = _der_tlv(pk_content)
+            pk_items = _der_tlv_pos(pk_content, base=bit_val_start + 1)
             rsa_children = []
+            subject_key_start = bit_val_start + 1
+            subject_key_len = len(pk_content)
             if pk_items and pk_items[0][0] == 0x30:
-                rsa_items = _der_tlv(pk_items[0][1])
+                _, rsa_val, rsa_tlv_start, rsa_tlv_len, rsa_val_start = pk_items[0]
+                subject_key_start = rsa_tlv_start
+                subject_key_len = rsa_tlv_len
+                rsa_items = _der_tlv_pos(rsa_val, base=rsa_val_start)
                 if len(rsa_items) >= 2 and rsa_items[0][0] == 0x02:
-                    mod_int = int.from_bytes(rsa_items[0][1], 'big')
-                    exp_int = int.from_bytes(rsa_items[1][1], 'big') if rsa_items[1][0] == 0x02 else 65537
+                    _, mod_val, _, _, mod_start = rsa_items[0]
+                    mod_int = int.from_bytes(mod_val, 'big')
+                    if rsa_items[1][0] == 0x02:
+                        _, exp_val, _, _, exp_start = rsa_items[1]
+                        exp_int = int.from_bytes(exp_val, 'big')
+                        exp_len_tlv = len(exp_val)
+                    else:
+                        exp_start = subject_key_start
+                        exp_len_tlv = 0
+                        exp_int = 65537
                     rsa_children = [
-                        {'title': f'modulus: 0x{mod_int:x}'},
-                        {'title': f'publicExponent: {exp_int}'},
+                        {'title': f'modulus: 0x{mod_int:x}', 'offset': mod_start, 'length': len(mod_val)},
+                        {'title': f'publicExponent: {exp_int}', 'offset': exp_start, 'length': exp_len_tlv},
                     ]
             spki_children.append({
                 'title': f'subjectPublicKey [...]: {pk_hex[:64]}',
-                'children': [{'title': 'RSA Public Key', 'children': rsa_children}] if rsa_children else [],
+                'offset': subject_key_start,
+                'length': subject_key_len,
+                'children': [{
+                    'title': 'RSA Public Key',
+                    'offset': subject_key_start,
+                    'length': subject_key_len,
+                    'children': rsa_children,
+                }] if rsa_children else [],
             })
-        return {'title': 'subjectPublicKeyInfo', 'children': spki_children}
+        return {'title': 'subjectPublicKeyInfo', 'offset': tlv_start, 'length': tlv_len, 'children': spki_children}
 
     # ─── Build KeyUsage bit-flag children ────────────────────────────────────
-    def _build_ku_flags(ku_byte: int, decipher_only: bool = False) -> list:
+    def _build_ku_flags(ku_byte: int, ku_offset: int, ku_length: int, decipher_only: bool = False) -> list:
         bit_defs = [
             (7, 'digitalSignature'), (6, 'contentCommitment'), (5, 'keyEncipherment'),
             (4, 'dataEncipherment'), (3, 'keyAgreement'), (2, 'keyCertSign'),
@@ -6210,8 +6343,8 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
                 n0[i] = '1' if is_set else '0'
             else:
                 n1[i - 4] = '1' if is_set else '0'
-            children.append({'title': f"{''.join(n0)} {''.join(n1)} = {name}: {'True' if is_set else 'False'}"})
-        children.append({'title': f"0... .... = decipherOnly: {'True' if decipher_only else 'False'}"})
+            children.append({'title': f"{''.join(n0)} {''.join(n1)} = {name}: {'True' if is_set else 'False'}", 'offset': ku_offset, 'length': ku_length})
+        children.append({'title': f"0... .... = decipherOnly: {'True' if decipher_only else 'False'}", 'offset': ku_offset, 'length': ku_length})
         return children
 
     # ─── Parse SCT extension bytes ───────────────────────────────────────────
@@ -6221,18 +6354,20 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
         result = []
         try:
             # The value is OCTET STRING wrapping the SCT list TLS bytes
-            inner = _der_tlv(sct_ext_octet_val)
+            inner = _der_tlv_pos(sct_ext_octet_val, base=0)
             if not inner or inner[0][0] != 0x04:
                 return result
-            sct_list = inner[0][1]
+            _, sct_list, _, _, sct_list_start = inner[0]
             if len(sct_list) < 2:
                 return result
             list_len = int.from_bytes(sct_list[0:2], 'big')
-            result.append({'title': f'Serialized SCT List Length: {list_len}'})
+            result.append({'title': f'Serialized SCT List Length: {list_len}', 'offset': sct_list_start, 'length': 2})
             pos = 2
             while pos + 2 <= len(sct_list):
+                sct_len_start = sct_list_start + pos
                 sct_len = int.from_bytes(sct_list[pos:pos + 2], 'big')
                 pos += 2
+                sct_data_start = sct_list_start + pos
                 sct = sct_list[pos:pos + sct_len]
                 pos += sct_len
                 if len(sct) < 43:
@@ -6259,19 +6394,23 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
                 alg_name = alg_names.get(alg_code, f'0x{alg_code:04x}')
                 sct_node = {
                     'title': f'Signed Certificate Timestamp ({log_name})',
+                    'offset': sct_data_start,
+                    'length': sct_len,
                     'children': [
-                        {'title': f'Serialized SCT Length: {sct_len}'},
-                        {'title': f'SCT Version: {version}'},
-                        {'title': f'Log ID: {log_id_hex}'},
-                        {'title': f'Timestamp: {ts_str}'},
-                        {'title': f'Extensions length: {ext_len}'},
+                        {'title': f'Serialized SCT Length: {sct_len}', 'offset': sct_len_start, 'length': 2},
+                        {'title': f'SCT Version: {version}', 'offset': sct_data_start, 'length': 1},
+                        {'title': f'Log ID: {log_id_hex}', 'offset': sct_data_start + 1, 'length': 32},
+                        {'title': f'Timestamp: {ts_str}', 'offset': sct_data_start + 33, 'length': 8},
+                        {'title': f'Extensions length: {ext_len}', 'offset': sct_data_start + 41, 'length': 2},
                         {'title': f'Signature Algorithm: {alg_name} (0x{alg_code:04x})',
+                         'offset': sct_data_start + sig_pos,
+                         'length': 2,
                          'children': [
-                             {'title': f'Signature Hash Algorithm Hash: {hash_names.get(hash_alg, hash_alg)} ({hash_alg})'},
-                             {'title': f'Signature Hash Algorithm Signature: {sign_names.get(sign_alg, sign_alg)} ({sign_alg})'},
+                             {'title': f'Signature Hash Algorithm Hash: {hash_names.get(hash_alg, hash_alg)} ({hash_alg})', 'offset': sct_data_start + sig_pos, 'length': 1},
+                             {'title': f'Signature Hash Algorithm Signature: {sign_names.get(sign_alg, sign_alg)} ({sign_alg})', 'offset': sct_data_start + sig_pos + 1, 'length': 1},
                          ]},
-                        {'title': f'Signature Length: {sig_len}'},
-                        {'title': f'Signature: {sig_hex}'},
+                        {'title': f'Signature Length: {sig_len}', 'offset': sct_data_start + sig_pos + 2, 'length': 2},
+                        {'title': f'Signature: {sig_hex}', 'offset': sct_data_start + sig_pos + 4, 'length': sig_len},
                     ],
                 }
                 result.append(sct_node)
@@ -6280,181 +6419,248 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
         return result
 
     # ─── Build single Extension tree ─────────────────────────────────────────
-    def _build_ext_tree(ext_oid: str, is_critical: bool, ext_val_octet: bytes) -> dict:
+    def _build_ext_tree(ext_oid: str, is_critical: bool, ext_val_octet: bytes, ext_start: int, ext_len_tlv: int, ext_meta: dict) -> dict:
         ext_name = OID_EXT.get(ext_oid, ext_oid)
-        children: list = [{'title': f'Extension Id: {ext_oid} ({ext_name})'}]
+        children: list = []
+        ext_oid_start = int(ext_meta.get('oid_start', ext_start))
+        ext_oid_len = int(ext_meta.get('oid_len', 0))
+        critical_start = ext_meta.get('critical_start', ext_start)
+        critical_len = int(ext_meta.get('critical_len', 0))
+        octet_tlv_start = int(ext_meta.get('octet_tlv_start', ext_start))
+        octet_tlv_len = int(ext_meta.get('octet_tlv_len', 0))
+        octet_value_start = int(ext_meta.get('octet_value_start', octet_tlv_start))
+        octet_value_len = int(ext_meta.get('octet_value_len', len(ext_val_octet)))
+        children.append({'title': f'Extension Id: {ext_oid} ({ext_name})', 'offset': ext_oid_start, 'length': ext_oid_len})
         if is_critical:
-            children.append({'title': 'critical: True'})
+            children.append({'title': 'critical: True', 'offset': critical_start, 'length': critical_len})
         try:
             val_items = _der_tlv(ext_val_octet)  # OCTET STRING value contains inner DER
             if not val_items:
-                return {'title': f'Extension ({ext_name})', 'children': children}
+                return {'title': f'Extension ({ext_name})', 'offset': ext_start, 'length': ext_len_tlv, 'children': children}
             inner_der = val_items[0][1] if val_items[0][0] == 0x04 else ext_val_octet
 
             # id-ce-keyUsage
             if ext_oid == '2.5.29.15':
-                bs_items = _der_tlv(inner_der)
+                bs_items = _der_tlv_pos(inner_der, base=octet_value_start)
                 if bs_items and bs_items[0][0] == 0x03:
-                    bs_val = bs_items[0][1]
+                    _, bs_val, _, _, bs_val_start = bs_items[0]
                     padding = bs_val[0] if bs_val else 0
                     ku_byte = bs_val[1] if len(bs_val) >= 2 else 0
                     ku_byte2 = bs_val[2] if len(bs_val) >= 3 else 0
                     decipher = bool(ku_byte2 & 0x80)
                     ku_hex = f'{ku_byte:02x}'
                     children.extend([
-                        {'title': f'Padding: {padding}'},
-                        {'title': f'KeyUsage: {ku_hex}', 'children': _build_ku_flags(ku_byte, decipher)},
+                        {'title': f'Padding: {padding}', 'offset': bs_val_start, 'length': min(1, len(bs_val))},
+                        {'title': f'KeyUsage: {ku_hex}', 'offset': bs_val_start + 1, 'length': 1 if len(bs_val) >= 2 else 0, 'children': _build_ku_flags(ku_byte, bs_val_start + 1, 1 if len(bs_val) >= 2 else 0, decipher)},
                     ])
 
             # id-ce-extKeyUsage
             elif ext_oid == '2.5.29.37':
-                seq_items = _der_tlv(inner_der)
+                seq_items = _der_tlv_pos(inner_der, base=octet_value_start)
                 if seq_items and seq_items[0][0] == 0x30:
-                    kp_list = [{'title': f'KeyPurposeId: {_decode_oid(i[1])} ({OID_KP.get(_decode_oid(i[1]), _decode_oid(i[1]))})'}
-                               for i in _der_tlv(seq_items[0][1]) if i[0] == 0x06]
-                    children.append({'title': f'KeyPurposeIDs: {len(kp_list)} items', 'children': kp_list})
+                    _, seq_val, _, _, seq_val_start = seq_items[0]
+                    kp_list = []
+                    for i in _der_tlv_pos(seq_val, base=seq_val_start):
+                        if i[0] != 0x06:
+                            continue
+                        kp_oid = _decode_oid(i[1])
+                        kp_list.append({'title': f'KeyPurposeId: {kp_oid} ({OID_KP.get(kp_oid, kp_oid)})', 'offset': i[4], 'length': len(i[1])})
+                    children.append({'title': f'KeyPurposeIDs: {len(kp_list)} items', 'offset': octet_value_start, 'length': octet_value_len, 'children': kp_list})
 
             # id-ce-basicConstraints
             elif ext_oid == '2.5.29.19':
-                seq_items = _der_tlv(inner_der)
-                bc_inner = _der_tlv(seq_items[0][1]) if seq_items and seq_items[0][0] == 0x30 else []
+                seq_items = _der_tlv_pos(inner_der, base=octet_value_start)
+                bc_inner = []
+                if seq_items and seq_items[0][0] == 0x30:
+                    _, bc_val, _, _, bc_val_start = seq_items[0]
+                    bc_inner = _der_tlv_pos(bc_val, base=bc_val_start)
                 ca_val = False
                 path_len = None
-                for tag, val in bc_inner:
+                ca_start = None
+                ca_len = 0
+                path_start = None
+                path_len_bytes = 0
+                for tag, val, _, _, val_start in bc_inner:
                     if tag == 0x01 and val:    # BOOLEAN
                         ca_val = val[0] != 0
+                        ca_start = val_start
+                        ca_len = len(val)
                     elif tag == 0x02:           # INTEGER
                         path_len = int.from_bytes(val, 'big')
+                        path_start = val_start
+                        path_len_bytes = len(val)
                 if ca_val:
-                    bc_ch = [{'title': 'cA: True'}]
+                    bc_ch = [{'title': 'cA: True', 'offset': ca_start, 'length': ca_len}]
                     if path_len is not None:
-                        bc_ch.append({'title': f'pathLenConstraint: {path_len}'})
-                    children.append({'title': 'BasicConstraintsSyntax', 'children': bc_ch})
+                        bc_ch.append({'title': f'pathLenConstraint: {path_len}', 'offset': path_start, 'length': path_len_bytes})
+                    children.append({'title': 'BasicConstraintsSyntax', 'offset': octet_value_start, 'length': octet_value_len, 'children': bc_ch})
                 else:
-                    children.append({'title': 'BasicConstraintsSyntax [0 length]'})
+                    children.append({'title': 'BasicConstraintsSyntax [0 length]', 'offset': octet_value_start, 'length': octet_value_len})
 
             # id-ce-subjectKeyIdentifier
             elif ext_oid == '2.5.29.14':
-                ski_items = _der_tlv(ext_val_octet)
+                ski_items = _der_tlv_pos(ext_val_octet, base=octet_value_start)
                 if ski_items and ski_items[0][0] == 0x04:
-                    children.append({'title': f'SubjectKeyIdentifier: {ski_items[0][1].hex()}'})
+                    children.append({'title': f'SubjectKeyIdentifier: {ski_items[0][1].hex()}', 'offset': ski_items[0][4], 'length': len(ski_items[0][1])})
 
             # id-ce-authorityKeyIdentifier
             elif ext_oid == '2.5.29.35':
-                seq_items = _der_tlv(inner_der)
+                seq_items = _der_tlv_pos(inner_der, base=octet_value_start)
                 if seq_items and seq_items[0][0] == 0x30:
-                    for tag, val in _der_tlv(seq_items[0][1]):
+                    _, aki_seq_val, _, _, aki_seq_val_start = seq_items[0]
+                    for tag, val, _, _, aki_val_start in _der_tlv_pos(aki_seq_val, base=aki_seq_val_start):
                         if tag == 0x80:   # [0] keyIdentifier
                             children.append({'title': 'AuthorityKeyIdentifier',
-                                             'children': [{'title': f'keyIdentifier: {val.hex()}'}]})
+                                             'offset': octet_value_start,
+                                             'length': octet_value_len,
+                                             'children': [{'title': f'keyIdentifier: {val.hex()}', 'offset': aki_val_start, 'length': len(val)}]})
                             break
 
             # id-pe-authorityInfoAccess
             elif ext_oid == '1.3.6.1.5.5.7.1.1':
-                seq_items = _der_tlv(inner_der)
-                aia_seq = _der_tlv(seq_items[0][1]) if seq_items and seq_items[0][0] == 0x30 else []
+                seq_items = _der_tlv_pos(inner_der, base=octet_value_start)
+                aia_seq = []
+                aia_seq_start = octet_value_start
+                if seq_items and seq_items[0][0] == 0x30:
+                    _, aia_seq_val, _, _, aia_seq_start = seq_items[0]
+                    aia_seq = _der_tlv_pos(aia_seq_val, base=aia_seq_start)
                 aia_ch = []
-                for tag, val in aia_seq:
+                for tag, val, ad_start, ad_len_tlv, ad_val_start in aia_seq:
                     if tag != 0x30:
                         continue
-                    ad_items = _der_tlv(val)
+                    ad_items = _der_tlv_pos(val, base=ad_val_start)
                     if len(ad_items) < 2 or ad_items[0][0] != 0x06:
                         continue
                     method_oid = _decode_oid(ad_items[0][1])
                     method_name = OID_AIA.get(method_oid, method_oid)
-                    loc_tag, loc_val = ad_items[1]
+                    loc_tag, loc_val, loc_start, loc_len_tlv, loc_val_start = ad_items[1]
                     if loc_tag == 0x86:  # [6] uniformResourceIdentifier
                         loc_str = loc_val.decode('ascii', errors='replace')
                         loc_node = {'title': 'accessLocation: 6',
-                                    'children': [{'title': f'uniformResourceIdentifier: {loc_str}'}]}
+                                    'offset': loc_start,
+                                    'length': loc_len_tlv,
+                                    'children': [{'title': f'uniformResourceIdentifier: {loc_str}', 'offset': loc_val_start, 'length': len(loc_val)}]}
                     else:
-                        loc_node = {'title': f'accessLocation: {loc_tag}'}
+                        loc_node = {'title': f'accessLocation: {loc_tag}', 'offset': loc_start, 'length': loc_len_tlv}
                     aia_ch.append({'title': 'AccessDescription',
-                                   'children': [{'title': f'accessMethod: {method_oid} ({method_name})'}, loc_node]})
-                children.append({'title': f'AuthorityInfoAccessSyntax: {len(aia_ch)} items', 'children': aia_ch})
+                                   'offset': ad_start,
+                                   'length': ad_len_tlv,
+                                   'children': [{'title': f'accessMethod: {method_oid} ({method_name})', 'offset': ad_items[0][4], 'length': len(ad_items[0][1])}, loc_node]})
+                children.append({'title': f'AuthorityInfoAccessSyntax: {len(aia_ch)} items', 'offset': octet_value_start, 'length': octet_value_len, 'children': aia_ch})
 
             # id-ce-cRLDistributionPoints
             elif ext_oid == '2.5.29.31':
-                outer = _der_tlv(inner_der)
-                dp_list = _der_tlv(outer[0][1]) if outer and outer[0][0] == 0x30 else []
+                outer = _der_tlv_pos(inner_der, base=octet_value_start)
+                dp_list = []
+                dp_seq_start = octet_value_start
+                if outer and outer[0][0] == 0x30:
+                    _, dp_seq_val, _, _, dp_seq_start = outer[0]
+                    dp_list = _der_tlv_pos(dp_seq_val, base=dp_seq_start)
                 dp_ch = []
-                for tag, val in dp_list:
+                for tag, val, dp_start, dp_len_tlv, dp_val_start in dp_list:
                     if tag != 0x30:
                         continue
-                    dp_inner = _der_tlv(val)
+                    dp_inner = _der_tlv_pos(val, base=dp_val_start)
                     dp_sub = []
-                    for dt, dv in dp_inner:
+                    for dt, dv, dt_start, dt_len_tlv, dt_val_start in dp_inner:
                         if dt == 0xa0:   # [0] distributionPoint
-                            fn_items = _der_tlv(dv)
+                            fn_items = _der_tlv_pos(dv, base=dt_val_start)
                             fn_ch = []
-                            for ft, fv in fn_items:
+                            for ft, fv, ft_start, ft_len_tlv, ft_val_start in fn_items:
                                 if ft == 0xa0:  # fullName [0]
                                     gn_ch = []
-                                    for gt, gv in _der_tlv(fv):
+                                    for gt, gv, gt_start, gt_len_tlv, gt_val_start in _der_tlv_pos(fv, base=ft_val_start):
                                         if gt == 0x86:
                                             gn_ch.append({'title': 'GeneralName: uniformResourceIdentifier (6)',
-                                                          'children': [{'title': f'uniformResourceIdentifier: {gv.decode("ascii", errors="replace")}'}]})
+                                                          'offset': gt_start,
+                                                          'length': gt_len_tlv,
+                                                          'children': [{'title': f'uniformResourceIdentifier: {gv.decode("ascii", errors="replace")}', 'offset': gt_val_start, 'length': len(gv)}]})
                                     fn_ch.append({'title': f'fullName: {len(gn_ch)} item{"s" if len(gn_ch) != 1 else ""}',
+                                                  'offset': ft_start,
+                                                  'length': ft_len_tlv,
                                                   'children': gn_ch})
-                            dp_sub.append({'title': 'distributionPoint: fullName (0)', 'children': fn_ch})
-                    dp_ch.append({'title': 'DistributionPoint', 'children': dp_sub})
+                            dp_sub.append({'title': 'distributionPoint: fullName (0)', 'offset': dt_start, 'length': dt_len_tlv, 'children': fn_ch})
+                    dp_ch.append({'title': 'DistributionPoint', 'offset': dp_start, 'length': dp_len_tlv, 'children': dp_sub})
                 children.append({'title': f'CRLDistPointsSyntax: {len(dp_ch)} item{"s" if len(dp_ch) != 1 else ""}',
+                                  'offset': octet_value_start,
+                                  'length': octet_value_len,
                                   'children': dp_ch})
 
             # id-ce-subjectAltName / id-ce-issuerAltName
             elif ext_oid in ('2.5.29.17', '2.5.29.18'):
-                outer = _der_tlv(inner_der)
-                gn_seq = _der_tlv(outer[0][1]) if outer and outer[0][0] == 0x30 else []
+                outer = _der_tlv_pos(inner_der, base=octet_value_start)
+                gn_seq = []
+                gn_seq_start = octet_value_start
+                if outer and outer[0][0] == 0x30:
+                    _, gn_seq_val, _, _, gn_seq_start = outer[0]
+                    gn_seq = _der_tlv_pos(gn_seq_val, base=gn_seq_start)
                 gn_ch = []
-                for gt, gv in gn_seq:
+                for gt, gv, gt_start, gt_len_tlv, gt_val_start in gn_seq:
                     if gt == 0x82:   # [2] dNSName
                         gn_ch.append({'title': 'GeneralName: dNSName (2)',
-                                      'children': [{'title': f'dNSName: {gv.decode("ascii", errors="replace")}'}]})
+                                      'offset': gt_start,
+                                      'length': gt_len_tlv,
+                                      'children': [{'title': f'dNSName: {gv.decode("ascii", errors="replace")}', 'offset': gt_val_start, 'length': len(gv)}]})
                     elif gt == 0x86:  # [6] URI
                         gn_ch.append({'title': 'GeneralName: uniformResourceIdentifier (6)',
-                                      'children': [{'title': f'uniformResourceIdentifier: {gv.decode("ascii", errors="replace")}'}]})
+                                      'offset': gt_start,
+                                      'length': gt_len_tlv,
+                                      'children': [{'title': f'uniformResourceIdentifier: {gv.decode("ascii", errors="replace")}', 'offset': gt_val_start, 'length': len(gv)}]})
                     elif gt == 0x81:  # [1] rfc822Name
                         gn_ch.append({'title': 'GeneralName: rfc822Name (1)',
-                                      'children': [{'title': f'rfc822Name: {gv.decode("ascii", errors="replace")}'}]})
+                                      'offset': gt_start,
+                                      'length': gt_len_tlv,
+                                      'children': [{'title': f'rfc822Name: {gv.decode("ascii", errors="replace")}', 'offset': gt_val_start, 'length': len(gv)}]})
                 children.append({'title': f'GeneralNames: {len(gn_ch)} item{"s" if len(gn_ch) != 1 else ""}',
+                                  'offset': octet_value_start,
+                                  'length': octet_value_len,
                                   'children': gn_ch})
 
             # id-ce-certificatePolicies
             elif ext_oid == '2.5.29.32':
-                outer = _der_tlv(inner_der)
-                pi_seq = _der_tlv(outer[0][1]) if outer and outer[0][0] == 0x30 else []
+                outer = _der_tlv_pos(inner_der, base=octet_value_start)
+                pi_seq = []
+                pi_seq_start = octet_value_start
+                if outer and outer[0][0] == 0x30:
+                    _, pi_seq_val, _, _, pi_seq_start = outer[0]
+                    pi_seq = _der_tlv_pos(pi_seq_val, base=pi_seq_start)
                 pi_ch = []
-                for pt, pv in pi_seq:
+                for pt, pv, pi_start, pi_len_tlv, pi_val_start in pi_seq:
                     if pt != 0x30:
                         continue
-                    pi_items = _der_tlv(pv)
+                    pi_items = _der_tlv_pos(pv, base=pi_val_start)
                     if not pi_items or pi_items[0][0] != 0x06:
                         continue
                     pol_oid = _decode_oid(pi_items[0][1])
                     pol_name_short = OID_POLICY.get(pol_oid, pol_oid)
-                    pi_sub = [{'title': f'policyIdentifier: {pol_oid} ({pol_name_short})'}]
+                    pi_sub = [{'title': f'policyIdentifier: {pol_oid} ({pol_name_short})', 'offset': pi_items[0][4], 'length': len(pi_items[0][1])}]
                     if len(pi_items) > 1 and pi_items[1][0] == 0x30:  # policyQualifiers
-                        pq_seq = _der_tlv(pi_items[1][1])
+                        _, pq_seq_val, pq_start, pq_len_tlv, pq_val_start = pi_items[1]
+                        pq_seq = _der_tlv_pos(pq_seq_val, base=pq_val_start)
                         pq_ch = []
-                        for qpt, qpv in pq_seq:
+                        for qpt, qpv, q_start, q_len_tlv, q_val_start in pq_seq:
                             if qpt != 0x30:
                                 continue
-                            qp_items = _der_tlv(qpv)
+                            qp_items = _der_tlv_pos(qpv, base=q_val_start)
                             if not qp_items or qp_items[0][0] != 0x06:
                                 continue
                             q_oid = _decode_oid(qp_items[0][1])
                             q_name = OID_POLICY_QUAL.get(q_oid, q_oid)
-                            q_sub = [{'title': f'Id: {q_oid} ({q_name})'}]
+                            q_sub = [{'title': f'Id: {q_oid} ({q_name})', 'offset': qp_items[0][4], 'length': len(qp_items[0][1])}]
                             if len(qp_items) > 1:
-                                qval_tag, qval_bytes = qp_items[1]
+                                qval_tag, qval_bytes, _, _, qval_start = qp_items[1]
                                 if qval_tag == 0x16:  # IA5String (CPS URI)
-                                    q_sub.append({'title': f'DirectoryString: {qval_bytes.decode("ascii", errors="replace")}'})
-                            pq_ch.append({'title': 'PolicyQualifierInfo', 'children': q_sub})
+                                    q_sub.append({'title': f'DirectoryString: {qval_bytes.decode("ascii", errors="replace")}', 'offset': qval_start, 'length': len(qval_bytes)})
+                            pq_ch.append({'title': 'PolicyQualifierInfo', 'offset': q_start, 'length': q_len_tlv, 'children': q_sub})
                         if pq_ch:
                             pi_sub.append({'title': f'policyQualifiers: {len(pq_ch)} item{"s" if len(pq_ch) != 1 else ""}',
+                                           'offset': pq_start,
+                                           'length': pq_len_tlv,
                                            'children': pq_ch})
-                    pi_ch.append({'title': 'PolicyInformation', 'children': pi_sub})
+                    pi_ch.append({'title': 'PolicyInformation', 'offset': pi_start, 'length': pi_len_tlv, 'children': pi_sub})
                 children.append({'title': f'CertificatePoliciesSyntax: {len(pi_ch)} item{"s" if len(pi_ch) != 1 else ""}',
+                                  'offset': octet_value_start,
+                                  'length': octet_value_len,
                                   'children': pi_ch})
 
             # SignedCertificateTimestampList
@@ -6464,7 +6670,7 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
 
         except Exception:
             pass
-        return {'title': f'Extension ({ext_name})', 'children': children}
+        return {'title': f'Extension ({ext_name})', 'offset': ext_start, 'length': ext_len_tlv, 'children': children}
 
     # ─── Walk cert DER ────────────────────────────────────────────────────────
     def _der_tlv_pos(data: bytes, base: int = 0):
@@ -6491,9 +6697,9 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
             pos = end
         return result
 
-    def _pos_node(node: dict, start: int, length: int) -> dict:
+    def _pos_node(node: dict, start: int | None, length: int | None) -> dict:
         """Attach offset/length to a node dict if both are non-zero."""
-        if start and length:
+        if start is not None and length is not None and length >= 0:
             node['offset'] = start
             node['length'] = length
         return node
@@ -6508,13 +6714,15 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
             raise ValueError('cert SEQUENCE has fewer than 3 items')
 
         _, tbs_val,       tbs_start,  tbs_len_tlv,  tbs_val_start  = cert_inner[0]
-        _, outer_alg_val, oa_start,   oa_len_tlv,   _              = cert_inner[1]
-        _, sig_val,       sig_start,  sig_len_tlv,  _              = cert_inner[2]
+        _, outer_alg_val, oa_start,   oa_len_tlv,   oa_val_start   = cert_inner[1]
+        _, sig_val,       sig_start,  sig_len_tlv,  sig_val_start  = cert_inner[2]
 
         # Outer algorithm OID
-        outer_alg_items = _der_tlv(outer_alg_val)
+        outer_alg_items = _der_tlv_pos(outer_alg_val, base=oa_val_start)
         outer_alg_oid = _decode_oid(outer_alg_items[0][1]) if outer_alg_items and outer_alg_items[0][0] == 0x06 else ''
         outer_alg_name = OID_ALG.get(outer_alg_oid, outer_alg_oid)
+        outer_alg_oid_start = outer_alg_items[0][4] if outer_alg_items and outer_alg_items[0][0] == 0x06 else oa_val_start
+        outer_alg_oid_len = len(outer_alg_items[0][1]) if outer_alg_items and outer_alg_items[0][0] == 0x06 else 0
 
         # Signature bytes (BIT STRING: first byte = unused bits count)
         sig_bytes = sig_val[1:] if sig_val else b''
@@ -6526,89 +6734,116 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
         # version [0] EXPLICIT
         version_int = 0
         ver_start, ver_len_tlv = 0, 0
+        ver_value_start, ver_value_len = 0, 0
         if tbs_items and tbs_items[idx][0] == 0xa0:
             _, ver_content, ver_start, ver_len_tlv, _ = tbs_items[idx]
-            ver_items = _der_tlv(ver_content)
+            ver_items = _der_tlv_pos(ver_content, base=ver_start + (ver_len_tlv - len(ver_content)))
             if ver_items and ver_items[0][0] == 0x02:
-                version_int = int.from_bytes(ver_items[0][1], 'big')
+                _, ver_value, _, _, ver_value_start = ver_items[0]
+                version_int = int.from_bytes(ver_value, 'big')
+                ver_value_len = len(ver_value)
             idx += 1
         version_str = {0: 'v1', 1: 'v2', 2: 'v3'}.get(version_int, f'v{version_int + 1}')
 
         # serialNumber INTEGER
         serial_bytes = b'\x00'
         sn_start, sn_len_tlv = 0, 0
+        sn_value_start, sn_value_len = 0, 0
         if idx < len(tbs_items) and tbs_items[idx][0] == 0x02:
-            _, serial_bytes, sn_start, sn_len_tlv, _ = tbs_items[idx]
+            _, serial_bytes, sn_start, sn_len_tlv, sn_value_start = tbs_items[idx]
+            sn_value_len = len(serial_bytes)
         serial_hex = f'0x{int.from_bytes(serial_bytes, "big"):x}'
         idx += 1
 
         # signatureAlgorithm SEQUENCE
         sa_start, sa_len_tlv = 0, 0
         sig_alg_items = []
+        sa_val_start = 0
+        sig_alg_oid_start, sig_alg_oid_len = 0, 0
         if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
-            _, sa_val, sa_start, sa_len_tlv, _ = tbs_items[idx]
-            sig_alg_items = _der_tlv(sa_val)
+            _, sa_val, sa_start, sa_len_tlv, sa_val_start = tbs_items[idx]
+            sig_alg_items = _der_tlv_pos(sa_val, base=sa_val_start)
         sig_alg_oid = _decode_oid(sig_alg_items[0][1]) if sig_alg_items and sig_alg_items[0][0] == 0x06 else ''
+        if sig_alg_items and sig_alg_items[0][0] == 0x06:
+            sig_alg_oid_start = sig_alg_items[0][4]
+            sig_alg_oid_len = len(sig_alg_items[0][1])
         sig_alg_name = OID_ALG.get(sig_alg_oid, sig_alg_oid)
         idx += 1
 
         # issuer SEQUENCE
-        issuer_raw, issuer_start, issuer_len_tlv = b'', 0, 0
+        issuer_raw, issuer_start, issuer_len_tlv, issuer_val_start = b'', 0, 0, 0
         if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
-            _, issuer_raw, issuer_start, issuer_len_tlv, _ = tbs_items[idx]
+            _, issuer_raw, issuer_start, issuer_len_tlv, issuer_val_start = tbs_items[idx]
         idx += 1
 
         # validity SEQUENCE
-        validity_raw, validity_start, validity_len_tlv = b'', 0, 0
+        validity_raw, validity_start, validity_len_tlv, validity_val_start = b'', 0, 0, 0
         if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
-            _, validity_raw, validity_start, validity_len_tlv, _ = tbs_items[idx]
+            _, validity_raw, validity_start, validity_len_tlv, validity_val_start = tbs_items[idx]
         idx += 1
 
         # subject SEQUENCE
-        subject_raw, subject_start, subject_len_tlv = b'', 0, 0
+        subject_raw, subject_start, subject_len_tlv, subject_val_start = b'', 0, 0, 0
         if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
-            _, subject_raw, subject_start, subject_len_tlv, _ = tbs_items[idx]
+            _, subject_raw, subject_start, subject_len_tlv, subject_val_start = tbs_items[idx]
         idx += 1
 
         # subjectPublicKeyInfo SEQUENCE
-        spki_raw, spki_start, spki_len_tlv = b'', 0, 0
+        spki_raw, spki_start, spki_len_tlv, spki_val_start = b'', 0, 0, 0
         if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
-            _, spki_raw, spki_start, spki_len_tlv, _ = tbs_items[idx]
+            _, spki_raw, spki_start, spki_len_tlv, spki_val_start = tbs_items[idx]
         idx += 1
 
         # extensions [3] EXPLICIT
         ext_nodes = []
-        ext_start, ext_len_tlv = 0, 0
+        ext_start, ext_len_tlv, ext_val_start = 0, 0, 0
         while idx < len(tbs_items):
             if tbs_items[idx][0] == 0xa3:
-                _, e3_val, ext_start, ext_len_tlv, _ = tbs_items[idx]
-                exts_seq = _der_tlv(e3_val)
+                _, e3_val, ext_start, ext_len_tlv, ext_val_start = tbs_items[idx]
+                exts_seq = _der_tlv_pos(e3_val, base=ext_val_start)
                 if exts_seq and exts_seq[0][0] == 0x30:
-                    for et, ev in _der_tlv(exts_seq[0][1]):
+                    _, exts_seq_val, _, _, exts_seq_val_start = exts_seq[0]
+                    for et, ev, ext_item_start, ext_item_len_tlv, ext_item_val_start in _der_tlv_pos(exts_seq_val, base=exts_seq_val_start):
                         if et != 0x30:
                             continue
-                        ext_items = _der_tlv(ev)
+                        ext_items = _der_tlv_pos(ev, base=ext_item_val_start)
                         if not ext_items or ext_items[0][0] != 0x06:
                             continue
                         ext_oid = _decode_oid(ext_items[0][1])
                         is_critical = False
                         ext_val_octet = b''
-                        for eit, eiv in ext_items[1:]:
+                        ext_meta = {
+                            'oid_start': ext_items[0][4],
+                            'oid_len': len(ext_items[0][1]),
+                            'critical_start': None,
+                            'critical_len': 0,
+                            'octet_tlv_start': None,
+                            'octet_tlv_len': 0,
+                            'octet_value_start': None,
+                            'octet_value_len': 0,
+                        }
+                        for eit, eiv, eit_start, eit_len_tlv, eit_val_start in ext_items[1:]:
                             if eit == 0x01 and eiv:    # BOOLEAN critical
                                 is_critical = eiv[0] != 0
+                                ext_meta['critical_start'] = eit_val_start
+                                ext_meta['critical_len'] = len(eiv)
                             elif eit == 0x04:           # OCTET STRING
                                 ext_val_octet = eiv
-                        ext_nodes.append(_build_ext_tree(ext_oid, is_critical, ext_val_octet))
+                                ext_meta['octet_tlv_start'] = eit_start
+                                ext_meta['octet_tlv_len'] = eit_len_tlv
+                                ext_meta['octet_value_start'] = eit_val_start
+                                ext_meta['octet_value_len'] = len(eiv)
+                        ext_nodes.append(_build_ext_tree(ext_oid, is_critical, ext_val_octet, ext_item_start, ext_item_len_tlv, ext_meta))
             idx += 1
 
         signed_cert_children = [
-            _pos_node({'title': f'version: {version_str} ({version_int})'}, ver_start, ver_len_tlv),
-            _pos_node({'title': f'serialNumber: {serial_hex}'}, sn_start, sn_len_tlv),
-            _pos_node({'title': f'signature ({sig_alg_name})', 'children': [{'title': f'Algorithm Id: {sig_alg_oid} ({sig_alg_name})'}]}, sa_start, sa_len_tlv),
-            _pos_node(_build_name_tree(issuer_raw, 'issuer'), issuer_start, issuer_len_tlv),
-            _pos_node(_build_validity_tree(validity_raw), validity_start, validity_len_tlv),
-            _pos_node(_build_name_tree(subject_raw, 'subject'), subject_start, subject_len_tlv),
-            _pos_node(_build_spki_tree(spki_raw), spki_start, spki_len_tlv),
+            _pos_node({'title': f'version: {version_str} ({version_int})'}, ver_value_start, ver_value_len),
+            _pos_node({'title': f'serialNumber: {serial_hex}'}, sn_value_start, sn_value_len),
+            _pos_node({'title': f'signature ({sig_alg_name})', 'children': [{'title': f'Algorithm Id: {sig_alg_oid} ({sig_alg_name})', 'offset': sig_alg_oid_start, 'length': sig_alg_oid_len}]}, sa_start, sa_len_tlv),
+            _build_name_tree(issuer_raw, 'issuer', issuer_start, issuer_len_tlv, issuer_val_start),
+            _build_validity_tree(validity_raw, validity_start, validity_len_tlv, validity_val_start),
+            _build_name_tree(subject_raw, 'subject', subject_start, subject_len_tlv, subject_val_start),
+            _build_spki_tree(spki_raw, spki_start, spki_len_tlv, spki_val_start),
             _pos_node({'title': f'extensions: {len(ext_nodes)} items', 'children': ext_nodes}, ext_start, ext_len_tlv),
         ]
 
@@ -6618,9 +6853,9 @@ def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
             'length': len(cert_bytes),
             'children': [
                 {'title': 'signedCertificate', 'offset': tbs_start, 'length': tbs_len_tlv, 'children': signed_cert_children},
-                _pos_node({'title': f'algorithmIdentifier ({outer_alg_name})', 'children': [{'title': f'Algorithm Id: {outer_alg_oid} ({outer_alg_name})'}]}, oa_start, oa_len_tlv),
-                {'title': 'Padding: 0'},
-                _pos_node({'title': f'encrypted [...]: {sig_bytes.hex()}'}, sig_start, sig_len_tlv),
+                _pos_node({'title': f'algorithmIdentifier ({outer_alg_name})', 'children': [{'title': f'Algorithm Id: {outer_alg_oid} ({outer_alg_name})', 'offset': outer_alg_oid_start, 'length': outer_alg_oid_len}]}, oa_start, oa_len_tlv),
+                {'title': f'Padding: {sig_val[0] if sig_val else 0}', 'offset': sig_val_start, 'length': min(1, len(sig_val))},
+                _pos_node({'title': f'encrypted [...]: {sig_bytes.hex()}', 'offset': sig_val_start + 1, 'length': max(0, len(sig_val) - 1)}, sig_val_start + 1, max(0, len(sig_val) - 1)),
             ],
         }
 
@@ -6921,22 +7156,11 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
     if scan_start > 0:
         prefix = tls_bytes_raw[:scan_start]
         children.append({
-            'title': 'TLSv1.2 Record Layer: Handshake Protocol: Certificate',
+            'title': 'Handshake Protocol: Certificate',
             'offset': offset - scan_start,
             'length': scan_start,
             'children': [
-                {'title': 'Content Type: Handshake (22)', 'offset': offset - scan_start, 'length': 1},
-                {'title': 'Version: TLS 1.2 (0x0303)', 'offset': offset - scan_start + 1, 'length': 2},
-                {'title': f'Length: {scan_start}', 'offset': offset - scan_start + 3, 'length': 2},
-                {
-                    'title': 'Handshake Protocol: Certificate',
-                    'offset': offset - scan_start,
-                    'length': scan_start,
-                    'children': [
-                        {'title': 'Handshake Type: Certificate (11)'},
-                        {'title': f'Fragment data: {prefix.hex()}', 'offset': offset - scan_start, 'length': scan_start},
-                    ],
-                },
+                {'title': f'Fragment data: {prefix.hex()}', 'offset': offset - scan_start, 'length': scan_start},
             ],
         })
 
@@ -6997,7 +7221,7 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
                                 fcert_bytes = frag_hs_body[fcert_data_start:fcert_data_end]
                                 fcert_abs = frag_hs_abs + 4 + fcert_data_start
                                 frag_certs_children.append({'title': f'Certificate Length: {fcert_len}', 'offset': frag_hs_abs + 4 + fp, 'length': 3})
-                                if len(fcert_bytes) >= fcert_len:
+                                if len(fcert_bytes) == fcert_len:
                                     frag_certs_children.append(_parse_x509_cert_tree(fcert_bytes, fcert_abs))
                                 else:
                                     frag_certs_children.append({
@@ -7158,7 +7382,14 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
                             'offset': hs_abs + 4 + p,
                             'length': 3,
                         })
-                        cert_tree = _parse_x509_cert_tree(cert_bytes_data, cert_abs)
+                        if len(cert_bytes_data) == cert_len:
+                            cert_tree = _parse_x509_cert_tree(cert_bytes_data, cert_abs)
+                        else:
+                            cert_tree = {
+                                'title': f'Certificate [...] (fragment): {cert_bytes_data.hex()}',
+                                'offset': cert_abs,
+                                'length': len(cert_bytes_data),
+                            }
                         certs_children.append(cert_tree)
                         p = cert_data_end
                     handshake_children.append({'title': f'Certificates ({certs_len} bytes)', 'offset': hs_abs + 7, 'length': max(0, certs_len), 'children': certs_children})

@@ -3243,10 +3243,19 @@ class PacketParser:
                     return f'Standard query 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}'
                 answer_suffix = ''
                 try:
-                    first_answer = getattr(dns, 'an', None)
-                    answer_type = int(getattr(first_answer, 'type', 0) or 0) if first_answer is not None else 0
-                    answer_data = getattr(first_answer, 'rdata', '') if first_answer is not None else ''
-                    answer_type_name = {
+                    raw_dns = bytes(dns)
+                    records_text = []
+                    from core.formatters import _dns_read_name, _dns_rdata_text
+                    pos = 12
+                    qdcount = int(getattr(dns, 'qdcount', 0) or 0)
+                    ancount = int(getattr(dns, 'ancount', 0) or 0)
+                    nscount = int(getattr(dns, 'nscount', 0) or 0)
+                    arcount = int(getattr(dns, 'arcount', 0) or 0)
+                    for _ in range(qdcount):
+                        _, next_pos = _dns_read_name(raw_dns, pos)
+                        pos = next_pos + 4
+                    total_rr = ancount + nscount + arcount
+                    type_name_map = {
                         1: 'A',
                         2: 'NS',
                         5: 'CNAME',
@@ -3254,9 +3263,24 @@ class PacketParser:
                         15: 'MX',
                         16: 'TXT',
                         28: 'AAAA',
-                    }.get(answer_type, str(answer_type)) if answer_type else ''
-                    if answer_type_name and answer_data:
-                        answer_suffix = f' {answer_type_name} {answer_data}'
+                    }
+                    for _ in range(total_rr):
+                        _, next_pos = _dns_read_name(raw_dns, pos)
+                        if next_pos + 10 > len(raw_dns):
+                            break
+                        rr_type = int.from_bytes(raw_dns[next_pos:next_pos + 2], 'big')
+                        rdlen = int.from_bytes(raw_dns[next_pos + 8:next_pos + 10], 'big')
+                        rdata_start = next_pos + 10
+                        rdata_end = rdata_start + rdlen
+                        if rdata_end > len(raw_dns):
+                            break
+                        rr_type_name = type_name_map.get(rr_type, str(rr_type))
+                        rr_text = _dns_rdata_text(raw_dns[rdata_start:rdata_end], rr_type, raw_dns, rdata_start)
+                        if rr_type_name and rr_text:
+                            records_text.append(f'{rr_type_name} {rr_text}')
+                        pos = rdata_end
+                    if records_text:
+                        answer_suffix = ' ' + ' '.join(records_text)
                 except Exception:
                     answer_suffix = ''
                 qtype_prefix = f'{qtype_name} ' if qtype_name else ''
