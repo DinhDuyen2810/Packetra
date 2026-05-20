@@ -502,6 +502,11 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 sections.append(_icmpv6_section(icmpv6_payload, offset, record))
                 payload_handled = True
                 offset += len(icmpv6_payload)
+        elif getattr(record, 'protocol', '') == 'OSPF':
+            ospf_payload = bytes(getattr(packet[IPv6], 'payload', b''))
+            if ospf_payload:
+                sections.append(_ospf_section(ospf_payload, offset))
+                payload_handled = True
 
     if effective_tcp_layer is not None:
 
@@ -880,7 +885,7 @@ def _frame_section(record) -> Dict[str, Any]:
     elif protocol == 'LOOP':
         protocol_string = 'eth:ethertype:loop:data'
     elif protocol == 'OSPF':
-        protocol_string = 'eth:ethertype:ip:ospf'
+        protocol_string = 'eth:ethertype:ipv6:ospf' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:ospf'
     elif protocol == 'CDP':
         protocol_string = 'eth:llc:cdp'
     elif protocol == 'CAPWAP-Control':

@@ -2431,6 +2431,14 @@ class PacketParser:
             info += f' CID: {client_id} '
         return info
 
+    def _is_ospf_ipv6_packet(self, packet) -> bool:
+        if not packet.haslayer(IPv6):
+            return False
+        try:
+            return int(getattr(packet[IPv6], 'nh', -1) or -1) == 89 and len(bytes(getattr(packet[IPv6], 'payload', b''))) >= 4
+        except Exception:
+            return False
+
     def _guess_protocol(self, packet, metadata: dict | None = None):
         metadata = metadata or {}
         eth_type = self._ether_type(packet)
@@ -2474,6 +2482,8 @@ class PacketParser:
                 return 'L2TPv3'
             if ip_proto == 89:
                 return 'OSPF'
+        if self._is_ospf_ipv6_packet(packet):
+            return 'OSPF'
         if isinstance(metadata.get('wlan', None), dict) and metadata.get('wlan'):
             return '802.11'
         if str(metadata.get('capwap_transport', '') or '') == 'control':
