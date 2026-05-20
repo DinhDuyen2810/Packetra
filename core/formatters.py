@@ -548,6 +548,11 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             if bool(metadata.get('http_has_line_based_text', False)):
                 sections.append(_http_line_based_text_section(record, offset))
             payload_handled = True
+        elif getattr(record, 'protocol', '') in {'SMTP', 'SMTP/IMF'} and tcp_payload:
+            sections.append(_smtp_section(tcp_payload, offset, record))
+            if getattr(record, 'protocol', '') == 'SMTP/IMF':
+                sections.append(_imf_section(record, offset))
+            payload_handled = True
         elif bool(metadata.get('tcp_is_retransmission', False)) and tcp_payload:
             payload_handled = True
 
@@ -925,6 +930,13 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ipv6:ipv6.hopopts:icmpv6' if has_hopopts else 'eth:ethertype:ipv6:icmpv6'
     elif protocol == 'HTTP':
         protocol_string = 'eth:ethertype:ip:tcp:http:data-text-lines' if bool(metadata.get('http_has_line_based_text', False)) else 'eth:ethertype:ip:tcp:http'
+    elif protocol == 'SMTP':
+        if str(metadata.get('smtp_kind', '') or '') == 'data':
+            protocol_string = 'eth:ethertype:ip:tcp:smtp:data-text-lines'
+        else:
+            protocol_string = 'eth:ethertype:ip:tcp:smtp'
+    elif protocol == 'SMTP/IMF':
+        protocol_string = 'eth:ethertype:ip:tcp:smtp:imf'
     elif protocol == 'TCP':
         if eth_type == 0x8847:
             protocol_string = 'eth:ethertype:mpls:tcp'
@@ -947,6 +959,9 @@ def _frame_section(record) -> Dict[str, Any]:
     ):
         coloring_name = 'HTTP'
         coloring_string = 'http || tcp.port == 80 || http2'
+    elif protocol in {'SMTP', 'SMTP/IMF'}:
+        coloring_name = 'TCP'
+        coloring_string = 'tcp'
     elif protocol == 'LDP':
         if metadata.get('tcp_stream_index', None) is not None and int(metadata.get('tcp_stream_index', -1)) >= 0:
             coloring_name = 'TCP'
@@ -3730,6 +3745,250 @@ def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
         'title': f'Line-based text data: {content_type} ({len(lines)} lines)',
         **_byte_mapping(offset, body_offset, len(body), byte_source),
         'children': lines,
+    }
+
+
+def _smtp_response_description(code: str) -> str:
+    return {
+        '220': '<domain> Service ready',
+        '250': 'Requested mail action okay, completed',
+        '354': 'Start mail input; end with <CRLF>.<CRLF>',
+        '221': 'Service closing transmission channel',
+    }.get(str(code or ''), '')
+
+
+def _smtp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    children: List[Dict[str, Any]] = []
+    smtp_kind = str(metadata.get('smtp_kind', '') or '')
+
+    if smtp_kind == 'response':
+        line = payload.split(b'\r\n', 1)[0]
+        line_text = line.decode(errors='ignore')
+        code = str(metadata.get('smtp_response_code', '') or line_text[:3])
+        param = str(metadata.get('smtp_response_parameter', '') or (line_text[4:].strip() if len(line_text) > 4 else ''))
+        response_children = []
+        if code:
+            description = _smtp_response_description(code)
+            title = f'Response code: {description} ({code})' if description else f'Response code: {code}'
+            response_children.append({
+                'title': title,
+                'offset': offset,
+                'length': 3,
+            })
+        if param:
+            response_children.append({
+                'title': f'Response parameter: {param}',
+                'offset': offset + 4,
+                'length': len(line) - 4,
+            })
+        children.append({
+            'title': f'Response: {line_text}\\r\\n',
+            'offset': offset,
+            'length': len(line) + 2,
+            'children': response_children,
+        })
+    elif smtp_kind == 'command':
+        line = payload.split(b'\r\n', 1)[0]
+        line_text = line.decode(errors='ignore')
+        parts = line_text.split(' ', 1)
+        command = parts[0].strip().upper() if parts else ''
+        param = parts[1].strip() if len(parts) > 1 else ''
+        command_children = []
+        if command:
+            command_children.append({
+                'title': f'Command: {command}',
+                'offset': offset,
+                'length': len(command),
+            })
+        if param:
+            command_children.append({
+                'title': f'Request parameter: {param}',
+                'offset': offset + len(command) + 1,
+                'length': len(line) - len(command) - 1,
+            })
+        children.append({
+            'title': f'Command Line: {line_text}\\r\\n',
+            'offset': offset,
+            'length': len(line) + 2,
+            'children': command_children,
+        })
+    elif smtp_kind == 'data':
+        full_payload = bytes(metadata.get('smtp_data_reassembled_payload', b'') or b'')
+        if full_payload:
+            segments = list(metadata.get('smtp_data_segments', []) or [])
+            reassembled_len = int(metadata.get('smtp_data_reassembled_length', 0) or 0)
+            segment_summary = ', '.join(
+                f"#{int(segment.get('frame_number', 0) or 0)}({int(segment.get('payload_length', 0) or 0)})"
+                for segment in segments
+            )
+            data_children = []
+            for segment in segments:
+                start_pos = int(segment.get('payload_start', 0) or 0)
+                seg_len = int(segment.get('payload_length', 0) or 0)
+                end_pos = max(start_pos, start_pos + seg_len - 1)
+                data_children.append({
+                    'title': f"[Frame: {int(segment.get('frame_number', 0) or 0)}, payload: {start_pos}-{end_pos} ({seg_len} bytes)]",
+                    **_byte_mapping(0, start_pos, seg_len, TCP_REASSEMBLED_BYTE_SOURCE),
+                })
+            data_children.append({'title': f'[DATA fragment count: {len(segments)}]'})
+            data_children.append({
+                'title': f'[Reassembled DATA length: {reassembled_len}]',
+                **_byte_mapping(0, 0, reassembled_len, TCP_REASSEMBLED_BYTE_SOURCE),
+            })
+            if segments:
+                children.append({
+                    'title': f'[{len(segments)} DATA fragments ({reassembled_len} bytes): {segment_summary}]',
+                    'children': data_children,
+                })
+            dot_offset = int(metadata.get('smtp_data_dot_offset_in_payload', 0) or 0)
+            dot_length = int(metadata.get('smtp_data_dot_length', 0) or 0)
+            if dot_length > 0:
+                children.append({
+                    'title': 'C: .',
+                    'offset': offset + dot_offset,
+                    'length': dot_length,
+                })
+        else:
+            children.append(_smtp_line_based_text_section(payload, offset))
+            reassembled_frame = metadata.get('smtp_reassembled_data_in_frame', None) or metadata.get('tcp_reassembled_pdu_in_frame', None)
+            if reassembled_frame is not None:
+                children.append({
+                    'title': f'[Reassembled DATA in frame: {int(reassembled_frame)}]',
+                })
+
+    response_frame = metadata.get('smtp_response_frame', None)
+    if response_frame is not None:
+        children.append({'title': f'[Response in frame: {int(response_frame)}]'})
+    request_frame = metadata.get('smtp_request_frame', None)
+    if request_frame is not None:
+        children.append({'title': f'[Request in frame: {int(request_frame)}]'})
+    time_since_request = metadata.get('smtp_time_since_request_ms', None)
+    if time_since_request is not None:
+        children.append({'title': f'[Time since request: {float(time_since_request):.6f} milliseconds]'})
+
+    node: Dict[str, Any] = {'title': 'Simple Mail Transfer Protocol', 'children': children}
+    if smtp_kind in {'command', 'response'}:
+        node.update(_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE))
+    elif smtp_kind == 'data':
+        if bytes(metadata.get('smtp_data_reassembled_payload', b'') or b''):
+            node.update(_byte_mapping(0, 0, int(metadata.get('smtp_data_reassembled_length', 0) or 0), TCP_REASSEMBLED_BYTE_SOURCE))
+        else:
+            node.update(_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE))
+    return node
+
+
+def _smtp_line_based_text_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    lines = []
+    cursor = 0
+    for raw_line in payload.splitlines(keepends=True):
+        text = raw_line.decode(errors='ignore').replace('\r', '\\r').replace('\n', '\\n')
+        lines.append({
+            'title': text,
+            'offset': offset + cursor,
+            'length': len(raw_line),
+        })
+        cursor += len(raw_line)
+    return {
+        'title': f'Line-based text data ({len(lines)} lines)',
+        'offset': offset,
+        'length': len(payload),
+        'children': lines,
+    }
+
+
+def _imf_address_value(raw_line: bytes) -> str:
+    try:
+        return raw_line.split(b':', 1)[1].decode(errors='ignore').strip()
+    except Exception:
+        return ''
+
+
+def _imf_section(record, offset: int) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) or {}
+    imf = metadata.get('smtp_imf', {}) or {}
+    payload = bytes(metadata.get('smtp_data_reassembled_payload', b'') or b'')
+    headers = list(imf.get('headers', []) or [])
+    body_lines = list(imf.get('body_lines', []) or [])
+    children: List[Dict[str, Any]] = []
+
+    for header in headers:
+        raw_line = bytes(header.get('raw', b'') or b'')
+        line_text = raw_line.decode(errors='ignore')
+        header_offset = int(header.get('offset', 0) or 0)
+        header_length = int(header.get('length', len(raw_line) + 2) or (len(raw_line) + 2))
+        lower = raw_line.lower()
+        if lower.startswith(b'from:'):
+            value = _imf_address_value(raw_line)
+            children.append({
+                'title': f'From: {value}, 1 item',
+                **_byte_mapping(0, header_offset, header_length, TCP_REASSEMBLED_BYTE_SOURCE),
+                'children': [
+                    {
+                        'title': f'Item: {value}\\r\\n',
+                        **_byte_mapping(0, header_offset + 6, max(0, len(raw_line) - 5), TCP_REASSEMBLED_BYTE_SOURCE),
+                        'children': [
+                            {
+                                'title': f'Address: {value.strip("<>")}',
+                                **_byte_mapping(0, header_offset + 6, max(0, len(raw_line) - 6), TCP_REASSEMBLED_BYTE_SOURCE),
+                            },
+                        ],
+                    },
+                ],
+            })
+        elif lower.startswith(b'to:'):
+            value = _imf_address_value(raw_line)
+            children.append({
+                'title': f'To: {value}, 1 item',
+                **_byte_mapping(0, header_offset, header_length, TCP_REASSEMBLED_BYTE_SOURCE),
+                'children': [
+                    {
+                        'title': f'Item: {value}\\r\\n',
+                        **_byte_mapping(0, header_offset + 4, max(0, len(raw_line) - 3), TCP_REASSEMBLED_BYTE_SOURCE),
+                        'children': [
+                            {
+                                'title': f'Address: {value.strip("<>")}',
+                                **_byte_mapping(0, header_offset + 4, max(0, len(raw_line) - 4), TCP_REASSEMBLED_BYTE_SOURCE),
+                            },
+                        ],
+                    },
+                ],
+            })
+        else:
+            children.append({
+                'title': line_text,
+                **_byte_mapping(0, header_offset, header_length, TCP_REASSEMBLED_BYTE_SOURCE),
+            })
+
+    terminator_offset = int(imf.get('headers_terminator_offset', -1) or -1)
+    if terminator_offset >= 0:
+        children.append({
+            'title': '\\r\\n',
+            **_byte_mapping(0, terminator_offset, int(imf.get('headers_terminator_length', 4) or 4), TCP_REASSEMBLED_BYTE_SOURCE),
+        })
+
+    if body_lines:
+        text_children = []
+        for line in body_lines:
+            raw_line = bytes(line.get('raw', b'') or b'')
+            line_text = raw_line.decode(errors='ignore').rstrip('\r\n')
+            line_text = f'{line_text}  ' if line_text else ''
+            text_children.append({
+                'title': line_text,
+                **_byte_mapping(0, int(line.get('offset', 0) or 0), int(line.get('length', len(raw_line)) or len(raw_line)), TCP_REASSEMBLED_BYTE_SOURCE),
+            })
+        body_start = int(body_lines[0].get('offset', 0) or 0)
+        body_len = sum(int(line.get('length', 0) or 0) for line in body_lines)
+        children.append({
+            'title': 'Message-Text',
+            **_byte_mapping(0, body_start, body_len, TCP_REASSEMBLED_BYTE_SOURCE),
+            'children': text_children,
+        })
+
+    return {
+        'title': 'Internet Message Format',
+        **_byte_mapping(0, 0, len(payload), TCP_REASSEMBLED_BYTE_SOURCE),
+        'children': children,
     }
 
 

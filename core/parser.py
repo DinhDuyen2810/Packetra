@@ -29,6 +29,7 @@ class PacketParser:
         self.icmp_echo_pending = {}
         self.http_request_pending = {}
         self.dns_request_pending = {}
+        self.smtp_request_pending = {}
         self.layer_stream_maps = {
             'ethernet': {},
             'ipv4': {},
@@ -98,6 +99,7 @@ class PacketParser:
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
         self._update_tls_stream_metadata(packet, metadata, int(number))
         self._update_http_stream_metadata(packet, metadata, epoch_time)
+        self._update_smtp_stream_metadata(packet, metadata, epoch_time)
         self._update_capwap_metadata(packet, metadata)
 
         protocol = self._guess_protocol(packet, metadata)
@@ -153,6 +155,7 @@ class PacketParser:
 
         self._track_transport_record(record)
         self._update_http_metadata(record)
+        self._update_smtp_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
         self._update_dns_metadata(packet, record)
 
@@ -2524,6 +2527,12 @@ class PacketParser:
                     return 'BGP'
             if not bool(metadata.get('http_incomplete', False)) and str(metadata.get('http_kind', '') or ''):
                 return 'HTTP'
+            if sport == 25 or dport == 25:
+                smtp_kind = str(metadata.get('smtp_kind', '') or '')
+                if smtp_kind == 'data' and bytes(metadata.get('smtp_data_reassembled_payload', b'') or b''):
+                    return 'SMTP/IMF'
+                if smtp_kind in {'command', 'response', 'data'}:
+                    return 'SMTP'
         if packet.haslayer(ARP) and eth_type != 0x8035:
             return 'ARP'
         if self._is_dhcpv6_packet(packet):
@@ -2860,6 +2869,86 @@ class PacketParser:
         total_len = header_len + self._http_content_length(headers)
         return kind, header_len, total_len, headers
 
+    def _smtp_payload_kind(self, payload: bytes) -> str | None:
+        if not payload:
+            return None
+        if len(payload) >= 4 and payload[:3].isdigit() and payload[3:4] in {b' ', b'-'}:
+            return 'response'
+        line = payload.split(b'\r\n', 1)[0]
+        verb = line.split(b' ', 1)[0].upper()
+        if verb in {b'HELO', b'EHLO', b'MAIL', b'RCPT', b'DATA', b'QUIT', b'RSET', b'NOOP', b'VRFY', b'EXPN', b'HELP'}:
+            return 'command'
+        return None
+
+    def _smtp_command_parts(self, payload: bytes) -> tuple[str, str]:
+        try:
+            line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+            parts = line.split(' ', 1)
+            command = parts[0].strip().upper()
+            param = parts[1].strip() if len(parts) > 1 else ''
+            return command, param
+        except Exception:
+            return '', ''
+
+    def _smtp_response_parts(self, payload: bytes) -> tuple[str, str]:
+        try:
+            line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+            code = line[:3]
+            param = line[4:].strip() if len(line) > 4 else ''
+            return code, param
+        except Exception:
+            return '', ''
+
+    def _smtp_parse_imf(self, payload: bytes) -> dict[str, object]:
+        parsed: dict[str, object] = {
+            'headers': [],
+            'subject': '',
+            'content_type': '',
+            'from': '',
+            'to': '',
+            'body_lines': [],
+        }
+        try:
+            header_end = payload.find(b'\r\n\r\n')
+            header_blob = payload if header_end == -1 else payload[:header_end]
+            body_blob = b'' if header_end == -1 else payload[header_end + 4:]
+            headers = []
+            cursor = 0
+            for raw_line in header_blob.split(b'\r\n'):
+                line_len = len(raw_line)
+                headers.append({
+                    'raw': raw_line,
+                    'offset': cursor,
+                    'length': line_len + 2,
+                })
+                lower = raw_line.lower()
+                if lower.startswith(b'subject:'):
+                    parsed['subject'] = raw_line.split(b':', 1)[1].decode(errors='ignore').strip()
+                elif lower.startswith(b'content-type:'):
+                    parsed['content_type'] = raw_line.split(b':', 1)[1].decode(errors='ignore').strip()
+                elif lower.startswith(b'from:'):
+                    parsed['from'] = raw_line.split(b':', 1)[1].decode(errors='ignore').strip()
+                elif lower.startswith(b'to:'):
+                    parsed['to'] = raw_line.split(b':', 1)[1].decode(errors='ignore').strip()
+                cursor += line_len + 2
+            if header_end != -1:
+                parsed['headers_terminator_offset'] = header_end
+                parsed['headers_terminator_length'] = 4
+            body_lines = []
+            body_cursor = 0
+            for raw_line in body_blob.splitlines(keepends=True):
+                body_lines.append({
+                    'raw': raw_line,
+                    'offset': (header_end + 4 if header_end != -1 else 0) + body_cursor,
+                    'length': len(raw_line),
+                })
+                body_cursor += len(raw_line)
+            parsed['headers'] = headers
+            parsed['body_lines'] = body_lines
+        except Exception:
+            pass
+        return parsed
+
     def _find_stream_record(self, state: dict, frame_number: int) -> PacketRecord | None:
         for stream_record in reversed(state.get('records', [])):
             if int(getattr(stream_record, 'number', 0) or 0) == int(frame_number):
@@ -3099,6 +3188,121 @@ class PacketParser:
             metadata['tcp_reassembled_length'] = int(total_len)
             metadata['tcp_reassembled_data_hex'] = full_payload.hex()
 
+    def _update_smtp_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
+        effective_ip = self._effective_ip_layer(packet)
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        src = str(effective_ip.src)
+        dst = str(effective_ip.dst)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        if sport != 25 and dport != 25:
+            return
+
+        payload = self._payload_bytes(packet)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+
+        frame_number = int(metadata.get('frame_number', 0) or 0)
+        dir_key = (src, sport, dst, dport)
+        smtp_state = state.setdefault('smtp', {})
+        pending_data = smtp_state.get('pending_data')
+        payload_kind = self._smtp_payload_kind(payload)
+
+        if pending_data and dir_key == pending_data.get('dir_key') and payload:
+            existing = bytes(pending_data.get('payload', b''))
+            segments = list(pending_data.get('segments', []))
+            terminator = b'.\r\n'
+            candidate = existing + bytes(payload)
+            data_len = len(payload)
+            if candidate.endswith(terminator):
+                data_len = max(0, len(payload) - len(terminator))
+            segment_start = len(existing)
+            current_segment = {
+                'frame_number': frame_number,
+                'payload_start': int(segment_start),
+                'payload_length': int(data_len),
+                'tcp_start_offset_in_payload': 0,
+            }
+            segments.append(current_segment)
+            if candidate.endswith(terminator):
+                full_payload = candidate[:-len(terminator)]
+                metadata['smtp_kind'] = 'data'
+                metadata['smtp_data_reassembled_payload'] = full_payload
+                metadata['smtp_data_reassembled_length'] = int(len(full_payload))
+                metadata['smtp_data_segments'] = segments
+                metadata['smtp_data_fragment_count'] = int(len(segments))
+                metadata['smtp_is_reassembled'] = len(segments) > 1
+                metadata['smtp_data_dot_offset_in_payload'] = max(0, len(payload) - len(terminator))
+                metadata['smtp_data_dot_length'] = len(terminator)
+                metadata['smtp_imf'] = self._smtp_parse_imf(full_payload)
+                metadata['tcp_reassembled_segments'] = segments
+                metadata['tcp_reassembled_length'] = int(len(full_payload))
+                metadata['tcp_reassembled_data_hex'] = full_payload.hex()
+                smtp_state.pop('pending_data', None)
+
+                for segment in segments[:-1]:
+                    segment_record = self._find_stream_record(state, int(segment.get('frame_number', 0) or 0))
+                    if segment_record is None:
+                        continue
+                    segment_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
+                    segment_record.metadata['smtp_reassembled_data_in_frame'] = frame_number
+                    segment_record.metadata['tcp_segment_data_length'] = int(segment.get('payload_length', 0) or 0)
+                    segment_record.metadata['tcp_segment_data_offset'] = int(segment.get('tcp_start_offset_in_payload', 0) or 0)
+                    segment_record.protocol = 'SMTP'
+                    segment_record.info = self._build_info(segment_record.raw, 'SMTP', segment_record.metadata)
+
+                if segments:
+                    metadata['tcp_segment_data_length'] = int(segments[-1].get('payload_length', 0) or 0)
+                    metadata['tcp_segment_data_offset'] = int(segments[-1].get('tcp_start_offset_in_payload', 0) or 0)
+            else:
+                pending_data['payload'] = candidate
+                pending_data['segments'] = segments
+                metadata['smtp_kind'] = 'data'
+                metadata['tcp_segment_data_length'] = int(data_len)
+                metadata['tcp_segment_data_offset'] = 0
+            return
+
+        if payload_kind == 'command':
+            command, parameter = self._smtp_command_parts(payload)
+            metadata['smtp_kind'] = 'command'
+            metadata['smtp_command'] = command
+            metadata['smtp_parameter'] = parameter
+            if command == 'DATA':
+                smtp_state['expect_data_dir'] = dir_key
+            return
+
+        if payload_kind == 'response':
+            code, parameter = self._smtp_response_parts(payload)
+            metadata['smtp_kind'] = 'response'
+            metadata['smtp_response_code'] = code
+            metadata['smtp_response_parameter'] = parameter
+            if code == '354':
+                client_dir = (dst, dport, src, sport)
+                smtp_state['pending_data'] = {
+                    'dir_key': client_dir,
+                    'payload': b'',
+                    'segments': [],
+                    'start_frame': frame_number + 1,
+                    'start_epoch': float(epoch_time),
+                }
+            return
+
+        expected_dir = smtp_state.get('pending_data', {}).get('dir_key') if isinstance(smtp_state.get('pending_data'), dict) else None
+        if expected_dir == dir_key and payload:
+            smtp_state['pending_data'] = {
+                'dir_key': dir_key,
+                'payload': b'',
+                'segments': [],
+                'start_frame': frame_number,
+                'start_epoch': float(epoch_time),
+            }
+            self._update_smtp_stream_metadata(packet, metadata, epoch_time)
+
     def _update_http_metadata(self, record: PacketRecord) -> None:
         if str(getattr(record, 'protocol', '') or '').upper() != 'HTTP':
             return
@@ -3157,6 +3361,52 @@ class PacketParser:
         record.metadata['http_time_since_request_ms'] = float(response_ms)
         if not pending:
             self.http_request_pending.pop(stream_key, None)
+
+    def _update_smtp_metadata(self, record: PacketRecord) -> None:
+        protocol = str(getattr(record, 'protocol', '') or '').upper()
+        if protocol not in {'SMTP', 'SMTP/IMF'}:
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        metadata = record.metadata
+        payload = bytes(metadata.get('smtp_data_reassembled_payload', b'') or self._payload_bytes(packet))
+        kind = str(metadata.get('smtp_kind', '') or '') or self._smtp_payload_kind(payload)
+        if not kind:
+            return
+
+        effective_ip = self._effective_ip_layer(packet)
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        stream_key = self._canonical_transport_key(
+            str(effective_ip.src),
+            int(getattr(tcp_layer, 'sport', 0) or 0),
+            str(effective_ip.dst),
+            int(getattr(tcp_layer, 'dport', 0) or 0),
+            'TCP',
+        )
+
+        if kind in {'command', 'data'}:
+            self.smtp_request_pending.setdefault(stream_key, []).append(record)
+            return
+
+        if kind != 'response':
+            return
+
+        pending = self.smtp_request_pending.get(stream_key)
+        if not pending:
+            return
+        request_record = pending.pop(0)
+        request_record.metadata['smtp_response_frame'] = int(record.number)
+        record.metadata['smtp_request_frame'] = int(request_record.number)
+        response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
+        record.metadata['smtp_time_since_request_ms'] = max(0.0, float(response_delta))
+        if not pending:
+            self.smtp_request_pending.pop(stream_key, None)
 
     def _build_info(self, packet, protocol: str, metadata: dict | None = None) -> str:
         metadata = metadata or {}
@@ -3324,6 +3574,41 @@ class PacketParser:
                             return f'{response_text}  ({content_type})'
                         return f'{response_text} '
                 return 'HTTP'
+            if protocol in {'SMTP', 'SMTP/IMF'}:
+                if protocol == 'SMTP/IMF':
+                    imf = metadata.get('smtp_imf', {}) or {}
+                    subject = str(imf.get('subject', '') or '').strip()
+                    from_addr = str(imf.get('from', '') or '').strip()
+                    body_lines = imf.get('body_lines', []) or []
+                    body_preview = ''
+                    if body_lines:
+                        preview_parts = []
+                        for line in body_lines[:80]:
+                            raw_line = bytes(line.get('raw', b'') or b'').decode(errors='ignore').rstrip('\r\n')
+                            if raw_line:
+                                preview_parts.append(raw_line)
+                        body_preview = '  , '.join(preview_parts)
+                    parts = []
+                    if subject:
+                        parts.append(f'subject: {subject}')
+                    if from_addr:
+                        parts.append(f'from: {from_addr}')
+                    if from_addr and body_preview:
+                        parts.append('')
+                    if body_preview:
+                        parts.append(body_preview)
+                    return ', '.join(parts) if parts else 'Internet Message Format'
+                payload = self._payload_bytes(packet)
+                kind = str(metadata.get('smtp_kind', '') or '') or self._smtp_payload_kind(payload)
+                if kind == 'data':
+                    fragment_len = int(metadata.get('tcp_segment_data_length', 0) or len(payload))
+                    return f'C: DATA fragment, {fragment_len} bytes'
+                line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+                if kind == 'response':
+                    return f'S: {line}'
+                if kind == 'command':
+                    return f'C: {line}'
+                return 'Simple Mail Transfer Protocol'
             if protocol.startswith('TLS'):
                 tls_summaries = self._tls_record_summaries(packet)
                 if not tls_summaries:

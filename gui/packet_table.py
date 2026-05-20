@@ -24,6 +24,8 @@ class PacketTable(QTableWidget):
         'TLSv1.3': QColor(237, 233, 255),
         'QUIC': QColor(216, 237, 255),
         'HTTP': QColor(255, 245, 219),
+        'SMTP': QColor(255, 240, 216),
+        'SMTP/IMF': QColor(255, 240, 216),
         'DHCP': QColor(229, 245, 238),
         'DHCPv6': QColor(229, 245, 238),
     }
