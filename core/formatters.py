@@ -226,7 +226,12 @@ def _ipv4_payload_length(ip_layer):
 
 
 def _tcp_payload_bytes(packet, tcp_layer):
-    raw_payload = bytes(getattr(tcp_layer, 'payload', b''))
+    tcp_payload = getattr(tcp_layer, 'payload', b'')
+    raw_original = getattr(tcp_payload, 'original', None)
+    if isinstance(raw_original, (bytes, bytearray)) and raw_original:
+        raw_payload = bytes(raw_original)
+    else:
+        raw_payload = bytes(tcp_payload)
     effective_ip = _effective_ip_layer(packet) if packet is not None else None
     if effective_ip is not None:
         ip_payload_len = _ipv4_payload_length(effective_ip)
@@ -704,19 +709,36 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += len(http_layer)
 
-    if packet.haslayer(TLS):
 
-        tls_layer = packet[TLS]
+    # TLS fallback: if protocol is TLS and TCP payload looks like TLS record, but no TLS layer
+    is_tls_protocol = str(getattr(record, 'protocol', '')).startswith('TLS')
+    tcp_payload = _tcp_payload_bytes(getattr(record, 'raw', None), effective_tcp_layer) if effective_tcp_layer is not None else b''
+    tls_header_at_start = (
+        len(tcp_payload) >= 5
+        and int(tcp_payload[0]) in {20, 21, 22, 23}
+        and int.from_bytes(tcp_payload[1:3], 'big') in {0x0301, 0x0302, 0x0303, 0x0304}
+    )
+    tls_header_embedded = False
+    if len(tcp_payload) >= 5:
+        for i in range(0, len(tcp_payload) - 4):
+            ctype = int(tcp_payload[i])
+            ver = int.from_bytes(tcp_payload[i + 1:i + 3], 'big')
+            rec_len = int.from_bytes(tcp_payload[i + 3:i + 5], 'big')
+            if ctype in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304} and i + 5 + rec_len <= len(tcp_payload):
+                tls_header_embedded = True
+                break
 
+    if (packet.haslayer(TLS) or (is_tls_protocol and tls_header_at_start) or tls_header_embedded):
         sections.append(
             _tls_section_precise(
                 packet,
                 offset,
-                tcp_stream_index
+                tcp_stream_index,
+                record=record
             )
         )
-
-        offset += len(tls_layer)
+        raw_payload_consumed = True
+        # offset += len(tls_layer) # Do not increment offset if no TLS layer
 
     if packet.haslayer(QUIC):
 
@@ -1596,6 +1618,41 @@ def _tls_clienthello_ja4(record_payload: bytes) -> Dict[str, str] | None:
     if ext_hex:
         raw += '_' + ','.join(ext_hex)
     return {'value': f'{prefix}_{cipher_hash}_{ext_hash}', 'raw': raw}
+
+
+def _tls_serverhello_ja3s(record_payload: bytes) -> Dict[str, str] | None:
+    if len(record_payload) < 42 or int(record_payload[0]) != 2:
+        return None
+
+    cursor = 4
+    version = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+    cursor += 2 + 32
+    if cursor >= len(record_payload):
+        return None
+
+    session_id_len = int(record_payload[cursor])
+    cursor += 1 + session_id_len
+    if cursor + 3 > len(record_payload):
+        return None
+
+    cipher = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+    cursor += 2
+    cursor += 1
+
+    ext_ids: list[str] = []
+    if cursor + 2 <= len(record_payload):
+        ext_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+        cursor += 2
+        ext_end = min(len(record_payload), cursor + ext_len)
+        while cursor + 4 <= ext_end:
+            ext_type = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
+            ext_size = int.from_bytes(record_payload[cursor + 2:cursor + 4], 'big')
+            ext_ids.append(str(ext_type))
+            cursor = min(ext_end, cursor + 4 + ext_size)
+
+    import hashlib
+    full = f'{version},{cipher},{"-".join(ext_ids)}'
+    return {'full': full, 'hash': hashlib.md5(full.encode('ascii')).hexdigest()}
 
 
 def _ipv6_next_header_name(next_header: int) -> str:
@@ -3184,16 +3241,13 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     # ---- TCP OPTIONS ----
 
     if options:
-
         option_children = []
         option_titles = []
         option_offset = offset + 20
-
         for opt in options:
-
             try:
-
                 name, value = opt
+                # MSS
                 if name == 'MSS':
                     option_titles.append('Maximum segment size')
                     option_children.append({
@@ -3207,6 +3261,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                         ],
                     })
                     option_offset += 4
+                # NOP
                 elif name == 'NOP':
                     option_titles.append('No-Operation (NOP)')
                     option_children.append({
@@ -3218,6 +3273,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                         ],
                     })
                     option_offset += 1
+                # Window Scale
                 elif name == 'WScale':
                     multiplier = 1 << int(value)
                     option_titles.append('Window scale')
@@ -3233,6 +3289,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                         ],
                     })
                     option_offset += 3
+                # SACK Permitted
                 elif name == 'SAckOK':
                     option_titles.append('SACK permitted')
                     option_children.append({
@@ -3245,25 +3302,96 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                         ],
                     })
                     option_offset += 2
-                else:
+                # SACK
+                elif name == 'SAck':
+                    # value is a list of (left, right) edges
+                    option_titles.append('SACK')
+                    sack_blocks = []
+                    for i, (left, right) in enumerate(value):
+                        sack_blocks.append({
+                            'title': f'SACK Block {i+1}: Left Edge={left}, Right Edge={right}',
+                            'length': 8
+                        })
                     option_children.append({
-                        'title': f'{name}: {value}'
+                        'title': f'TCP Option - SACK ({len(value)} blocks)',
+                        'offset': option_offset,
+                        'length': 2 + 8 * len(value),
+                        'children': [
+                            {'title': 'Kind: SACK (5)', 'offset': option_offset, 'length': 1},
+                            {'title': f'Length: {2 + 8 * len(value)}', 'offset': option_offset + 1, 'length': 1},
+                            *sack_blocks
+                        ],
                     })
-
+                    option_offset += 2 + 8 * len(value)
+                # Timestamp
+                elif name == 'Timestamp':
+                    option_titles.append('Timestamp')
+                    tsval, tsecr = value
+                    option_children.append({
+                        'title': f'TCP Option - Timestamp: TSval={tsval}, TSecr={tsecr}',
+                        'offset': option_offset,
+                        'length': 10,
+                        'children': [
+                            {'title': 'Kind: Timestamp (8)', 'offset': option_offset, 'length': 1},
+                            {'title': 'Length: 10', 'offset': option_offset + 1, 'length': 1},
+                            {'title': f'TSval: {tsval}', 'offset': option_offset + 2, 'length': 4},
+                            {'title': f'TSecr: {tsecr}', 'offset': option_offset + 6, 'length': 4},
+                        ],
+                    })
+                    option_offset += 10
+                # End of Option List
+                elif name == 'EOL':
+                    option_titles.append('End of Option List')
+                    option_children.append({
+                        'title': 'TCP Option - End of Option List',
+                        'offset': option_offset,
+                        'length': 1,
+                        'children': [
+                            {'title': 'Kind: End of Option List (0)', 'offset': option_offset, 'length': 1},
+                        ],
+                    })
+                    option_offset += 1
+                # Fast Open
+                elif name == 'TFO':
+                    option_titles.append('TCP Fast Open')
+                    option_children.append({
+                        'title': f'TCP Option - Fast Open: {value.hex() if isinstance(value, (bytes, bytearray)) else value}',
+                        'offset': option_offset,
+                        'length': 2 + len(value),
+                        'children': [
+                            {'title': 'Kind: Fast Open (34)', 'offset': option_offset, 'length': 1},
+                            {'title': f'Length: {2 + len(value)}', 'offset': option_offset + 1, 'length': 1},
+                            {'title': f'Data: {value.hex() if isinstance(value, (bytes, bytearray)) else value}', 'offset': option_offset + 2, 'length': len(value)},
+                        ],
+                    })
+                    option_offset += 2 + len(value)
+                # Unknown/Other
+                else:
+                    # Try to show as hex if possible
+                    try:
+                        raw = bytes(value) if isinstance(value, (bytes, bytearray)) else value
+                        hexval = raw.hex() if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    except Exception:
+                        hexval = str(value)
+                    option_titles.append(str(name))
+                    option_children.append({
+                        'title': f'TCP Option - {name}: {hexval}',
+                        'offset': option_offset,
+                        'length': 2 + (len(raw) if isinstance(raw, (bytes, bytearray)) else 0),
+                        'children': [
+                            {'title': f'Kind: {name}', 'offset': option_offset, 'length': 1},
+                            {'title': f'Length: {2 + (len(raw) if isinstance(raw, (bytes, bytearray)) else 0)}', 'offset': option_offset + 1, 'length': 1},
+                            {'title': f'Data: {hexval}', 'offset': option_offset + 2, 'length': len(raw) if isinstance(raw, (bytes, bytearray)) else 0},
+                        ],
+                    })
+                    option_offset += 2 + (len(raw) if isinstance(raw, (bytes, bytearray)) else 0)
             except Exception:
-
-                option_children.append({
-                    'title': str(opt)
-                })
-
+                option_titles.append(str(opt))
+                option_children.append({'title': str(opt)})
         children.append({
-
             'title': f'Options: ({max(0, tcp_header_len - 20)} bytes), ' + ', '.join(option_titles) if option_titles else 'Options',
-
             'offset': offset + 20,
-
             'length': max(0, tcp_header_len - 20),
-
             'children': option_children
         })
 
@@ -3281,20 +3409,30 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                 'offset': offset + tcp_header_len,
                 'length': payload_len,
             })
-        elif metadata.get('tcp_reassembled_pdu_in_frame', None) is not None:
+        elif metadata.get('tcp_reassembled_pdu_in_frame', None) is not None or metadata.get('tls_reassembled_pdu_in_frame', None) is not None:
+            _pdu_frame = metadata.get('tcp_reassembled_pdu_in_frame') or metadata.get('tls_reassembled_pdu_in_frame')
             children.append({
-                'title': f'[Reassembled PDU in frame: {int(metadata.get("tcp_reassembled_pdu_in_frame"))}]',
+                'title': f'[Reassembled PDU in frame: {int(_pdu_frame)}]',
             })
+            # Use the actual contribution length, not the full TCP payload length
+            _seg_data_len = int(metadata.get('tls_segment_data_length') or metadata.get('tcp_segment_data_length') or payload_len)
+            # Use the actual start offset within TCP payload (fragment may start after earlier complete records)
+            _seg_data_off = int(metadata.get('tls_segment_data_offset') or metadata.get('tcp_segment_data_offset') or 0)
             children.append({
-                'title': f'TCP segment data ({payload_len} bytes)',
-                'offset': offset + tcp_header_len,
-                'length': payload_len,
+                'title': f'TCP segment data ({_seg_data_len} bytes)',
+                'offset': offset + tcp_header_len + _seg_data_off,
+                'length': _seg_data_len,
             })
-        elif metadata.get('tcp_reassembled_segments', None) or metadata.get('http_reassembled_segments', None):
+        elif metadata.get('tcp_reassembled_segments', None) or metadata.get('http_reassembled_segments', None) or metadata.get('tls_reassembled_segments', None):
+            # For the completing frame: only the first N bytes go towards the reassembled PDU
+            _tls_segs = metadata.get('tls_reassembled_segments') or []
+            _last_seg = _tls_segs[-1] if _tls_segs else {}
+            _seg_data_len = int(_last_seg.get('payload_length', payload_len))
+            _seg_data_off = int(_last_seg.get('tcp_start_offset_in_payload', 0))
             children.append({
-                'title': f'TCP segment data ({payload_len} bytes)',
-                'offset': offset + tcp_header_len,
-                'length': payload_len,
+                'title': f'TCP segment data ({_seg_data_len} bytes)',
+                'offset': offset + tcp_header_len + _seg_data_off,
+                'length': _seg_data_len,
             })
         elif protocol_name == 'BGP':
             children.append({
@@ -3325,6 +3463,7 @@ def _tcp_reassembly_section(record) -> Dict[str, Any] | None:
     segments = list(
         metadata.get('tcp_reassembled_segments', [])
         or metadata.get('http_reassembled_segments', [])
+        or metadata.get('tls_reassembled_segments', [])
         or []
     )
     if not segments:
@@ -3333,6 +3472,7 @@ def _tcp_reassembly_section(record) -> Dict[str, Any] | None:
     reassembled_len = int(
         metadata.get('tcp_reassembled_length', 0)
         or metadata.get('http_reassembled_length', 0)
+        or metadata.get('tls_reassembled_length', 0)
         or 0
     )
     if reassembled_len <= 0:
@@ -3359,7 +3499,11 @@ def _tcp_reassembly_section(record) -> Dict[str, Any] | None:
 
     reassembly_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
     if not reassembly_hex:
-        reassembly_payload = bytes(metadata.get('http_reassembled_payload', b'') or b'')
+        reassembly_payload = bytes(
+            metadata.get('http_reassembled_payload', b'')
+            or metadata.get('tls_reassembled_payload', b'')
+            or b''
+        )
         reassembly_hex = reassembly_payload.hex() if reassembly_payload else ''
     if reassembly_hex:
         children.append({
@@ -5727,160 +5871,800 @@ def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
 
 
 def _tls_section(packet, offset: int, stream_index: int) -> Dict[str, Any]:
-
     tls = packet[TLS]
+    tls_raw = bytes(tls)
+    tls_len = len(tls_raw)
 
-    tls_len = len(tls)
+    def _tls_version_name(version: int) -> str:
+        return {
+            0x0301: 'TLSv1.0',
+            0x0302: 'TLSv1.1',
+            0x0303: 'TLSv1.2',
+            0x0304: 'TLSv1.3',
+        }.get(int(version), f'0x{int(version):04x}')
 
-    content_type_map = {
-        20: 'Change Cipher Spec',
-        21: 'Alert',
-        22: 'Handshake',
-        23: 'Application Data',
-    }
+    def _tls_content_type_name(content_type: int) -> str:
+        return {
+            20: 'Change Cipher Spec',
+            21: 'Alert',
+            22: 'Handshake',
+            23: 'Application Data',
+        }.get(int(content_type), str(int(content_type)))
 
-    version_map = {
-        0x0301: 'TLSv1.0',
-        0x0302: 'TLSv1.1',
-        0x0303: 'TLSv1.2',
-        0x0304: 'TLSv1.3',
-    }
+    def _tls_handshake_type_name(handshake_type: int) -> str:
+        return {
+            1: 'Client Hello',
+            2: 'Server Hello',
+            4: 'New Session Ticket',
+            11: 'Certificate',
+            12: 'Server Key Exchange',
+            13: 'Certificate Request',
+            14: 'Server Hello Done',
+            16: 'Client Key Exchange',
+            20: 'Finished',
+        }.get(int(handshake_type), f'Handshake ({int(handshake_type)})')
 
-    content_type = int(getattr(tls, 'type', 0) or 0)
-
-    version = int(getattr(tls, 'version', 0) or 0)
-
-    record_len = int(getattr(tls, 'len', 0) or 0)
-
-    content_name = content_type_map.get(
-        content_type,
-        str(content_type)
-    )
-
-    version_name = version_map.get(
-        version,
-        f'0x{version:04x}'
-    )
-
-    payload = b''
-
-    protocol_name = 'Hypertext Transfer Protocol'
-
-    try:
-
-        msg = getattr(tls, 'msg', None)
-
-        if msg:
-
-            # msg có thể là list hoặc object
-            if isinstance(msg, list):
-
-                for item in msg:
-                    try:
-                        payload += bytes(item)
-                    except Exception:
-                        pass
-
-            else:
-
-                try:
-                    payload = bytes(msg)
-                except Exception:
-                    pass
-
-        if not payload:
-
-            try:
-                payload = bytes(tls.payload)
-            except Exception:
-                payload = b''
-
-    except Exception:
-
-        payload = b''
-
-    if not payload:
-        payload = bytes(tls.payload)
-
-    payload_hex = payload.hex()
-
-    children = []
-
+    children: List[Dict[str, Any]] = []
     if stream_index >= 0:
-        children.append({
-            'title': f'[Stream index: {stream_index}]'
-        })
+        children.append({'title': f'[Stream index: {stream_index}]'})
 
-    children.append({
-        'title':
-                f'{version_name} Record Layer: '
-                f'{content_name} Protocol: {protocol_name}',
+    cursor = 0
+    while cursor + 5 <= len(tls_raw):
+        content_type = int(tls_raw[cursor])
+        version = int.from_bytes(tls_raw[cursor + 1:cursor + 3], 'big')
+        record_len = int.from_bytes(tls_raw[cursor + 3:cursor + 5], 'big')
+        body_start = cursor + 5
+        body_end = min(len(tls_raw), body_start + record_len)
+        body = tls_raw[body_start:body_end]
 
-            'offset': offset,
-            'length': tls_len,
+        content_name = _tls_content_type_name(content_type)
+        version_name = _tls_version_name(version)
+        record_children: List[Dict[str, Any]] = [
+            {
+                'title': f'Content Type: {content_name} ({content_type})',
+                'offset': offset + cursor,
+                'length': 1,
+            },
+            {
+                'title': f'Version: {version_name} (0x{version:04x})',
+                'offset': offset + cursor + 1,
+                'length': 2,
+            },
+            {
+                'title': f'Length: {record_len}',
+                'offset': offset + cursor + 3,
+                'length': 2,
+            },
+        ]
 
-            'children': [
+        record_title = f'{version_name} Record Layer: {content_name} Protocol'
+        if content_type == 22 and len(body) >= 4:
+            hs_pos = 0
+            handshake_titles: List[str] = []
+            while hs_pos + 4 <= len(body):
+                handshake_type = int(body[hs_pos])
+                handshake_len = int.from_bytes(body[hs_pos + 1:hs_pos + 4], 'big')
+                hs_total = 4 + handshake_len
+                if hs_total < 4 or hs_pos + hs_total > len(body):
+                    handshake_titles.append('Encrypted Handshake Message')
+                    break
+                handshake_name = _tls_handshake_type_name(handshake_type)
+                handshake_titles.append(handshake_name)
+                record_children.append(
+                    {
+                        'title': f'Handshake Protocol: {handshake_name}',
+                        'offset': offset + body_start + hs_pos,
+                        'length': hs_total,
+                        'children': [
+                            {
+                                'title': f'Handshake Type: {handshake_name} ({handshake_type})',
+                                'offset': offset + body_start + hs_pos,
+                                'length': 1,
+                            },
+                            {
+                                'title': f'Length: {handshake_len}',
+                                'offset': offset + body_start + hs_pos + 1,
+                                'length': 3,
+                            },
+                        ],
+                    }
+                )
+                hs_pos += hs_total
+            if handshake_titles:
+                record_title = f'{version_name} Record Layer: Handshake Protocol: {", ".join(handshake_titles)}'
 
+        record_node: Dict[str, Any] = {
+            'title': record_title,
+            'offset': offset + cursor,
+            'length': 5 + len(body),
+            'children': record_children,
+        }
+        if content_type in {22, 23} and body:
+            record_node['children'].append(
                 {
-                    'title':
-                        f'Content Type: '
-                        f'{content_name} ({content_type})',
-
-                    'offset': offset,
-                    'length': 1,
-                },
-
-                {
-                    'title':
-                        f'Version: '
-                        f'{version_name} '
-                        f'(0x{version:04x})',
-
-                    'offset': offset + 1,
-                    'length': 2,
-                },
-
-                {
-                    'title':
-                        f'Length: {record_len}',
-
-                    'offset': offset + 3,
-                    'length': 2,
+                    'title': f'TLS segment data ({len(body)} bytes)',
+                    'offset': offset + body_start,
+                    'length': len(body),
                 }
-            ]
-        })
+            )
+        children.append(record_node)
 
-    if payload_hex:
+        if record_len <= 0:
+            break
+        cursor = body_start + record_len
 
-        children[1]['children'].append({
-
-            'title':
-                f'Encrypted Application Data: '
-                f'{payload_hex}',
-
-            'offset': offset + 5,
-            'length': len(payload),
-        })
-
-        children[1]['children'].append({
-
-            'title':
-                '[Application Data Protocol]'
-        })
-
-    return {
-
-        'title':
-            'Transport Layer Security',
-
+    result = {
+        'title': 'Transport Layer Security',
         'offset': offset,
         'length': tls_len,
         'children': children,
     }
 
-def _tls_section_precise(packet, offset: int, stream_index: int) -> Dict[str, Any]:
+    if _is_reassembled:
+        # Tag every node that carries a byte mapping so the hex view highlights
+        # bytes in the "Reassembled TCP" tab rather than the raw frame bytes.
+        def _tag_tcp_reassembled(node: dict):
+            if 'offset' in node and 'length' in node:
+                node['byte_source'] = TCP_REASSEMBLED_BYTE_SOURCE
+            for child in node.get('children', []):
+                _tag_tcp_reassembled(child)
+        _tag_tcp_reassembled(result)
+
+    return result
+
+def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
+    """Parse DER-encoded X.509 certificate into a Wireshark-style detail tree node."""
+    hex_prefix = cert_bytes.hex()
+
+    # ─── Minimal DER walker ───────────────────────────────────────────────────
+    def _der_tlv(data: bytes):
+        """Return list of (tag, value_bytes) from a DER container (non-recursive)."""
+        result, pos = [], 0
+        while pos < len(data):
+            if pos >= len(data):
+                break
+            tag = data[pos]; pos += 1
+            if pos >= len(data):
+                break
+            if data[pos] & 0x80:
+                n = data[pos] & 0x7f; pos += 1
+                if pos + n > len(data):
+                    break
+                length = int.from_bytes(data[pos:pos + n], 'big'); pos += n
+            else:
+                length = data[pos]; pos += 1
+            end = pos + length
+            result.append((tag, data[pos:end]))
+            pos = end
+        return result
+
+    def _decode_oid(b: bytes) -> str:
+        if not b:
+            return ''
+        arcs, first = [], b[0]
+        arcs.append(min(first // 40, 2))
+        arcs.append(first - 40 * arcs[0])
+        val = 0
+        for byte in b[1:]:
+            val = (val << 7) | (byte & 0x7f)
+            if not (byte & 0x80):
+                arcs.append(val); val = 0
+        return '.'.join(map(str, arcs))
+
+    # ─── OID name tables ─────────────────────────────────────────────────────
+    OID_ATTR = {
+        '2.5.4.3': 'id-at-commonName', '2.5.4.6': 'id-at-countryName',
+        '2.5.4.7': 'id-at-localityName', '2.5.4.8': 'id-at-stateOrProvinceName',
+        '2.5.4.10': 'id-at-organizationName', '2.5.4.11': 'id-at-organizationalUnitName',
+    }
+    OID_ALG = {
+        '1.2.840.113549.1.1.11': 'sha256WithRSAEncryption',
+        '1.2.840.113549.1.1.5': 'sha1WithRSAEncryption',
+        '1.2.840.113549.1.1.1': 'rsaEncryption',
+        '1.2.840.10045.2.1': 'ecPublicKey',
+    }
+    OID_EXT = {
+        '2.5.29.15': 'id-ce-keyUsage', '2.5.29.17': 'id-ce-subjectAltName',
+        '2.5.29.18': 'id-ce-issuerAltName', '2.5.29.19': 'id-ce-basicConstraints',
+        '2.5.29.14': 'id-ce-subjectKeyIdentifier', '2.5.29.35': 'id-ce-authorityKeyIdentifier',
+        '2.5.29.37': 'id-ce-extKeyUsage', '2.5.29.31': 'id-ce-cRLDistributionPoints',
+        '2.5.29.32': 'id-ce-certificatePolicies', '1.3.6.1.5.5.7.1.1': 'id-pe-authorityInfoAccess',
+        '1.3.6.1.4.1.11129.2.4.2': 'SignedCertificateTimestampList',
+    }
+    OID_KP = {
+        '1.3.6.1.5.5.7.3.1': 'id-kp-serverAuth', '1.3.6.1.5.5.7.3.2': 'id-kp-clientAuth',
+        '1.3.6.1.5.5.7.3.3': 'id-kp-codeSigning', '1.3.6.1.5.5.7.3.4': 'id-kp-emailProtection',
+    }
+    OID_AIA = {
+        '1.3.6.1.5.5.7.48.1': 'id-ad-ocsp', '1.3.6.1.5.5.7.48.2': 'id-ad-caIssuers',
+    }
+    OID_POLICY_QUAL = {'1.3.6.1.5.5.7.2.1': 'id-qt-cps'}
+    OID_POLICY = {
+        '2.23.140.1.2.3': 'joint-iso-itu-t.23.140.1.2.3',
+        '2.5.29.32.0': 'anyPolicy',
+    }
+    TAG_STR_NAME = {0x0C: 'uTF8String', 0x13: 'printableString', 0x16: 'ia5String', 0x14: 'teletexString'}
+    TAG_STR_ID   = {0x0C: 4, 0x13: 1, 0x16: 0, 0x14: 0}
+    SCT_LOG_NAMES = {
+        '68f698f81f6482be3a8ceeb9281d4cfc71515d6793d444d10a67acbb4f4ffbc4': "Google 'Aviator' log",
+        'ee4bbdb775ce60bae142691fabe19e66a30f7e5fb072d88300c47b897aa8fdcb': "Google 'Rocketeer' log",
+        'a4b90990b418581487bb13a2cc67700a3c359804f91bdfb8e377cd0ec80ddc10': "Google 'Pilot' log",
+        '293c519654c83965baaa50fc5807d4b76fbf587a2972dca4c30cf4e54547f478': "Google 'Skydiver' log",
+    }
+
+    # ─── Build Name (issuer/subject) tree ────────────────────────────────────
+    def _build_name_tree(name_raw_der: bytes, label: str) -> dict:
+        rdn_items, name_parts = [], []
+        for set_tag, set_val in _der_tlv(name_raw_der):
+            if set_tag != 0x31:
+                continue
+            for seq_tag, seq_val in _der_tlv(set_val):
+                if seq_tag != 0x30:
+                    continue
+                items = _der_tlv(seq_val)
+                if len(items) < 2 or items[0][0] != 0x06:
+                    continue
+                oid = _decode_oid(items[0][1])
+                attr_name = OID_ATTR.get(oid, oid)
+                str_tag, str_val = items[1]
+                try:
+                    val = str_val.decode('utf-8')
+                except Exception:
+                    val = str_val.hex()
+                name_parts.append(f'{attr_name}={val}')
+                str_type_name = TAG_STR_NAME.get(str_tag, 'uTF8String')
+                str_type_id   = TAG_STR_ID.get(str_tag, 4)
+                if oid == '2.5.4.6':
+                    value_node = {'title': f'CountryName: {val}'}
+                else:
+                    value_node = {
+                        'title': f'DirectoryString: {str_type_name} ({str_type_id})',
+                        'children': [{'title': f'{str_type_name}: {val}'}],
+                    }
+                rdn_items.append({
+                    'title': f'RDNSequence item: 1 item ({attr_name}={val})',
+                    'children': [{'title': f'RelativeDistinguishedName item ({attr_name}={val})',
+                                  'children': [{'title': f'Object Id: {oid} ({attr_name})'}, value_node]}],
+                })
+        name_str = ','.join(reversed(name_parts))
+        return {
+            'title': f'{label}: rdnSequence (0)',
+            'children': [{'title': f'rdnSequence: {len(rdn_items)} items ({name_str})', 'children': rdn_items}],
+        }
+
+    # ─── Build Validity tree ─────────────────────────────────────────────────
+    def _build_validity_tree(validity_raw: bytes) -> dict:
+        import datetime
+        def _parse_time(tag, val):
+            s = val.decode('ascii', errors='replace').rstrip('Z')
+            try:
+                if tag == 0x17:  # UTCTime (2-digit year)
+                    dt = datetime.datetime.strptime(s, '%y%m%d%H%M%S')
+                    if dt.year < 1950:
+                        dt = dt.replace(year=dt.year + 100)
+                else:              # GeneralizedTime
+                    dt = datetime.datetime.strptime(s, '%Y%m%d%H%M%S')
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                return s
+        items = _der_tlv(validity_raw)
+        nb_str = _parse_time(items[0][0], items[0][1]) if len(items) >= 1 else '?'
+        na_str = _parse_time(items[1][0], items[1][1]) if len(items) >= 2 else '?'
+        nb_type = 'utcTime' if (items[0][0] if items else 0x17) == 0x17 else 'generalTime'
+        na_type = 'utcTime' if (items[1][0] if len(items) > 1 else 0x17) == 0x17 else 'generalTime'
+        return {
+            'title': 'validity',
+            'children': [
+                {'title': f'notBefore: {nb_type} (0)', 'children': [{'title': f'{nb_type}: {nb_str} (UTC)'}]},
+                {'title': f'notAfter: {na_type} (0)',  'children': [{'title': f'{na_type}: {na_str} (UTC)'}]},
+            ],
+        }
+
+    # ─── Build SubjectPublicKeyInfo tree ─────────────────────────────────────
+    def _build_spki_tree(spki_raw: bytes) -> dict:
+        items = _der_tlv(spki_raw)
+        alg_oid_str = ''
+        if items and items[0][0] == 0x30:
+            alg_items = _der_tlv(items[0][1])
+            if alg_items and alg_items[0][0] == 0x06:
+                alg_oid_str = _decode_oid(alg_items[0][1])
+        alg_name = OID_ALG.get(alg_oid_str, alg_oid_str)
+        spki_children = [
+            {'title': f'algorithm ({alg_name})', 'children': [{'title': f'Algorithm Id: {alg_oid_str} ({alg_name})'}]},
+            {'title': 'Padding: 0'},
+        ]
+        if len(items) >= 2 and items[1][0] == 0x03:
+            bitstr = items[1][1]
+            pk_content = bitstr[1:] if bitstr else b''  # skip unused-bits byte
+            pk_hex = pk_content.hex()
+            pk_items = _der_tlv(pk_content)
+            rsa_children = []
+            if pk_items and pk_items[0][0] == 0x30:
+                rsa_items = _der_tlv(pk_items[0][1])
+                if len(rsa_items) >= 2 and rsa_items[0][0] == 0x02:
+                    mod_int = int.from_bytes(rsa_items[0][1], 'big')
+                    exp_int = int.from_bytes(rsa_items[1][1], 'big') if rsa_items[1][0] == 0x02 else 65537
+                    rsa_children = [
+                        {'title': f'modulus: 0x{mod_int:x}'},
+                        {'title': f'publicExponent: {exp_int}'},
+                    ]
+            spki_children.append({
+                'title': f'subjectPublicKey [...]: {pk_hex[:64]}',
+                'children': [{'title': 'RSA Public Key', 'children': rsa_children}] if rsa_children else [],
+            })
+        return {'title': 'subjectPublicKeyInfo', 'children': spki_children}
+
+    # ─── Build KeyUsage bit-flag children ────────────────────────────────────
+    def _build_ku_flags(ku_byte: int, decipher_only: bool = False) -> list:
+        bit_defs = [
+            (7, 'digitalSignature'), (6, 'contentCommitment'), (5, 'keyEncipherment'),
+            (4, 'dataEncipherment'), (3, 'keyAgreement'), (2, 'keyCertSign'),
+            (1, 'cRLSign'), (0, 'encipherOnly'),
+        ]
+        children = []
+        for bit_pos, name in bit_defs:
+            is_set = bool(ku_byte & (1 << bit_pos))
+            i = 7 - bit_pos
+            n0, n1 = ['.'] * 4, ['.'] * 4
+            if i < 4:
+                n0[i] = '1' if is_set else '0'
+            else:
+                n1[i - 4] = '1' if is_set else '0'
+            children.append({'title': f"{''.join(n0)} {''.join(n1)} = {name}: {'True' if is_set else 'False'}"})
+        children.append({'title': f"0... .... = decipherOnly: {'True' if decipher_only else 'False'}"})
+        return children
+
+    # ─── Parse SCT extension bytes ───────────────────────────────────────────
+    def _parse_sct_ext(sct_ext_octet_val: bytes) -> list:
+        """Parse SignedCertificateTimestampList. Input: raw value of extension's OCTET STRING."""
+        import datetime
+        result = []
+        try:
+            # The value is OCTET STRING wrapping the SCT list TLS bytes
+            inner = _der_tlv(sct_ext_octet_val)
+            if not inner or inner[0][0] != 0x04:
+                return result
+            sct_list = inner[0][1]
+            if len(sct_list) < 2:
+                return result
+            list_len = int.from_bytes(sct_list[0:2], 'big')
+            result.append({'title': f'Serialized SCT List Length: {list_len}'})
+            pos = 2
+            while pos + 2 <= len(sct_list):
+                sct_len = int.from_bytes(sct_list[pos:pos + 2], 'big')
+                pos += 2
+                sct = sct_list[pos:pos + sct_len]
+                pos += sct_len
+                if len(sct) < 43:
+                    continue
+                version = sct[0]
+                log_id_hex = sct[1:33].hex()
+                log_name = SCT_LOG_NAMES.get(log_id_hex, 'Unknown log')
+                ts_ms = int.from_bytes(sct[33:41], 'big')
+                ts_dt = datetime.datetime(1970, 1, 1) + datetime.timedelta(milliseconds=ts_ms)
+                ts_str = ts_dt.strftime('%b %e, %Y %H:%M:%S') + f'.{ts_ms % 1000:03d}000000 UTC'
+                ext_len = int.from_bytes(sct[41:43], 'big')
+                sig_pos = 43 + ext_len
+                if sig_pos + 4 > len(sct):
+                    continue
+                hash_alg = sct[sig_pos]
+                sign_alg = sct[sig_pos + 1]
+                sig_len = int.from_bytes(sct[sig_pos + 2:sig_pos + 4], 'big')
+                sig_hex = sct[sig_pos + 4:sig_pos + 4 + sig_len].hex()
+                hash_names = {4: 'SHA256', 5: 'SHA384', 6: 'SHA512', 2: 'SHA1'}
+                sign_names = {1: 'RSA', 2: 'DSA', 3: 'ECDSA'}
+                alg_code = (hash_alg << 8) | sign_alg
+                alg_names = {0x0403: 'ecdsa_secp256r1_sha256', 0x0401: 'rsa_pkcs1_sha256',
+                              0x0201: 'rsa_pkcs1_sha1', 0x0203: 'ecdsa_sha1'}
+                alg_name = alg_names.get(alg_code, f'0x{alg_code:04x}')
+                sct_node = {
+                    'title': f'Signed Certificate Timestamp ({log_name})',
+                    'children': [
+                        {'title': f'Serialized SCT Length: {sct_len}'},
+                        {'title': f'SCT Version: {version}'},
+                        {'title': f'Log ID: {log_id_hex}'},
+                        {'title': f'Timestamp: {ts_str}'},
+                        {'title': f'Extensions length: {ext_len}'},
+                        {'title': f'Signature Algorithm: {alg_name} (0x{alg_code:04x})',
+                         'children': [
+                             {'title': f'Signature Hash Algorithm Hash: {hash_names.get(hash_alg, hash_alg)} ({hash_alg})'},
+                             {'title': f'Signature Hash Algorithm Signature: {sign_names.get(sign_alg, sign_alg)} ({sign_alg})'},
+                         ]},
+                        {'title': f'Signature Length: {sig_len}'},
+                        {'title': f'Signature: {sig_hex}'},
+                    ],
+                }
+                result.append(sct_node)
+        except Exception:
+            pass
+        return result
+
+    # ─── Build single Extension tree ─────────────────────────────────────────
+    def _build_ext_tree(ext_oid: str, is_critical: bool, ext_val_octet: bytes) -> dict:
+        ext_name = OID_EXT.get(ext_oid, ext_oid)
+        children: list = [{'title': f'Extension Id: {ext_oid} ({ext_name})'}]
+        if is_critical:
+            children.append({'title': 'critical: True'})
+        try:
+            val_items = _der_tlv(ext_val_octet)  # OCTET STRING value contains inner DER
+            if not val_items:
+                return {'title': f'Extension ({ext_name})', 'children': children}
+            inner_der = val_items[0][1] if val_items[0][0] == 0x04 else ext_val_octet
+
+            # id-ce-keyUsage
+            if ext_oid == '2.5.29.15':
+                bs_items = _der_tlv(inner_der)
+                if bs_items and bs_items[0][0] == 0x03:
+                    bs_val = bs_items[0][1]
+                    padding = bs_val[0] if bs_val else 0
+                    ku_byte = bs_val[1] if len(bs_val) >= 2 else 0
+                    ku_byte2 = bs_val[2] if len(bs_val) >= 3 else 0
+                    decipher = bool(ku_byte2 & 0x80)
+                    ku_hex = f'{ku_byte:02x}'
+                    children.extend([
+                        {'title': f'Padding: {padding}'},
+                        {'title': f'KeyUsage: {ku_hex}', 'children': _build_ku_flags(ku_byte, decipher)},
+                    ])
+
+            # id-ce-extKeyUsage
+            elif ext_oid == '2.5.29.37':
+                seq_items = _der_tlv(inner_der)
+                if seq_items and seq_items[0][0] == 0x30:
+                    kp_list = [{'title': f'KeyPurposeId: {_decode_oid(i[1])} ({OID_KP.get(_decode_oid(i[1]), _decode_oid(i[1]))})'}
+                               for i in _der_tlv(seq_items[0][1]) if i[0] == 0x06]
+                    children.append({'title': f'KeyPurposeIDs: {len(kp_list)} items', 'children': kp_list})
+
+            # id-ce-basicConstraints
+            elif ext_oid == '2.5.29.19':
+                seq_items = _der_tlv(inner_der)
+                bc_inner = _der_tlv(seq_items[0][1]) if seq_items and seq_items[0][0] == 0x30 else []
+                ca_val = False
+                path_len = None
+                for tag, val in bc_inner:
+                    if tag == 0x01 and val:    # BOOLEAN
+                        ca_val = val[0] != 0
+                    elif tag == 0x02:           # INTEGER
+                        path_len = int.from_bytes(val, 'big')
+                if ca_val:
+                    bc_ch = [{'title': 'cA: True'}]
+                    if path_len is not None:
+                        bc_ch.append({'title': f'pathLenConstraint: {path_len}'})
+                    children.append({'title': 'BasicConstraintsSyntax', 'children': bc_ch})
+                else:
+                    children.append({'title': 'BasicConstraintsSyntax [0 length]'})
+
+            # id-ce-subjectKeyIdentifier
+            elif ext_oid == '2.5.29.14':
+                ski_items = _der_tlv(ext_val_octet)
+                if ski_items and ski_items[0][0] == 0x04:
+                    children.append({'title': f'SubjectKeyIdentifier: {ski_items[0][1].hex()}'})
+
+            # id-ce-authorityKeyIdentifier
+            elif ext_oid == '2.5.29.35':
+                seq_items = _der_tlv(inner_der)
+                if seq_items and seq_items[0][0] == 0x30:
+                    for tag, val in _der_tlv(seq_items[0][1]):
+                        if tag == 0x80:   # [0] keyIdentifier
+                            children.append({'title': 'AuthorityKeyIdentifier',
+                                             'children': [{'title': f'keyIdentifier: {val.hex()}'}]})
+                            break
+
+            # id-pe-authorityInfoAccess
+            elif ext_oid == '1.3.6.1.5.5.7.1.1':
+                seq_items = _der_tlv(inner_der)
+                aia_seq = _der_tlv(seq_items[0][1]) if seq_items and seq_items[0][0] == 0x30 else []
+                aia_ch = []
+                for tag, val in aia_seq:
+                    if tag != 0x30:
+                        continue
+                    ad_items = _der_tlv(val)
+                    if len(ad_items) < 2 or ad_items[0][0] != 0x06:
+                        continue
+                    method_oid = _decode_oid(ad_items[0][1])
+                    method_name = OID_AIA.get(method_oid, method_oid)
+                    loc_tag, loc_val = ad_items[1]
+                    if loc_tag == 0x86:  # [6] uniformResourceIdentifier
+                        loc_str = loc_val.decode('ascii', errors='replace')
+                        loc_node = {'title': 'accessLocation: 6',
+                                    'children': [{'title': f'uniformResourceIdentifier: {loc_str}'}]}
+                    else:
+                        loc_node = {'title': f'accessLocation: {loc_tag}'}
+                    aia_ch.append({'title': 'AccessDescription',
+                                   'children': [{'title': f'accessMethod: {method_oid} ({method_name})'}, loc_node]})
+                children.append({'title': f'AuthorityInfoAccessSyntax: {len(aia_ch)} items', 'children': aia_ch})
+
+            # id-ce-cRLDistributionPoints
+            elif ext_oid == '2.5.29.31':
+                outer = _der_tlv(inner_der)
+                dp_list = _der_tlv(outer[0][1]) if outer and outer[0][0] == 0x30 else []
+                dp_ch = []
+                for tag, val in dp_list:
+                    if tag != 0x30:
+                        continue
+                    dp_inner = _der_tlv(val)
+                    dp_sub = []
+                    for dt, dv in dp_inner:
+                        if dt == 0xa0:   # [0] distributionPoint
+                            fn_items = _der_tlv(dv)
+                            fn_ch = []
+                            for ft, fv in fn_items:
+                                if ft == 0xa0:  # fullName [0]
+                                    gn_ch = []
+                                    for gt, gv in _der_tlv(fv):
+                                        if gt == 0x86:
+                                            gn_ch.append({'title': 'GeneralName: uniformResourceIdentifier (6)',
+                                                          'children': [{'title': f'uniformResourceIdentifier: {gv.decode("ascii", errors="replace")}'}]})
+                                    fn_ch.append({'title': f'fullName: {len(gn_ch)} item{"s" if len(gn_ch) != 1 else ""}',
+                                                  'children': gn_ch})
+                            dp_sub.append({'title': 'distributionPoint: fullName (0)', 'children': fn_ch})
+                    dp_ch.append({'title': 'DistributionPoint', 'children': dp_sub})
+                children.append({'title': f'CRLDistPointsSyntax: {len(dp_ch)} item{"s" if len(dp_ch) != 1 else ""}',
+                                  'children': dp_ch})
+
+            # id-ce-subjectAltName / id-ce-issuerAltName
+            elif ext_oid in ('2.5.29.17', '2.5.29.18'):
+                outer = _der_tlv(inner_der)
+                gn_seq = _der_tlv(outer[0][1]) if outer and outer[0][0] == 0x30 else []
+                gn_ch = []
+                for gt, gv in gn_seq:
+                    if gt == 0x82:   # [2] dNSName
+                        gn_ch.append({'title': 'GeneralName: dNSName (2)',
+                                      'children': [{'title': f'dNSName: {gv.decode("ascii", errors="replace")}'}]})
+                    elif gt == 0x86:  # [6] URI
+                        gn_ch.append({'title': 'GeneralName: uniformResourceIdentifier (6)',
+                                      'children': [{'title': f'uniformResourceIdentifier: {gv.decode("ascii", errors="replace")}'}]})
+                    elif gt == 0x81:  # [1] rfc822Name
+                        gn_ch.append({'title': 'GeneralName: rfc822Name (1)',
+                                      'children': [{'title': f'rfc822Name: {gv.decode("ascii", errors="replace")}'}]})
+                children.append({'title': f'GeneralNames: {len(gn_ch)} item{"s" if len(gn_ch) != 1 else ""}',
+                                  'children': gn_ch})
+
+            # id-ce-certificatePolicies
+            elif ext_oid == '2.5.29.32':
+                outer = _der_tlv(inner_der)
+                pi_seq = _der_tlv(outer[0][1]) if outer and outer[0][0] == 0x30 else []
+                pi_ch = []
+                for pt, pv in pi_seq:
+                    if pt != 0x30:
+                        continue
+                    pi_items = _der_tlv(pv)
+                    if not pi_items or pi_items[0][0] != 0x06:
+                        continue
+                    pol_oid = _decode_oid(pi_items[0][1])
+                    pol_name_short = OID_POLICY.get(pol_oid, pol_oid)
+                    pi_sub = [{'title': f'policyIdentifier: {pol_oid} ({pol_name_short})'}]
+                    if len(pi_items) > 1 and pi_items[1][0] == 0x30:  # policyQualifiers
+                        pq_seq = _der_tlv(pi_items[1][1])
+                        pq_ch = []
+                        for qpt, qpv in pq_seq:
+                            if qpt != 0x30:
+                                continue
+                            qp_items = _der_tlv(qpv)
+                            if not qp_items or qp_items[0][0] != 0x06:
+                                continue
+                            q_oid = _decode_oid(qp_items[0][1])
+                            q_name = OID_POLICY_QUAL.get(q_oid, q_oid)
+                            q_sub = [{'title': f'Id: {q_oid} ({q_name})'}]
+                            if len(qp_items) > 1:
+                                qval_tag, qval_bytes = qp_items[1]
+                                if qval_tag == 0x16:  # IA5String (CPS URI)
+                                    q_sub.append({'title': f'DirectoryString: {qval_bytes.decode("ascii", errors="replace")}'})
+                            pq_ch.append({'title': 'PolicyQualifierInfo', 'children': q_sub})
+                        if pq_ch:
+                            pi_sub.append({'title': f'policyQualifiers: {len(pq_ch)} item{"s" if len(pq_ch) != 1 else ""}',
+                                           'children': pq_ch})
+                    pi_ch.append({'title': 'PolicyInformation', 'children': pi_sub})
+                children.append({'title': f'CertificatePoliciesSyntax: {len(pi_ch)} item{"s" if len(pi_ch) != 1 else ""}',
+                                  'children': pi_ch})
+
+            # SignedCertificateTimestampList
+            elif ext_oid == '1.3.6.1.4.1.11129.2.4.2':
+                sct_children = _parse_sct_ext(ext_val_octet)
+                children.extend(sct_children)
+
+        except Exception:
+            pass
+        return {'title': f'Extension ({ext_name})', 'children': children}
+
+    # ─── Walk cert DER ────────────────────────────────────────────────────────
+    def _der_tlv_pos(data: bytes, base: int = 0):
+        """Like _der_tlv but returns (tag, val, tlv_start_abs, tlv_total_len, val_start_abs)."""
+        result, pos = [], 0
+        while pos < len(data):
+            tlv_start = pos
+            if pos >= len(data):
+                break
+            tag = data[pos]; pos += 1
+            if pos >= len(data):
+                break
+            b = data[pos]
+            if b & 0x80:
+                n = b & 0x7f; pos += 1
+                if pos + n > len(data):
+                    break
+                length = int.from_bytes(data[pos:pos + n], 'big'); pos += n
+            else:
+                length = b; pos += 1
+            val_start = pos
+            end = pos + length
+            result.append((tag, data[pos:end], base + tlv_start, end - tlv_start, base + val_start))
+            pos = end
+        return result
+
+    def _pos_node(node: dict, start: int, length: int) -> dict:
+        """Attach offset/length to a node dict if both are non-zero."""
+        if start and length:
+            node['offset'] = start
+            node['length'] = length
+        return node
+
+    try:
+        cert_outer = _der_tlv_pos(cert_bytes, base=abs_offset)
+        if not cert_outer or cert_outer[0][0] != 0x30:
+            raise ValueError('not a SEQUENCE')
+        _, cert_inner_bytes, _co_start, _co_len, co_val_start = cert_outer[0]
+        cert_inner = _der_tlv_pos(cert_inner_bytes, base=co_val_start)
+        if len(cert_inner) < 3:
+            raise ValueError('cert SEQUENCE has fewer than 3 items')
+
+        _, tbs_val,       tbs_start,  tbs_len_tlv,  tbs_val_start  = cert_inner[0]
+        _, outer_alg_val, oa_start,   oa_len_tlv,   _              = cert_inner[1]
+        _, sig_val,       sig_start,  sig_len_tlv,  _              = cert_inner[2]
+
+        # Outer algorithm OID
+        outer_alg_items = _der_tlv(outer_alg_val)
+        outer_alg_oid = _decode_oid(outer_alg_items[0][1]) if outer_alg_items and outer_alg_items[0][0] == 0x06 else ''
+        outer_alg_name = OID_ALG.get(outer_alg_oid, outer_alg_oid)
+
+        # Signature bytes (BIT STRING: first byte = unused bits count)
+        sig_bytes = sig_val[1:] if sig_val else b''
+
+        # Parse TBSCertificate fields with position tracking
+        tbs_items = _der_tlv_pos(tbs_val, base=tbs_val_start)
+        idx = 0
+
+        # version [0] EXPLICIT
+        version_int = 0
+        ver_start, ver_len_tlv = 0, 0
+        if tbs_items and tbs_items[idx][0] == 0xa0:
+            _, ver_content, ver_start, ver_len_tlv, _ = tbs_items[idx]
+            ver_items = _der_tlv(ver_content)
+            if ver_items and ver_items[0][0] == 0x02:
+                version_int = int.from_bytes(ver_items[0][1], 'big')
+            idx += 1
+        version_str = {0: 'v1', 1: 'v2', 2: 'v3'}.get(version_int, f'v{version_int + 1}')
+
+        # serialNumber INTEGER
+        serial_bytes = b'\x00'
+        sn_start, sn_len_tlv = 0, 0
+        if idx < len(tbs_items) and tbs_items[idx][0] == 0x02:
+            _, serial_bytes, sn_start, sn_len_tlv, _ = tbs_items[idx]
+        serial_hex = f'0x{int.from_bytes(serial_bytes, "big"):x}'
+        idx += 1
+
+        # signatureAlgorithm SEQUENCE
+        sa_start, sa_len_tlv = 0, 0
+        sig_alg_items = []
+        if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
+            _, sa_val, sa_start, sa_len_tlv, _ = tbs_items[idx]
+            sig_alg_items = _der_tlv(sa_val)
+        sig_alg_oid = _decode_oid(sig_alg_items[0][1]) if sig_alg_items and sig_alg_items[0][0] == 0x06 else ''
+        sig_alg_name = OID_ALG.get(sig_alg_oid, sig_alg_oid)
+        idx += 1
+
+        # issuer SEQUENCE
+        issuer_raw, issuer_start, issuer_len_tlv = b'', 0, 0
+        if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
+            _, issuer_raw, issuer_start, issuer_len_tlv, _ = tbs_items[idx]
+        idx += 1
+
+        # validity SEQUENCE
+        validity_raw, validity_start, validity_len_tlv = b'', 0, 0
+        if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
+            _, validity_raw, validity_start, validity_len_tlv, _ = tbs_items[idx]
+        idx += 1
+
+        # subject SEQUENCE
+        subject_raw, subject_start, subject_len_tlv = b'', 0, 0
+        if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
+            _, subject_raw, subject_start, subject_len_tlv, _ = tbs_items[idx]
+        idx += 1
+
+        # subjectPublicKeyInfo SEQUENCE
+        spki_raw, spki_start, spki_len_tlv = b'', 0, 0
+        if idx < len(tbs_items) and tbs_items[idx][0] == 0x30:
+            _, spki_raw, spki_start, spki_len_tlv, _ = tbs_items[idx]
+        idx += 1
+
+        # extensions [3] EXPLICIT
+        ext_nodes = []
+        ext_start, ext_len_tlv = 0, 0
+        while idx < len(tbs_items):
+            if tbs_items[idx][0] == 0xa3:
+                _, e3_val, ext_start, ext_len_tlv, _ = tbs_items[idx]
+                exts_seq = _der_tlv(e3_val)
+                if exts_seq and exts_seq[0][0] == 0x30:
+                    for et, ev in _der_tlv(exts_seq[0][1]):
+                        if et != 0x30:
+                            continue
+                        ext_items = _der_tlv(ev)
+                        if not ext_items or ext_items[0][0] != 0x06:
+                            continue
+                        ext_oid = _decode_oid(ext_items[0][1])
+                        is_critical = False
+                        ext_val_octet = b''
+                        for eit, eiv in ext_items[1:]:
+                            if eit == 0x01 and eiv:    # BOOLEAN critical
+                                is_critical = eiv[0] != 0
+                            elif eit == 0x04:           # OCTET STRING
+                                ext_val_octet = eiv
+                        ext_nodes.append(_build_ext_tree(ext_oid, is_critical, ext_val_octet))
+            idx += 1
+
+        signed_cert_children = [
+            _pos_node({'title': f'version: {version_str} ({version_int})'}, ver_start, ver_len_tlv),
+            _pos_node({'title': f'serialNumber: {serial_hex}'}, sn_start, sn_len_tlv),
+            _pos_node({'title': f'signature ({sig_alg_name})', 'children': [{'title': f'Algorithm Id: {sig_alg_oid} ({sig_alg_name})'}]}, sa_start, sa_len_tlv),
+            _pos_node(_build_name_tree(issuer_raw, 'issuer'), issuer_start, issuer_len_tlv),
+            _pos_node(_build_validity_tree(validity_raw), validity_start, validity_len_tlv),
+            _pos_node(_build_name_tree(subject_raw, 'subject'), subject_start, subject_len_tlv),
+            _pos_node(_build_spki_tree(spki_raw), spki_start, spki_len_tlv),
+            _pos_node({'title': f'extensions: {len(ext_nodes)} items', 'children': ext_nodes}, ext_start, ext_len_tlv),
+        ]
+
+        return {
+            'title': f'Certificate [...]: {hex_prefix}',
+            'offset': abs_offset,
+            'length': len(cert_bytes),
+            'children': [
+                {'title': 'signedCertificate', 'offset': tbs_start, 'length': tbs_len_tlv, 'children': signed_cert_children},
+                _pos_node({'title': f'algorithmIdentifier ({outer_alg_name})', 'children': [{'title': f'Algorithm Id: {outer_alg_oid} ({outer_alg_name})'}]}, oa_start, oa_len_tlv),
+                {'title': 'Padding: 0'},
+                _pos_node({'title': f'encrypted [...]: {sig_bytes.hex()}'}, sig_start, sig_len_tlv),
+            ],
+        }
+
+    except Exception:
+        return {
+            'title': f'Certificate [...]: {hex_prefix}',
+            'offset': abs_offset,
+            'length': len(cert_bytes),
+        }
+
+
+def _tls_section_precise(packet, offset: int, stream_index: int, record=None) -> Dict[str, Any]:
     tcp_layer = _effective_tcp_layer(packet)
-    tls_bytes = _tcp_payload_bytes(packet, tcp_layer) if tcp_layer is not None else bytes(packet[TLS])
+    tls_bytes_raw = _tcp_payload_bytes(packet, tcp_layer) if tcp_layer is not None else bytes(packet[TLS])
+
+    # Use TCP-reassembled TLS payload if available (e.g. fragmented Certificate)
+    _is_reassembled = False
+    if record is not None:
+        _meta = getattr(record, 'metadata', {}) or {}
+        _reassembled = _meta.get('tls_reassembled_payload')
+        if _reassembled:
+            tls_bytes_raw = bytes(_reassembled)
+            _is_reassembled = True
+
+    scan_start = 0
+    if len(tls_bytes_raw) >= 5:
+        first_type = int(tls_bytes_raw[0])
+        first_ver = int.from_bytes(tls_bytes_raw[1:3], 'big')
+        first_len = int.from_bytes(tls_bytes_raw[3:5], 'big')
+        starts_with_tls = first_type in {20, 21, 22, 23} and first_ver in {0x0301, 0x0302, 0x0303, 0x0304} and 5 + first_len <= len(tls_bytes_raw)
+        if not starts_with_tls:
+            for i in range(0, len(tls_bytes_raw) - 4):
+                ctype = int(tls_bytes_raw[i])
+                ver = int.from_bytes(tls_bytes_raw[i + 1:i + 3], 'big')
+                rec_len = int.from_bytes(tls_bytes_raw[i + 3:i + 5], 'big')
+                if ctype in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304} and i + 5 + rec_len <= len(tls_bytes_raw):
+                    scan_start = i
+                    break
+
+    tls_bytes = tls_bytes_raw[scan_start:] if scan_start < len(tls_bytes_raw) else b''
+    if _is_reassembled:
+        offset = 0  # offsets are 0-based within the reassembled buffer
+    else:
+        offset = offset + scan_start
     tls_len = len(tls_bytes)
 
     content_type_map = {
@@ -5993,6 +6777,7 @@ def _tls_section_precise(packet, offset: int, stream_index: int) -> Dict[str, An
         43: 'supported_versions',
         45: 'psk_key_exchange_modes',
         51: 'key_share',
+        65281: 'renegotiation_info',
     }
 
     def record_version_name(value: int) -> str:
@@ -6016,9 +6801,144 @@ def _tls_section_precise(packet, offset: int, stream_index: int) -> Dict[str, An
         except Exception:
             return f'{int(epoch_value)}'
 
+    def _parse_extensions(container: bytes, cursor: int, base_abs: int, max_end: int) -> tuple[list[dict], int, int]:
+        if cursor + 2 > max_end:
+            return [], cursor, 0
+
+        ext_len = int.from_bytes(container[cursor:cursor + 2], 'big')
+        cursor += 2
+        ext_start = cursor
+        ext_children = []
+
+        while cursor + 4 <= min(max_end, ext_start + ext_len):
+            ext_type = int.from_bytes(container[cursor:cursor + 2], 'big')
+            ext_size = int.from_bytes(container[cursor + 2:cursor + 4], 'big')
+            data_start = cursor + 4
+            data_end = min(max_end, data_start + ext_size)
+            ext_name = extension_name_map.get(ext_type, ext_type)
+            ext_node = {
+                'title': f'Extension: {ext_name} (len={ext_size})',
+                'offset': base_abs + cursor,
+                'length': min(max_end - cursor, 4 + ext_size),
+                'children': [
+                    {'title': f'Type: {ext_name} ({ext_type})', 'offset': base_abs + cursor, 'length': 2},
+                    {'title': f'Length: {ext_size}', 'offset': base_abs + cursor + 2, 'length': 2},
+                ],
+            }
+
+            ext_payload = container[data_start:data_end]
+            if ext_type == 11 and len(ext_payload) >= 1:
+                list_len = int(ext_payload[0])
+                formats_map = {0: 'uncompressed', 1: 'ansiX962_compressed_prime', 2: 'ansiX962_compressed_char2'}
+                point_children = []
+                for i in range(min(list_len, max(0, len(ext_payload) - 1))):
+                    fmt = int(ext_payload[1 + i])
+                    point_children.append({'title': f'EC point format: {formats_map.get(fmt, fmt)} ({fmt})', 'offset': base_abs + data_start + 1 + i, 'length': 1})
+                ext_node['children'].extend([
+                    {'title': f'EC point formats Length: {list_len}', 'offset': base_abs + data_start, 'length': 1},
+                    {'title': f'Elliptic curves point formats ({len(point_children)})', 'offset': base_abs + data_start + 1, 'length': max(0, len(ext_payload) - 1), 'children': point_children},
+                ])
+            elif ext_type == 10 and len(ext_payload) >= 2:
+                group_map = {
+                    0x0001: 'sect163k1', 0x0002: 'sect163r1', 0x0003: 'sect163r2', 0x0004: 'sect193r1', 0x0005: 'sect193r2',
+                    0x0006: 'sect233k1', 0x0007: 'sect233r1', 0x0008: 'sect239k1', 0x0009: 'sect283k1', 0x000a: 'sect283r1',
+                    0x000b: 'sect409k1', 0x000c: 'sect409r1', 0x000d: 'sect571k1', 0x000e: 'sect571r1', 0x000f: 'secp160k1',
+                    0x0010: 'secp160r1', 0x0011: 'secp160r2', 0x0012: 'secp192k1', 0x0013: 'secp192r1', 0x0014: 'secp224k1',
+                    0x0015: 'secp224r1', 0x0016: 'secp256k1', 0x0017: 'secp256r1', 0x0018: 'secp384r1', 0x0019: 'secp521r1',
+                }
+                list_len = int.from_bytes(ext_payload[:2], 'big')
+                group_children = []
+                p = 2
+                while p + 2 <= min(len(ext_payload), 2 + list_len):
+                    group = int.from_bytes(ext_payload[p:p + 2], 'big')
+                    group_children.append({'title': f'Supported Group: {group_map.get(group, f"0x{group:04x}")} (0x{group:04x})', 'offset': base_abs + data_start + p, 'length': 2})
+                    p += 2
+                ext_node['children'].extend([
+                    {'title': f'Supported Groups List Length: {list_len}', 'offset': base_abs + data_start, 'length': 2},
+                    {'title': f'Supported Groups ({len(group_children)} groups)', 'offset': base_abs + data_start + 2, 'length': max(0, list_len), 'children': group_children},
+                ])
+            elif ext_type == 35:
+                ext_node['children'].append({'title': 'Session Ticket: <MISSING>'})
+            elif ext_type == 65281:
+                renego_len_val = int(ext_payload[0]) if len(ext_payload) >= 1 else 0
+                renego_child = {
+                    'title': f'Renegotiation info extension length: {renego_len_val}',
+                    'offset': base_abs + data_start,
+                    'length': 1,
+                }
+                ext_node['children'].append({
+                    'title': 'Renegotiation Info extension',
+                    'offset': base_abs + data_start,
+                    'length': 1,
+                    'children': [renego_child],
+                })
+            elif ext_type == 13 and len(ext_payload) >= 2:
+                sig_map = {
+                    0x0601: 'rsa_pkcs1_sha512', 0x0602: 'SHA512 DSA', 0x0603: 'ecdsa_secp521r1_sha512',
+                    0x0501: 'rsa_pkcs1_sha384', 0x0502: 'SHA384 DSA', 0x0503: 'ecdsa_secp384r1_sha384',
+                    0x0401: 'rsa_pkcs1_sha256', 0x0402: 'SHA256 DSA', 0x0403: 'ecdsa_secp256r1_sha256',
+                    0x0301: 'SHA224 RSA', 0x0302: 'SHA224 DSA', 0x0303: 'SHA224 ECDSA',
+                    0x0201: 'rsa_pkcs1_sha1', 0x0202: 'SHA1 DSA', 0x0203: 'ecdsa_sha1',
+                }
+                hash_map = {2: 'SHA1', 3: 'SHA224', 4: 'SHA256', 5: 'SHA384', 6: 'SHA512'}
+                sign_map = {1: 'RSA', 2: 'DSA', 3: 'ECDSA'}
+                list_len = int.from_bytes(ext_payload[:2], 'big')
+                sig_children = []
+                p = 2
+                while p + 2 <= min(len(ext_payload), 2 + list_len):
+                    sig = int.from_bytes(ext_payload[p:p + 2], 'big')
+                    hash_id = ext_payload[p]
+                    sign_id = ext_payload[p + 1]
+                    sig_children.append({
+                        'title': f'Signature Algorithm: {sig_map.get(sig, f"0x{sig:04x}")} (0x{sig:04x})',
+                        'offset': base_abs + data_start + p,
+                        'length': 2,
+                        'children': [
+                            {'title': f'Signature Hash Algorithm Hash: {hash_map.get(hash_id, hash_id)} ({hash_id})', 'offset': base_abs + data_start + p, 'length': 1},
+                            {'title': f'Signature Hash Algorithm Signature: {sign_map.get(sign_id, sign_id)} ({sign_id})', 'offset': base_abs + data_start + p + 1, 'length': 1},
+                        ],
+                    })
+                    p += 2
+                ext_node['children'].extend([
+                    {'title': f'Signature Hash Algorithms Length: {list_len}', 'offset': base_abs + data_start, 'length': 2},
+                    {'title': f'Signature Hash Algorithms ({len(sig_children)} algorithms)', 'offset': base_abs + data_start + 2, 'length': max(0, list_len), 'children': sig_children},
+                ])
+            elif ext_type == 15 and len(ext_payload) >= 1:
+                mode = int(ext_payload[0])
+                ext_node['children'].append({'title': f'Mode: {"Peer allowed to send requests" if mode == 1 else mode} ({mode})', 'offset': base_abs + data_start, 'length': 1})
+            else:
+                ext_node['children'].append({'title': f'Data: {ext_payload.hex()}', 'offset': base_abs + data_start, 'length': max(0, len(ext_payload))})
+
+            ext_children.append(ext_node)
+            cursor = data_end
+
+        return ext_children, cursor, ext_len
+
     children = []
     if stream_index >= 0:
         children.append({'title': f'[Stream index: {stream_index}]'})
+
+    if scan_start > 0:
+        prefix = tls_bytes_raw[:scan_start]
+        children.append({
+            'title': 'TLSv1.2 Record Layer: Handshake Protocol: Certificate',
+            'offset': offset - scan_start,
+            'length': scan_start,
+            'children': [
+                {'title': 'Content Type: Handshake (22)', 'offset': offset - scan_start, 'length': 1},
+                {'title': 'Version: TLS 1.2 (0x0303)', 'offset': offset - scan_start + 1, 'length': 2},
+                {'title': f'Length: {scan_start}', 'offset': offset - scan_start + 3, 'length': 2},
+                {
+                    'title': 'Handshake Protocol: Certificate',
+                    'offset': offset - scan_start,
+                    'length': scan_start,
+                    'children': [
+                        {'title': 'Handshake Type: Certificate (11)'},
+                        {'title': f'Fragment data: {prefix.hex()}', 'offset': offset - scan_start, 'length': scan_start},
+                    ],
+                },
+            ],
+        })
 
     pos = 0
     while pos + 5 <= len(tls_bytes):
@@ -6037,201 +6957,309 @@ def _tls_section_precise(packet, offset: int, stream_index: int) -> Dict[str, An
         ]
         record_title = f'{record_version_name(version)} Record Layer: {content_name} Protocol'
 
-        if content_type == 22 and len(record_payload) >= 4:
-            hs_type = int(record_payload[0])
-            hs_len = int.from_bytes(record_payload[1:4], 'big')
-            hs_name = handshake_type_map.get(hs_type, f'Handshake ({hs_type})')
-            title_version_name = record_version_name(version)
+        parse_handshake = content_type == 22 and len(record_payload) >= 4
+        if not parse_handshake and content_type == 23 and len(record_payload) >= 4:
+            hs_type_probe = int(record_payload[0])
+            hs_len_probe = int.from_bytes(record_payload[1:4], 'big')
+            hs_total_probe = 4 + hs_len_probe
+            if hs_type_probe in {1, 2, 4, 11, 12, 13, 14, 15, 16, 20} and hs_total_probe <= len(record_payload):
+                parse_handshake = True
 
-            handshake_children = [
-                {'title': f'Handshake Type: {hs_name} ({hs_type})', 'offset': offset + payload_start, 'length': 1},
-                {'title': f'Length: {hs_len}', 'offset': offset + payload_start + 1, 'length': 3},
-            ]
+        if parse_handshake:
+            hs_pos = 0
+            hs_names = []
+            while hs_pos + 4 <= len(record_payload):
+                hs_type = int(record_payload[hs_pos])
+                hs_len = int.from_bytes(record_payload[hs_pos + 1:hs_pos + 4], 'big')
+                hs_total = 4 + hs_len
 
-            if hs_type == 1 and len(record_payload) >= 42:
-                cursor = 4
-                hello_version = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
-                title_version_name = record_version_name(hello_version)
-                record_title = f'{title_version_name} Record Layer: Handshake Protocol: {hs_name}'
-                handshake_children.append({'title': f'Version: {tls_clienthello_version_name(hello_version)} (0x{hello_version:04x})', 'offset': offset + payload_start + cursor, 'length': 2})
-                cursor += 2
-                random_bytes = record_payload[cursor:cursor + 32]
-                gmt_unix = int.from_bytes(random_bytes[:4], 'big') if len(random_bytes) >= 4 else 0
-                handshake_children.append({
-                    'title': f'Random: {random_bytes.hex()}',
-                    'offset': offset + payload_start + cursor,
-                    'length': 32,
-                    'children': [
-                        {'title': f'GMT Unix Time: {_fmt_epoch_local(gmt_unix)}', 'offset': offset + payload_start + cursor, 'length': 4},
-                        {'title': f'Random Bytes: {random_bytes[4:].hex()}', 'offset': offset + payload_start + cursor + 4, 'length': max(0, len(random_bytes) - 4)},
-                    ],
-                })
-                cursor += 32
-            else:
-                record_title = f'{title_version_name} Record Layer: Handshake Protocol: {hs_name}'
+                if hs_total < 4 or hs_pos + hs_total > len(record_payload):
+                    is_fragment = hs_total >= 4 and hs_type in handshake_type_map
+                    # For Certificate (hs_type=11), parse available bytes even if fragmented
+                    if is_fragment and hs_type == 11 and len(record_payload) >= hs_pos + 4 + 3:
+                        frag_hs_abs = offset + payload_start + hs_pos
+                        frag_hs_body = record_payload[hs_pos + 4:]
+                        hs_names.append('Certificate')
+                        frag_handshake_children = [
+                            {'title': f'Handshake Type: Certificate (11)', 'offset': frag_hs_abs, 'length': 1},
+                            {'title': f'Length: {hs_len}', 'offset': frag_hs_abs + 1, 'length': 3},
+                        ]
+                        if len(frag_hs_body) >= 3:
+                            frag_certs_len = int.from_bytes(frag_hs_body[0:3], 'big')
+                            frag_handshake_children.append({'title': f'Certificates Length: {frag_certs_len}', 'offset': frag_hs_abs + 4, 'length': 3})
+                            frag_certs_children = []
+                            fp = 3
+                            frag_certs_end = min(len(frag_hs_body), 3 + frag_certs_len)
+                            while fp + 3 <= frag_certs_end:
+                                fcert_len = int.from_bytes(frag_hs_body[fp:fp + 3], 'big')
+                                fcert_data_start = fp + 3
+                                fcert_data_end = min(frag_certs_end, fcert_data_start + fcert_len)
+                                fcert_bytes = frag_hs_body[fcert_data_start:fcert_data_end]
+                                fcert_abs = frag_hs_abs + 4 + fcert_data_start
+                                frag_certs_children.append({'title': f'Certificate Length: {fcert_len}', 'offset': frag_hs_abs + 4 + fp, 'length': 3})
+                                if len(fcert_bytes) >= fcert_len:
+                                    frag_certs_children.append(_parse_x509_cert_tree(fcert_bytes, fcert_abs))
+                                else:
+                                    frag_certs_children.append({
+                                        'title': f'Certificate [...] (fragment): {fcert_bytes.hex()}',
+                                        'offset': fcert_abs,
+                                        'length': len(fcert_bytes),
+                                    })
+                                fp = fcert_data_end
+                            frag_handshake_children.append({'title': f'Certificates ({frag_certs_len} bytes)', 'offset': frag_hs_abs + 7, 'length': max(0, frag_certs_len), 'children': frag_certs_children})
+                        record_children.append({
+                            'title': 'Handshake Protocol: Certificate',
+                            'offset': frag_hs_abs,
+                            'length': len(record_payload) - hs_pos,
+                            'children': frag_handshake_children,
+                        })
+                    else:
+                        hs_names.append('Fragmented Handshake Message' if is_fragment else 'Encrypted Handshake Message')
+                        record_children.append({
+                            'title': f'Handshake Protocol: {"Fragmented Handshake Message" if is_fragment else "Encrypted Handshake Message"}',
+                            'offset': offset + payload_start + hs_pos,
+                            'length': len(record_payload) - hs_pos,
+                        })
+                    break
 
-            if cursor < len(record_payload):
-                session_id_len = int(record_payload[cursor])
-                handshake_children.append({'title': f'Session ID Length: {session_id_len}', 'offset': offset + payload_start + cursor, 'length': 1})
-                cursor += 1
-                if session_id_len > 0:
-                    handshake_children.append({'title': f'Session ID: {record_payload[cursor:cursor + session_id_len].hex()}', 'offset': offset + payload_start + cursor, 'length': session_id_len})
-                cursor += session_id_len
+                hs_name = handshake_type_map.get(hs_type, f'Handshake ({hs_type})')
+                hs_names.append(hs_name)
+                hs_body_start = hs_pos + 4
+                hs_body_end = hs_body_start + hs_len
+                hs_body = record_payload[hs_body_start:hs_body_end]
+                hs_abs = offset + payload_start + hs_pos
+                cursor = 0
 
-            if cursor + 2 <= len(record_payload):
-                cipher_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
-                handshake_children.append({'title': f'Cipher Suites Length: {cipher_len}', 'offset': offset + payload_start + cursor, 'length': 2})
-                cursor += 2
-                cipher_start = cursor
-                cipher_children = []
-                while cursor + 2 <= cipher_start + cipher_len and cursor + 2 <= len(record_payload):
-                    suite = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
-                    cipher_children.append({
-                        'title': f'Cipher Suite: {cipher_suite_map.get(suite, f"0x{suite:04x}")} (0x{suite:04x})',
-                        'offset': offset + payload_start + cursor,
-                        'length': 2,
-                    })
+                handshake_children = [
+                    {'title': f'Handshake Type: {hs_name} ({hs_type})', 'offset': hs_abs, 'length': 1},
+                    {'title': f'Length: {hs_len}', 'offset': hs_abs + 1, 'length': 3},
+                ]
+
+                if hs_type == 1 and len(hs_body) >= 34:
+                    hello_version = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                    handshake_children.append({'title': f'Version: {tls_clienthello_version_name(hello_version)} (0x{hello_version:04x})', 'offset': hs_abs + 4 + cursor, 'length': 2})
                     cursor += 2
-                handshake_children.append({'title': f'Cipher Suites ({len(cipher_children)} suites)', 'offset': offset + payload_start + cipher_start, 'length': cipher_len, 'children': cipher_children})
-
-            if cursor < len(record_payload):
-                compression_len = int(record_payload[cursor])
-                handshake_children.append({'title': f'Compression Methods Length: {compression_len}', 'offset': offset + payload_start + cursor, 'length': 1})
-                cursor += 1
-                comp_start = cursor
-                compression_children = []
-                for _ in range(compression_len):
-                    if cursor >= len(record_payload):
-                        break
-                    method = int(record_payload[cursor])
-                    compression_children.append({
-                        'title': f'Compression Method: {"null" if method == 0 else method} ({method})',
-                        'offset': offset + payload_start + cursor,
-                        'length': 1,
-                    })
-                    cursor += 1
-                handshake_children.append({'title': f'Compression Methods ({len(compression_children)} methods)', 'offset': offset + payload_start + comp_start, 'length': compression_len, 'children': compression_children})
-
-            if cursor + 2 <= len(record_payload):
-                ext_len = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
-                handshake_children.append({'title': f'Extensions Length: {ext_len}', 'offset': offset + payload_start + cursor, 'length': 2})
-                cursor += 2
-                ext_start = cursor
-                ext_children = []
-                while cursor + 4 <= ext_start + ext_len and cursor + 4 <= len(record_payload):
-                    ext_type = int.from_bytes(record_payload[cursor:cursor + 2], 'big')
-                    ext_size = int.from_bytes(record_payload[cursor + 2:cursor + 4], 'big')
-                    data_start = cursor + 4
-                    data_end = min(len(record_payload), data_start + ext_size)
-                    ext_name = extension_name_map.get(ext_type, ext_type)
-                    ext_node = {
-                        'title': f'Extension: {ext_name} (len={ext_size})',
-                        'offset': offset + payload_start + cursor,
-                        'length': min(len(record_payload) - cursor, 4 + ext_size),
+                    random_bytes = hs_body[cursor:cursor + 32]
+                    gmt_unix = int.from_bytes(random_bytes[:4], 'big') if len(random_bytes) >= 4 else 0
+                    handshake_children.append({
+                        'title': f'Random: {random_bytes.hex()}',
+                        'offset': hs_abs + 4 + cursor,
+                        'length': min(32, len(random_bytes)),
                         'children': [
-                            {'title': f'Type: {ext_name} ({ext_type})', 'offset': offset + payload_start + cursor, 'length': 2},
-                            {'title': f'Length: {ext_size}', 'offset': offset + payload_start + cursor + 2, 'length': 2},
+                            {'title': f'GMT Unix Time: {_fmt_epoch_local(gmt_unix)}', 'offset': hs_abs + 4 + cursor, 'length': min(4, len(random_bytes))},
+                            {'title': f'Random Bytes: {random_bytes[4:].hex()}', 'offset': hs_abs + 4 + cursor + 4, 'length': max(0, len(random_bytes) - 4)},
                         ],
-                    }
-                    ext_payload = record_payload[data_start:data_end]
-                    if ext_type == 11 and len(ext_payload) >= 1:
-                        list_len = int(ext_payload[0])
-                        formats_map = {0: 'uncompressed', 1: 'ansiX962_compressed_prime', 2: 'ansiX962_compressed_char2'}
-                        point_children = []
-                        for i in range(min(list_len, max(0, len(ext_payload) - 1))):
-                            fmt = int(ext_payload[1 + i])
-                            point_children.append({'title': f'EC point format: {formats_map.get(fmt, fmt)} ({fmt})', 'offset': offset + payload_start + data_start + 1 + i, 'length': 1})
-                        ext_node['children'].extend([
-                            {'title': f'EC point formats Length: {list_len}', 'offset': offset + payload_start + data_start, 'length': 1},
-                            {'title': f'Elliptic curves point formats ({len(point_children)})', 'offset': offset + payload_start + data_start + 1, 'length': max(0, len(ext_payload) - 1), 'children': point_children},
-                        ])
-                    elif ext_type == 10 and len(ext_payload) >= 2:
-                        group_map = {
-                            0x0001: 'sect163k1', 0x0002: 'sect163r1', 0x0003: 'sect163r2', 0x0004: 'sect193r1', 0x0005: 'sect193r2',
-                            0x0006: 'sect233k1', 0x0007: 'sect233r1', 0x0008: 'sect239k1', 0x0009: 'sect283k1', 0x000a: 'sect283r1',
-                            0x000b: 'sect409k1', 0x000c: 'sect409r1', 0x000d: 'sect571k1', 0x000e: 'sect571r1', 0x000f: 'secp160k1',
-                            0x0010: 'secp160r1', 0x0011: 'secp160r2', 0x0012: 'secp192k1', 0x0013: 'secp192r1', 0x0014: 'secp224k1',
-                            0x0015: 'secp224r1', 0x0016: 'secp256k1', 0x0017: 'secp256r1', 0x0018: 'secp384r1', 0x0019: 'secp521r1',
-                        }
-                        list_len = int.from_bytes(ext_payload[:2], 'big')
-                        group_children = []
-                        p = 2
-                        while p + 2 <= min(len(ext_payload), 2 + list_len):
-                            group = int.from_bytes(ext_payload[p:p + 2], 'big')
-                            group_children.append({'title': f'Supported Group: {group_map.get(group, f"0x{group:04x}")} (0x{group:04x})', 'offset': offset + payload_start + data_start + p, 'length': 2})
-                            p += 2
-                        ext_node['children'].extend([
-                            {'title': f'Supported Groups List Length: {list_len}', 'offset': offset + payload_start + data_start, 'length': 2},
-                            {'title': f'Supported Groups ({len(group_children)} groups)', 'offset': offset + payload_start + data_start + 2, 'length': max(0, list_len), 'children': group_children},
-                        ])
-                    elif ext_type == 35:
-                        ext_node['children'].append({'title': 'Session Ticket: <MISSING>'})
-                    elif ext_type == 13 and len(ext_payload) >= 2:
+                    })
+                    cursor += 32
+                    if cursor < len(hs_body):
+                        sid_len = int(hs_body[cursor])
+                        handshake_children.append({'title': f'Session ID Length: {sid_len}', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                        cursor += 1
+                        if sid_len > 0 and cursor + sid_len <= len(hs_body):
+                            handshake_children.append({'title': f'Session ID: {hs_body[cursor:cursor + sid_len].hex()}', 'offset': hs_abs + 4 + cursor, 'length': sid_len})
+                        cursor += sid_len
+                    if cursor + 2 <= len(hs_body):
+                        cipher_len = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                        handshake_children.append({'title': f'Cipher Suites Length: {cipher_len}', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                        cursor += 2
+                        cipher_start = cursor
+                        cipher_children = []
+                        while cursor + 2 <= min(len(hs_body), cipher_start + cipher_len):
+                            suite = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                            cipher_children.append({'title': f'Cipher Suite: {cipher_suite_map.get(suite, f"0x{suite:04x}")} (0x{suite:04x})', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                            cursor += 2
+                        handshake_children.append({'title': f'Cipher Suites ({len(cipher_children)} suites)', 'offset': hs_abs + 4 + cipher_start, 'length': max(0, min(cipher_len, len(hs_body) - cipher_start)), 'children': cipher_children})
+                    if cursor < len(hs_body):
+                        comp_len = int(hs_body[cursor])
+                        handshake_children.append({'title': f'Compression Methods Length: {comp_len}', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                        cursor += 1
+                        comp_start = cursor
+                        comp_children = []
+                        for _ in range(comp_len):
+                            if cursor >= len(hs_body):
+                                break
+                            method = int(hs_body[cursor])
+                            comp_children.append({'title': f'Compression Method: {"null" if method == 0 else method} ({method})', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                            cursor += 1
+                        handshake_children.append({'title': f'Compression Methods ({len(comp_children)} methods)', 'offset': hs_abs + 4 + comp_start, 'length': max(0, min(comp_len, len(hs_body) - comp_start)), 'children': comp_children})
+                    ext_children, cursor_after_ext, ext_len = _parse_extensions(hs_body, cursor, hs_abs + 4, len(hs_body))
+                    if ext_len > 0 or ext_children:
+                        handshake_children.append({'title': f'Extensions Length: {ext_len}', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                        handshake_children.append({'title': f'Extensions ({len(ext_children)})', 'offset': hs_abs + 4 + cursor + 2, 'length': ext_len, 'children': ext_children})
+                    try:
+                        ja3 = _tls_clienthello_ja3(bytes([hs_type]) + hs_len.to_bytes(3, 'big') + hs_body)
+                        if ja3:
+                            ja4 = _tls_clienthello_ja4(bytes([hs_type]) + hs_len.to_bytes(3, 'big') + hs_body)
+                            if ja4:
+                                handshake_children.append({'title': f'[JA4: {ja4["value"]}]'})
+                                handshake_children.append({'title': f'[JA4_r: {ja4["raw"]}]'})
+                            handshake_children.append({'title': f'[JA3 Fullstring: {ja3["full"]}]'})
+                            handshake_children.append({'title': f'[JA3: {ja3["hash"]}]'})
+                    except Exception:
+                        pass
+
+                elif hs_type == 2 and len(hs_body) >= 38:
+                    hello_version = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                    handshake_children.append({'title': f'Version: {version_name(hello_version)} (0x{hello_version:04x})', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                    cursor += 2
+                    random_bytes = hs_body[cursor:cursor + 32]
+                    gmt_unix = int.from_bytes(random_bytes[:4], 'big') if len(random_bytes) >= 4 else 0
+                    handshake_children.append({
+                        'title': f'Random: {random_bytes.hex()}',
+                        'offset': hs_abs + 4 + cursor,
+                        'length': min(32, len(random_bytes)),
+                        'children': [
+                            {'title': f'GMT Unix Time: {_fmt_epoch_local(gmt_unix)}', 'offset': hs_abs + 4 + cursor, 'length': min(4, len(random_bytes))},
+                            {'title': f'Random Bytes: {random_bytes[4:].hex()}', 'offset': hs_abs + 4 + cursor + 4, 'length': max(0, len(random_bytes) - 4)},
+                        ],
+                    })
+                    cursor += 32
+                    if cursor < len(hs_body):
+                        sid_len = int(hs_body[cursor])
+                        handshake_children.append({'title': f'Session ID Length: {sid_len}', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                        cursor += 1
+                        if sid_len > 0 and cursor + sid_len <= len(hs_body):
+                            handshake_children.append({'title': f'Session ID: {hs_body[cursor:cursor + sid_len].hex()}', 'offset': hs_abs + 4 + cursor, 'length': sid_len})
+                        cursor += sid_len
+                    if cursor + 2 <= len(hs_body):
+                        suite = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                        handshake_children.append({'title': f'Cipher Suite: {cipher_suite_map.get(suite, f"0x{suite:04x}")} (0x{suite:04x})', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                        cursor += 2
+                    if cursor < len(hs_body):
+                        method = int(hs_body[cursor])
+                        handshake_children.append({'title': f'Compression Method: {"null" if method == 0 else method} ({method})', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                        cursor += 1
+                    ext_children, _, ext_len = _parse_extensions(hs_body, cursor, hs_abs + 4, len(hs_body))
+                    if ext_len > 0 or ext_children:
+                        handshake_children.append({'title': f'Extensions Length: {ext_len}', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                        handshake_children.append({'title': f'Extensions ({len(ext_children)})', 'offset': hs_abs + 4 + cursor + 2, 'length': ext_len, 'children': ext_children})
+                    try:
+                        ja3s = _tls_serverhello_ja3s(bytes([hs_type]) + hs_len.to_bytes(3, 'big') + hs_body)
+                        if ja3s:
+                            handshake_children.append({'title': f'[JA3S Fullstring: {ja3s["full"]}]'})
+                            handshake_children.append({'title': f'[JA3S: {ja3s["hash"]}]'})
+                    except Exception:
+                        pass
+
+                elif hs_type == 11 and len(hs_body) >= 3:
+                    certs_len = int.from_bytes(hs_body[0:3], 'big')
+                    handshake_children.append({'title': f'Certificates Length: {certs_len}', 'offset': hs_abs + 4, 'length': 3})
+                    certs_children = []
+                    p = 3
+                    certs_end = min(len(hs_body), 3 + certs_len)
+                    while p + 3 <= certs_end:
+                        cert_len = int.from_bytes(hs_body[p:p + 3], 'big')
+                        cert_data_start = p + 3
+                        cert_data_end = min(certs_end, cert_data_start + cert_len)
+                        cert_bytes_data = hs_body[cert_data_start:cert_data_end]
+                        cert_abs = hs_abs + 4 + cert_data_start
+                        certs_children.append({
+                            'title': f'Certificate Length: {cert_len}',
+                            'offset': hs_abs + 4 + p,
+                            'length': 3,
+                        })
+                        cert_tree = _parse_x509_cert_tree(cert_bytes_data, cert_abs)
+                        certs_children.append(cert_tree)
+                        p = cert_data_end
+                    handshake_children.append({'title': f'Certificates ({certs_len} bytes)', 'offset': hs_abs + 7, 'length': max(0, certs_len), 'children': certs_children})
+
+                elif hs_type == 12 and len(hs_body) >= 4:
+                    ecdhe_children = []
+                    curve_type = int(hs_body[cursor])
+                    ecdhe_children.append({'title': f'Curve Type: {"named_curve" if curve_type == 3 else curve_type} (0x{curve_type:02x})', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                    cursor += 1
+                    if cursor + 2 <= len(hs_body):
+                        named_curve = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                        curve_map = {0x0017: 'secp256r1', 0x0018: 'secp384r1', 0x0019: 'secp521r1'}
+                        ecdhe_children.append({'title': f'Named Curve: {curve_map.get(named_curve, f"0x{named_curve:04x}")} (0x{named_curve:04x})', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                        cursor += 2
+                    if cursor < len(hs_body):
+                        pub_len = int(hs_body[cursor])
+                        ecdhe_children.append({'title': f'Pubkey Length: {pub_len}', 'offset': hs_abs + 4 + cursor, 'length': 1})
+                        cursor += 1
+                        if pub_len > 0 and cursor + pub_len <= len(hs_body):
+                            ecdhe_children.append({'title': f'Pubkey: {hs_body[cursor:cursor + pub_len].hex()}', 'offset': hs_abs + 4 + cursor, 'length': pub_len})
+                        cursor += pub_len
+                    if cursor + 2 <= len(hs_body):
+                        sig_alg = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
                         sig_map = {
-                            0x0601: 'rsa_pkcs1_sha512', 0x0602: 'SHA512 DSA', 0x0603: 'ecdsa_secp521r1_sha512',
-                            0x0501: 'rsa_pkcs1_sha384', 0x0502: 'SHA384 DSA', 0x0503: 'ecdsa_secp384r1_sha384',
-                            0x0401: 'rsa_pkcs1_sha256', 0x0402: 'SHA256 DSA', 0x0403: 'ecdsa_secp256r1_sha256',
-                            0x0301: 'SHA224 RSA', 0x0302: 'SHA224 DSA', 0x0303: 'SHA224 ECDSA',
-                            0x0201: 'rsa_pkcs1_sha1', 0x0202: 'SHA1 DSA', 0x0203: 'ecdsa_sha1',
+                            0x0601: 'rsa_pkcs1_sha512', 0x0501: 'rsa_pkcs1_sha384', 0x0401: 'rsa_pkcs1_sha256',
+                            0x0403: 'ecdsa_secp256r1_sha256', 0x0503: 'ecdsa_secp384r1_sha384', 0x0603: 'ecdsa_secp521r1_sha512',
                         }
                         hash_map = {2: 'SHA1', 3: 'SHA224', 4: 'SHA256', 5: 'SHA384', 6: 'SHA512'}
                         sign_map = {1: 'RSA', 2: 'DSA', 3: 'ECDSA'}
-                        list_len = int.from_bytes(ext_payload[:2], 'big')
-                        sig_children = []
-                        p = 2
-                        while p + 2 <= min(len(ext_payload), 2 + list_len):
-                            sig = int.from_bytes(ext_payload[p:p + 2], 'big')
-                            hash_id = ext_payload[p]
-                            sign_id = ext_payload[p + 1]
-                            sig_children.append({
-                                'title': f'Signature Algorithm: {sig_map.get(sig, f"0x{sig:04x}")} (0x{sig:04x})',
-                                'offset': offset + payload_start + data_start + p,
-                                'length': 2,
-                                'children': [
-                                    {
-                                        'title': f'Signature Hash Algorithm Hash: {hash_map.get(hash_id, hash_id)} ({hash_id})',
-                                        'offset': offset + payload_start + data_start + p,
-                                        'length': 1,
-                                    },
-                                    {
-                                        'title': f'Signature Hash Algorithm Signature: {sign_map.get(sign_id, sign_id)} ({sign_id})',
-                                        'offset': offset + payload_start + data_start + p + 1,
-                                        'length': 1,
-                                    },
-                                ],
-                            })
-                            p += 2
-                        ext_node['children'].extend([
-                            {'title': f'Signature Hash Algorithms Length: {list_len}', 'offset': offset + payload_start + data_start, 'length': 2},
-                            {'title': f'Signature Hash Algorithms ({len(sig_children)} algorithms)', 'offset': offset + payload_start + data_start + 2, 'length': max(0, list_len), 'children': sig_children},
-                        ])
-                    elif ext_type == 15 and len(ext_payload) >= 1:
-                        mode = int(ext_payload[0])
-                        ext_node['children'].append({'title': f'Mode: {"Peer allowed to send requests" if mode == 1 else mode} ({mode})', 'offset': offset + payload_start + data_start, 'length': 1})
-                    else:
-                        ext_node['children'].append({'title': f'Data: {ext_payload.hex()}', 'offset': offset + payload_start + data_start, 'length': max(0, len(ext_payload))})
-                    ext_children.append(ext_node)
-                    cursor = data_end
-                handshake_children.append({'title': f'Extensions ({len(ext_children)})', 'offset': offset + payload_start + ext_start, 'length': ext_len, 'children': ext_children})
+                        ecdhe_children.append({
+                            'title': f'Signature Algorithm: {sig_map.get(sig_alg, f"0x{sig_alg:04x}")} (0x{sig_alg:04x})',
+                            'offset': hs_abs + 4 + cursor,
+                            'length': 2,
+                            'children': [
+                                {'title': f'Signature Hash Algorithm Hash: {hash_map.get(hs_body[cursor], hs_body[cursor])} ({hs_body[cursor]})', 'offset': hs_abs + 4 + cursor, 'length': 1},
+                                {'title': f'Signature Hash Algorithm Signature: {sign_map.get(hs_body[cursor + 1], hs_body[cursor + 1])} ({hs_body[cursor + 1]})', 'offset': hs_abs + 4 + cursor + 1, 'length': 1},
+                            ],
+                        })
+                        cursor += 2
+                    if cursor + 2 <= len(hs_body):
+                        sig_len = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                        ecdhe_children.append({'title': f'Signature Length: {sig_len}', 'offset': hs_abs + 4 + cursor, 'length': 2})
+                        cursor += 2
+                        if sig_len > 0 and cursor + sig_len <= len(hs_body):
+                            ecdhe_children.append({'title': f'Signature: {hs_body[cursor:cursor + sig_len].hex()}', 'offset': hs_abs + 4 + cursor, 'length': sig_len})
+                    handshake_children.append({
+                        'title': 'EC Diffie-Hellman Server Params',
+                        'offset': hs_abs + 4,
+                        'length': len(hs_body),
+                        'children': ecdhe_children,
+                    })
 
-                try:
-                    ja3 = _tls_clienthello_ja3(record_payload)
-                    if ja3:
-                        ja4 = _tls_clienthello_ja4(record_payload)
-                        if ja4:
-                            handshake_children.append({'title': f'[JA4: {ja4["value"]}]'})
-                            handshake_children.append({'title': f'[JA4_r: {ja4["raw"]}]'})
-                        handshake_children.append({'title': f'[JA3 Fullstring: {ja3["full"]}]'})
-                        handshake_children.append({'title': f'[JA3: {ja3["hash"]}]'})
-                except Exception:
-                    pass
+                elif hs_type == 16 and len(hs_body) >= 1:
+                    pub_len = int(hs_body[0])
+                    ecdhe_client_children = [
+                        {'title': f'Pubkey Length: {pub_len}', 'offset': hs_abs + 4, 'length': 1}
+                    ]
+                    if pub_len > 0 and 1 + pub_len <= len(hs_body):
+                        ecdhe_client_children.append({'title': f'Pubkey: {hs_body[1:1 + pub_len].hex()}', 'offset': hs_abs + 5, 'length': pub_len})
+                    handshake_children.append({
+                        'title': 'EC Diffie-Hellman Client Params',
+                        'offset': hs_abs + 4,
+                        'length': len(hs_body),
+                        'children': ecdhe_client_children,
+                    })
 
-            record_children.append({
-                'title': f'Handshake Protocol: {hs_name}',
-                'offset': offset + payload_start,
-                'length': min(len(record_payload), 4 + hs_len),
-                'children': handshake_children,
-            })
+                elif hs_type == 4 and len(hs_body) >= 6:
+                    life = int.from_bytes(hs_body[0:4], 'big')
+                    ticket_len = int.from_bytes(hs_body[4:6], 'big')
+                    ticket = hs_body[6:6 + ticket_len]
+                    handshake_children.append({
+                        'title': 'TLS Session Ticket',
+                        'offset': hs_abs + 4,
+                        'length': min(len(hs_body), 6 + ticket_len),
+                        'children': [
+                            {'title': f'Session Ticket Lifetime Hint: {life} seconds ({life // 3600} hours)', 'offset': hs_abs + 4, 'length': 4},
+                            {'title': f'Session Ticket Length: {ticket_len}', 'offset': hs_abs + 8, 'length': 2},
+                            {'title': f'Session Ticket: {ticket.hex()}', 'offset': hs_abs + 10, 'length': max(0, len(ticket))},
+                        ],
+                    })
+
+                record_children.append({
+                    'title': f'Handshake Protocol: {hs_name}',
+                    'offset': hs_abs,
+                    'length': hs_total,
+                    'children': handshake_children,
+                })
+                hs_pos += hs_total
+
+            if hs_names:
+                record_title = f'{record_version_name(version)} Record Layer: Handshake Protocol: {", ".join(hs_names)}'
+        elif content_type == 20 and len(record_payload) >= 1:
+            if int(record_payload[0]) == 1:
+                record_title = f'{record_version_name(version)} Record Layer: Change Cipher Spec Protocol: Change Cipher Spec'
+                record_children.append({
+                    'title': 'Change Cipher Spec Message',
+                    'offset': offset + payload_start,
+                    'length': 1,
+                })
+            else:
+                record_children.append({'title': f'Record Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
         elif record_payload:
             record_children.append({'title': f'Record Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
 
@@ -6246,12 +7274,24 @@ def _tls_section_precise(packet, offset: int, stream_index: int) -> Dict[str, An
             break
         pos = payload_end
 
-    return {
+    result = {
         'title': 'Transport Layer Security',
         'offset': offset,
         'length': tls_len,
         'children': children,
     }
+
+    if _is_reassembled:
+        # Tag every node with a byte mapping so hex_view highlights in the
+        # "Reassembled TCP" tab instead of the raw frame bytes.
+        def _tag_tcp_reassembled(node: dict):
+            if 'offset' in node and 'length' in node:
+                node['byte_source'] = TCP_REASSEMBLED_BYTE_SOURCE
+            for child in node.get('children', []):
+                _tag_tcp_reassembled(child)
+        _tag_tcp_reassembled(result)
+
+    return result
 
 
 def _mpls_section(payload: bytes, offset: int) -> Dict[str, Any]:

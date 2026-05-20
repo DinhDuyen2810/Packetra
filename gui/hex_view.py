@@ -330,16 +330,25 @@ class PacketBytesView(QWidget):
             ('packet', f'Packet ({len(packet_data)} bytes)', packet_data),
         ]
 
+        reassembled_data = b''
         reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
         if reassembled_hex:
             try:
                 reassembled_data = bytes.fromhex(reassembled_hex)
             except ValueError:
                 reassembled_data = b''
-            if reassembled_data:
-                sources.append(
-                    ('tcp_reassembled', f'Reassembled TCP ({len(reassembled_data)} bytes)', reassembled_data)
-                )
+        if not reassembled_data:
+            _tls_payload = bytes(metadata.get('tls_reassembled_payload', b'') or b'')
+            _tls_pdu_len = int(metadata.get('tls_reassembled_length', 0) or 0)
+            # Truncate to the reassembled PDU length (e.g. Certificate record only, not SKE/SHD)
+            if _tls_pdu_len and _tls_pdu_len < len(_tls_payload):
+                reassembled_data = _tls_payload[:_tls_pdu_len]
+            else:
+                reassembled_data = _tls_payload
+        if reassembled_data:
+            sources.append(
+                ('tcp_reassembled', f'Reassembled TCP ({len(reassembled_data)} bytes)', reassembled_data)
+            )
 
         self._reset_tabs(sources)
         if self._tabs.count() > 0:

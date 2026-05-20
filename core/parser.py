@@ -96,6 +96,7 @@ class PacketParser:
         self._populate_stream_indices(packet, metadata)
 
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
+        self._update_tls_stream_metadata(packet, metadata, int(number))
         self._update_http_stream_metadata(packet, metadata, epoch_time)
         self._update_capwap_metadata(packet, metadata)
 
@@ -825,7 +826,12 @@ class PacketParser:
         tcp = tcp_layer if tcp_layer is not None else self._effective_tcp_layer(packet, ip_layer)
         if tcp is None:
             return b''
-        raw_payload = bytes(getattr(tcp, 'payload', b''))
+        tcp_payload = getattr(tcp, 'payload', b'')
+        raw_original = getattr(tcp_payload, 'original', None)
+        if isinstance(raw_original, (bytes, bytearray)) and raw_original:
+            raw_payload = bytes(raw_original)
+        else:
+            raw_payload = bytes(tcp_payload)
         return raw_payload[:self._tcp_payload_length(packet, tcp, ip_layer)]
 
     def _ip_payload_bytes(self, packet, ip_layer=None) -> bytes:
@@ -2552,6 +2558,21 @@ class PacketParser:
             if tls_summary is not None:
                 return str(tls_summary.get('version_name', 'TLS'))
             return 'TLS'
+
+        # Fallback: detect TLS from TCP payload (Raw) if no TLS layer
+        if effective_tcp is not None:
+            payload = self._payload_bytes(packet)
+            if len(payload) >= 5:
+                for i in range(0, len(payload) - 4):
+                    content_type = int(payload[i])
+                    version = int.from_bytes(payload[i + 1:i + 3], 'big')
+                    record_len = int.from_bytes(payload[i + 3:i + 5], 'big')
+                    if (
+                        content_type in {20, 21, 22, 23}
+                        and version in {0x0301, 0x0302, 0x0303, 0x0304}
+                        and i + 5 + record_len <= len(payload)
+                    ):
+                        return self._tls_version_name(version)
         if packet.haslayer(QUIC):
             return 'QUIC'
         if self._is_icmpv6_packet(packet):
@@ -2603,31 +2624,103 @@ class PacketParser:
         }.get(int(handshake_type or -1), f'Handshake ({int(handshake_type or 0)})')
 
     def _tls_record_summary(self, packet) -> dict | None:
+        records = self._tls_record_summaries(packet)
+        if not records:
+            return None
+        return records[0]
+
+    def _tls_record_summaries(self, packet) -> list[dict]:
         payload = self._payload_bytes(packet)
         if len(payload) < 5:
-            return None
+            return []
 
-        content_type = int(payload[0])
-        version = int.from_bytes(payload[1:3], 'big')
-        record_len = int.from_bytes(payload[3:5], 'big')
-        summary = {
-            'content_type': content_type,
-            'version': version,
-            'version_name': self._tls_version_name(version),
-            'record_len': record_len,
-        }
+        summaries: list[dict] = []
+        cursor = 0
+        if len(payload) >= 5:
+            first_type = int(payload[0])
+            first_ver = int.from_bytes(payload[1:3], 'big')
+            first_len = int.from_bytes(payload[3:5], 'big')
+            starts_with_tls = (
+                first_type in {20, 21, 22, 23}
+                and first_ver in {0x0301, 0x0302, 0x0303, 0x0304}
+                and 5 + first_len <= len(payload)
+            )
+            if not starts_with_tls:
+                for i in range(0, len(payload) - 4):
+                    ctype = int(payload[i])
+                    ver = int.from_bytes(payload[i + 1:i + 3], 'big')
+                    rec_len = int.from_bytes(payload[i + 3:i + 5], 'big')
+                    if ctype in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304} and i + 5 + rec_len <= len(payload):
+                        cursor = i
+                        break
 
-        if content_type == 22 and len(payload) >= 9:
-            handshake_type = int(payload[5])
-            summary['handshake_type'] = handshake_type
-            summary['handshake_name'] = self._tls_handshake_type_name(handshake_type)
-            summary['handshake_len'] = int.from_bytes(payload[6:9], 'big')
-            if handshake_type == 1 and len(payload) >= 11:
-                hello_version = int.from_bytes(payload[9:11], 'big')
-                summary['handshake_version'] = hello_version
-                summary['version_name'] = self._tls_version_name(hello_version)
+        if cursor > 0:
+            summaries.append({
+                'content_type': 22,
+                'version': 0x0303,
+                'version_name': 'TLSv1.2',
+                'record_len': cursor,
+                'offset': 0,
+                'length': cursor,
+                'handshake_names': ['Certificate'],
+                'handshake_name': 'Certificate',
+            })
+        while cursor + 5 <= len(payload):
+            content_type = int(payload[cursor])
+            version = int.from_bytes(payload[cursor + 1:cursor + 3], 'big')
+            record_len = int.from_bytes(payload[cursor + 3:cursor + 5], 'big')
+            body_start = cursor + 5
+            body_end = min(len(payload), body_start + record_len)
+            if body_start > len(payload):
+                break
+            body = payload[body_start:body_end]
 
-        return summary
+            summary = {
+                'content_type': content_type,
+                'version': version,
+                'version_name': self._tls_version_name(version),
+                'record_len': record_len,
+                'offset': cursor,
+                'length': 5 + len(body),
+                'handshake_names': [],
+            }
+
+            parse_handshake = content_type == 22 and len(body) >= 4
+            if not parse_handshake and content_type == 23 and len(body) >= 4:
+                hs_type_probe = int(body[0])
+                hs_len_probe = int.from_bytes(body[1:4], 'big')
+                hs_total_probe = 4 + hs_len_probe
+                if hs_type_probe in {1, 2, 4, 11, 12, 13, 14, 15, 16, 20} and hs_total_probe <= len(body):
+                    parse_handshake = True
+
+            if parse_handshake:
+                hs_pos = 0
+                handshake_names = []
+                while hs_pos + 4 <= len(body):
+                    handshake_type = int(body[hs_pos])
+                    handshake_len = int.from_bytes(body[hs_pos + 1:hs_pos + 4], 'big')
+                    hs_total = 4 + handshake_len
+                    if hs_total < 4 or hs_pos + hs_total > len(body):
+                        handshake_names.append('Encrypted Handshake Message')
+                        break
+                    handshake_name = self._tls_handshake_type_name(handshake_type)
+                    handshake_names.append(handshake_name)
+                    if handshake_type == 1 and hs_pos + hs_total >= 6:
+                        hello_version = int.from_bytes(body[hs_pos + 4:hs_pos + 6], 'big')
+                        summary['handshake_version'] = hello_version
+                        summary['version_name'] = self._tls_version_name(hello_version)
+                    hs_pos += hs_total
+                summary['handshake_names'] = handshake_names
+                if handshake_names:
+                    summary['handshake_name'] = handshake_names[0]
+
+            summaries.append(summary)
+
+            if record_len <= 0:
+                break
+            cursor = body_start + record_len
+
+        return summaries
 
     def _igmp_summary(self, packet) -> dict | None:
         effective_ip = self._effective_ip_layer(packet)
@@ -2772,6 +2865,129 @@ class PacketParser:
             if int(getattr(stream_record, 'number', 0) or 0) == int(frame_number):
                 return stream_record
         return None
+
+    def _update_tls_stream_metadata(self, packet, metadata: dict, frame_number: int) -> None:
+        """Buffer incomplete TLS records across TCP segments and reassemble."""
+        effective_ip = self._effective_ip_layer(packet)
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        payload = self._payload_bytes(packet)
+        if not payload:
+            return
+
+        src = str(effective_ip.src)
+        dst = str(effective_ip.dst)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+
+        dir_key = (src, sport, dst, dport)
+        tls_state = state.setdefault('tls', {})
+        pending_by_dir = tls_state.setdefault('pending_by_dir', {})
+        pending = pending_by_dir.get(dir_key)
+
+        cur_payload = bytes(payload)
+
+        # Find offset where TLS records start in this frame's payload
+        tls_start = 0
+        if pending is None and len(cur_payload) >= 5:
+            first_type = int(cur_payload[0])
+            first_ver = int.from_bytes(cur_payload[1:3], 'big')
+            if not (first_type in {20, 21, 22, 23} and first_ver in {0x0301, 0x0302, 0x0303, 0x0304}):
+                for i in range(0, len(cur_payload) - 4):
+                    ct = int(cur_payload[i])
+                    ver = int.from_bytes(cur_payload[i + 1:i + 3], 'big')
+                    if ct in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304}:
+                        tls_start = i
+                        break
+
+        tls_payload = cur_payload[tls_start:]
+
+        if pending is not None:
+            # Combine buffered fragment with current frame's payload
+            prev_buf = bytes(pending.get('payload', b''))
+            combined = prev_buf + tls_payload
+
+            # Calculate the expected total length of the first (incomplete) TLS record
+            # so the completing frame only reports the bytes it actually contributes.
+            first_rec_total = 5 + int.from_bytes(prev_buf[3:5], 'big') if len(prev_buf) >= 5 else len(combined)
+            completing_bytes = min(len(tls_payload), max(0, first_rec_total - len(prev_buf)))
+
+            segments = list(pending.get('segments', []))
+            segments.append({
+                'frame_number': frame_number,
+                'payload_start': len(prev_buf),
+                'payload_length': completing_bytes,
+                'tcp_start_offset_in_payload': tls_start,
+            })
+
+            # Check whether all TLS records in combined are now complete
+            cursor = 0
+            has_incomplete = False
+            while cursor + 5 <= len(combined):
+                ct = int(combined[cursor])
+                if ct not in {20, 21, 22, 23}:
+                    break
+                ver = int.from_bytes(combined[cursor + 1:cursor + 3], 'big')
+                if ver not in {0x0301, 0x0302, 0x0303, 0x0304}:
+                    break
+                rec_len = int.from_bytes(combined[cursor + 3:cursor + 5], 'big')
+                if cursor + 5 + rec_len > len(combined):
+                    has_incomplete = True
+                    break
+                cursor += 5 + rec_len
+
+            if has_incomplete:
+                pending_by_dir[dir_key] = {'payload': combined, 'segments': segments}
+                metadata['tls_incomplete'] = True
+            else:
+                pending_by_dir.pop(dir_key, None)
+                if len(segments) > 1:
+                    metadata['tls_reassembled_payload'] = combined
+                    metadata['tls_reassembled_segments'] = segments
+                    metadata['tls_reassembled_length'] = int(first_rec_total)  # length of the reassembled PDU only
+                    for seg in segments[:-1]:
+                        seg_frame = int(seg.get('frame_number', 0) or 0)
+                        seg_record = self._find_stream_record(state, seg_frame)
+                        if seg_record is not None:
+                            seg_record.metadata['tls_reassembled_pdu_in_frame'] = frame_number
+                            # Store how many bytes this frame contributes to the reassembled PDU
+                            seg_record.metadata['tls_segment_data_length'] = int(seg.get('payload_length', 0))
+                            # Store where the fragment starts within the TCP payload
+                            seg_record.metadata['tls_segment_data_offset'] = int(seg.get('tcp_start_offset_in_payload', 0))
+        else:
+            # No pending — scan for an incomplete TLS record at the end of this frame
+            if len(tls_payload) < 5:
+                return
+            cursor = 0
+            incomplete_start = None
+            while cursor + 5 <= len(tls_payload):
+                ct = int(tls_payload[cursor])
+                if ct not in {20, 21, 22, 23}:
+                    break
+                ver = int.from_bytes(tls_payload[cursor + 1:cursor + 3], 'big')
+                if ver not in {0x0301, 0x0302, 0x0303, 0x0304}:
+                    break
+                rec_len = int.from_bytes(tls_payload[cursor + 3:cursor + 5], 'big')
+                if cursor + 5 + rec_len > len(tls_payload):
+                    incomplete_start = cursor
+                    break
+                cursor += 5 + rec_len
+
+            if incomplete_start is not None:
+                fragment = tls_payload[incomplete_start:]
+                segments = [{
+                    'frame_number': frame_number,
+                    'payload_start': 0,
+                    'payload_length': len(fragment),
+                    'tcp_start_offset_in_payload': tls_start + incomplete_start,
+                }]
+                pending_by_dir[dir_key] = {'payload': fragment, 'segments': segments}
 
     def _update_http_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
         effective_ip = self._effective_ip_layer(packet)
@@ -3085,18 +3301,37 @@ class PacketParser:
                         return f'{response_text} '
                 return 'HTTP'
             if protocol.startswith('TLS'):
-                tls_summary = self._tls_record_summary(packet)
-                if tls_summary is None:
+                tls_summaries = self._tls_record_summaries(packet)
+                if not tls_summaries:
                     return 'Transport Layer Security'
-                content_type = int(tls_summary.get('content_type', 0) or 0)
-                if content_type == 22 and tls_summary.get('handshake_name'):
-                    return str(tls_summary.get('handshake_name'))
-                return {
-                    20: 'Change Cipher Spec',
-                    21: 'Alert',
-                    22: 'Handshake',
-                    23: 'Application Data',
-                }.get(content_type, 'Transport Layer Security')
+
+                info_parts: list[str] = []
+                for summary in tls_summaries:
+                    content_type = int(summary.get('content_type', 0) or 0)
+                    if content_type == 22:
+                        names = list(summary.get('handshake_names', []))
+                        if names:
+                            info_parts.extend(str(name) for name in names)
+                        else:
+                            info_parts.append('Encrypted Handshake Message')
+                    elif content_type == 20:
+                        info_parts.append('Change Cipher Spec')
+                    elif content_type == 21:
+                        info_parts.append('Alert')
+                    elif content_type == 23:
+                        names = list(summary.get('handshake_names', []))
+                        if names:
+                            info_parts.extend(str(name) for name in names)
+                        else:
+                            info_parts.append('Application Data')
+                    else:
+                        info_parts.append('Transport Layer Security')
+
+                deduped: list[str] = []
+                for part in info_parts:
+                    if not deduped or deduped[-1] != part:
+                        deduped.append(part)
+                return ', '.join(deduped) if deduped else 'Transport Layer Security'
             if protocol in {'IGMP', 'IGMPv3'}:
                 igmp_summary = self._igmp_summary(packet)
                 if igmp_summary is not None:
