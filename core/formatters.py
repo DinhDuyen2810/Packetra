@@ -116,6 +116,12 @@ def _internet_checksum(data: bytes) -> int:
 
 def _mac_display(mac: str) -> str:
     mac_text = str(mac or '')
+    if mac_text.lower() == '01:80:c2:00:00:00':
+        return f'Nearest-Customer-Bridge ({mac_text})'
+    if mac_text.lower() == '01:80:c2:00:00:02':
+        return f'Slow-Protocols ({mac_text})'
+    if mac_text.lower() == '01:80:c2:00:00:0e':
+        return f'Nearest-Bridge ({mac_text})'
     vendor = get_mac_vendor(mac_text)
     if vendor:
         suffix = ':'.join(mac_text.split(':')[-3:])
@@ -250,6 +256,23 @@ def _tcp_payload_bytes(packet, tcp_layer):
             return raw_payload[:payload_len]
         except Exception:
             pass
+    return raw_payload
+
+
+def _udp_payload_bytes(packet, udp_layer):
+    udp_payload = getattr(udp_layer, 'payload', b'')
+    raw_original = getattr(udp_payload, 'original', None)
+    if isinstance(raw_original, (bytes, bytearray)) and raw_original:
+        raw_payload = bytes(raw_original)
+    else:
+        raw_payload = bytes(udp_payload)
+
+    try:
+        udp_len = int(getattr(udp_layer, 'len', 0) or 0)
+        if udp_len >= 8:
+            return raw_payload[:max(0, min(len(raw_payload), udp_len - 8))]
+    except Exception:
+        pass
     return raw_payload
 
 
@@ -584,7 +607,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_ripng_section(udp_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'HSRPv2' and tcp_payload == b'':
-            udp_payload = bytes(getattr(effective_udp_layer, 'payload', b'')) if effective_udp_layer is not None else b''
+            udp_payload = _udp_payload_bytes(packet, effective_udp_layer) if effective_udp_layer is not None else b''
             sections.append(_hsrpv2_section(udp_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') in {'SMTP', 'SMTP/IMF'} and tcp_payload:
@@ -632,23 +655,23 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_ldp_section(ldp_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'RIPng':
-            ripng_payload = bytes(getattr(udp_layer, 'payload', b''))
+            ripng_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_ripng_section(ripng_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'RIPv2':
-            rip_payload = bytes(getattr(udp_layer, 'payload', b''))
+            rip_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_ripv2_section(rip_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'Syslog':
-            syslog_payload = bytes(getattr(udp_layer, 'payload', b''))
+            syslog_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_syslog_section(syslog_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'NTP':
-            ntp_payload = bytes(getattr(udp_layer, 'payload', b''))
+            ntp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_ntp_section(ntp_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'HSRPv2':
-            hsrp_payload = bytes(getattr(udp_layer, 'payload', b''))
+            hsrp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_hsrpv2_section(hsrp_payload, offset))
             payload_handled = True
 
@@ -688,7 +711,12 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         offset += len(icmp_layer)
 
     if getattr(record, 'protocol', '') == 'STP':
-        stp_payload = bytes(packet[SNAP].payload) if packet.haslayer(SNAP) else b''
+        if packet.haslayer(SNAP):
+            stp_payload = bytes(packet[SNAP].payload)
+        elif packet.haslayer('STP'):
+            stp_payload = bytes(packet['STP'])
+        else:
+            stp_payload = b''
         if stp_payload:
             sections.append(_stp_section(stp_payload, offset))
             payload_handled = True
@@ -1279,8 +1307,12 @@ def _ether_section(
             return f'CDP/VTP/DTP/PAgP/UDLD ({mac_text})'
         if mac_lower == '01:00:0c:cc:cc:cd':
             return f'PVST+ ({mac_text})'
+        if mac_lower == '01:80:c2:00:00:00':
+            return f'Nearest-Customer-Bridge ({mac_text})'
         if mac_lower == '01:80:c2:00:00:02':
             return f'Slow-Protocols ({mac_text})'
+        if mac_lower == '01:80:c2:00:00:0e':
+            return f'Nearest-Bridge ({mac_text})'
         if mac_lower == 'ab:00:00:02:00:00':
             return f'DEC-MOP-Remote-Console ({mac_text})'
 
@@ -1463,6 +1495,15 @@ def _arp_section(layer, offset: int) -> Dict[str, Any]:
 def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
     metadata = getattr(record, 'metadata', {}) if record else {}
     raw = bytes(layer)
+    if record is not None:
+        try:
+            effective_ip = _effective_ip_layer(getattr(record, 'raw', None))
+            if effective_ip is not None:
+                ip_payload = _ip_payload_bytes(getattr(record, 'raw', None), effective_ip)
+                if ip_payload:
+                    raw = raw[:len(ip_payload)]
+        except Exception:
+            pass
     icmp_type = int(raw[0]) if len(raw) >= 1 else int(getattr(layer, 'type', 0) or 0)
     code = int(raw[1]) if len(raw) >= 2 else int(getattr(layer, 'code', 0) or 0)
     checksum = int.from_bytes(raw[2:4], 'big') if len(raw) >= 4 else 0
@@ -1470,7 +1511,10 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
     identifier_le = int.from_bytes(raw[4:6], 'little') if len(raw) >= 6 else 0
     sequence_be = int.from_bytes(raw[6:8], 'big') if len(raw) >= 8 else 0
     sequence_le = int.from_bytes(raw[6:8], 'little') if len(raw) >= 8 else 0
-    payload = raw[8:] if len(raw) > 8 else b''
+    if icmp_type in {13, 14}:
+        payload = raw[20:] if len(raw) > 20 else b''
+    else:
+        payload = raw[8:] if len(raw) > 8 else b''
 
     checksum_status = 'Good'
     if len(raw) >= 4:
@@ -1482,6 +1526,8 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
     type_name = {
         0: 'Echo (ping) reply',
         8: 'Echo (ping) request',
+        13: 'Timestamp request',
+        14: 'Timestamp reply',
     }.get(icmp_type, f'Type {icmp_type}')
 
     children = [
@@ -1489,11 +1535,36 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
         {'title': f'Code: {code}', 'offset': offset + 1, 'length': 1},
         {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
         {'title': f'[Checksum Status: {checksum_status}]'},
-        {'title': f'Identifier (BE): {identifier_be} (0x{identifier_be:04x})', 'offset': offset + 4, 'length': 2},
-        {'title': f'Identifier (LE): {identifier_le} (0x{identifier_le:04x})', 'offset': offset + 4, 'length': 2},
-        {'title': f'Sequence Number (BE): {sequence_be} (0x{sequence_be:04x})', 'offset': offset + 6, 'length': 2},
-        {'title': f'Sequence Number (LE): {sequence_le} (0x{sequence_le:04x})', 'offset': offset + 6, 'length': 2},
     ]
+
+    if icmp_type in {0, 8, 13, 14}:
+        children.extend([
+            {'title': f'Identifier (BE): {identifier_be} (0x{identifier_be:04x})', 'offset': offset + 4, 'length': 2},
+            {'title': f'Identifier (LE): {identifier_le} (0x{identifier_le:04x})', 'offset': offset + 4, 'length': 2},
+            {'title': f'Sequence Number (BE): {sequence_be} (0x{sequence_be:04x})', 'offset': offset + 6, 'length': 2},
+            {'title': f'Sequence Number (LE): {sequence_le} (0x{sequence_le:04x})', 'offset': offset + 6, 'length': 2},
+        ])
+
+    if icmp_type in {13, 14} and len(raw) >= 20:
+        originate = int.from_bytes(raw[8:12], 'big')
+        receive = int.from_bytes(raw[12:16], 'big')
+        transmit = int.from_bytes(raw[16:20], 'big')
+
+        def _timestamp_text(value: int) -> str:
+            total_ms = int(value)
+            hours = total_ms // 3600000
+            rem = total_ms % 3600000
+            minutes = rem // 60000
+            rem %= 60000
+            seconds = rem // 1000
+            millis = rem % 1000
+            return f'{value} ({hours} hours, {minutes} minutes, {seconds}.{millis:03d} seconds after midnight UTC)'
+
+        children.extend([
+            {'title': f'Originate Timestamp: {_timestamp_text(originate)}', 'offset': offset + 8, 'length': 4},
+            {'title': f'Receive Timestamp: {_timestamp_text(receive)}', 'offset': offset + 12, 'length': 4},
+            {'title': f'Transmit Timestamp: {_timestamp_text(transmit)}', 'offset': offset + 16, 'length': 4},
+        ])
 
     response_frame = metadata.get('icmp_response_frame')
     if response_frame is not None:
@@ -1563,14 +1634,23 @@ def _igmp_section(payload: bytes, offset: int) -> Dict[str, Any]:
         checksum_bytes[2:4] = b'\x00\x00'
         checksum_status = 'Good' if _internet_checksum(bytes(checksum_bytes)) == checksum else 'Bad'
 
-    children = [
-        {'title': f'[IGMP Version: {3 if igmp_type == 0x11 and len(payload) >= 12 else 2}]'},
-        {'title': f'Type: {_igmp_type_name(igmp_type)} (0x{igmp_type:02x})', 'offset': offset, 'length': 1},
-        {'title': f'Max Resp Time: {max_resp / 10.0:.1f} sec (0x{max_resp:02x})', 'offset': offset + 1, 'length': 1},
-        {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
-        {'title': f'[Checksum Status: {checksum_status}]'},
-        {'title': f'Multicast Address: {group_addr}', 'offset': offset + 4, 'length': 4},
-    ]
+    version = 3 if igmp_type in {0x11, 0x22} and len(payload) >= 8 else 1 if igmp_type == 0x12 else 2
+    children = [{'title': f'[IGMP Version: {version}]'}]
+    if igmp_type == 0x22 and len(payload) >= 8:
+        children.extend([
+            {'title': f'Type: {_igmp_type_name(igmp_type)} (0x{igmp_type:02x})', 'offset': offset, 'length': 1},
+            {'title': f'Reserved: 0x{max_resp:02x}', 'offset': offset + 1, 'length': 1},
+            {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
+            {'title': f'[Checksum Status: {checksum_status}]'},
+        ])
+    else:
+        children.extend([
+            {'title': f'Type: {_igmp_type_name(igmp_type)} (0x{igmp_type:02x})', 'offset': offset, 'length': 1},
+            {'title': f'Max Resp Time: {max_resp / 10.0:.1f} sec (0x{max_resp:02x})', 'offset': offset + 1, 'length': 1},
+            {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
+            {'title': f'[Checksum Status: {checksum_status}]'},
+            {'title': f'Multicast Address: {group_addr}', 'offset': offset + 4, 'length': 4},
+        ])
 
     if igmp_type == 0x11 and len(payload) >= 12:
         s_flag = (payload[8] >> 3) & 0x1
@@ -1597,6 +1677,53 @@ def _igmp_section(payload: bytes, offset: int) -> Dict[str, Any]:
                 })
             if source_children:
                 children.append({'title': f'Source Addresses ({len(source_children)})', 'children': source_children})
+    elif igmp_type == 0x22 and len(payload) >= 8:
+        reserved = int.from_bytes(payload[4:6], 'big')
+        record_count = int.from_bytes(payload[6:8], 'big')
+        children.extend([
+            {'title': f'Reserved: {reserved:04x}', 'offset': offset + 4, 'length': 2},
+            {'title': f'Number of Group Records: {record_count}', 'offset': offset + 6, 'length': 2},
+        ])
+        cursor = 8
+        record_type_names = {
+            1: 'MODE_IS_INCLUDE',
+            2: 'MODE_IS_EXCLUDE',
+            3: 'CHANGE_TO_INCLUDE_MODE',
+            4: 'CHANGE_TO_EXCLUDE_MODE',
+            5: 'ALLOW_NEW_SOURCES',
+            6: 'BLOCK_OLD_SOURCES',
+        }
+        for index in range(record_count):
+            if cursor + 8 > len(payload):
+                break
+            record_type = int(payload[cursor])
+            aux_len = int(payload[cursor + 1])
+            source_count = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+            multicast = str(ipaddress.IPv4Address(payload[cursor + 4:cursor + 8]))
+            record_len = 8 + (source_count * 4) + (aux_len * 4)
+            record_children = [
+                {'title': f'Record Type: {record_type_names.get(record_type, str(record_type))} ({record_type})', 'offset': offset + cursor, 'length': 1},
+                {'title': f'Aux Data Len: {aux_len}', 'offset': offset + cursor + 1, 'length': 1},
+                {'title': f'Number of Sources: {source_count}', 'offset': offset + cursor + 2, 'length': 2},
+                {'title': f'Multicast Address: {multicast}', 'offset': offset + cursor + 4, 'length': 4},
+            ]
+            source_cursor = cursor + 8
+            for src_index in range(source_count):
+                if source_cursor + 4 > len(payload):
+                    break
+                record_children.append({
+                    'title': f'Source Address [{src_index + 1}]: {str(ipaddress.IPv4Address(payload[source_cursor:source_cursor + 4]))}',
+                    'offset': offset + source_cursor,
+                    'length': 4,
+                })
+                source_cursor += 4
+            children.append({
+                'title': f'Group Record [{index + 1}]: {multicast}',
+                'offset': offset + cursor,
+                'length': min(record_len, max(0, len(payload) - cursor)),
+                'children': record_children,
+            })
+            cursor += record_len
 
     title = 'Internet Group Management Protocol'
     if igmp_type == 0x11 and len(payload) >= 12:
@@ -2072,16 +2199,68 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         135: 'Neighbor Solicitation',
         136: 'Neighbor Advertisement',
         143: 'Multicast Listener Report Message v2',
+        3: 'Time Exceeded',
     }.get(icmpv6_type, f'ICMPv6 Type {icmpv6_type}')
 
     children: List[Dict[str, Any]] = [
         {'title': f'Type: {type_name} ({icmpv6_type})', 'offset': offset, 'length': 1},
-        {'title': f'Code: {code}', 'offset': offset + 1, 'length': 1},
+        {'title': f'Code: {code}{" (Hop limit exceeded in transit)" if icmpv6_type == 3 and code == 0 else " (Fragment reassembly time exceeded)" if icmpv6_type == 3 and code == 1 else ""}', 'offset': offset + 1, 'length': 1},
         {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
         {'title': f'[Checksum Status: {checksum_status}]'},
     ]
 
-    if icmpv6_type == 143:
+    if icmpv6_type in {1, 2, 3, 4}:
+        children[0]['children'] = [
+            {
+                'title': '[Expert Info (Note/Response): Type indicates an error]',
+                'children': [
+                    {'title': '[Type indicates an error]'},
+                    {'title': '[Severity level: Note]'},
+                    {'title': '[Group: Response]'},
+                ],
+            }
+        ]
+
+    if icmpv6_type == 3:
+        reserved = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
+        children.append({'title': f'Reserved: {reserved:08x}', 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0})
+        inner_payload = payload[8:] if len(payload) > 8 else b''
+        if len(inner_payload) >= 40 and (inner_payload[0] >> 4) == 6:
+            try:
+                inner_ipv6 = IPv6(inner_payload)
+                inner_length = min(len(inner_payload), 40 + int(getattr(inner_ipv6, 'plen', 0) or 0))
+                inner_ipv6_node = _ipv6_section(inner_ipv6, offset + 8, -1)
+                inner_ipv6_node['title'] = f'Internet Protocol Version 6, Src: {inner_ipv6.src} ({inner_ipv6.src}), Dst: {inner_ipv6.dst} ({inner_ipv6.dst})'
+                inner_ipv6_node['length'] = inner_length
+                if inner_ipv6.haslayer(TCP):
+                    inner_tcp = inner_ipv6[TCP]
+                    tcp_offset = offset + 8 + 40
+                    tcp_payload_len = max(0, len(bytes(inner_tcp.payload)))
+                    tcp_flags = int(getattr(inner_tcp, 'flags', 0) or 0)
+                    tcp_set_flags = []
+                    for name, mask in [('FIN', 0x01), ('SYN', 0x02), ('RST', 0x04), ('PSH', 0x08), ('ACK', 0x10), ('URG', 0x20), ('ECE', 0x40), ('CWR', 0x80)]:
+                        if tcp_flags & mask:
+                            tcp_set_flags.append(name)
+                    inner_ipv6_node.setdefault('children', []).append({
+                        'title': f'Transmission Control Protocol, Src Port: {int(getattr(inner_tcp, "sport", 0) or 0)} ({int(getattr(inner_tcp, "sport", 0) or 0)}), Dst Port: {"smtp (25)" if int(getattr(inner_tcp, "dport", 0) or 0) == 25 else int(getattr(inner_tcp, "dport", 0) or 0)}, Seq: {int(getattr(inner_tcp, "seq", 0) or 0)}',
+                        'offset': tcp_offset,
+                        'length': min(len(inner_payload) - 40, int(getattr(inner_tcp, 'dataofs', 5) or 5) * 4 + tcp_payload_len),
+                        'children': [
+                            {'title': f'Source Port: {int(getattr(inner_tcp, "sport", 0) or 0)} ({int(getattr(inner_tcp, "sport", 0) or 0)})', 'offset': tcp_offset, 'length': 2},
+                            {'title': f'Destination Port: smtp (25)' if int(getattr(inner_tcp, 'dport', 0) or 0) == 25 else f'Destination Port: {int(getattr(inner_tcp, "dport", 0) or 0)} ({int(getattr(inner_tcp, "dport", 0) or 0)})', 'offset': tcp_offset + 2, 'length': 2},
+                            {'title': f'Sequence Number: {int(getattr(inner_tcp, "seq", 0) or 0)}', 'offset': tcp_offset + 4, 'length': 4},
+                            {'title': f'Acknowledgment Number: {int(getattr(inner_tcp, "ack", 0) or 0)}', 'offset': tcp_offset + 8, 'length': 4},
+                            {'title': f'{int(getattr(inner_tcp, "dataofs", 5) or 5):04b} .... = Header Length: {int(getattr(inner_tcp, "dataofs", 5) or 5) * 4} bytes ({int(getattr(inner_tcp, "dataofs", 5) or 5)})', 'offset': tcp_offset + 12, 'length': 1},
+                            {'title': f'Flags: 0x{tcp_flags:03x} ({", ".join(tcp_set_flags) if tcp_set_flags else "None"})', 'offset': tcp_offset + 12, 'length': 2},
+                            {'title': f'Window: {int(getattr(inner_tcp, "window", 0) or 0)}', 'offset': tcp_offset + 14, 'length': 2},
+                            {'title': f'Checksum: 0x{int(getattr(inner_tcp, "chksum", 0) or 0):04x}', 'offset': tcp_offset + 16, 'length': 2},
+                            {'title': f'Urgent Pointer: {int(getattr(inner_tcp, "urgptr", 0) or 0)}', 'offset': tcp_offset + 18, 'length': 2},
+                        ],
+                    })
+                children.append(inner_ipv6_node)
+            except Exception:
+                pass
+    elif icmpv6_type == 143:
         reserved = int.from_bytes(payload[4:6], 'big') if len(payload) >= 6 else 0
         record_count = int.from_bytes(payload[6:8], 'big') if len(payload) >= 8 else 0
         children.extend([
@@ -2246,8 +2425,12 @@ def _dot3_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
         mac_lower = mac_text.lower()
         if mac_lower == '01:00:0c:cc:cc:cc':
             return f'CDP/VTP/DTP/PAgP/UDLD ({mac_text})'
+        if mac_lower == '01:80:c2:00:00:00':
+            return f'Nearest-Customer-Bridge ({mac_text})'
         if mac_lower == '01:80:c2:00:00:02':
             return f'Slow-Protocols ({mac_text})'
+        if mac_lower == '01:80:c2:00:00:0e':
+            return f'Nearest-Bridge ({mac_text})'
         if mac_lower == 'ab:00:00:02:00:00':
             return f'DEC-MOP-Remote-Console ({mac_text})'
         if not vendor:
@@ -2321,23 +2504,30 @@ def _llc_section(layer, snap_layer, offset: int) -> Dict[str, Any]:
         0x010b: 'PVSTP+',
         0x0111: 'UDLD',
     }.get(pid, f'0x{pid:04x}')
+    dsap_name = 'SNAP'
+    dsap_bits = '1010 101.'
+    if snap_layer is None and dsap == 0x42:
+        dsap_name = 'Spanning Tree BPDU'
+        dsap_bits = '0100 001.'
+    ssap_name = dsap_name
+    ssap_bits = dsap_bits
 
     children = [
         {
-            'title': f'DSAP: SNAP (0x{dsap:02x})',
+            'title': f'DSAP: {dsap_name} (0x{dsap:02x})',
             'offset': offset,
             'length': 1,
             'children': [
-                {'title': '1010 101. = SAP: SNAP', 'offset': offset, 'length': 1},
+                {'title': f'{dsap_bits} = SAP: {dsap_name}', 'offset': offset, 'length': 1},
                 {'title': '.... ...0 = IG Bit: Individual', 'offset': offset, 'length': 1},
             ],
         },
         {
-            'title': f'SSAP: SNAP (0x{ssap:02x})',
+            'title': f'SSAP: {ssap_name} (0x{ssap:02x})',
             'offset': offset + 1,
             'length': 1,
             'children': [
-                {'title': '1010 101. = SAP: SNAP', 'offset': offset + 1, 'length': 1},
+                {'title': f'{ssap_bits} = SAP: {ssap_name}', 'offset': offset + 1, 'length': 1},
                 {'title': '.... ...0 = CR Bit: Command', 'offset': offset + 1, 'length': 1},
             ],
         },
@@ -2542,6 +2732,62 @@ def _ntp_section(payload: bytes, offset: int, record) -> Dict[str, Any]:
     tx_ts = int.from_bytes(payload[40:48], 'big') if len(payload) >= 48 else 0
     leap_name = {0: 'no warning', 1: 'last minute has 61 seconds', 2: 'last minute has 59 seconds', 3: 'alarm condition'}.get(leap, str(leap))
     mode_name = {1: 'symmetric active', 2: 'symmetric passive', 3: 'client', 4: 'server', 5: 'broadcast'}.get(mode, str(mode))
+    if mode == 6 and len(payload) >= 12:
+        flags2 = int(payload[1]) if len(payload) >= 2 else 0
+        response_bit = (flags2 >> 7) & 0x01
+        error_bit = (flags2 >> 6) & 0x01
+        more_bit = (flags2 >> 5) & 0x01
+        opcode = flags2 & 0x1F
+        opcode_name = {
+            1: 'read status',
+            2: 'read variables',
+            3: 'write variables',
+        }.get(opcode, str(opcode))
+        sequence = int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0
+        status = int.from_bytes(payload[4:6], 'big') if len(payload) >= 6 else 0
+        association_id = int.from_bytes(payload[6:8], 'big') if len(payload) >= 8 else 0
+        data_offset = int.from_bytes(payload[8:10], 'big') if len(payload) >= 10 else 0
+        count = int.from_bytes(payload[10:12], 'big') if len(payload) >= 12 else 0
+        children = [
+            {
+                'title': f'Flags: 0x{first:02x}, Leap Indicator: {leap_name}, Version number: NTP Version {version}, Mode: reserved for NTP control message',
+                'offset': offset,
+                'length': 1,
+                'children': [
+                    {'title': f'{leap:02b}.. .... = Leap Indicator: {leap_name} ({leap})', 'offset': offset, 'length': 1},
+                    {'title': f'..{version:03b} ... = Version number: NTP Version {version} ({version})', 'offset': offset, 'length': 1},
+                    {'title': f'.... .{mode:03b} = Mode: reserved for NTP control message ({mode})', 'offset': offset, 'length': 1},
+                ],
+            },
+            {
+                'title': f'Flags 2: 0x{flags2:02x}, Opcode: {opcode_name}',
+                'offset': offset + 1,
+                'length': 1,
+                'children': [
+                    {'title': f'{response_bit}... .... = Response bit: {"Response" if response_bit else "Request"}', 'offset': offset + 1, 'length': 1},
+                    {'title': f'.{error_bit}.. .... = Error bit: {error_bit}', 'offset': offset + 1, 'length': 1},
+                    {'title': f'..{more_bit}. .... = More bit: {more_bit}', 'offset': offset + 1, 'length': 1},
+                    {'title': f'...{opcode:05b} = Opcode: {opcode_name} ({opcode})', 'offset': offset + 1, 'length': 1},
+                ],
+            },
+            {'title': f'Sequence: {sequence}', 'offset': offset + 2, 'length': 2},
+            {'title': f'Status: 0x{status:04x}', 'offset': offset + 4, 'length': 2},
+            {'title': f'AssociationID: {association_id}', 'offset': offset + 6, 'length': 2},
+            {'title': f'Offset: {data_offset}', 'offset': offset + 8, 'length': 2},
+            {'title': f'Count: {count}', 'offset': offset + 10, 'length': 2},
+        ]
+        response_frame = int(record.metadata.get('ntp_response_frame', 0) or 0)
+        request_frame = int(record.metadata.get('ntp_request_frame', 0) or 0)
+        if response_frame > 0:
+            children.insert(3, {'title': f'[Response In: {response_frame}]'})
+        elif request_frame > 0:
+            children.insert(3, {'title': f'[Request In: {request_frame}]'})
+        return {
+            'title': f'Network Time Protocol (NTP Version {version}, control)',
+            'offset': offset,
+            'length': len(payload),
+            'children': children,
+        }
     stratum_name = {3: 'secondary reference'}.get(stratum, str(stratum))
     poll_seconds = 2 ** poll if poll >= 0 else 0
     precision_seconds = 2 ** precision if precision < 0 else 0
@@ -3216,6 +3462,20 @@ def _udld_section(payload: bytes, offset: int) -> Dict[str, Any]:
 
 def _hsrpv2_section(payload: bytes, offset: int) -> Dict[str, Any]:
     children = []
+    if len(payload) >= 6 and int(payload[0]) == 2 and int(payload[1]) == 4:
+        active_groups = int.from_bytes(payload[2:4], 'big')
+        passive_groups = int.from_bytes(payload[4:6], 'big')
+        children.append({
+            'title': 'Interface State TLV: Type=2 Len=4',
+            'offset': offset,
+            'length': 6,
+            'children': [
+                {'title': 'Type: Interface State (2)', 'offset': offset, 'length': 1},
+                {'title': 'Length: 4', 'offset': offset + 1, 'length': 1},
+                {'title': f'Active Groups: {active_groups}', 'offset': offset + 2, 'length': 2},
+                {'title': f'Passive Groups: {passive_groups}', 'offset': offset + 4, 'length': 2},
+            ],
+        })
     if len(payload) >= 42:
         tlv_type = int(payload[0])
         tlv_len = int(payload[1])
@@ -3929,6 +4189,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     bytes_in_flight = metadata.get('tcp_bytes_in_flight', None)
     bytes_since_last_psh = metadata.get('tcp_bytes_since_last_psh', None)
     is_retransmission = bool(metadata.get('tcp_is_retransmission', False))
+    is_spurious_retransmission = bool(metadata.get('tcp_is_spurious_retransmission', False))
     protocol_name = str(getattr(record, 'protocol', '') or '').upper() if record else ''
     has_ack_flag = bool(flag_bits['ACK'])
     is_syn_packet = bool(flag_bits['SYN'])
@@ -4188,18 +4449,31 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     })
     seq_ack_children = []
     if is_retransmission:
-        seq_ack_children.append({
-            'title': '[TCP Analysis Flags]',
-            'children': [
+        tcp_analysis_children = []
+        if is_spurious_retransmission:
+            tcp_analysis_children.append(
                 {
-                    'title': '[Expert Info (Note/Sequence): This frame is a (suspected) retransmission]',
+                    'title': '[Expert Info (Note/Sequence): This frame is a (suspected) spurious retransmission]',
                     'children': [
-                        {'title': '[This frame is a (suspected) retransmission]'},
+                        {'title': '[This frame is a (suspected) spurious retransmission]'},
                         {'title': '[Severity level: Note]'},
                         {'title': '[Group: Sequence]'},
                     ],
-                },
-            ],
+                }
+            )
+        tcp_analysis_children.append(
+            {
+                'title': '[Expert Info (Note/Sequence): This frame is a (suspected) retransmission]',
+                'children': [
+                    {'title': '[This frame is a (suspected) retransmission]'},
+                    {'title': '[Severity level: Note]'},
+                    {'title': '[Group: Sequence]'},
+                ],
+            }
+        )
+        seq_ack_children.append({
+            'title': '[TCP Analysis Flags]',
+            'children': tcp_analysis_children,
         })
     elif duplicate_ack:
         seq_ack_children.append({
@@ -6476,7 +6750,10 @@ def _dns_type_name(value: int) -> str:
         12: 'PTR',
         15: 'MX',
         16: 'TXT',
+        33: 'SRV',
+        41: 'OPT',
         28: 'AAAA',
+        255: 'ANY',
     }.get(int(value or 0), str(int(value or 0)))
 
 
@@ -6530,15 +6807,34 @@ def _dns_rdata_text(data: bytes, rr_type: int, full_raw: bytes | None = None, rd
         start = rdata_offset if full_raw is not None else 0
         name, _ = _dns_read_name(source, start)
         return name
+    if rr_type == 16:
+        items = []
+        pos = 0
+        while pos < len(data):
+            ln = int(data[pos])
+            pos += 1
+            chunk = data[pos:pos + ln]
+            items.append(chunk.decode(errors='ignore'))
+            pos += ln
+        return ', '.join(items)
+    if rr_type == 33 and len(data) >= 6:
+        source = full_raw if full_raw is not None else data
+        start = rdata_offset if full_raw is not None else 0
+        priority = int.from_bytes(data[0:2], 'big')
+        weight = int.from_bytes(data[2:4], 'big')
+        port = int.from_bytes(data[4:6], 'big')
+        target, _ = _dns_read_name(source, start + 6)
+        return f'{priority} {weight} {port} {target}'
     return data.hex()
 
 
 def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
     raw = bytes(layer)
     metadata = getattr(record, 'metadata', {}) if record else {}
+    protocol_name = str(getattr(record, 'protocol', '') or '')
     if len(raw) < 12:
         return {
-            'title': 'Domain Name System',
+            'title': 'Multicast Domain Name System' if protocol_name == 'MDNS' else 'Domain Name System',
             'offset': offset,
             'length': len(raw),
             'children': [],
@@ -6605,14 +6901,25 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
         if next_pos + 4 > len(raw):
             break
         qtype = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
-        qclass = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+        qclass_raw = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+        qclass = qclass_raw & 0x7FFF
+        qu_question = bool(qclass_raw & 0x8000)
         name_len = max(0, len(name.encode('utf-8')))
         label_count = len([part for part in name.split('.') if part])
         type_title = f'Type: {_dns_type_name(qtype)} ({qtype})'
         if qtype == 1:
             type_title += ' (Host Address)'
+        elif qtype == 12:
+            type_title += ' (domain name PoinTeR)'
+        elif qtype == 33:
+            type_title += ' (Server Selection)'
+        elif qtype == 16:
+            type_title += ' (Text strings)'
+        title = f'{name}: type {_dns_type_name(qtype)}, class {_dns_class_name(qclass)}'
+        if protocol_name == 'MDNS' and qu_question:
+            title += ', "QU" question'
         question_children.append({
-            'title': f'{name}: type {_dns_type_name(qtype)}, class {_dns_class_name(qclass)}',
+            'title': title,
             'offset': offset + pos,
             'length': next_pos + 4 - pos,
             'children': [
@@ -6623,6 +6930,8 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                 {'title': f'Class: {_dns_class_name(qclass)} (0x{qclass:04x})', 'offset': offset + next_pos + 2, 'length': 2},
             ],
         })
+        if protocol_name == 'MDNS' and qu_question:
+            question_children[-1]['children'].append({'title': '1... .... .... .... = QU: yes', 'offset': offset + next_pos + 2, 'length': 2})
         pos = next_pos + 4
 
     if question_children:
@@ -6646,7 +6955,9 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             if next_pos + 10 > len(raw):
                 break
             rr_type = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
-            rr_class = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+            rr_class_raw = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+            rr_class = rr_class_raw & 0x7FFF
+            cache_flush = bool(rr_class_raw & 0x8000)
             ttl = int.from_bytes(raw[next_pos + 4:next_pos + 8], 'big')
             rdlen = int.from_bytes(raw[next_pos + 8:next_pos + 10], 'big')
             rdata_start = next_pos + 10
@@ -6658,6 +6969,14 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             type_title = f'Type: {_dns_type_name(rr_type)} ({rr_type})'
             if rr_type == 1:
                 type_title += ' (Host Address)'
+            elif rr_type == 12:
+                type_title += ' (domain name PoinTeR)'
+            elif rr_type == 33:
+                type_title += ' (Server Selection)'
+            elif rr_type == 16:
+                type_title += ' (Text strings)'
+            elif rr_type == 28:
+                type_title += ' (IP6 Address)'
             value_title = 'Address'
             if rr_type in {2, 5, 12}:
                 value_title = {
@@ -6665,18 +6984,66 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                     5: 'Canonical Name',
                     12: 'Domain Name',
                 }.get(rr_type, 'Name')
+            rr_title = f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}'
+            if protocol_name == 'MDNS' and cache_flush:
+                rr_title += ', cache flush'
+            if rr_type == 33:
+                rr_title += f', priority {int.from_bytes(rdata_bytes[0:2], "big") if len(rdata_bytes) >= 2 else 0}, weight {int.from_bytes(rdata_bytes[2:4], "big") if len(rdata_bytes) >= 4 else 0}, port {int.from_bytes(rdata_bytes[4:6], "big") if len(rdata_bytes) >= 6 else 0}, target {(_dns_read_name(raw, rdata_start + 6)[0] if len(rdata_bytes) >= 6 else "")}'
+            elif rdata_text:
+                rr_title += f', addr {rdata_text}'
+            rr_children = [
+                {'title': f'Name: {name}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                {'title': type_title, 'offset': offset + next_pos, 'length': 2},
+                {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2},
+            ]
+            if protocol_name == 'MDNS':
+                rr_children.append({'title': f'{"1" if cache_flush else "0"}... .... .... .... = Cache flush: {"True" if cache_flush else "False"}', 'offset': offset + next_pos + 2, 'length': 2})
+            rr_children.extend([
+                {'title': f'Time to live: {ttl} ({ttl if ttl < 3600 else ttl // 3600}{" seconds" if ttl < 3600 else " hour, 15 minutes" if ttl == 4500 else " seconds"})', 'offset': offset + next_pos + 4, 'length': 4},
+                {'title': f'Data length: {rdlen}', 'offset': offset + next_pos + 8, 'length': 2},
+            ])
+            if rr_type == 16:
+                txt_pos = rdata_start
+                while txt_pos < rdata_end:
+                    txt_len = int(raw[txt_pos]) if txt_pos < len(raw) else 0
+                    rr_children.append({'title': f'TXT Length: {txt_len}', 'offset': offset + txt_pos, 'length': 1})
+                    txt_val = raw[txt_pos + 1:txt_pos + 1 + txt_len].decode(errors='ignore')
+                    rr_children.append({'title': f'TXT: {txt_val}', 'offset': offset + txt_pos + 1, 'length': txt_len})
+                    txt_pos += 1 + txt_len
+            elif rr_type == 33 and len(rdata_bytes) >= 6:
+                priority = int.from_bytes(rdata_bytes[0:2], 'big')
+                weight = int.from_bytes(rdata_bytes[2:4], 'big')
+                port = int.from_bytes(rdata_bytes[4:6], 'big')
+                target, _ = _dns_read_name(raw, rdata_start + 6)
+                instance_parts = name.split('.')
+                if len(instance_parts) >= 4:
+                    rr_children.extend([
+                        {'title': f'Instance: {instance_parts[0]}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                        {'title': f'Service: {instance_parts[1]}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                        {'title': f'Protocol: {instance_parts[2]}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                        {'title': f'Name: {instance_parts[3]}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                    ])
+                rr_children.extend([
+                    {'title': f'Priority: {priority}', 'offset': offset + rdata_start, 'length': 2},
+                    {'title': f'Weight: {weight}', 'offset': offset + rdata_start + 2, 'length': 2},
+                    {'title': f'Port: {port}', 'offset': offset + rdata_start + 4, 'length': 2},
+                    {'title': f'Target: {target}', 'offset': offset + rdata_start + 6, 'length': max(0, rdlen - 6)},
+                ])
+            elif rr_type == 41:
+                rr_children.extend([
+                    {'title': f'UDP payload size: {rr_class}', 'offset': offset + next_pos + 2, 'length': 2},
+                    {'title': f'Extended RCODE: {(ttl >> 24) & 0xFF}', 'offset': offset + next_pos + 4, 'length': 1},
+                    {'title': f'EDNS0 version: {(ttl >> 16) & 0xFF}', 'offset': offset + next_pos + 5, 'length': 1},
+                    {'title': f'Z: 0x{ttl & 0xFFFF:04x}', 'offset': offset + next_pos + 6, 'length': 2},
+                ])
+            else:
+                rr_children.append({'title': f'{value_title}: {rdata_text}', 'offset': offset + rdata_start, 'length': rdlen})
+
             items.append({
-                'title': f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}, addr {rdata_text}',
+                'title': rr_title,
                 'offset': offset + pos,
                 'length': rdata_end - pos,
-                'children': [
-                    {'title': f'Name: {name}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
-                    {'title': type_title, 'offset': offset + next_pos, 'length': 2},
-                    {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2},
-                    {'title': f'Time to live: {ttl} ({ttl} seconds)', 'offset': offset + next_pos + 4, 'length': 4},
-                    {'title': f'Data length: {rdlen}', 'offset': offset + next_pos + 8, 'length': 2},
-                    {'title': f'{value_title}: {rdata_text}', 'offset': offset + rdata_start, 'length': rdlen},
-                ],
+                'children': rr_children,
             })
             pos = rdata_end
         return items, pos
@@ -6734,7 +7101,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
         children.append({'title': f'[Time: {float(dns_time_ms):.6f} milliseconds]'})
 
     return {
-        'title': f'Domain Name System ({"response" if qr else "query"})',
+        'title': f'{"Multicast Domain Name System" if protocol_name == "MDNS" else "Domain Name System"} ({"response" if qr else "query"})',
         'offset': offset,
         'length': len(raw),
         'children': children,
@@ -9982,3 +10349,4 @@ def _data_section(layer, offset: int, length: int) -> Dict[str, Any]:
 
         'children': children,
     }
+

@@ -500,6 +500,7 @@ class PacketParser:
         has_ack_flag = bool(tcp_flags & 0x10)
         ack_only = bool(has_ack_flag and payload_len == 0 and (tcp_flags & 0x07) == 0)
         is_retransmission = False
+        is_spurious_retransmission = False
         is_duplicate_ack = False
         is_window_update = False
         previous_segment_not_captured = False
@@ -521,6 +522,14 @@ class PacketParser:
 
         if is_retransmission:
             metadata['tcp_is_retransmission'] = True
+            if has_ack_flag and rev_packets:
+                for seg in reversed(rev_packets):
+                    seg_ack = int(seg.get('ack_raw', 0) or 0)
+                    if self._tcp_seq_geq(seg_ack, end_seq_raw):
+                        is_spurious_retransmission = True
+                        break
+            if is_spurious_retransmission:
+                metadata['tcp_is_spurious_retransmission'] = True
 
         if dir_packets:
             highest_dir_end = None
@@ -535,7 +544,7 @@ class PacketParser:
             same_ack_run = []
             for seg in reversed(dir_packets):
                 seg_flags = int(seg.get('tcp_flags', 0) or 0)
-                if int(seg.get('payload_len', 0) or 0) != 0 or not bool(seg_flags & 0x10) or (seg_flags & 0x07) != 0:
+                if not bool(seg_flags & 0x10) or (seg_flags & 0x07) != 0:
                     continue
                 if int(seg.get('ack_raw', -1) or -1) != ack:
                     if same_ack_run:
@@ -723,6 +732,8 @@ class PacketParser:
             return 'PVST+'
         if text.lower() == '01:80:c2:00:00:02':
             return 'Slow-Protocols'
+        if text.lower() == '01:80:c2:00:00:00':
+            return 'Nearest-Customer-Bridge'
         if text.lower() == '01:80:c2:00:00:0e':
             return 'Nearest-Bridge'
         if text.lower() == 'ab:00:00:02:00:00':
@@ -929,6 +940,8 @@ class PacketParser:
         try:
             if packet.haslayer(SNAP):
                 return bytes(packet[SNAP].payload)
+            if packet.haslayer('STP'):
+                return bytes(packet['STP'])
         except Exception:
             pass
         return b''
@@ -1089,12 +1102,18 @@ class PacketParser:
             if (sport, dport) not in {(2029, 2029), (1985, 1985)}:
                 return False
             payload = self._hsrpv2_payload(packet)
-            return len(payload) >= 40 and int(payload[0]) == 1 and int(payload[1]) == 40 and int(payload[2]) == 2
+            if len(payload) >= 42 and int(payload[0]) == 1 and int(payload[1]) == 40 and int(payload[2]) == 2:
+                return True
+            return len(payload) >= 6 and int(payload[0]) == 2 and int(payload[1]) == 4
         except Exception:
             return False
 
     def _hsrpv2_info_text(self, packet) -> str:
         payload = self._hsrpv2_payload(packet)
+        if len(payload) >= 6 and int(payload[0]) == 2 and int(payload[1]) == 4:
+            active_groups = int.from_bytes(payload[2:4], 'big')
+            passive_groups = int.from_bytes(payload[4:6], 'big')
+            return f'Interface State TLV (Act={active_groups} Pass={passive_groups})'
         if len(payload) < 8:
             return 'Cisco Hot Standby Router Protocol'
         opcode = int(payload[3])
@@ -1102,6 +1121,22 @@ class PacketParser:
         opcode_name = {0: 'Hello', 1: 'Coup', 2: 'Resign'}.get(opcode, f'Opcode {opcode}')
         state_name = {1: 'Initial', 2: 'Learn', 3: 'Listen', 4: 'Speak', 5: 'Standby', 6: 'Active'}.get(state, str(state))
         return f'{opcode_name} (state {state_name})'
+
+    def _icmp_timestamp_info_text(self, packet) -> str:
+        if not packet.haslayer(ICMP) or not packet.haslayer(IP):
+            return packet.summary()
+        raw = bytes(packet[ICMP])
+        if len(raw) < 20:
+            return packet.summary()
+        icmp_type = int(raw[0])
+        if icmp_type not in {13, 14}:
+            return packet.summary()
+        label = 'Timestamp request' if icmp_type == 13 else 'Timestamp reply'
+        identifier = int.from_bytes(raw[4:6], 'big')
+        sequence_be = int.from_bytes(raw[6:8], 'big')
+        sequence_le = int.from_bytes(raw[6:8], 'little')
+        ttl = int(getattr(packet[IP], 'ttl', 0) or 0)
+        return f'{label.ljust(21)}id=0x{identifier:04x}, seq={sequence_be}/{sequence_le}, ttl={ttl}'
 
     def _syslog_payload(self, packet) -> bytes:
         try:
@@ -1163,11 +1198,13 @@ class PacketParser:
             sport = int(getattr(udp_layer, 'sport', 0) or 0)
             dport = int(getattr(udp_layer, 'dport', 0) or 0)
             payload = self._ntp_payload(packet)
-            if len(payload) < 48:
+            if len(payload) < 12:
                 return False
             first = int(payload[0])
             version = (first >> 3) & 0x07
             mode = first & 0x07
+            if mode == 6:
+                return (sport == 123 or dport == 123 or packet.haslayer('NTPHeader')) and version in {1, 2, 3, 4} and len(payload) >= 12
             return (sport == 123 or dport == 123 or packet.haslayer('NTPHeader')) and version in {1, 2, 3, 4} and mode in {1, 2, 3, 4, 5}
         except Exception:
             return False
@@ -1185,6 +1222,7 @@ class PacketParser:
             3: 'client',
             4: 'server',
             5: 'broadcast',
+            6: 'control',
         }.get(mode, str(mode))
         return f'NTP Version {version}, {mode_name}'
 
@@ -2866,6 +2904,7 @@ class PacketParser:
             130: 'Multicast Listener Query',
             131: 'Multicast Listener Report',
             132: 'Multicast Listener Done',
+            3: f'Time Exceeded ({"Hop limit exceeded in transit" if int(payload[1]) == 0 else "Fragment reassembly time exceeded"})',
         }.get(icmpv6_type, f'ICMPv6 Type {icmpv6_type}')
 
     def _dhcpv6_message_name(self, msg_type: int) -> str:
@@ -3061,7 +3100,7 @@ class PacketParser:
             return 'DHCP'
         if packet.haslayer(DNS):
             qname = self._dns_qname(packet)
-            if qname.endswith('.local'):
+            if qname.endswith('.local') or self._is_mdns_transport(packet):
                 return 'MDNS'
             return 'DNS'
         igmp_summary = self._igmp_summary(packet)
@@ -3289,6 +3328,30 @@ class PacketParser:
                 summary['info'] = f'Membership Query, specific for {group_address}'
             return summary
 
+        if igmp_type == 0x12:
+            summary['version'] = 'IGMPv1'
+            summary['info'] = 'Membership Report'
+            return summary
+
+        if igmp_type == 0x22 and len(payload) >= 8:
+            summary['version'] = 'IGMPv3'
+            record_count = int.from_bytes(payload[6:8], 'big')
+            summary['record_count'] = record_count
+            if record_count > 0 and len(payload) >= 16:
+                record_type = int(payload[8])
+                source_count = int.from_bytes(payload[10:12], 'big')
+                multicast_address = '.'.join(str(int(b)) for b in payload[12:16])
+                summary['record_type'] = record_type
+                summary['source_count'] = source_count
+                summary['multicast_address'] = multicast_address
+                if record_type == 2 and source_count == 0:
+                    summary['info'] = f'Membership Report / Join group {multicast_address} for any sources'
+                else:
+                    summary['info'] = f'Membership Report / Record type {record_type} for group {multicast_address}'
+            else:
+                summary['info'] = 'Membership Report'
+            return summary
+
         summary['info'] = {
             0x11: 'Membership Query',
             0x12: 'Version 1 Membership Report',
@@ -3297,6 +3360,101 @@ class PacketParser:
             0x22: 'Version 3 Membership Report',
         }.get(igmp_type, f'IGMP Type 0x{igmp_type:02x}')
         return summary
+
+    def _is_mdns_transport(self, packet) -> bool:
+        effective_ip = self._effective_ip_layer(packet)
+        udp_layer = self._effective_udp_layer(packet, effective_ip)
+        if udp_layer is None:
+            return False
+        sport = int(getattr(udp_layer, 'sport', 0) or 0)
+        dport = int(getattr(udp_layer, 'dport', 0) or 0)
+        if sport != 5353 and dport != 5353:
+            return False
+        dst = ''
+        if effective_ip is not None:
+            dst = str(getattr(effective_ip, 'dst', '') or '')
+        elif packet.haslayer(IPv6):
+            dst = str(getattr(packet[IPv6], 'dst', '') or '')
+        return dst in {'224.0.0.251', 'ff02::fb'} or sport == 5353 or dport == 5353
+
+    def _mdns_info_text(self, packet) -> str:
+        try:
+            from core.formatters import _dns_read_name
+            dns = packet[DNS]
+            raw = bytes(dns)
+            qdcount = int(getattr(dns, 'qdcount', 0) or 0)
+            ancount = int(getattr(dns, 'ancount', 0) or 0)
+            nscount = int(getattr(dns, 'nscount', 0) or 0)
+            arcount = int(getattr(dns, 'arcount', 0) or 0)
+            qtype_map = {1: 'A', 2: 'NS', 5: 'CNAME', 12: 'PTR', 15: 'MX', 16: 'TXT', 28: 'AAAA', 33: 'SRV', 41: 'OPT', 255: 'ANY'}
+            pos = 12
+            if int(getattr(dns, 'qr', 0) or 0) == 0:
+                items = []
+                for _ in range(qdcount):
+                    name, next_pos = _dns_read_name(raw, pos)
+                    if next_pos + 4 > len(raw):
+                        break
+                    qtype = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
+                    qclass = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+                    qu = bool(qclass & 0x8000)
+                    item = f'{qtype_map.get(qtype, str(qtype))} {name}'
+                    if qu:
+                        item += ', "QU" question'
+                    items.append(item)
+                    pos = next_pos + 4
+                for _ in range(nscount + arcount):
+                    name, next_pos = _dns_read_name(raw, pos)
+                    if next_pos + 10 > len(raw):
+                        break
+                    rr_type = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
+                    rdlen = int.from_bytes(raw[next_pos + 8:next_pos + 10], 'big')
+                    pos = next_pos + 10 + rdlen
+                    if rr_type == 41:
+                        items.append('OPT')
+                return f'Standard query 0x{int(getattr(dns, "id", 0) or 0):04x} ' + ' '.join(items)
+
+            items = []
+            for _ in range(qdcount):
+                _, next_pos = _dns_read_name(raw, pos)
+                pos = next_pos + 4
+            for _ in range(ancount + nscount + arcount):
+                name, next_pos = _dns_read_name(raw, pos)
+                if next_pos + 10 > len(raw):
+                    break
+                rr_type = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
+                rr_class = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
+                rdlen = int.from_bytes(raw[next_pos + 8:next_pos + 10], 'big')
+                rdata_start = next_pos + 10
+                rdata_end = rdata_start + rdlen
+                if rdata_end > len(raw):
+                    break
+                cache_flush = bool(rr_class & 0x8000)
+                if rr_type == 12:
+                    target, _ = _dns_read_name(raw, rdata_start)
+                    items.append(f'PTR {target}')
+                elif rr_type == 16:
+                    items.append('TXT, cache flush' if cache_flush else 'TXT')
+                elif rr_type == 33 and rdlen >= 6:
+                    priority = int.from_bytes(raw[rdata_start:rdata_start + 2], 'big')
+                    weight = int.from_bytes(raw[rdata_start + 2:rdata_start + 4], 'big')
+                    port = int.from_bytes(raw[rdata_start + 4:rdata_start + 6], 'big')
+                    target, _ = _dns_read_name(raw, rdata_start + 6)
+                    prefix = 'SRV, cache flush' if cache_flush else 'SRV'
+                    items.append(f'{prefix} {priority} {weight} {port} {target}')
+                elif rr_type == 28 and rdlen == 16:
+                    import ipaddress
+                    addr = str(ipaddress.IPv6Address(raw[rdata_start:rdata_end]))
+                    prefix = 'AAAA, cache flush' if cache_flush else 'AAAA'
+                    items.append(f'{prefix} {addr}')
+                elif rr_type == 1 and rdlen == 4:
+                    import ipaddress
+                    addr = str(ipaddress.IPv4Address(raw[rdata_start:rdata_end]))
+                    prefix = 'A, cache flush' if cache_flush else 'A'
+                    items.append(f'{prefix} {addr}')
+                pos = rdata_end
+            return f'Standard query response 0x{int(getattr(dns, "id", 0) or 0):04x} ' + ' '.join(items)
+        except Exception:
+            return 'Multicast Domain Name System'
 
     def _tcp_window_scale_shift(self, tcp_layer) -> int | None:
         for option in getattr(tcp_layer, 'options', []) or []:
@@ -3942,22 +4100,48 @@ class PacketParser:
             return
 
         payload = self._ntp_payload(packet)
-        if len(payload) < 48:
+        if len(payload) < 12:
             return
 
         effective_ip = self._effective_ip_layer(packet)
         udp_layer = self._effective_udp_layer(packet, effective_ip)
-        if effective_ip is None or udp_layer is None:
+        if udp_layer is None:
+            return
+        if effective_ip is not None:
+            src_addr = str(effective_ip.src)
+            dst_addr = str(effective_ip.dst)
+        elif packet.haslayer(IPv6):
+            src_addr = str(packet[IPv6].src)
+            dst_addr = str(packet[IPv6].dst)
+        else:
             return
 
         mode = int(payload[0]) & 0x07
         stream_key = self._canonical_transport_key(
-            str(effective_ip.src),
+            src_addr,
             int(getattr(udp_layer, 'sport', 0) or 0),
-            str(effective_ip.dst),
+            dst_addr,
             int(getattr(udp_layer, 'dport', 0) or 0),
             'UDP',
         )
+
+        if mode == 6:
+            response_bit = (int(payload[1]) >> 7) & 0x01 if len(payload) >= 2 else 0
+            if response_bit == 0:
+                self.ntp_request_pending.setdefault(stream_key, []).append(record)
+                return
+            pending = self.ntp_request_pending.get(stream_key)
+            if not pending:
+                return
+            request_record = pending.pop(0)
+            request_record.metadata['ntp_response_frame'] = int(record.number)
+            record.metadata['ntp_request_frame'] = int(request_record.number)
+            if not pending:
+                self.ntp_request_pending.pop(stream_key, None)
+            return
+
+        if len(payload) < 48:
+            return
 
         if mode == 3:
             self.ntp_request_pending.setdefault(stream_key, []).append(record)
@@ -4068,6 +4252,8 @@ class PacketParser:
                 return 'IEEE 802.11'
             if protocol in {'DNS', 'MDNS'}:
                 dns = packet[DNS]
+                if protocol == 'MDNS':
+                    return self._mdns_info_text(packet)
                 qname = self._dns_qname(packet)
                 qtype_name = ''
                 try:
@@ -4236,7 +4422,7 @@ class PacketParser:
                     if not deduped or deduped[-1] != part:
                         deduped.append(part)
                 return ', '.join(deduped) if deduped else 'Transport Layer Security'
-            if protocol in {'IGMP', 'IGMPv3'}:
+            if protocol in {'IGMP', 'IGMPv1', 'IGMPv2', 'IGMPv3'}:
                 igmp_summary = self._igmp_summary(packet)
                 if igmp_summary is not None:
                     return str(igmp_summary.get('info', 'Internet Group Management Protocol'))
@@ -4253,13 +4439,6 @@ class PacketParser:
                 win = int(getattr(tcp, 'window', 0) or 0)
                 display_window = int(win)
                 tcp_flags = int(getattr(tcp, 'flags', 0) or 0)
-                if not bool(tcp_flags & 0x02):
-                    try:
-                        shift = metadata.get('tcp_window_scale_shift', None)
-                        if shift is not None:
-                            display_window = int(win) * (1 << int(shift))
-                    except Exception:
-                        display_window = int(win)
                 payload_len = self._tcp_payload_length(packet, tcp)
                 has_ack_flag = bool(int(getattr(tcp, 'flags', 0) or 0) & 0x10)
                 prefix = ''
@@ -4269,6 +4448,8 @@ class PacketParser:
                     prefix = f'[TCP Dup ACK {dup_frame}#{dup_count}] '
                 elif bool(metadata.get('tcp_is_window_update', False)):
                     prefix = '[TCP Window Update] '
+                elif bool(metadata.get('tcp_is_spurious_retransmission', False)):
+                    prefix = '[TCP Spurious Retransmission] '
                 elif bool(metadata.get('tcp_is_retransmission', False)):
                     prefix = '[TCP Retransmission] '
                 elif bool(metadata.get('tcp_previous_segment_not_captured', False)):
@@ -4292,6 +4473,11 @@ class PacketParser:
             if protocol == 'ICMPv6':
                 return self._icmpv6_info_text(packet) or packet.summary()
             if protocol == 'ICMP':
+                raw = bytes(packet[ICMP]) if packet.haslayer(ICMP) else b''
+                if raw[:1] in {b'\x08', b'\x00'}:
+                    return self._icmp_echo_info_text(packet)
+                if raw[:1] in {b'\x0d', b'\x0e'}:
+                    return self._icmp_timestamp_info_text(packet)
                 return packet.summary()
             return packet.summary()
         except Exception:
