@@ -163,6 +163,116 @@ class PacketParser:
 
         return record
 
+    def parse_fast(self, packet, number: int, iface: str = '') -> PacketRecord:
+        """Fast-path parser for initial large-file rendering."""
+        epoch_time = float(getattr(packet, 'time', 0.0))
+        if self.first_epoch is None:
+            self.first_epoch = epoch_time
+        relative_time = max(0.0, epoch_time - self.first_epoch)
+
+        if self.last_epoch_captured is None:
+            frame_delta = 0.0
+        else:
+            frame_delta = max(0.0, epoch_time - self.last_epoch_captured)
+        self.last_epoch_captured = epoch_time
+        self.last_epoch_displayed = epoch_time
+
+        effective_ip = self._effective_ip_layer(packet)
+        effective_tcp = self._effective_tcp_layer(packet, effective_ip)
+        effective_udp = self._effective_udp_layer(packet, effective_ip)
+        src, dst = self._extract_endpoints(packet)
+        sport, dport = self._extract_ports(packet, effective_tcp, effective_udp)
+        layers = [layer.__name__.upper() for layer in packet.layers()]
+        length = len(packet)
+
+        protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp)
+        info = self._quick_info(packet, protocol, effective_tcp, effective_udp)
+
+        stream_hint = ''
+        if sport is not None or dport is not None:
+            stream_hint = f'{src}:{sport or "-"} -> {dst}:{dport or "-"}'
+
+        metadata = {
+            'fast_preview': True,
+            'frame_number': int(number),
+            'frame_time_delta': frame_delta,
+            'frame_time_delta_displayed': frame_delta,
+        }
+
+        return PacketRecord(
+            number=number,
+            epoch_time=epoch_time,
+            relative_time=relative_time,
+            length=length,
+            src=src,
+            dst=dst,
+            protocol=protocol,
+            info=info,
+            layers=layers,
+            sport=sport,
+            dport=dport,
+            stream_hint=stream_hint,
+            metadata=metadata,
+            raw=packet,
+            iface=iface,
+        )
+
+    def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None) -> str:
+        if packet.haslayer(ARP):
+            return 'ARP'
+        if packet.haslayer(DNS):
+            qname = self._dns_qname(packet)
+            if qname.endswith('.local'):
+                return 'MDNS'
+            return 'DNS'
+        if packet.haslayer(ICMPv6EchoRequest) or packet.haslayer(ICMPv6EchoReply) or packet.haslayer(IPv6ExtHdrHopByHop):
+            raw = bytes(getattr(packet[IPv6], 'payload', b'')) if packet.haslayer(IPv6) else b''
+            if raw and raw[:1] == b'\x03':
+                return 'ICMPv6'
+        if packet.haslayer(ICMP):
+            return 'ICMP'
+        if tcp_layer is not None:
+            payload = self._payload_bytes(packet)
+            kind = self._http_payload_kind(payload)
+            if kind is not None:
+                if b'xml' in payload.lower():
+                    return 'HTTP/XML'
+                return 'HTTP'
+            return 'TCP'
+        if udp_layer is not None:
+            return 'UDP'
+        if packet.haslayer(IPv6):
+            return 'IPv6'
+        if packet.haslayer(IP):
+            return 'IPv4'
+        return 'ETH'
+
+    def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None) -> str:
+        if protocol in {'HTTP', 'HTTP/XML'}:
+            payload = self._payload_bytes(packet)
+            kind = self._http_payload_kind(payload)
+            if kind == 'request':
+                method, path, version = self._http_request_parts(payload)
+                if method or path or version:
+                    return f'{method} {path} {version} '
+            if kind == 'response':
+                version, code, reason = self._http_response_parts(payload)
+                text = ' '.join(part for part in (version, code, reason) if part)
+                if text:
+                    return f'{text} '
+            return 'HTTP'
+        if protocol == 'TCP' and tcp_layer is not None:
+            flags = self._tcp_flags_to_string(tcp_layer.flags)
+            payload_len = self._tcp_payload_length(packet, tcp_layer)
+            return f'{tcp_layer.sport} -> {tcp_layer.dport} [{flags}] Len={payload_len}'
+        if protocol == 'UDP' and udp_layer is not None:
+            udp_len = max(0, int(getattr(udp_layer, 'len', 8) or 8) - 8)
+            return f'{udp_layer.sport} -> {udp_layer.dport} Len={udp_len}'
+        try:
+            return packet.summary()
+        except Exception:
+            return protocol
+
     def _canonical_transport_key(self, src: str, sport: int, dst: str, dport: int, proto: str):
         left = (str(src), int(sport))
         right = (str(dst), int(dport))

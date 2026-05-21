@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 from scapy.all import ARP, Ether, bind_layers, rdpcap, wrpcap
-from scapy.utils import PcapNgWriter
+from scapy.utils import PcapNgWriter, PcapReader
 
 from utils.pcapng_parser import PcapngParser, PcapngMetadata, PcapngFileWriter
 
@@ -122,13 +122,8 @@ def save_pcapng_file_comment(filename: str, comment: str) -> bool:
     return PcapngFileWriter(filename).update_file_comment(comment)
 
 
-def load_pcap(filename) -> Tuple:
-    """Load PCAP/PCAPNG file and extract packets + metadata.
-
-    Returns:
-        (packets, metadata) where metadata contains file_comment, interfaces, packet_comments
-    """
-    packets = rdpcap(filename)
+def load_capture_metadata(filename: str) -> CaptureMetadata:
+    """Load capture metadata only (without loading all packets)."""
     metadata = CaptureMetadata()
 
     # Try to extract metadata from PCAPNG format
@@ -195,4 +190,24 @@ def load_pcap(filename) -> Tuple:
         # If pcapng parsing fails, continue with packets only
         print(f'Warning: Could not extract pcapng metadata: {e}')
 
+    return metadata
+
+
+def iter_pcap_packets(filename: str):
+    """Stream packets from capture file to avoid full-file preload latency."""
+    reader = PcapReader(filename)
+    try:
+        for packet in reader:
+            yield packet
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            pass
+
+
+def load_pcap(filename) -> Tuple:
+    """Backward-compatible full load API."""
+    packets = rdpcap(filename)
+    metadata = load_capture_metadata(filename)
     return packets, metadata

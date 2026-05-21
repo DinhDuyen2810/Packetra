@@ -20,7 +20,8 @@ from gui.hex_view import PacketBytesView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
 from utils.pcap_io import (
-    load_pcap,
+    load_capture_metadata,
+    iter_pcap_packets,
     normalize_capture_extension,
     save_capture_file,
     save_pcapng_file_comment,
@@ -1079,7 +1080,27 @@ class CaptureView(QWidget):
     def show_details(self, row, _col):
         if row < 0 or row >= len(self.visible_indices):
             return
-        record = self.records[self.visible_indices[row]]
+        record_index = self.visible_indices[row]
+        record = self.records[record_index]
+        if bool(record.metadata.get('fast_preview', False)):
+            full_record = self.parser.parse(record.raw, int(record.number), record.iface)
+            full_record = self._apply_capture_metadata_to_record(full_record, int(record.number))
+            self.records[record_index] = full_record
+            record = full_record
+            values = [
+                str(record.number),
+                f'{record.relative_time:.9f}',
+                record.src,
+                record.dst,
+                record.protocol,
+                str(record.length),
+                record.info,
+            ]
+            for col, value in enumerate(values):
+                item = self.table.item(row, col)
+                if item is not None:
+                    item.setText(value)
+            self.table._paint_row(row, record.protocol)
         self.details_tree.show_packet(record)
         self.hex_view.show_packet(record)
         self.detail_status_changed.emit('', 0)
@@ -1204,26 +1225,50 @@ class CaptureView(QWidget):
         try:
             self.clear_packets(reset_file_path=False)
             self.loaded_file_path = filename
-            packets, metadata = load_pcap(filename)
-            self.capture_metadata = metadata
-            batch_size = 1000
-            total = len(packets)
+            self.capture_metadata = load_capture_metadata(filename)
+            display_expr = self.display_filter_input.text().strip()
+            no_filter = (display_expr == '')
+            batch_size = 5000
+            loaded = 0
+            batch_new_visible = []
 
-            for start in range(0, total, batch_size):
-                end = min(start + batch_size, total)
-                for idx in range(start, end):
-                    record = self.parser.parse(packets[idx], idx + 1)
-                    self.records.append(self._apply_capture_metadata_to_record(record, idx + 1))
-                self._update_status(f'Loaded {end}/{total} packets...')
-                if end < total:
+            for idx, packet in enumerate(iter_pcap_packets(filename), start=1):
+                record = self.parser.parse_fast(packet, idx)
+                record = self._apply_capture_metadata_to_record(record, idx)
+                self.records.append(record)
+                loaded = idx
+
+                if no_filter:
+                    self.visible_indices.append(idx - 1)
+                    batch_new_visible.append(record)
+                elif self.display_filter.matches(record, display_expr):
+                    self.visible_indices.append(idx - 1)
+                    batch_new_visible.append(record)
+
+                if loaded % batch_size == 0:
+                    if batch_new_visible:
+                        self.table.setUpdatesEnabled(False)
+                        for visible_record in batch_new_visible:
+                            self.table.append_record(visible_record)
+                        self.table.setUpdatesEnabled(True)
+                        batch_new_visible.clear()
+                    self._update_status(f'Loaded {loaded} packets...')
                     QApplication.processEvents()
 
+            if batch_new_visible:
+                self.table.setUpdatesEnabled(False)
+                for visible_record in batch_new_visible:
+                    self.table.append_record(visible_record)
+                self.table.setUpdatesEnabled(True)
+                batch_new_visible.clear()
+
             self._set_dirty(False)
-            self.apply_display_filter()
+            if not no_filter:
+                self.apply_display_filter()
             if self.visible_indices:
                 self.goto_first_packet()
             self._remember_recent_file(self.loaded_file_path)
-            self._update_status(f'Loaded {len(self.records)} packets from {self.loaded_file_path}')
+            self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')
         finally:
             self._set_packet_panes_updates_enabled(True)
             self._set_packet_panes_visible(True)
