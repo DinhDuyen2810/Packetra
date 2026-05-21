@@ -63,7 +63,7 @@ class DisplayFilter:
             return True
 
         aliases = {
-            'tcp', 'udp', 'dns', 'mdns', 'arp', 'icmp', 'icmpv6', 'igmp', 'tls', 'quic', 'http', 'smtp', 'imf', 'dhcp', 'ip', 'ipv6', 'eth'
+            'tcp', 'udp', 'dns', 'mdns', 'arp', 'icmp', 'icmpv6', 'igmp', 'tls', 'quic', 'http', 'smtp', 'imf', 'dhcp', 'ripng', 'ripv2', 'stp', 'syslog', 'ntp', 'lacp', 'vtp', 'lldp', 'udld', 'loop', 'hsrp', 'hsrpv2', 'ip', 'ipv6', 'eth'
         }
         if low in aliases:
             proto_low = str(record.protocol or '').lower()
@@ -74,6 +74,8 @@ class DisplayFilter:
                 return proto_low.startswith('igmp') or 'igmp' in layer_lows
             if low in {'smtp', 'imf'}:
                 return proto_low == 'smtp' or proto_low == 'smtp/imf' or low in layer_lows
+            if low in {'hsrp', 'hsrpv2'}:
+                return proto_low == 'hsrpv2' or low in layer_lows
             return proto_low == low or low in layer_lows
 
         checks = {

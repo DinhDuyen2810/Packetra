@@ -6,7 +6,7 @@ from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, bind_layers
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NS, ICMPv6ND_NA, IPv6ExtHdrHopByHop
-from scapy.layers.l2 import Dot3, LLC, SNAP
+from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 
@@ -30,6 +30,7 @@ class PacketParser:
         self.http_request_pending = {}
         self.dns_request_pending = {}
         self.smtp_request_pending = {}
+        self.ntp_request_pending = {}
         self.layer_stream_maps = {
             'ethernet': {},
             'ipv4': {},
@@ -156,6 +157,7 @@ class PacketParser:
         self._track_transport_record(record)
         self._update_http_metadata(record)
         self._update_smtp_metadata(record)
+        self._update_ntp_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
         self._update_dns_metadata(packet, record)
 
@@ -708,6 +710,16 @@ class PacketParser:
             return 'Broadcast'
         if text.lower() == '01:00:0c:cc:cc:cc':
             return 'CDP/VTP/DTP/PAgP/UDLD'
+        if text.lower() == '01:00:0c:cc:cc:cd':
+            return 'PVST+'
+        if text.lower() == '01:80:c2:00:00:02':
+            return 'Slow-Protocols'
+        if text.lower() == '01:80:c2:00:00:0e':
+            return 'Nearest-Bridge'
+        if text.lower() == '33:33:00:00:00:09':
+            return 'IPv6mcast_09'
+        if text.lower() == '33:33:00:00:00:66':
+            return 'IPv6mcast_66'
         parts = text.split(':')
         if len(parts) == 6 and all(len(part) == 2 for part in parts):
             vendor = get_mac_vendor(text)
@@ -726,16 +738,92 @@ class PacketParser:
             pass
         return None, None
 
+    def _inner_eth_type(self, packet) -> int | None:
+        try:
+            if packet.haslayer(Dot1Q):
+                return int(getattr(packet[Dot1Q], 'type', 0) or 0)
+            if packet.haslayer(Ether):
+                return int(getattr(packet[Ether], 'type', 0) or 0)
+        except Exception:
+            pass
+        return None
+
     def _is_cdp_packet(self, packet) -> bool:
         oui, code = self._snap_oui_code(packet)
         if oui == 0x00000C and code == 0x2000:
             return True
+        return False
+
+    def _is_lacp_packet(self, packet) -> bool:
         try:
-            if packet.haslayer(Dot3):
-                return str(getattr(packet[Dot3], 'dst', '') or '').lower() == '01:00:0c:cc:cc:cc'
+            inner_type = self._inner_eth_type(packet)
+            if inner_type != 0x8809:
+                return False
+            payload = self._payload_bytes(packet)
+            return len(payload) >= 2 and int(payload[0]) == 0x01 and int(payload[1]) == 0x01
+        except Exception:
+            return False
+
+    def _lacp_payload(self, packet) -> bytes:
+        payload = self._payload_bytes(packet)
+        return payload[1:] if len(payload) >= 1 else b''
+
+    def _lacp_info_text(self, packet) -> str:
+        payload = self._lacp_payload(packet)
+        if len(payload) < 39:
+            return 'Link Aggregation Control Protocol'
+        actor_sys = ':'.join(f'{b:02x}' for b in payload[5:11])
+        actor_port = int.from_bytes(payload[15:17], 'big')
+        actor_key = int.from_bytes(payload[11:13], 'big')
+        actor_state = int(payload[17])
+        partner_sys = ':'.join(f'{b:02x}' for b in payload[25:31])
+        partner_port = int.from_bytes(payload[35:37], 'big')
+        partner_key = int.from_bytes(payload[31:33], 'big')
+        partner_state = int(payload[37])
+        def _state_flags(value: int) -> str:
+            return ''.join([
+                '*' if value & 0x80 else '*',
+                '*' if value & 0x40 else '*',
+                'D' if value & 0x20 else '*',
+                'C' if value & 0x10 else '*',
+                'S' if value & 0x08 else '*',
+                'G' if value & 0x04 else '*',
+                '*' if value & 0x02 else '*',
+                'A' if value & 0x01 else '*',
+            ])
+        return (
+            f'v1 ACTOR {actor_sys} P: {actor_port} K: {actor_key} {_state_flags(actor_state)} '
+            f'PARTNER {partner_sys} P: {partner_port} K: {partner_key} {_state_flags(partner_state)}'
+        )
+
+    def _is_vtp_packet(self, packet) -> bool:
+        try:
+            oui, code = self._snap_oui_code(packet)
+            return oui == 0x00000C and code == 0x2003
+        except Exception:
+            return False
+
+    def _vtp_payload(self, packet) -> bytes:
+        try:
+            if packet.haslayer(SNAP):
+                return bytes(packet[SNAP].payload)
         except Exception:
             pass
-        return False
+        return b''
+
+    def _vtp_info_text(self, packet) -> str:
+        payload = self._vtp_payload(packet)
+        if len(payload) < 40:
+            return 'VLAN Trunking Protocol'
+        code = int(payload[1])
+        followers = int(payload[2])
+        revision = int.from_bytes(payload[36:40], 'big')
+        code_name = {
+            0x01: 'Summary Advertisement',
+            0x02: 'Subset Advertisement',
+            0x03: 'Advertisement Request',
+        }.get(code, f'Code 0x{code:02x}')
+        return f'{code_name}, Revision: {revision}, Followers: {followers}'
 
     def _cdp_payload(self, packet) -> bytes:
         try:
@@ -744,6 +832,331 @@ class PacketParser:
         except Exception:
             pass
         return b''
+
+    def _ripng_payload(self, packet) -> bytes:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is not None:
+                return bytes(udp_layer.payload)
+        except Exception:
+            pass
+        return b''
+
+    def _ripv2_payload(self, packet) -> bytes:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is not None:
+                return bytes(udp_layer.payload)
+        except Exception:
+            pass
+        return b''
+
+    def _is_ripng_packet(self, packet) -> bool:
+        try:
+            if not packet.haslayer(IPv6):
+                return False
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is None:
+                return False
+            if int(getattr(udp_layer, 'sport', 0) or 0) != 521 or int(getattr(udp_layer, 'dport', 0) or 0) != 521:
+                return False
+            payload = self._ripng_payload(packet)
+            return len(payload) >= 4 and int(payload[1]) == 1
+        except Exception:
+            return False
+
+    def _ripng_info_text(self, packet) -> str:
+        payload = self._ripng_payload(packet)
+        if len(payload) < 2:
+            return 'RIPng'
+        command = int(payload[0])
+        version = int(payload[1])
+        command_name = {1: 'Request', 2: 'Response'}.get(command, f'Command {command}')
+        return f' Command {command_name}, Version {version}'
+
+    def _is_ripv2_packet(self, packet) -> bool:
+        try:
+            if packet.haslayer(IP):
+                udp_layer = self._effective_udp_layer(packet)
+                if udp_layer is None:
+                    return False
+                if int(getattr(udp_layer, 'sport', 0) or 0) != 520 or int(getattr(udp_layer, 'dport', 0) or 0) != 520:
+                    return False
+                payload = self._ripv2_payload(packet)
+                return len(payload) >= 4 and int(payload[1]) == 2
+        except Exception:
+            pass
+        return False
+
+    def _ripv2_info_text(self, packet) -> str:
+        payload = self._ripv2_payload(packet)
+        if len(payload) < 1:
+            return 'Routing Information Protocol'
+        command = int(payload[0])
+        return {1: 'Request', 2: 'Response'}.get(command, f'Command {command}')
+
+    def _stp_payload(self, packet) -> bytes:
+        try:
+            if packet.haslayer(SNAP):
+                return bytes(packet[SNAP].payload)
+        except Exception:
+            pass
+        return b''
+
+    def _is_stp_packet(self, packet) -> bool:
+        try:
+            oui, code = self._snap_oui_code(packet)
+            if oui == 0x00000C and code == 0x010B:
+                return True
+            return packet.haslayer('STP')
+        except Exception:
+            return False
+
+    def _is_udld_packet(self, packet) -> bool:
+        try:
+            oui, code = self._snap_oui_code(packet)
+            return oui == 0x00000C and code == 0x0111
+        except Exception:
+            return False
+
+    def _udld_payload(self, packet) -> bytes:
+        try:
+            if packet.haslayer(SNAP):
+                return bytes(packet[SNAP].payload)
+        except Exception:
+            pass
+        return b''
+
+    def _udld_info_text(self, packet) -> str:
+        payload = self._udld_payload(packet)
+        if len(payload) < 4:
+            return 'Unidirectional Link Detection'
+        pos = 4
+        device_id = ''
+        port_id = ''
+        while pos + 4 <= len(payload):
+            tlv_type = int.from_bytes(payload[pos:pos + 2], 'big')
+            tlv_len = int.from_bytes(payload[pos + 2:pos + 4], 'big')
+            if tlv_len < 4 or pos + tlv_len > len(payload):
+                break
+            value = payload[pos + 4:pos + tlv_len]
+            if tlv_type == 0x0001:
+                device_id = value.decode(errors='ignore')
+            elif tlv_type == 0x0002:
+                port_id = value.decode(errors='ignore')
+            pos += tlv_len
+        if device_id or port_id:
+            return f'Device ID: {device_id}  Port ID: {port_id}  '
+        return 'Unidirectional Link Detection'
+
+    def _stp_info_text(self, packet) -> str:
+        payload = self._stp_payload(packet)
+        if len(payload) < 35:
+            return 'Spanning Tree Protocol'
+        try:
+            version = int(payload[2])
+            bpdu_type = int(payload[3])
+            flags = int(payload[4])
+            root_prio = int.from_bytes(payload[5:7], 'big') & 0xF000
+            vlan_id = int.from_bytes(payload[5:7], 'big') & 0x0FFF
+            root_mac = ':'.join(f'{b:02x}' for b in payload[7:13])
+            path_cost = int.from_bytes(payload[13:17], 'big')
+            port_id = int.from_bytes(payload[25:27], 'big')
+            prefix = 'RST'
+            if version == 2 and bpdu_type == 2:
+                prefix = 'RST'
+            tc_prefix = 'TC + ' if (flags & 0x01) else ''
+            return f'{prefix}. {tc_prefix}Root = {root_prio}/{vlan_id}/{root_mac}  Cost = {path_cost}  Port = 0x{port_id:04x}'
+        except Exception:
+            return 'Spanning Tree Protocol'
+
+    def _lldp_payload(self, packet) -> bytes:
+        try:
+            if packet.haslayer('Raw'):
+                return bytes(packet['Raw'].load)
+        except Exception:
+            pass
+        return b''
+
+    def _is_lldp_packet(self, packet) -> bool:
+        try:
+            return int(getattr(packet[Ether], 'type', 0) or 0) == 0x88CC and len(self._lldp_payload(packet)) >= 2
+        except Exception:
+            return False
+
+    def _lldp_tlvs(self, payload: bytes) -> list[dict]:
+        tlvs = []
+        pos = 0
+        while pos + 2 <= len(payload):
+            header = int.from_bytes(payload[pos:pos + 2], 'big')
+            tlv_type = (header >> 9) & 0x7F
+            tlv_len = header & 0x1FF
+            value_start = pos + 2
+            value_end = value_start + tlv_len
+            if value_end > len(payload):
+                break
+            tlvs.append({
+                'type': tlv_type,
+                'length': tlv_len,
+                'offset': pos,
+                'value': payload[value_start:value_end],
+            })
+            pos = value_end
+            if tlv_type == 0:
+                break
+        return tlvs
+
+    def _lldp_info_text(self, packet) -> str:
+        payload = self._lldp_payload(packet)
+        tlvs = self._lldp_tlvs(payload)
+        chassis = ''
+        port = ''
+        ttl = ''
+        system_name = ''
+        system_desc = ''
+        for tlv in tlvs:
+            value = bytes(tlv.get('value', b''))
+            tlv_type = int(tlv.get('type', -1))
+            if tlv_type == 1 and len(value) >= 7 and int(value[0]) == 4:
+                chassis = ':'.join(f'{b:02x}' for b in value[1:7])
+            elif tlv_type == 2 and len(value) >= 2:
+                port = value[1:].decode(errors='ignore')
+            elif tlv_type == 3 and len(value) >= 2:
+                ttl = str(int.from_bytes(value[:2], 'big'))
+            elif tlv_type == 5:
+                system_name = value.decode(errors='ignore')
+            elif tlv_type == 6:
+                system_desc = value.decode(errors='ignore')
+        parts = []
+        if chassis:
+            parts.append(f'MA/{chassis}')
+        if port:
+            parts.append(f'IN/{port}')
+        if ttl:
+            parts.append(ttl)
+        if system_name:
+            parts.append(f'SysN={system_name}')
+        if system_desc:
+            parts.append(f'SysD={system_desc}')
+        return ' '.join(parts) if parts else 'Link Layer Discovery Protocol'
+
+    def _hsrpv2_payload(self, packet) -> bytes:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is not None:
+                return bytes(udp_layer.payload)
+        except Exception:
+            pass
+        return b''
+
+    def _is_hsrpv2_packet(self, packet) -> bool:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is None:
+                return False
+            sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            dport = int(getattr(udp_layer, 'dport', 0) or 0)
+            if (sport, dport) not in {(2029, 2029), (1985, 1985)}:
+                return False
+            payload = self._hsrpv2_payload(packet)
+            return len(payload) >= 40 and int(payload[0]) == 1 and int(payload[1]) == 40 and int(payload[2]) == 2
+        except Exception:
+            return False
+
+    def _hsrpv2_info_text(self, packet) -> str:
+        payload = self._hsrpv2_payload(packet)
+        if len(payload) < 8:
+            return 'Cisco Hot Standby Router Protocol'
+        opcode = int(payload[3])
+        state = int(payload[4])
+        opcode_name = {0: 'Hello', 1: 'Coup', 2: 'Resign'}.get(opcode, f'Opcode {opcode}')
+        state_name = {1: 'Initial', 2: 'Learn', 3: 'Listen', 4: 'Speak', 5: 'Standby', 6: 'Active'}.get(state, str(state))
+        return f'{opcode_name} (state {state_name})'
+
+    def _syslog_payload(self, packet) -> bytes:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is not None:
+                return bytes(udp_layer.payload)
+        except Exception:
+            pass
+        return b''
+
+    def _is_syslog_packet(self, packet) -> bool:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is None:
+                return False
+            sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            dport = int(getattr(udp_layer, 'dport', 0) or 0)
+            payload = self._syslog_payload(packet)
+            return len(payload) >= 5 and (sport == 514 or dport == 514) and payload.startswith(b'<') and b'>' in payload[:6]
+        except Exception:
+            return False
+
+    def _syslog_info_text(self, packet) -> str:
+        payload = self._syslog_payload(packet)
+        if not payload.startswith(b'<') or b'>' not in payload[:6]:
+            return 'Syslog'
+        end = payload.find(b'>', 1, 6)
+        if end == -1:
+            return 'Syslog'
+        try:
+            pri = int(payload[1:end].decode(errors='ignore'))
+        except Exception:
+            return 'Syslog'
+        facility = pri >> 3
+        level = pri & 0x07
+        facility_name = {
+            23: 'LOCAL7',
+        }.get(facility, f'FACILITY{facility}')
+        level_name = {
+            5: 'NOTICE',
+        }.get(level, str(level))
+        message = payload[end + 1:].decode(errors='ignore').strip()
+        return f'{facility_name}.{level_name}: {message}'
+
+    def _ntp_payload(self, packet) -> bytes:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is not None:
+                return bytes(udp_layer.payload)
+        except Exception:
+            pass
+        return b''
+
+    def _is_ntp_packet(self, packet) -> bool:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is None:
+                return False
+            sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            dport = int(getattr(udp_layer, 'dport', 0) or 0)
+            payload = self._ntp_payload(packet)
+            if len(payload) < 48:
+                return False
+            first = int(payload[0])
+            version = (first >> 3) & 0x07
+            mode = first & 0x07
+            return (sport == 123 or dport == 123 or packet.haslayer('NTPHeader')) and version in {1, 2, 3, 4} and mode in {1, 2, 3, 4, 5}
+        except Exception:
+            return False
+
+    def _ntp_info_text(self, packet) -> str:
+        payload = self._ntp_payload(packet)
+        if len(payload) < 1:
+            return 'Network Time Protocol'
+        first = int(payload[0])
+        version = (first >> 3) & 0x07
+        mode = first & 0x07
+        mode_name = {
+            1: 'symmetric active',
+            2: 'symmetric passive',
+            3: 'client',
+            4: 'server',
+            5: 'broadcast',
+        }.get(mode, str(mode))
+        return f'NTP Version {version}, {mode_name}'
 
     def _cdp_device_and_port(self, payload: bytes):
         device_id = ''
@@ -2481,7 +2894,7 @@ class PacketParser:
 
         if eth_type == 0x8035 and packet.haslayer(ARP):
             return 'RARP'
-        if eth_type == 0x9000:
+        if eth_type == 0x9000 or (eth_type == 0x8100 and self._inner_eth_type(packet) == 0x9000):
             return 'LOOP'
         if self._is_cdp_packet(packet):
             return 'CDP'
@@ -2493,6 +2906,26 @@ class PacketParser:
                 return 'OSPF'
         if self._is_ospf_ipv6_packet(packet):
             return 'OSPF'
+        if self._is_ripng_packet(packet):
+            return 'RIPng'
+        if self._is_ripv2_packet(packet):
+            return 'RIPv2'
+        if self._is_hsrpv2_packet(packet):
+            return 'HSRPv2'
+        if self._is_stp_packet(packet):
+            return 'STP'
+        if self._is_lacp_packet(packet):
+            return 'LACP'
+        if self._is_vtp_packet(packet):
+            return 'VTP'
+        if self._is_syslog_packet(packet):
+            return 'Syslog'
+        if self._is_ntp_packet(packet):
+            return 'NTP'
+        if self._is_udld_packet(packet):
+            return 'UDLD'
+        if self._is_lldp_packet(packet):
+            return 'LLDP'
         if isinstance(metadata.get('wlan', None), dict) and metadata.get('wlan'):
             return '802.11'
         if str(metadata.get('capwap_transport', '') or '') == 'control':
@@ -3408,6 +3841,49 @@ class PacketParser:
         if not pending:
             self.smtp_request_pending.pop(stream_key, None)
 
+    def _update_ntp_metadata(self, record: PacketRecord) -> None:
+        protocol = str(getattr(record, 'protocol', '') or '').upper()
+        if protocol != 'NTP':
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        payload = self._ntp_payload(packet)
+        if len(payload) < 48:
+            return
+
+        effective_ip = self._effective_ip_layer(packet)
+        udp_layer = self._effective_udp_layer(packet, effective_ip)
+        if effective_ip is None or udp_layer is None:
+            return
+
+        mode = int(payload[0]) & 0x07
+        stream_key = self._canonical_transport_key(
+            str(effective_ip.src),
+            int(getattr(udp_layer, 'sport', 0) or 0),
+            str(effective_ip.dst),
+            int(getattr(udp_layer, 'dport', 0) or 0),
+            'UDP',
+        )
+
+        if mode == 3:
+            self.ntp_request_pending.setdefault(stream_key, []).append(record)
+            return
+
+        if mode != 4:
+            return
+
+        pending = self.ntp_request_pending.get(stream_key)
+        if not pending:
+            return
+        request_record = pending.pop(0)
+        request_record.metadata['ntp_response_frame'] = int(record.number)
+        record.metadata['ntp_request_frame'] = int(request_record.number)
+        if not pending:
+            self.ntp_request_pending.pop(stream_key, None)
+
     def _build_info(self, packet, protocol: str, metadata: dict | None = None) -> str:
         metadata = metadata or {}
         try:
@@ -3457,6 +3933,26 @@ class PacketParser:
                     5: 'LS Acknowledge',
                 }.get(msg_type, f'OSPF Message ({msg_type})' if msg_type >= 0 else 'OSPF')
                 return msg_name
+            if protocol == 'RIPng':
+                return self._ripng_info_text(packet)
+            if protocol == 'RIPv2':
+                return self._ripv2_info_text(packet)
+            if protocol == 'STP':
+                return self._stp_info_text(packet)
+            if protocol == 'LACP':
+                return self._lacp_info_text(packet)
+            if protocol == 'VTP':
+                return self._vtp_info_text(packet)
+            if protocol == 'Syslog':
+                return self._syslog_info_text(packet)
+            if protocol == 'NTP':
+                return self._ntp_info_text(packet)
+            if protocol == 'UDLD':
+                return self._udld_info_text(packet)
+            if protocol == 'LLDP':
+                return self._lldp_info_text(packet)
+            if protocol == 'HSRPv2':
+                return self._hsrpv2_info_text(packet)
             if protocol == 'CAPWAP-Control':
                 message_name = str(metadata.get('capwap_message_name', '') or '').strip()
                 if message_name:

@@ -143,10 +143,9 @@ class PacketDetailsTree(QTreeWidget):
 
     def _add_node(self, parent, data):
         item = QTreeWidgetItem([data['title']])
-        parent_offset, parent_length = parent.data(0, Qt.ItemDataRole.UserRole) if parent is not self.invisibleRootItem() else (-1, 0)
         parent_source = parent.data(0, self.BYTE_SOURCE_ROLE) if parent is not self.invisibleRootItem() else 'packet'
-        offset = int(data['offset']) if 'offset' in data else parent_offset
-        length = int(data['length']) if 'length' in data else parent_length
+        offset = int(data['offset']) if 'offset' in data else -1
+        length = int(data['length']) if 'length' in data else 0
         byte_source = str(data.get('byte_source', parent_source) or parent_source or 'packet')
         selectable = bool(data.get('selectable_bytes', False))
         if 'offset' in data and 'length' in data and offset >= 0 and length > 0:
