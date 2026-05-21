@@ -279,6 +279,7 @@ class PacketBytesView(QWidget):
         self._views = {
             'packet': PacketHexView(),
             'tcp_reassembled': PacketHexView(),
+            'decoded_utf8': PacketHexView(),
         }
         self._tab_sources = []
 
@@ -348,6 +349,18 @@ class PacketBytesView(QWidget):
         if reassembled_data:
             sources.append(
                 ('tcp_reassembled', f'Reassembled TCP ({len(reassembled_data)} bytes)', reassembled_data)
+            )
+        decoded_utf8 = b''
+        http_body = bytes(metadata.get('http_body', b'') or b'')
+        if http_body:
+            try:
+                http_body.decode('utf-8', errors='strict')
+                decoded_utf8 = http_body
+            except Exception:
+                decoded_utf8 = b''
+        if decoded_utf8:
+            sources.append(
+                ('decoded_utf8', f'Decoded UTF-8 text ({len(decoded_utf8)} bytes)', decoded_utf8)
             )
 
         self._reset_tabs(sources)

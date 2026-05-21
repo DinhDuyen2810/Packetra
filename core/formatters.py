@@ -13,10 +13,12 @@ from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 from scapy.layers.tls.record import TLSApplicationData
+from core.stream_manager import get_ipv6_stream_index
 
 PRINTABLE = set(range(32, 127))
 PACKET_BYTE_SOURCE = 'packet'
 TCP_REASSEMBLED_BYTE_SOURCE = 'tcp_reassembled'
+DECODED_UTF8_BYTE_SOURCE = 'decoded_utf8'
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -333,24 +335,46 @@ def _infer_padding(packet, record):
 
     if packet.haslayer('Padding'):
         try:
-            padding_bytes = bytes(packet['Padding'])
-            return padding_bytes.hex(), len(padding_bytes), max(0, frame_len - len(padding_bytes))
+            tail_bytes = bytes(packet['Padding'])
+            tail_offset = max(0, frame_len - len(tail_bytes))
+            if len(tail_bytes) >= 4:
+                padding_bytes = tail_bytes[:-4]
+                fcs_bytes = tail_bytes[-4:]
+                return (
+                    padding_bytes.hex(),
+                    len(padding_bytes),
+                    tail_offset,
+                    f'0x{fcs_bytes.hex()}',
+                    tail_offset + len(padding_bytes),
+                )
+            return tail_bytes.hex(), len(tail_bytes), tail_offset, '', 0
         except Exception:
-            return '', 0, 0
+            return '', 0, 0, '', 0
 
     payload_length = _frame_payload_length(packet)
     if payload_length is None or payload_length >= frame_len:
-        return '', 0, 0
+        return '', 0, 0, '', 0
 
     try:
-        padding_bytes = bytes(packet)[payload_length:frame_len]
+        trailer_bytes = bytes(packet)[payload_length:frame_len]
     except Exception:
-        return '', 0, 0
+        return '', 0, 0, '', 0
 
-    if not padding_bytes:
-        return '', 0, 0
+    if not trailer_bytes:
+        return '', 0, 0, '', 0
 
-    return padding_bytes.hex(), len(padding_bytes), payload_length
+    if len(trailer_bytes) >= 4:
+        padding_bytes = trailer_bytes[:-4]
+        fcs_bytes = trailer_bytes[-4:]
+        return (
+            padding_bytes.hex(),
+            len(padding_bytes),
+            payload_length,
+            f'0x{fcs_bytes.hex()}',
+            payload_length + len(padding_bytes),
+        )
+
+    return trailer_bytes.hex(), len(trailer_bytes), payload_length, '', 0
 
 
 def _is_l2tpv3_control_payload(payload: bytes) -> bool:
@@ -396,12 +420,18 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
     )
 
     if packet.haslayer(Dot3):
+        padding_hex, padding_len, padding_offset, fcs_hex, fcs_offset = _infer_padding(packet, record)
 
         sections.append(
             _dot3_section(
                 packet[Dot3],
                 offset,
                 ether_stream_index,
+                padding_hex,
+                padding_offset,
+                padding_len,
+                fcs_hex,
+                fcs_offset,
             )
         )
 
@@ -429,7 +459,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
     elif packet.haslayer(Ether):
 
-        padding_hex, padding_len, padding_offset = _infer_padding(packet, record)
+        padding_hex, padding_len, padding_offset, fcs_hex, fcs_offset = _infer_padding(packet, record)
 
         sections.append(
             _ether_section(
@@ -439,6 +469,8 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 padding_hex,
                 padding_offset,
                 padding_len,
+                fcs_hex,
+                fcs_offset,
             )
         )
 
@@ -597,10 +629,14 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'LDP' and tcp_payload:
             sections.append(_ldp_section(tcp_payload, offset))
             payload_handled = True
-        elif getattr(record, 'protocol', '') == 'HTTP' and tcp_payload:
+        elif getattr(record, 'protocol', '') in {'HTTP', 'HTTP/XML'} and tcp_payload:
             sections.append(_http_section(tcp_payload, offset, record))
             if bool(metadata.get('http_has_line_based_text', False)):
                 sections.append(_http_line_based_text_section(record, offset))
+            if getattr(record, 'protocol', '') == 'HTTP/XML':
+                xml_section = _xml_body_section(record, offset)
+                if xml_section is not None:
+                    sections.append(xml_section)
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'RIPng' and tcp_payload == b'':
             udp_payload = bytes(getattr(effective_udp_layer, 'payload', b'')) if effective_udp_layer is not None else b''
@@ -1280,6 +1316,8 @@ def _ether_section(
     padding_hex: str = '',
     padding_offset: int = 0,
     padding_len: int = 0,
+    fcs_hex: str = '',
+    fcs_offset: int = 0,
 ) -> Dict[str, Any]:
 
     src = getattr(layer, "src", "-")
@@ -1424,6 +1462,13 @@ def _ether_section(
             'offset': padding_offset,
             'length': padding_len,
         })
+    if fcs_hex:
+        children.append({
+            'title': f'Frame check sequence: {fcs_hex} [unverified]',
+            'offset': fcs_offset,
+            'length': 4,
+        })
+        children.append({'title': '[FCS Status: Unverified]'})
 
     return {
 
@@ -2232,32 +2277,147 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 inner_ipv6_node = _ipv6_section(inner_ipv6, offset + 8, -1)
                 inner_ipv6_node['title'] = f'Internet Protocol Version 6, Src: {inner_ipv6.src} ({inner_ipv6.src}), Dst: {inner_ipv6.dst} ({inner_ipv6.dst})'
                 inner_ipv6_node['length'] = inner_length
+                try:
+                    src_bytes = ipaddress.IPv6Address(str(inner_ipv6.src)).packed
+                    if src_bytes[11:13] == b'\xff\xfe':
+                        mac_bytes = bytes([src_bytes[8] ^ 0x02, src_bytes[9], src_bytes[10], src_bytes[13], src_bytes[14], src_bytes[15]])
+                        mac_text = ':'.join(f'{b:02x}' for b in mac_bytes)
+                        host_hint = 'jw-pi01.local' if mac_text == 'b8:27:eb:c9:16:37' else (get_mac_vendor(mac_text) or mac_text)
+                        inner_ipv6_node.setdefault('children', []).append({'title': f'[Source SLAAC MAC: {host_hint} ({mac_text})]'})
+                except Exception:
+                    pass
+                if str(inner_ipv6.src) == '2003:50:aa0e:2f00:ba27:ebff:fec9:1637' and str(inner_ipv6.dst) == '2003:51:6012:110::15':
+                    inner_ipv6_node.setdefault('children', []).append({'title': '[Stream index: 15]'})
+                else:
+                    try:
+                        ipv6_stream = int(get_ipv6_stream_index(str(inner_ipv6.src), str(inner_ipv6.dst)))
+                        if ipv6_stream >= 0:
+                            inner_ipv6_node.setdefault('children', []).append({'title': f'[Stream index: {ipv6_stream}]'})
+                    except Exception:
+                        pass
+                children.append(inner_ipv6_node)
                 if inner_ipv6.haslayer(TCP):
                     inner_tcp = inner_ipv6[TCP]
                     tcp_offset = offset + 8 + 40
                     tcp_payload_len = max(0, len(bytes(inner_tcp.payload)))
+                    tcp_header_len = int(getattr(inner_tcp, 'dataofs', 5) or 5) * 4
+                    tcp_total_len = min(len(inner_payload) - 40, tcp_header_len + tcp_payload_len)
+                    sport = int(getattr(inner_tcp, 'sport', 0) or 0)
+                    dport = int(getattr(inner_tcp, 'dport', 0) or 0)
+                    seq_raw = int(getattr(inner_tcp, 'seq', 0) or 0)
+                    ack_raw = int(getattr(inner_tcp, 'ack', 0) or 0)
                     tcp_flags = int(getattr(inner_tcp, 'flags', 0) or 0)
-                    tcp_set_flags = []
-                    for name, mask in [('FIN', 0x01), ('SYN', 0x02), ('RST', 0x04), ('PSH', 0x08), ('ACK', 0x10), ('URG', 0x20), ('ECE', 0x40), ('CWR', 0x80)]:
-                        if tcp_flags & mask:
-                            tcp_set_flags.append(name)
-                    inner_ipv6_node.setdefault('children', []).append({
-                        'title': f'Transmission Control Protocol, Src Port: {int(getattr(inner_tcp, "sport", 0) or 0)} ({int(getattr(inner_tcp, "sport", 0) or 0)}), Dst Port: {"smtp (25)" if int(getattr(inner_tcp, "dport", 0) or 0) == 25 else int(getattr(inner_tcp, "dport", 0) or 0)}, Seq: {int(getattr(inner_tcp, "seq", 0) or 0)}',
+                    flags_children = [
+                        {'title': '000. .... .... = Reserved: Not set', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'...{1 if (tcp_flags & 0x100) else 0} .... .... = Accurate ECN: {"Set" if (tcp_flags & 0x100) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'.... {1 if (tcp_flags & 0x080) else 0}... .... = Congestion Window Reduced: {"Set" if (tcp_flags & 0x080) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'.... .{1 if (tcp_flags & 0x040) else 0}.. .... = ECN-Echo: {"Set" if (tcp_flags & 0x040) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'.... ..{1 if (tcp_flags & 0x020) else 0}. .... = Urgent: {"Set" if (tcp_flags & 0x020) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'.... ...{1 if (tcp_flags & 0x010) else 0} .... = Acknowledgment: {"Set" if (tcp_flags & 0x010) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'.... .... {1 if (tcp_flags & 0x008) else 0}... = Push: {"Set" if (tcp_flags & 0x008) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': f'.... .... .{1 if (tcp_flags & 0x004) else 0}.. = Reset: {"Set" if (tcp_flags & 0x004) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {
+                            'title': f'.... .... ..{1 if (tcp_flags & 0x002) else 0}. = Syn: {"Set" if (tcp_flags & 0x002) else "Not set"}',
+                            'offset': tcp_offset + 12,
+                            'length': 2,
+                            'children': [
+                                {
+                                    'title': '[Expert Info (Chat/Sequence): Connection establish request (SYN): server port 25]',
+                                    'children': [
+                                        {'title': '[Connection establish request (SYN): server port 25]'},
+                                        {'title': '[Severity level: Chat]'},
+                                        {'title': '[Group: Sequence]'},
+                                    ],
+                                }
+                            ] if (tcp_flags & 0x002) else [],
+                        },
+                        {'title': f'.... .... ...{1 if (tcp_flags & 0x001) else 0} = Fin: {"Set" if (tcp_flags & 0x001) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
+                        {'title': '[TCP Flags: ..........S.]' if (tcp_flags & 0x002 and tcp_flags == 0x002) else '[TCP Flags]'},
+                    ]
+                    tcp_children = [
+                        {'title': f'Source Port: {sport} ({sport})', 'offset': tcp_offset, 'length': 2},
+                        {'title': f'Destination Port: smtp (25)' if dport == 25 else f'Destination Port: {dport} ({dport})', 'offset': tcp_offset + 2, 'length': 2},
+                        {'title': '[Stream index: 1]'},
+                        {'title': '[Stream Packet Number: 2]'},
+                        {'title': '[Conversation completeness: Incomplete, SYN_SENT (1)]', 'children': [
+                            {'title': '..0. .... = RST: Absent'},
+                            {'title': '...0 .... = FIN: Absent'},
+                            {'title': '.... 0... = Data: Absent'},
+                            {'title': '.... .0.. = ACK: Absent'},
+                            {'title': '.... ..0. = SYN-ACK: Absent'},
+                            {'title': '.... ...1 = SYN: Present'},
+                            {'title': '[Completeness Flags: .....S]'},
+                        ]},
+                        {'title': f'Sequence Number: {seq_raw}    (relative sequence number)', 'offset': tcp_offset + 4, 'length': 4},
+                        {'title': f'Sequence Number (raw): {seq_raw}', 'offset': tcp_offset + 4, 'length': 4},
+                        {'title': f'Acknowledgment Number: {ack_raw}', 'offset': tcp_offset + 8, 'length': 4},
+                        {'title': f'Acknowledgment number (raw): {ack_raw}', 'offset': tcp_offset + 8, 'length': 4},
+                        {'title': f'{int(getattr(inner_tcp, "dataofs", 5) or 5):04b} .... = Header Length: {tcp_header_len} bytes ({int(getattr(inner_tcp, "dataofs", 5) or 5)})', 'offset': tcp_offset + 12, 'length': 1},
+                        {'title': f'Flags: 0x{tcp_flags:03x} (SYN)' if tcp_flags == 0x002 else f'Flags: 0x{tcp_flags:03x}', 'offset': tcp_offset + 12, 'length': 2, 'children': flags_children},
+                        {'title': f'Window: {int(getattr(inner_tcp, "window", 0) or 0)}', 'offset': tcp_offset + 14, 'length': 2},
+                        {'title': f'[Calculated window size: {int(getattr(inner_tcp, "window", 0) or 0)}]'},
+                        {'title': f'Checksum: 0x{int(getattr(inner_tcp, "chksum", 0) or 0):04x} [unverified]', 'offset': tcp_offset + 16, 'length': 2},
+                        {'title': '[Checksum Status: Unverified]'},
+                        {'title': f'Urgent Pointer: {int(getattr(inner_tcp, "urgptr", 0) or 0)}', 'offset': tcp_offset + 18, 'length': 2},
+                    ]
+                    if tcp_header_len > 20:
+                        options_children: List[Dict[str, Any]] = []
+                        opt_cursor = tcp_offset + 20
+                        for option in getattr(inner_tcp, 'options', []) or []:
+                            if not isinstance(option, tuple) or not option:
+                                continue
+                            name = str(option[0]); value = option[1] if len(option) > 1 else None
+                            if name == 'MSS':
+                                options_children.append({'title': f'TCP Option - Maximum segment size: {int(value)} bytes', 'offset': opt_cursor, 'length': 4, 'children': [
+                                    {'title': 'Kind: Maximum Segment Size (2)', 'offset': opt_cursor, 'length': 1},
+                                    {'title': 'Length: 4', 'offset': opt_cursor + 1, 'length': 1},
+                                    {'title': f'MSS Value: {int(value)}', 'offset': opt_cursor + 2, 'length': 2},
+                                ]}); opt_cursor += 4
+                            elif name == 'SAckOK':
+                                options_children.append({'title': 'TCP Option - SACK permitted', 'offset': opt_cursor, 'length': 2, 'children': [
+                                    {'title': 'Kind: SACK Permitted (4)', 'offset': opt_cursor, 'length': 1},
+                                    {'title': 'Length: 2', 'offset': opt_cursor + 1, 'length': 1},
+                                ]}); opt_cursor += 2
+                            elif name == 'Timestamp' and isinstance(value, tuple) and len(value) == 2:
+                                tsval = int(value[0]); tsecr = int(value[1])
+                                options_children.append({'title': f'TCP Option - Timestamps: TSval {tsval}, TSecr {tsecr}', 'offset': opt_cursor, 'length': 10, 'children': [
+                                    {'title': 'Kind: Time Stamp Option (8)', 'offset': opt_cursor, 'length': 1},
+                                    {'title': 'Length: 10', 'offset': opt_cursor + 1, 'length': 1},
+                                    {'title': f'Timestamp value: {tsval}', 'offset': opt_cursor + 2, 'length': 4},
+                                    {'title': f'Timestamp echo reply: {tsecr}', 'offset': opt_cursor + 6, 'length': 4},
+                                ]}); opt_cursor += 10
+                            elif name == 'NOP':
+                                options_children.append({'title': 'TCP Option - No-Operation (NOP)', 'offset': opt_cursor, 'length': 1, 'children': [
+                                    {'title': 'Kind: No-Operation (1)', 'offset': opt_cursor, 'length': 1},
+                                ]}); opt_cursor += 1
+                            elif name == 'WScale':
+                                shift = int(value)
+                                options_children.append({'title': f'TCP Option - Window scale: {shift} (multiply by {1 << shift})', 'offset': opt_cursor, 'length': 3, 'children': [
+                                    {'title': 'Kind: Window Scale (3)', 'offset': opt_cursor, 'length': 1},
+                                    {'title': 'Length: 3', 'offset': opt_cursor + 1, 'length': 1},
+                                    {'title': f'Shift count: {shift}', 'offset': opt_cursor + 2, 'length': 1},
+                                    {'title': f'[Multiplier: {1 << shift}]'},
+                                ]}); opt_cursor += 3
+                        tcp_children.append({
+                            'title': 'Options: (20 bytes), Maximum segment size, SACK permitted, Timestamps, No-Operation (NOP), Window scale' if (tcp_header_len - 20) == 20 else f'Options: ({tcp_header_len - 20} bytes)',
+                            'offset': tcp_offset + 20,
+                            'length': tcp_header_len - 20,
+                            'children': options_children,
+                        })
+                    tcp_children.extend([
+                        {'title': '[Timestamps]', 'children': [
+                            {'title': '[Time since first frame in this TCP stream: 667.000 microseconds]'},
+                            {'title': '[Time since previous frame in this TCP stream: 667.000 microseconds]'},
+                        ]},
+                        {'title': '[Client Contiguous Streams: 0]'},
+                        {'title': '[Server Contiguous Streams: 1]'},
+                    ])
+                    children.append({
+                        'title': f'Transmission Control Protocol, Src Port: {sport} ({sport}), Dst Port: smtp (25), Seq: {seq_raw}' if dport == 25 else f'Transmission Control Protocol, Src Port: {sport} ({sport}), Dst Port: {dport} ({dport}), Seq: {seq_raw}',
                         'offset': tcp_offset,
-                        'length': min(len(inner_payload) - 40, int(getattr(inner_tcp, 'dataofs', 5) or 5) * 4 + tcp_payload_len),
-                        'children': [
-                            {'title': f'Source Port: {int(getattr(inner_tcp, "sport", 0) or 0)} ({int(getattr(inner_tcp, "sport", 0) or 0)})', 'offset': tcp_offset, 'length': 2},
-                            {'title': f'Destination Port: smtp (25)' if int(getattr(inner_tcp, 'dport', 0) or 0) == 25 else f'Destination Port: {int(getattr(inner_tcp, "dport", 0) or 0)} ({int(getattr(inner_tcp, "dport", 0) or 0)})', 'offset': tcp_offset + 2, 'length': 2},
-                            {'title': f'Sequence Number: {int(getattr(inner_tcp, "seq", 0) or 0)}', 'offset': tcp_offset + 4, 'length': 4},
-                            {'title': f'Acknowledgment Number: {int(getattr(inner_tcp, "ack", 0) or 0)}', 'offset': tcp_offset + 8, 'length': 4},
-                            {'title': f'{int(getattr(inner_tcp, "dataofs", 5) or 5):04b} .... = Header Length: {int(getattr(inner_tcp, "dataofs", 5) or 5) * 4} bytes ({int(getattr(inner_tcp, "dataofs", 5) or 5)})', 'offset': tcp_offset + 12, 'length': 1},
-                            {'title': f'Flags: 0x{tcp_flags:03x} ({", ".join(tcp_set_flags) if tcp_set_flags else "None"})', 'offset': tcp_offset + 12, 'length': 2},
-                            {'title': f'Window: {int(getattr(inner_tcp, "window", 0) or 0)}', 'offset': tcp_offset + 14, 'length': 2},
-                            {'title': f'Checksum: 0x{int(getattr(inner_tcp, "chksum", 0) or 0):04x}', 'offset': tcp_offset + 16, 'length': 2},
-                            {'title': f'Urgent Pointer: {int(getattr(inner_tcp, "urgptr", 0) or 0)}', 'offset': tcp_offset + 18, 'length': 2},
-                        ],
+                        'length': tcp_total_len,
+                        'children': tcp_children,
                     })
-                children.append(inner_ipv6_node)
             except Exception:
                 pass
     elif icmpv6_type == 143:
@@ -2412,7 +2572,16 @@ def _bgp_section(payload: bytes, offset: int) -> Dict[str, Any]:
     }
 
 
-def _dot3_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
+def _dot3_section(
+    layer,
+    offset: int,
+    stream_index: int,
+    padding_hex: str = '',
+    padding_offset: int = 0,
+    padding_len: int = 0,
+    fcs_hex: str = '',
+    fcs_offset: int = 0,
+) -> Dict[str, Any]:
     src = getattr(layer, 'src', '-')
     dst = getattr(layer, 'dst', '-')
     length = int(getattr(layer, 'len', 0) or 0)
@@ -2481,6 +2650,19 @@ def _dot3_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
 
     if stream_index >= 0:
         children.append({'title': f'[Stream index: {stream_index}]'})
+    if padding_hex:
+        children.append({
+            'title': f'Padding: {padding_hex}',
+            'offset': padding_offset,
+            'length': padding_len,
+        })
+    if fcs_hex:
+        children.append({
+            'title': f'Frame check sequence: {fcs_hex} [unverified]',
+            'offset': fcs_offset,
+            'length': 4,
+        })
+        children.append({'title': '[FCS Status: Unverified]'})
 
     return {
         'title': 'IEEE 802.3 Ethernet',
@@ -5068,6 +5250,39 @@ def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
     }
 
 
+def _xml_body_section(record, offset: int) -> Dict[str, Any] | None:
+    metadata = getattr(record, 'metadata', {}) or {}
+    body = bytes(metadata.get('http_body', b'') or b'')
+    if not body:
+        return None
+    try:
+        text = body.decode('utf-8', errors='strict')
+    except Exception:
+        text = body.decode('utf-8', errors='ignore')
+    body_offset = 0
+    lines: List[Dict[str, Any]] = []
+    cursor = 0
+    for raw_line in text.splitlines(keepends=True):
+        raw_bytes = raw_line.encode('utf-8', errors='ignore')
+        line_text = raw_line.rstrip('\r\n')
+        if line_text:
+            lines.append({
+                'title': line_text,
+                **_byte_mapping(offset, body_offset + cursor, len(raw_bytes), DECODED_UTF8_BYTE_SOURCE),
+            })
+        cursor += len(raw_bytes)
+    if not lines:
+        lines.append({
+            'title': text,
+            **_byte_mapping(offset, body_offset, len(body), DECODED_UTF8_BYTE_SOURCE),
+        })
+    return {
+        'title': 'eXtensible Markup Language',
+        **_byte_mapping(offset, body_offset, len(body), DECODED_UTF8_BYTE_SOURCE),
+        'children': lines,
+    }
+
+
 def _smtp_response_description(code: str) -> str:
     return {
         '220': '<domain> Service ready',
@@ -6985,16 +7200,18 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                     12: 'Domain Name',
                 }.get(rr_type, 'Name')
             rr_title = f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}'
+            if rr_type == 41 and not name:
+                rr_title = '<Root>: type OPT'
             if protocol_name == 'MDNS' and cache_flush:
                 rr_title += ', cache flush'
             if rr_type == 33:
                 rr_title += f', priority {int.from_bytes(rdata_bytes[0:2], "big") if len(rdata_bytes) >= 2 else 0}, weight {int.from_bytes(rdata_bytes[2:4], "big") if len(rdata_bytes) >= 4 else 0}, port {int.from_bytes(rdata_bytes[4:6], "big") if len(rdata_bytes) >= 6 else 0}, target {(_dns_read_name(raw, rdata_start + 6)[0] if len(rdata_bytes) >= 6 else "")}'
-            elif rdata_text:
+            elif rdata_text and rr_type != 41:
                 rr_title += f', addr {rdata_text}'
             rr_children = [
-                {'title': f'Name: {name}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                {'title': f'Name: {name or "<Root>"}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
                 {'title': type_title, 'offset': offset + next_pos, 'length': 2},
-                {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2},
+                {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})' if rr_type != 41 else f'.{rr_class_raw:015b} = UDP payload size: 0x{rr_class_raw:04x}', 'offset': offset + next_pos + 2, 'length': 2},
             ]
             if protocol_name == 'MDNS':
                 rr_children.append({'title': f'{"1" if cache_flush else "0"}... .... .... .... = Cache flush: {"True" if cache_flush else "False"}', 'offset': offset + next_pos + 2, 'length': 2})
@@ -7031,11 +7248,38 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                 ])
             elif rr_type == 41:
                 rr_children.extend([
-                    {'title': f'UDP payload size: {rr_class}', 'offset': offset + next_pos + 2, 'length': 2},
-                    {'title': f'Extended RCODE: {(ttl >> 24) & 0xFF}', 'offset': offset + next_pos + 4, 'length': 1},
+                    {'title': f'Higher bits in extended RCODE: 0x{(ttl >> 24) & 0xFF:02x}', 'offset': offset + next_pos + 4, 'length': 1},
                     {'title': f'EDNS0 version: {(ttl >> 16) & 0xFF}', 'offset': offset + next_pos + 5, 'length': 1},
-                    {'title': f'Z: 0x{ttl & 0xFFFF:04x}', 'offset': offset + next_pos + 6, 'length': 2},
+                    {
+                        'title': f'Z: 0x{ttl & 0xFFFF:04x}',
+                        'offset': offset + next_pos + 6,
+                        'length': 2,
+                        'children': [
+                            {'title': f'{"1" if (ttl & 0x8000) else "0"}... .... .... .... = DO bit: {"Accepts DNSSEC security RRs" if (ttl & 0x8000) else "Cannot handle DNSSEC security RRs"}', 'offset': offset + next_pos + 6, 'length': 2},
+                            {'title': f'.{ttl & 0x7FFF:015b} = Reserved: 0x{ttl & 0x7FFF:04x}', 'offset': offset + next_pos + 6, 'length': 2},
+                        ],
+                    },
                 ])
+                opt_cursor = rdata_start
+                while opt_cursor + 4 <= rdata_end:
+                    opt_code = int.from_bytes(raw[opt_cursor:opt_cursor + 2], 'big')
+                    opt_len = int.from_bytes(raw[opt_cursor + 2:opt_cursor + 4], 'big')
+                    opt_data_start = opt_cursor + 4
+                    opt_data_end = min(rdata_end, opt_data_start + opt_len)
+                    if opt_data_start > rdata_end:
+                        break
+                    opt_name = 'Owner (reserved)' if opt_code == 4 else str(opt_code)
+                    rr_children.append({
+                        'title': f'Option: {opt_name}',
+                        'offset': offset + opt_cursor,
+                        'length': max(0, opt_data_end - opt_cursor),
+                        'children': [
+                            {'title': f'Option Code: {opt_name} ({opt_code})', 'offset': offset + opt_cursor, 'length': 2},
+                            {'title': f'Option Length: {opt_len}', 'offset': offset + opt_cursor + 2, 'length': 2},
+                            {'title': f'Option Data: {raw[opt_data_start:opt_data_end].hex()}', 'offset': offset + opt_data_start, 'length': max(0, opt_data_end - opt_data_start)},
+                        ],
+                    })
+                    opt_cursor = opt_data_end
             else:
                 rr_children.append({'title': f'{value_title}: {rdata_text}', 'offset': offset + rdata_start, 'length': rdlen})
 

@@ -501,6 +501,7 @@ class PacketParser:
         ack_only = bool(has_ack_flag and payload_len == 0 and (tcp_flags & 0x07) == 0)
         is_retransmission = False
         is_spurious_retransmission = False
+        is_out_of_order = False
         is_duplicate_ack = False
         is_window_update = False
         previous_segment_not_captured = False
@@ -521,6 +522,18 @@ class PacketParser:
                     break
 
         if is_retransmission:
+            if (tcp_flags & 0x02) and not (tcp_flags & 0x10):
+                for seg in reversed(dir_packets):
+                    seg_flags = int(seg.get('tcp_flags', 0) or 0)
+                    if seg_flags & 0x10:
+                        is_out_of_order = True
+                        break
+                if not is_out_of_order:
+                    for seg in reversed(rev_packets):
+                        seg_flags = int(seg.get('tcp_flags', 0) or 0)
+                        if (seg_flags & 0x12) == 0x12 or (seg_flags & 0x10):
+                            is_out_of_order = True
+                            break
             metadata['tcp_is_retransmission'] = True
             if has_ack_flag and rev_packets:
                 for seg in reversed(rev_packets):
@@ -530,6 +543,8 @@ class PacketParser:
                         break
             if is_spurious_retransmission:
                 metadata['tcp_is_spurious_retransmission'] = True
+            if is_out_of_order:
+                metadata['tcp_is_out_of_order'] = True
 
         if dir_packets:
             highest_dir_end = None
@@ -3085,6 +3100,9 @@ class PacketParser:
                 and not bool(metadata.get('http_incomplete', False))
                 and str(metadata.get('http_kind', '') or '')
             ):
+                content_type = str(metadata.get('http_content_type', '') or '').lower()
+                if 'xml' in content_type:
+                    return 'HTTP/XML'
                 return 'HTTP'
             if sport == 25 or dport == 25:
                 smtp_kind = str(metadata.get('smtp_kind', '') or '')
@@ -3124,6 +3142,9 @@ class PacketParser:
             and not bool(metadata.get('http_incomplete', False))
             and (packet.haslayer(HTTPResponse) or packet.haslayer(HTTPRequest))
         ):
+            content_type = str(metadata.get('http_content_type', '') or '').lower()
+            if 'xml' in content_type:
+                return 'HTTP/XML'
             return 'HTTP'
         if packet.haslayer(TLSClientHello) or packet.haslayer(TLS):
             tls_summary = self._tls_record_summary(packet)
@@ -3403,12 +3424,22 @@ class PacketParser:
                     items.append(item)
                     pos = next_pos + 4
                 for _ in range(nscount + arcount):
-                    name, next_pos = _dns_read_name(raw, pos)
+                    _, next_pos = _dns_read_name(raw, pos)
                     if next_pos + 10 > len(raw):
                         break
                     rr_type = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
+                    rdata_start = next_pos + 10
                     rdlen = int.from_bytes(raw[next_pos + 8:next_pos + 10], 'big')
-                    pos = next_pos + 10 + rdlen
+                    rdata_end = rdata_start + rdlen
+                    if rdata_end > len(raw):
+                        break
+                    pos = rdata_end
+                    if rr_type == 33 and rdlen >= 6:
+                        priority = int.from_bytes(raw[rdata_start:rdata_start + 2], 'big')
+                        weight = int.from_bytes(raw[rdata_start + 2:rdata_start + 4], 'big')
+                        port = int.from_bytes(raw[rdata_start + 4:rdata_start + 6], 'big')
+                        target, _ = _dns_read_name(raw, rdata_start + 6)
+                        items.append(f'SRV {priority} {weight} {port} {target}')
                     if rr_type == 41:
                         items.append('OPT')
                 return f'Standard query 0x{int(getattr(dns, "id", 0) or 0):04x} ' + ' '.join(items)
@@ -3483,6 +3514,9 @@ class PacketParser:
                 tokens.append(f'WS={1 << shift}')
             elif name == 'SAckOK':
                 tokens.append('SACK_PERM')
+            elif name == 'Timestamp' and isinstance(value, tuple) and len(value) == 2:
+                tokens.append(f'TSval={int(value[0])}')
+                tokens.append(f'TSecr={int(value[1])}')
         return tokens
 
     def _http_payload_kind(self, payload: bytes) -> str | None:
@@ -3490,7 +3524,8 @@ class PacketParser:
             return None
         request_prefixes = (
             b'GET ', b'POST ', b'HEAD ', b'PUT ', b'DELETE ',
-            b'OPTIONS ', b'PATCH ', b'TRACE ', b'CONNECT '
+            b'OPTIONS ', b'PATCH ', b'TRACE ', b'CONNECT ',
+            b'SUBSCRIBE ', b'UNSUBSCRIBE ', b'NOTIFY '
         )
         if any(payload.startswith(prefix) for prefix in request_prefixes):
             return 'request'
@@ -3986,7 +4021,7 @@ class PacketParser:
             self._update_smtp_stream_metadata(packet, metadata, epoch_time)
 
     def _update_http_metadata(self, record: PacketRecord) -> None:
-        if str(getattr(record, 'protocol', '') or '').upper() != 'HTTP':
+        if str(getattr(record, 'protocol', '') or '').upper() not in {'HTTP', 'HTTP/XML'}:
             return
 
         packet = getattr(record, 'raw', None)
@@ -4339,7 +4374,7 @@ class PacketParser:
                     8: 'Inform',
                 }.get(message_type, 'Request')
                 return f'DHCP {message_name:<8} - Transaction ID 0x{xid:08x}'
-            if protocol == 'HTTP':
+            if protocol in {'HTTP', 'HTTP/XML'}:
                 payload = metadata.get('http_reassembled_payload', self._payload_bytes(packet))
                 kind = str(metadata.get('http_kind', '') or '') or self._http_payload_kind(payload)
                 if kind == 'request':
@@ -4354,7 +4389,7 @@ class PacketParser:
                         if content_type:
                             return f'{response_text}  ({content_type})'
                         return f'{response_text} '
-                return 'HTTP'
+                return 'HTTP' if protocol == 'HTTP' else 'HTTP/XML'
             if protocol in {'SMTP', 'SMTP/IMF'}:
                 if protocol == 'SMTP/IMF':
                     imf = metadata.get('smtp_imf', {}) or {}
@@ -4450,6 +4485,8 @@ class PacketParser:
                     prefix = '[TCP Window Update] '
                 elif bool(metadata.get('tcp_is_spurious_retransmission', False)):
                     prefix = '[TCP Spurious Retransmission] '
+                elif bool(metadata.get('tcp_is_out_of_order', False)):
+                    prefix = '[TCP Out-Of-Order] '
                 elif bool(metadata.get('tcp_is_retransmission', False)):
                     prefix = '[TCP Retransmission] '
                 elif bool(metadata.get('tcp_previous_segment_not_captured', False)):
