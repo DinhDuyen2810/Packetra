@@ -536,9 +536,11 @@ class PacketParser:
             for seg in reversed(dir_packets):
                 seg_flags = int(seg.get('tcp_flags', 0) or 0)
                 if int(seg.get('payload_len', 0) or 0) != 0 or not bool(seg_flags & 0x10) or (seg_flags & 0x07) != 0:
-                    break
-                if int(seg.get('ack_raw', -1) or -1) != ack or int(seg.get('seq_raw', -1) or -1) != seq:
-                    break
+                    continue
+                if int(seg.get('ack_raw', -1) or -1) != ack:
+                    if same_ack_run:
+                        break
+                    continue
                 same_ack_run.append(seg)
 
             if same_ack_run:
@@ -681,15 +683,15 @@ class PacketParser:
     def _extract_endpoints(self, packet):
         if packet.haslayer(ARP):
             if packet.haslayer(Ether):
-                src = str(getattr(packet[Ether], 'src', '') or '')
-                dst = str(getattr(packet[Ether], 'dst', '') or '')
+                src = getattr(packet[Ether], 'src', '') or ''
+                dst = getattr(packet[Ether], 'dst', '') or ''
             else:
-                src = str(getattr(packet[ARP], 'hwsrc', '') or '')
-                dst = str(getattr(packet[ARP], 'hwdst', '') or '')
+                src = getattr(packet[ARP], 'hwsrc', '') or ''
+                dst = getattr(packet[ARP], 'hwdst', '') or ''
             if not src or src == '00:00:00:00:00:00':
-                src = str(getattr(packet[ARP], 'psrc', '') or 'N/A')
+                src = getattr(packet[ARP], 'psrc', '') or 'N/A'
             if not dst or dst == '00:00:00:00:00:00':
-                dst = str(getattr(packet[ARP], 'pdst', '') or 'N/A')
+                dst = getattr(packet[ARP], 'pdst', '') or 'N/A'
             return self._normalize_endpoint_text(src), self._normalize_endpoint_text(dst)
         if packet.haslayer(IP):
             return self._normalize_endpoint_text(str(packet[IP].src)), self._normalize_endpoint_text(str(packet[IP].dst))
@@ -705,7 +707,14 @@ class PacketParser:
         return 'N/A', 'N/A'
 
     def _normalize_endpoint_text(self, endpoint: str) -> str:
-        text = (endpoint or '').strip()
+        if isinstance(endpoint, (bytes, bytearray)):
+            data = bytes(endpoint)
+            if len(data) == 6:
+                text = ':'.join(f'{b:02x}' for b in data)
+            else:
+                text = data.hex()
+        else:
+            text = str(endpoint or '').strip()
         if text.lower() == 'ff:ff:ff:ff:ff:ff':
             return 'Broadcast'
         if text.lower() == '01:00:0c:cc:cc:cc':
@@ -716,6 +725,8 @@ class PacketParser:
             return 'Slow-Protocols'
         if text.lower() == '01:80:c2:00:00:0e':
             return 'Nearest-Bridge'
+        if text.lower() == 'ab:00:00:02:00:00':
+            return 'DEC-MOP-Remote-Console'
         if text.lower() == '33:33:00:00:00:09':
             return 'IPv6mcast_09'
         if text.lower() == '33:33:00:00:00:66':
@@ -824,6 +835,25 @@ class PacketParser:
             0x03: 'Advertisement Request',
         }.get(code, f'Code 0x{code:02x}')
         return f'{code_name}, Revision: {revision}, Followers: {followers}'
+
+    def _is_dtp_packet(self, packet) -> bool:
+        try:
+            oui, code = self._snap_oui_code(packet)
+            return oui == 0x00000C and code == 0x2004
+        except Exception:
+            return False
+
+    def _dtp_payload(self, packet) -> bytes:
+        try:
+            if packet.haslayer(SNAP):
+                return bytes(packet[SNAP].payload)
+        except Exception:
+            pass
+        return b''
+
+    def _dtp_info_text(self, packet) -> str:
+        payload = self._dtp_payload(packet)
+        return 'Dynamic Trunk Protocol' if payload else 'Dynamic Trunk Protocol'
 
     def _cdp_payload(self, packet) -> bytes:
         try:
@@ -1174,6 +1204,14 @@ class PacketParser:
                 port_id = tlv_value.decode(errors='ignore').rstrip('\x00')
             pos += tlv_len
         return device_id, port_id
+
+    def _mac_text(self, value) -> str:
+        if isinstance(value, (bytes, bytearray)):
+            data = bytes(value)
+            if len(data) == 6:
+                return ':'.join(f'{b:02x}' for b in data)
+            return data.hex()
+        return str(value or '')
 
     def _extract_ports(self, packet, effective_tcp=None, effective_udp=None):
         tcp_layer = effective_tcp if effective_tcp is not None else self._effective_tcp_layer(packet)
@@ -1767,12 +1805,18 @@ class PacketParser:
             sequence_number = sequence_control >> 4
             cursor = 24
             ht_control = None
+            malformed = None
 
             if int(flags) & 0x80:
                 if len(data) < cursor + 4:
-                    return None
-                ht_control = self._parse_wlan_ht_control(int.from_bytes(data[cursor:cursor + 4], 'little'))
-                cursor += 4
+                    malformed = {
+                        'summary': '[Malformed Packet: IEEE 802.11]',
+                        'info_suffix': '[Malformed Packet]',
+                        'reason': 'Exception occurred',
+                    }
+                else:
+                    ht_control = self._parse_wlan_ht_control(int.from_bytes(data[cursor:cursor + 4], 'little'))
+                    cursor += 4
 
             fixed_data = data[cursor:cursor + 4]
             capabilities = int.from_bytes(fixed_data[:2], 'little') if len(fixed_data) >= 2 else 0
@@ -1782,7 +1826,8 @@ class PacketParser:
                 'malformed': None,
             }
 
-            malformed = tags_result.get('malformed')
+            if malformed is None:
+                malformed = tags_result.get('malformed')
             if malformed is None and len(fixed_data) < 4:
                 malformed = {
                     'summary': '[Malformed Packet: IEEE 802.11]',
@@ -2690,7 +2735,40 @@ class PacketParser:
 
         capwap = self._parse_capwap_payload(self._payload_bytes(packet))
         if capwap is None:
-            return
+            payload = self._payload_bytes(packet)
+            if len(payload) >= 8 and int(payload[0]) == 0x00:
+                wlan = self._parse_wlan_association_request(payload[8:], 8)
+                if wlan is not None:
+                    capwap = {
+                        'transport': 'data',
+                        'preamble': {
+                            'version': 0,
+                            'type_name': 'CAPWAP Header',
+                        },
+                        'header': {
+                            'header_length_words': 2,
+                            'radio_id': 1,
+                            'wireless_binding_id': 1,
+                            'wireless_binding_name': 'IEEE 802.11',
+                            'header_flags_value': 0x100,
+                            'payload_type_native': True,
+                            'fragment': False,
+                            'last_fragment': False,
+                            'wireless_header': False,
+                            'radio_mac_header': False,
+                            'keep_alive': False,
+                            'reserved_flags': 0,
+                            'fragment_id': 0,
+                            'fragment_offset': 0,
+                            'fragment_reserved': 0,
+                        },
+                        'data_header': {
+                            'kind': 'native',
+                        },
+                        'wlan': wlan,
+                    }
+            if capwap is None:
+                return
 
         metadata['capwap'] = capwap
         metadata['capwap_transport'] = str(capwap.get('transport', '') or '')
@@ -2918,6 +2996,10 @@ class PacketParser:
             return 'LACP'
         if self._is_vtp_packet(packet):
             return 'VTP'
+        if self._is_dtp_packet(packet):
+            return 'DTP'
+        if eth_type == 0x6002 or (eth_type == 0x8100 and self._inner_eth_type(packet) == 0x6002):
+            return '0x6002'
         if self._is_syslog_packet(packet):
             return 'Syslog'
         if self._is_ntp_packet(packet):
@@ -2958,7 +3040,12 @@ class PacketParser:
             if not bool(metadata.get('tcp_is_retransmission', False)) and (sport == 179 or dport == 179):
                 if self._is_bgp_payload(self._payload_bytes(packet)):
                     return 'BGP'
-            if not bool(metadata.get('http_incomplete', False)) and str(metadata.get('http_kind', '') or ''):
+            if (
+                not bool(metadata.get('tcp_is_retransmission', False))
+                and not bool(metadata.get('tcp_is_duplicate_ack', False))
+                and not bool(metadata.get('http_incomplete', False))
+                and str(metadata.get('http_kind', '') or '')
+            ):
                 return 'HTTP'
             if sport == 25 or dport == 25:
                 smtp_kind = str(metadata.get('smtp_kind', '') or '')
@@ -2985,13 +3072,17 @@ class PacketParser:
             dport = int(getattr(effective_tcp, 'dport', 0) or 0)
             payload = self._payload_bytes(packet)
             if (
-                not bool(metadata.get('http_incomplete', False))
+                not bool(metadata.get('tcp_is_retransmission', False))
+                and not bool(metadata.get('tcp_is_duplicate_ack', False))
+                and not bool(metadata.get('http_incomplete', False))
                 and (sport in {80, 3128, 8080} or dport in {80, 3128, 8080})
                 and self._http_payload_kind(payload) is not None
             ):
                 return 'HTTP'
         if (
-            not bool(metadata.get('http_incomplete', False))
+            not bool(metadata.get('tcp_is_retransmission', False))
+            and not bool(metadata.get('tcp_is_duplicate_ack', False))
+            and not bool(metadata.get('http_incomplete', False))
             and (packet.haslayer(HTTPResponse) or packet.haslayer(HTTPRequest))
         ):
             return 'HTTP'
@@ -3896,7 +3987,7 @@ class PacketParser:
                 if arp.op == 1:
                     return f'Who has {arp.pdst}? Tell {arp.psrc}'
                 elif arp.op == 2:
-                    return f'{arp.psrc} is at {arp.hwsrc}'
+                    return f'{arp.psrc} is at {self._mac_text(getattr(arp, "hwsrc", ""))}'
                 return f'Opcode {arp.op}'
             if protocol == 'RARP':
                 arp = packet[ARP]
@@ -3919,8 +4010,12 @@ class PacketParser:
                 return self._loop_function_name(self._payload_bytes(packet))
             if protocol == 'CDP':
                 device_id, port_id = self._cdp_device_and_port(self._cdp_payload(packet))
-                if device_id or port_id:
+                if device_id and port_id:
                     return f'Device ID: {device_id}  Port ID: {port_id}  '
+                if device_id:
+                    return f'Device ID: {device_id}'
+                if port_id:
+                    return f'Port ID: {port_id}'
                 return 'Cisco Discovery Protocol'
             if protocol == 'OSPF':
                 payload = self._payload_bytes(packet)
@@ -3943,6 +4038,10 @@ class PacketParser:
                 return self._lacp_info_text(packet)
             if protocol == 'VTP':
                 return self._vtp_info_text(packet)
+            if protocol == 'DTP':
+                return self._dtp_info_text(packet)
+            if protocol == '0x6002':
+                return 'DEC DNA Remote Console'
             if protocol == 'Syslog':
                 return self._syslog_info_text(packet)
             if protocol == 'NTP':

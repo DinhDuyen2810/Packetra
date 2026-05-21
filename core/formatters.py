@@ -399,6 +399,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 cdp_payload = bytes(getattr(snap_layer, 'payload', b'')) if snap_layer is not None else b''
                 sections.append(_cdp_section(cdp_payload, offset))
                 payload_handled = True
+            elif getattr(record, 'protocol', '') == 'DTP':
+                dtp_payload = bytes(getattr(snap_layer, 'payload', b'')) if snap_layer is not None else b''
+                sections.append(_dtp_section(dtp_payload, offset))
+                payload_handled = True
 
     elif packet.haslayer(Ether):
 
@@ -1002,6 +1006,10 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:vlan:ethertype:slow:lacp'
     elif protocol == 'VTP':
         protocol_string = 'eth:ethertype:vlan:llc:vtp'
+    elif protocol == 'DTP':
+        protocol_string = 'eth:llc:dtp'
+    elif protocol == '0x6002':
+        protocol_string = 'eth:ethertype:vlan:ethertype:data'
     elif protocol == 'Syslog':
         protocol_string = 'eth:ethertype:vlan:ethertype:ip:udp:syslog'
     elif protocol == 'NTP':
@@ -1080,7 +1088,7 @@ def _frame_section(record) -> Dict[str, Any]:
     elif protocol in {'RIPng', 'RIPv2', 'Syslog', 'NTP'}:
         coloring_name = 'UDP'
         coloring_string = 'udp'
-    elif protocol in {'STP', 'LLDP', 'UDLD', 'LACP', 'VTP'}:
+    elif protocol in {'STP', 'LLDP', 'UDLD', 'LACP', 'VTP', 'DTP', '0x6002'}:
         coloring_name = 'Broadcast'
         coloring_string = 'eth[0] & 1'
     elif protocol in {'ICMPV6', 'ICMPv6'}:
@@ -1273,6 +1281,8 @@ def _ether_section(
             return f'PVST+ ({mac_text})'
         if mac_lower == '01:80:c2:00:00:02':
             return f'Slow-Protocols ({mac_text})'
+        if mac_lower == 'ab:00:00:02:00:00':
+            return f'DEC-MOP-Remote-Console ({mac_text})'
 
         if not vendor:
             return mac_text
@@ -2238,6 +2248,8 @@ def _dot3_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
             return f'CDP/VTP/DTP/PAgP/UDLD ({mac_text})'
         if mac_lower == '01:80:c2:00:00:02':
             return f'Slow-Protocols ({mac_text})'
+        if mac_lower == 'ab:00:00:02:00:00':
+            return f'DEC-MOP-Remote-Console ({mac_text})'
         if not vendor:
             return mac_text
         suffix = ':'.join(mac_text.split(':')[-3:])
@@ -2305,6 +2317,7 @@ def _llc_section(layer, snap_layer, offset: int) -> Dict[str, Any]:
     pid_name = {
         0x2000: 'CDP',
         0x2003: 'VTP',
+        0x2004: 'DTP',
         0x010b: 'PVSTP+',
         0x0111: 'UDLD',
     }.get(pid, f'0x{pid:04x}')
@@ -2711,6 +2724,71 @@ def _vtp_section(payload: bytes, offset: int) -> Dict[str, Any]:
         'title': 'VLAN Trunking Protocol',
         'offset': offset,
         'length': min(len(payload), 72),
+        'children': children,
+    }
+
+
+def _dtp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    version = int(payload[0]) if len(payload) >= 1 else 0
+    pos = 1
+    children = [
+        {'title': f'Version: {version}', 'offset': offset, 'length': 1},
+    ]
+    summary_domain = ''
+    summary_status = ''
+    summary_type = ''
+    summary_sender = ''
+    while pos + 4 <= len(payload):
+        tlv_type = int.from_bytes(payload[pos:pos + 2], 'big')
+        tlv_len = int.from_bytes(payload[pos + 2:pos + 4], 'big')
+        if tlv_len < 4 or pos + tlv_len > len(payload):
+            break
+        value = payload[pos + 4:pos + tlv_len]
+        if tlv_type == 0x0001:
+            summary_domain = value.decode(errors='ignore').rstrip('\x00')
+            children.append({'title': 'Domain', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Domain (0x0001)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Domain: {summary_domain}', 'offset': offset + pos + 4, 'length': len(value)},
+            ]})
+        elif tlv_type == 0x0002 and len(value) >= 1:
+            status = int(value[0])
+            summary_status = f'Trunk/On (0x{status:02x})' if status == 0x81 else f'0x{status:02x}'
+            children.append({'title': 'Trunk Status', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Trunk Status (0x0002)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Value: {summary_status}', 'offset': offset + pos + 4, 'length': 1, 'children': [
+                    {'title': f'{1 if status & 0x80 else 0}... .... = Trunk Operating Status: {"Trunk" if status & 0x80 else "Access"} (0x{(status >> 7) & 0x1:x})', 'offset': offset + pos + 4, 'length': 1},
+                    {'title': f'.... .{status & 0x07:03b} = Trunk Administrative Status: {"On" if (status & 0x07) == 0x01 else (status & 0x07)} (0x{status & 0x07:x})', 'offset': offset + pos + 4, 'length': 1},
+                ]},
+            ]})
+        elif tlv_type == 0x0003 and len(value) >= 1:
+            trunk_type = int(value[0])
+            summary_type = f'802.1Q/802.1Q (0x{trunk_type:02x})' if trunk_type == 0xa5 else f'0x{trunk_type:02x}'
+            children.append({'title': 'Trunk Type', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Trunk Type (0x0003)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Value: {summary_type}', 'offset': offset + pos + 4, 'length': 1, 'children': [
+                    {'title': f'{(trunk_type >> 5) & 0x07:03b}. .... = Trunk Operating Type: {"802.1Q" if ((trunk_type >> 5) & 0x07) == 0x5 else ((trunk_type >> 5) & 0x07)} (0x{((trunk_type >> 5) & 0x07):x})', 'offset': offset + pos + 4, 'length': 1},
+                    {'title': f'.... .{trunk_type & 0x07:03b} = Trunk Administrative Type: {"802.1Q" if (trunk_type & 0x07) == 0x5 else (trunk_type & 0x07)} (0x{trunk_type & 0x07:x})', 'offset': offset + pos + 4, 'length': 1},
+                ]},
+            ]})
+        elif tlv_type == 0x0004 and len(value) >= 6:
+            sender = ':'.join(f'{b:02x}' for b in value[:6])
+            summary_sender = _mac_display(sender)
+            children.append({'title': 'Sender ID', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Sender ID (0x0004)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Sender ID: {summary_sender}', 'offset': offset + pos + 4, 'length': 6},
+            ]})
+        pos += tlv_len
+    title = 'Dynamic Trunk Protocol'
+    if summary_domain and summary_status and summary_type and summary_sender:
+        title = f'Dynamic Trunk Protocol: {summary_domain} (Operating/Administrative): {summary_status} (Operating/Administrative): {summary_type}: {summary_sender.split(" (",1)[-1][:-1] if " (" in summary_sender else summary_sender}'
+    return {
+        'title': title,
+        'offset': offset,
+        'length': len(payload),
         'children': children,
     }
 

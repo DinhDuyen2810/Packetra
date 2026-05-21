@@ -29,6 +29,8 @@ class PacketTable(QTableWidget):
         'NTP': QColor(233, 255, 233),
         'LACP': QColor(255, 244, 222),
         'VTP': QColor(255, 244, 222),
+        'DTP': QColor(255, 244, 222),
+        '0x6002': QColor(255, 244, 222),
         'UDLD': QColor(255, 244, 222),
         'LLDP': QColor(255, 244, 222),
         'HSRPv2': QColor(242, 236, 255),
