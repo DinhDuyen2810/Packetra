@@ -7,8 +7,10 @@ from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NS, ICMPv6ND_NA, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment
 from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
+from scapy.layers.snmp import SNMP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
+from scapy.contrib.eigrp import EIGRP  # type: ignore
 
 from core.models import PacketRecord
 from core.formatters import get_mac_vendor
@@ -31,6 +33,10 @@ class PacketParser:
         self.http_request_pending = {}
         self.dns_request_pending = {}
         self.smtp_request_pending = {}
+        self.imap_request_pending = {}
+        self.sip_request_pending = {}
+        self.snmp_request_pending = {}
+        self.sdp_media_by_call = {}
         self.ntp_request_pending = {}
         self.tftp_sessions = {}
         self.ipv4_fragment_state = {}
@@ -164,6 +170,10 @@ class PacketParser:
         self._track_transport_record(record)
         self._update_http_metadata(record)
         self._update_smtp_metadata(record)
+        self._update_imap_metadata(record)
+        self._update_sip_metadata(record)
+        self._update_snmp_metadata(record)
+        self._update_rtp_metadata(record)
         self._update_ntp_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
         self._update_icmpv6_echo_metadata(packet, record)
@@ -236,6 +246,20 @@ class PacketParser:
         fragment_override = self._fragment_override_protocol(packet, metadata)
         if fragment_override:
             return fragment_override
+        pppoe_info = self._pppoe_payload_info(packet)
+        if pppoe_info is not None:
+            metadata['pppoe'] = pppoe_info
+            if bool(pppoe_info.get('is_discovery', False)):
+                return 'PPPoED'
+            ppp_protocol = int(pppoe_info.get('ppp_protocol', 0) or 0)
+            if ppp_protocol == 0xC021:
+                return 'PPP LCP'
+            if ppp_protocol == 0x8021:
+                return 'PPP IPCP'
+            if ppp_protocol == 0x8057:
+                return 'PPP IPV6CP'
+            if ppp_protocol != 0x0021:
+                return 'PPP'
         if packet.haslayer('ESP'):
             return 'ESP'
         if self._is_ospf_ipv6_packet(packet):
@@ -247,6 +271,15 @@ class PacketParser:
                     return 'OSPF'
             except Exception:
                 pass
+            eigrp_info = self._eigrp_payload_info(packet, effective_ip)
+            if eigrp_info is not None:
+                metadata['eigrp'] = eigrp_info
+                return 'EIGRP'
+        elif packet.haslayer(IPv6):
+            eigrp_info = self._eigrp_payload_info(packet, packet[IPv6])
+            if eigrp_info is not None:
+                metadata['eigrp'] = eigrp_info
+                return 'EIGRP'
         if packet.haslayer(ARP):
             return 'ARP'
         if packet.haslayer(DNS):
@@ -269,6 +302,10 @@ class PacketParser:
             if int(getattr(tcp_layer, 'sport', 0) or 0) == 22 or int(getattr(tcp_layer, 'dport', 0) or 0) == 22:
                 if payload.startswith(b'SSH-') or len(payload) >= 6:
                     return 'SSHv2'
+            imap_info = self._imap_payload_info(payload, sport, dport)
+            if imap_info is not None:
+                metadata['imap'] = imap_info
+                return 'IMAP'
             kind = self._http_payload_kind(payload)
             if kind is not None:
                 if b'xml' in payload.lower():
@@ -291,6 +328,21 @@ class PacketParser:
                 first = payload.split(b'\r\n', 1)[0].upper()
                 if first.startswith(b'M-SEARCH ') or first.startswith(b'NOTIFY ') or first.startswith(b'HTTP/1.'):
                     return 'SSDP'
+            sip_info = self._sip_payload_info(payload, sport, dport)
+            if sip_info is not None:
+                metadata['sip'] = sip_info
+                if bool(sip_info.get('has_sdp', False)):
+                    metadata['sdp'] = self._parse_sdp_body(bytes(sip_info.get('sdp_body', b'') or b''))
+                    return 'SIP/SDP'
+                return 'SIP'
+            rtp_info = self._rtp_payload_info(payload, sport, dport)
+            if rtp_info is not None:
+                metadata['rtp'] = rtp_info
+                return 'RTP'
+            snmp_info = self._snmp_payload_info(packet)
+            if snmp_info is not None:
+                metadata['snmp'] = snmp_info
+                return 'SNMP'
             return 'UDP'
         if packet.haslayer(IPv6):
             return 'IPv6'
@@ -300,6 +352,8 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP'}:
+            return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
         if protocol in {'HTTP', 'HTTP/XML'}:
@@ -599,6 +653,8 @@ class PacketParser:
 
     def _update_transport_stream_metadata(self, packet, metadata: dict, epoch_time: float):
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         tcp_layer = self._effective_tcp_layer(packet, effective_ip)
         udp_layer = self._effective_udp_layer(packet, effective_ip)
 
@@ -975,6 +1031,8 @@ class PacketParser:
             return
 
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         tcp_layer = self._effective_tcp_layer(packet, effective_ip)
         udp_layer = self._effective_udp_layer(packet, effective_ip)
         if tcp_layer is not None:
@@ -1091,6 +1149,493 @@ class PacketParser:
         except Exception:
             pass
         return None
+
+    def _ether_payload_offset(self, packet) -> int:
+        offset = 0
+        try:
+            if packet.haslayer(Ether):
+                offset += 14
+            if packet.haslayer(Dot1Q):
+                offset += 4
+        except Exception:
+            return 0
+        return offset
+
+    def _pppoe_payload_info(self, packet) -> dict | None:
+        try:
+            outer_type = self._ether_type(packet)
+            inner_type = self._inner_eth_type(packet)
+            effective_type = inner_type if int(outer_type or 0) == 0x8100 else outer_type
+            if int(effective_type or 0) not in {0x8863, 0x8864}:
+                return None
+
+            raw = bytes(packet)
+            base_offset = self._ether_payload_offset(packet)
+            if len(raw) < base_offset + 6:
+                return None
+
+            vt = int(raw[base_offset])
+            version = (vt >> 4) & 0x0F
+            pppoe_type = vt & 0x0F
+            code = int(raw[base_offset + 1])
+            session_id = int.from_bytes(raw[base_offset + 2:base_offset + 4], 'big')
+            payload_len = int.from_bytes(raw[base_offset + 4:base_offset + 6], 'big')
+            payload_start = base_offset + 6
+            payload_end = min(len(raw), payload_start + payload_len)
+            payload = raw[payload_start:payload_end]
+
+            info: dict = {
+                'eth_type': int(effective_type),
+                'offset': int(base_offset),
+                'version': int(version),
+                'type': int(pppoe_type),
+                'code': int(code),
+                'session_id': int(session_id),
+                'payload_length': int(payload_len),
+                'payload': payload,
+                'is_discovery': int(effective_type) == 0x8863,
+                'is_session': int(effective_type) == 0x8864,
+            }
+
+            if int(effective_type) == 0x8863:
+                tags = []
+                pos = 0
+                while pos + 4 <= len(payload):
+                    tag_type = int.from_bytes(payload[pos:pos + 2], 'big')
+                    tag_len = int.from_bytes(payload[pos + 2:pos + 4], 'big')
+                    tag_end = pos + 4 + tag_len
+                    if tag_end > len(payload):
+                        break
+                    tags.append({
+                        'type': int(tag_type),
+                        'length': int(tag_len),
+                        'value': payload[pos + 4:tag_end],
+                    })
+                    pos = tag_end
+                info['tags'] = tags
+            elif int(effective_type) == 0x8864 and len(payload) >= 2:
+                ppp_protocol = int.from_bytes(payload[:2], 'big')
+                ppp_payload = payload[2:]
+                info['ppp_protocol'] = int(ppp_protocol)
+                info['ppp_payload'] = ppp_payload
+                if len(ppp_payload) >= 4:
+                    info['ppp_control_code'] = int(ppp_payload[0])
+                    info['ppp_identifier'] = int(ppp_payload[1])
+                    info['ppp_length'] = int.from_bytes(ppp_payload[2:4], 'big')
+
+            return info
+        except Exception:
+            return None
+
+    def _pppoe_discovery_code_name(self, code: int) -> str:
+        return {
+            0x09: 'Active Discovery Initiation (PADI)',
+            0x07: 'Active Discovery Offer (PADO)',
+            0x19: 'Active Discovery Request (PADR)',
+            0x65: 'Active Discovery Session-confirmation (PADS)',
+            0xA7: 'Active Discovery Terminate (PADT)',
+        }.get(int(code), f'Code 0x{int(code):02x}')
+
+    def _ppp_control_code_name(self, protocol: int, code: int) -> str:
+        code_names = {
+            1: 'Configuration Request',
+            2: 'Configuration Ack',
+            3: 'Configuration Nak',
+            4: 'Configuration Reject',
+            5: 'Terminate Request',
+            6: 'Terminate Ack',
+            7: 'Code Reject',
+            8: 'Protocol Reject',
+        }
+        if int(protocol) == 0xC021:
+            code_names.update({
+                9: 'Echo Request',
+                10: 'Echo Reply',
+                11: 'Discard Request',
+            })
+        return code_names.get(int(code), f'Code {int(code)}')
+
+    def _eigrp_opcode_name(self, opcode: int) -> str:
+        return {
+            1: 'Update',
+            3: 'Query',
+            4: 'Reply',
+            5: 'Hello',
+            6: 'IPX SAP',
+            10: 'SIA Query',
+            11: 'SIA Reply',
+        }.get(int(opcode), f'Opcode {int(opcode)}')
+
+    def _eigrp_payload_bytes(self, packet, effective_ip=None) -> bytes:
+        effective_ip = effective_ip or self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        if effective_ip is None:
+            return b''
+        try:
+            if isinstance(effective_ip, IP):
+                header_len = int(getattr(effective_ip, 'ihl', 5) or 5) * 4
+                total_len = int(getattr(effective_ip, 'len', 0) or 0)
+                payload_len = max(0, total_len - header_len)
+                return bytes(getattr(effective_ip, 'payload', b''))[:payload_len]
+            if isinstance(effective_ip, IPv6):
+                payload_len = int(getattr(effective_ip, 'plen', 0) or 0)
+                return bytes(getattr(effective_ip, 'payload', b''))[:payload_len]
+        except Exception:
+            return b''
+        return b''
+
+    def _eigrp_payload_info(self, packet, effective_ip=None) -> dict | None:
+        effective_ip = effective_ip or self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        if effective_ip is None:
+            return None
+        try:
+            if isinstance(effective_ip, IP):
+                if int(getattr(effective_ip, 'proto', 0) or 0) != 88:
+                    return None
+            elif isinstance(effective_ip, IPv6):
+                if int(getattr(effective_ip, 'nh', 0) or 0) != 88:
+                    return None
+            else:
+                return None
+        except Exception:
+            return None
+
+        payload = self._eigrp_payload_bytes(packet, effective_ip)
+        if len(payload) < 20:
+            return None
+
+        info: dict = {
+            'payload': payload,
+            'version': int(payload[0]),
+            'opcode': int(payload[1]),
+            'checksum': int.from_bytes(payload[2:4], 'big'),
+            'flags': int.from_bytes(payload[4:8], 'big'),
+            'sequence': int.from_bytes(payload[8:12], 'big'),
+            'acknowledge': int.from_bytes(payload[12:16], 'big'),
+            'virtual_router_id': int.from_bytes(payload[16:18], 'big'),
+            'autonomous_system': int.from_bytes(payload[18:20], 'big'),
+            'is_ipv6': isinstance(effective_ip, IPv6),
+        }
+        tlvs = []
+        pos = 20
+        while pos + 4 <= len(payload):
+            tlv_type = int.from_bytes(payload[pos:pos + 2], 'big')
+            tlv_len = int.from_bytes(payload[pos + 2:pos + 4], 'big')
+            if tlv_len < 4 or pos + tlv_len > len(payload):
+                break
+            value = payload[pos + 4:pos + tlv_len]
+            tlv: dict = {
+                'type': int(tlv_type),
+                'length': int(tlv_len),
+                'offset': int(pos),
+                'value': value,
+            }
+            if tlv_type == 0x0002 and len(value) >= 36:
+                tlv.update({
+                    'auth_type': int.from_bytes(value[0:2], 'big'),
+                    'key_size': int.from_bytes(value[2:4], 'big'),
+                    'key_id': int.from_bytes(value[4:8], 'big'),
+                    'key_sequence': int.from_bytes(value[8:12], 'big'),
+                    'nullpad': value[12:20],
+                    'digest': value[20:36],
+                })
+            elif tlv_type == 0x0001 and len(value) >= 8:
+                tlv.update({
+                    'k1': int(value[0]),
+                    'k2': int(value[1]),
+                    'k3': int(value[2]),
+                    'k4': int(value[3]),
+                    'k5': int(value[4]),
+                    'k6': int(value[5]),
+                    'hold_time': int.from_bytes(value[6:8], 'big'),
+                })
+            elif tlv_type == 0x0004 and len(value) >= 4:
+                tlv.update({
+                    'ios_major': int(value[0]),
+                    'ios_minor': int(value[1]),
+                    'eigrp_major': int(value[2]),
+                    'eigrp_minor': int(value[3]),
+                })
+            tlvs.append(tlv)
+            pos += tlv_len
+        info['tlvs'] = tlvs
+        return info
+
+    def _snmp_pdu_name(self, pdu) -> str:
+        name = pdu.__class__.__name__ if pdu is not None else ''
+        return {
+            'SNMPget': 'get-request',
+            'SNMPnext': 'get-next-request',
+            'SNMPresponse': 'get-response',
+            'SNMPset': 'set-request',
+            'SNMPbulk': 'get-bulk-request',
+            'SNMPinform': 'inform-request',
+            'SNMPtrapv1': 'trap',
+            'SNMPtrapv2': 'snmpv2-trap',
+            'SNMPreport': 'report',
+        }.get(name, 'snmp')
+
+    def _snmp_version_name(self, version: int) -> str:
+        return {
+            0: 'v1',
+            1: 'v2c',
+            2: 'v2u',
+            3: 'v3',
+        }.get(int(version), f'v{int(version)}')
+
+    def _snmp_payload_info(self, packet) -> dict | None:
+        if not packet.haslayer(SNMP):
+            return None
+        try:
+            snmp_layer = packet[SNMP]
+            pdu = getattr(snmp_layer, 'PDU', None)
+            request_id = int(getattr(getattr(pdu, 'id', None), 'val', 0) or 0)
+            error_status = int(getattr(getattr(pdu, 'error', None), 'val', 0) or 0)
+            error_index = int(getattr(getattr(pdu, 'error_index', None), 'val', 0) or 0)
+            community = bytes(getattr(getattr(snmp_layer, 'community', None), 'val', b'') or b'')
+            version = int(getattr(getattr(snmp_layer, 'version', None), 'val', 0) or 0)
+            varbinds = []
+            for varbind in list(getattr(pdu, 'varbindlist', []) or []):
+                oid = str(getattr(getattr(varbind, 'oid', None), 'val', '') or '')
+                value = getattr(varbind, 'value', None)
+                value_type = type(value).__name__.replace('ASN1_', '') if value is not None else ''
+                value_raw = getattr(value, 'val', None) if value is not None else None
+                varbinds.append({
+                    'oid': oid,
+                    'value_type': value_type,
+                    'value': value_raw,
+                })
+            return {
+                'version': version,
+                'version_name': self._snmp_version_name(version),
+                'community': community,
+                'pdu_name': self._snmp_pdu_name(pdu),
+                'request_id': request_id,
+                'error_status': error_status,
+                'error_index': error_index,
+                'varbinds': varbinds,
+            }
+        except Exception:
+            return None
+
+    def _imap_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
+        if sport != 143 and dport != 143:
+            return None
+        line = payload.split(b'\r\n', 1)[0]
+        if not line:
+            return None
+        if any(byte < 0x09 or (0x0D < byte < 0x20) for byte in line):
+            return None
+        line_text = line.decode(errors='ignore')
+        if not line_text.strip():
+            return None
+        if dport == 143:
+            parts = line_text.split(' ', 2)
+            if len(parts) < 1 or not parts[0]:
+                return None
+            return {
+                'kind': 'request',
+                'line': line_text,
+                'request_tag': parts[0],
+                'request_command': parts[1].lower() if len(parts) > 1 else '',
+            }
+        tagged_line = ''
+        for raw_line in payload.split(b'\r\n'):
+            candidate = raw_line.decode(errors='ignore').strip()
+            if not candidate:
+                continue
+            parts = candidate.split(' ', 2)
+            if len(parts) >= 2 and parts[0][:1].isdigit():
+                tagged_line = candidate
+                break
+        if tagged_line:
+            parts = tagged_line.split(' ', 2)
+            return {
+                'kind': 'response',
+                'line': tagged_line,
+                'response_tag': parts[0],
+                'response_status': parts[1] if len(parts) > 1 else '',
+                'response_command': parts[2].split(' ', 1)[0] if len(parts) > 2 else '',
+                'tagged_response_line': tagged_line,
+            }
+        if line_text.startswith('* OK '):
+            return {
+                'kind': 'greeting',
+                'line': line_text,
+            }
+        if line_text.startswith('* '):
+            return {
+                'kind': 'response_untagged',
+                'line': line_text,
+            }
+        parts = line_text.split(' ', 2)
+        return {
+            'kind': 'response',
+            'line': line_text,
+            'response_tag': parts[0] if parts else '',
+            'response_status': parts[1] if len(parts) > 1 else '',
+            'response_command': parts[2].split(' ', 1)[0] if len(parts) > 2 else '',
+        }
+
+    def _sip_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
+        if not payload:
+            return None
+        line = payload.split(b'\r\n', 1)[0]
+        try:
+            line_text = line.decode(errors='ignore').strip()
+        except Exception:
+            line_text = ''
+        if not line_text:
+            return None
+
+        likely_port = sport == 5060 or dport == 5060
+        request_prefixes = {'INVITE', 'ACK', 'BYE', 'CANCEL', 'REGISTER', 'OPTIONS', 'MESSAGE', 'INFO', 'PRACK', 'UPDATE', 'SUBSCRIBE', 'NOTIFY', 'REFER', 'PUBLISH'}
+        is_response = line_text.startswith('SIP/2.0 ')
+        first_token = line_text.split(' ', 1)[0].upper() if line_text else ''
+        is_request = first_token in request_prefixes and ' SIP/2.0' in line_text
+        if not likely_port and not is_response and not is_request:
+            return None
+
+        header_end = payload.find(b'\r\n\r\n')
+        header_blob = payload if header_end == -1 else payload[:header_end]
+        body = b'' if header_end == -1 else payload[header_end + 4:]
+
+        headers: dict[str, str] = {}
+        for raw_line in header_blob.split(b'\r\n')[1:]:
+            if b':' not in raw_line:
+                continue
+            name_raw, value_raw = raw_line.split(b':', 1)
+            name = name_raw.decode(errors='ignore').strip().lower()
+            value = value_raw.decode(errors='ignore').strip()
+            if name and value:
+                headers[name] = value
+
+        info: dict = {
+            'line': line_text,
+            'headers': headers,
+            'call_id': str(headers.get('call-id', '') or ''),
+            'cseq': str(headers.get('cseq', '') or ''),
+            'content_type': str(headers.get('content-type', '') or ''),
+            'body': body,
+        }
+
+        cseq_parts = str(info.get('cseq', '') or '').split(' ', 1)
+        info['cseq_method'] = cseq_parts[1].strip().upper() if len(cseq_parts) > 1 else ''
+
+        if is_response:
+            parts = line_text.split(' ', 2)
+            info['kind'] = 'response'
+            info['status_code'] = parts[1] if len(parts) > 1 else ''
+            info['status_reason'] = parts[2] if len(parts) > 2 else ''
+        elif is_request:
+            parts = line_text.split(' ', 2)
+            if len(parts) < 3:
+                return None
+            info['kind'] = 'request'
+            info['method'] = parts[0].upper()
+            info['request_uri'] = parts[1]
+            info['version'] = parts[2]
+        else:
+            return None
+
+        content_type = str(info.get('content_type', '') or '').lower()
+        has_sdp = 'application/sdp' in content_type and bool(body)
+        info['has_sdp'] = has_sdp
+        if has_sdp:
+            info['sdp_body'] = body
+        return info
+
+    def _parse_sdp_body(self, body: bytes) -> dict:
+        parsed: dict = {
+            'lines': [],
+            'session_connection': '',
+            'media': [],
+        }
+        if not body:
+            return parsed
+
+        current_connection = ''
+        for raw_line in body.split(b'\r\n'):
+            line = raw_line.decode(errors='ignore').strip()
+            if not line:
+                continue
+            parsed['lines'].append(line)
+            if line.startswith('c='):
+                parts = line[2:].split()
+                if len(parts) >= 3:
+                    current_connection = parts[2]
+                    if not parsed['session_connection']:
+                        parsed['session_connection'] = current_connection
+            elif line.startswith('m='):
+                parts = line[2:].split()
+                if len(parts) >= 3:
+                    media_type = parts[0]
+                    try:
+                        media_port = int(parts[1])
+                    except Exception:
+                        media_port = 0
+                    media_protocol = parts[2]
+                    media_formats = parts[3:] if len(parts) > 3 else []
+                    parsed['media'].append({
+                        'type': media_type,
+                        'port': media_port,
+                        'protocol': media_protocol,
+                        'formats': media_formats,
+                        'connection': current_connection or parsed['session_connection'],
+                    })
+        return parsed
+
+    def _rtp_payload_type_name(self, payload_type: int) -> str:
+        return {
+            0: 'ITU-T G.711 PCMU',
+            3: 'GSM',
+            4: 'ITU-T G.723',
+            8: 'ITU-T G.711 PCMA',
+            9: 'G722',
+            18: 'ITU-T G.729',
+        }.get(int(payload_type), f'Payload type {int(payload_type)}')
+
+    def _rtp_payload_info(self, payload: bytes, sport: int = 0, dport: int = 0) -> dict | None:
+        if len(payload) < 12:
+            return None
+        if sport in {53, 67, 68, 69, 123, 161, 162, 500, 646, 1900, 5060, 5246, 5247} or dport in {53, 67, 68, 69, 123, 161, 162, 500, 646, 1900, 5060, 5246, 5247}:
+            return None
+
+        byte0 = int(payload[0])
+        version = (byte0 >> 6) & 0x03
+        if version != 2:
+            return None
+        padding = bool((byte0 >> 5) & 0x01)
+        extension = bool((byte0 >> 4) & 0x01)
+        csrc_count = byte0 & 0x0F
+        byte1 = int(payload[1])
+        marker = bool((byte1 >> 7) & 0x01)
+        payload_type = byte1 & 0x7F
+        header_length = 12 + (csrc_count * 4)
+        if header_length > len(payload):
+            return None
+        sequence = int.from_bytes(payload[2:4], 'big')
+        timestamp = int.from_bytes(payload[4:8], 'big')
+        ssrc = int.from_bytes(payload[8:12], 'big')
+        return {
+            'version': version,
+            'padding': padding,
+            'extension': extension,
+            'csrc_count': csrc_count,
+            'marker': marker,
+            'payload_type': payload_type,
+            'payload_type_name': self._rtp_payload_type_name(payload_type),
+            'sequence': sequence,
+            'extended_sequence': 65536 + sequence,
+            'timestamp': timestamp,
+            'extended_timestamp': 4294967296 + timestamp,
+            'ssrc': ssrc,
+            'header_length': header_length,
+            'payload': payload[header_length:],
+        }
 
     def _is_cdp_packet(self, packet) -> bool:
         oui, code = self._snap_oui_code(packet)
@@ -3603,6 +4148,20 @@ class PacketParser:
         fragment_override = self._fragment_override_protocol(packet, metadata)
         if fragment_override:
             return fragment_override
+        pppoe_info = self._pppoe_payload_info(packet)
+        if pppoe_info is not None:
+            metadata['pppoe'] = pppoe_info
+            if bool(pppoe_info.get('is_discovery', False)):
+                return 'PPPoED'
+            ppp_protocol = int(pppoe_info.get('ppp_protocol', 0) or 0)
+            if ppp_protocol == 0xC021:
+                return 'PPP LCP'
+            if ppp_protocol == 0x8021:
+                return 'PPP IPCP'
+            if ppp_protocol == 0x8057:
+                return 'PPP IPV6CP'
+            if ppp_protocol != 0x0021:
+                return 'PPP'
         eth_type = self._ether_type(packet)
         effective_ip = self._effective_ip_layer(packet)
         effective_tcp = self._effective_tcp_layer(packet, effective_ip)
@@ -3646,6 +4205,15 @@ class PacketParser:
                 return 'L2TPv3'
             if ip_proto == 89:
                 return 'OSPF'
+            eigrp_info = self._eigrp_payload_info(packet, effective_ip)
+            if eigrp_info is not None:
+                metadata['eigrp'] = eigrp_info
+                return 'EIGRP'
+        elif packet.haslayer(IPv6):
+            eigrp_info = self._eigrp_payload_info(packet, packet[IPv6])
+            if eigrp_info is not None:
+                metadata['eigrp'] = eigrp_info
+                return 'EIGRP'
         if self._is_ospf_ipv6_packet(packet):
             return 'OSPF'
         if self._is_ripng_packet(packet):
@@ -3701,6 +4269,21 @@ class PacketParser:
                     return 'CAPWAP-Data'
             if (sport == 646 or dport == 646) and self._is_ldp_payload(self._payload_bytes(packet)):
                 return 'LDP'
+            sip_info = self._sip_payload_info(udp_payload, sport, dport)
+            if sip_info is not None:
+                metadata['sip'] = sip_info
+                if bool(sip_info.get('has_sdp', False)):
+                    metadata['sdp'] = self._parse_sdp_body(bytes(sip_info.get('sdp_body', b'') or b''))
+                    return 'SIP/SDP'
+                return 'SIP'
+            rtp_info = self._rtp_payload_info(udp_payload, sport, dport)
+            if rtp_info is not None:
+                metadata['rtp'] = rtp_info
+                return 'RTP'
+            snmp_info = self._snmp_payload_info(packet)
+            if snmp_info is not None:
+                metadata['snmp'] = snmp_info
+                return 'SNMP'
         if effective_tcp is not None:
             sport = int(getattr(effective_tcp, 'sport', 0) or 0)
             dport = int(getattr(effective_tcp, 'dport', 0) or 0)
@@ -3718,6 +4301,11 @@ class PacketParser:
             if not bool(metadata.get('tcp_is_retransmission', False)) and (sport == 179 or dport == 179):
                 if self._is_bgp_payload(self._payload_bytes(packet)):
                     return 'BGP'
+            if not bool(metadata.get('tcp_is_retransmission', False)) and not bool(metadata.get('tcp_is_duplicate_ack', False)):
+                imap_info = self._imap_payload_info(self._payload_bytes(packet), sport, dport)
+                if imap_info is not None:
+                    metadata['imap'] = imap_info
+                    return 'IMAP'
             if (
                 not bool(metadata.get('tcp_is_retransmission', False))
                 and not bool(metadata.get('tcp_is_duplicate_ack', False))
@@ -4106,6 +4694,8 @@ class PacketParser:
 
     def _is_mdns_transport(self, packet) -> bool:
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         udp_layer = self._effective_udp_layer(packet, effective_ip)
         if udp_layer is None:
             return False
@@ -4320,7 +4910,7 @@ class PacketParser:
             return 'response'
         line = payload.split(b'\r\n', 1)[0]
         verb = line.split(b' ', 1)[0].upper()
-        if verb in {b'HELO', b'EHLO', b'MAIL', b'RCPT', b'DATA', b'QUIT', b'RSET', b'NOOP', b'VRFY', b'EXPN', b'HELP'}:
+        if verb in {b'HELO', b'EHLO', b'MAIL', b'RCPT', b'DATA', b'QUIT', b'RSET', b'NOOP', b'VRFY', b'EXPN', b'HELP', b'STARTTLS', b'AUTH'}:
             return 'command'
         return None
 
@@ -4342,6 +4932,37 @@ class PacketParser:
             return code, param
         except Exception:
             return '', ''
+
+    def _smtp_response_lines(self, payload: bytes) -> list[str]:
+        lines = []
+        for raw_line in payload.split(b'\r\n'):
+            try:
+                text = raw_line.decode(errors='ignore').strip()
+            except Exception:
+                text = ''
+            if text:
+                lines.append(text)
+        return lines
+
+    def _smtp_response_info_text(self, payload: bytes) -> str:
+        lines = self._smtp_response_lines(payload)
+        if not lines:
+            return 'Simple Mail Transfer Protocol'
+        first_line = lines[0]
+        if len(first_line) < 3 or not first_line[:3].isdigit():
+            return f'S: {first_line}'
+
+        code = first_line[:3]
+        extras = []
+        for line in lines[1:]:
+            if line.startswith(code) and len(line) > 4:
+                extras.append(line[4:].strip())
+            else:
+                extras.append(line.strip())
+        extras = [item for item in extras if item]
+        if not extras:
+            return f'S: {first_line}'
+        return f'S: {first_line} | ' + ' | '.join(extras)
 
     def _smtp_parse_imf(self, payload: bytes) -> dict[str, object]:
         parsed: dict[str, object] = {
@@ -4402,6 +5023,8 @@ class PacketParser:
     def _update_tls_stream_metadata(self, packet, metadata: dict, frame_number: int) -> None:
         """Buffer incomplete TLS records across TCP segments and reassemble."""
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         tcp_layer = self._effective_tcp_layer(packet, effective_ip)
         if effective_ip is None or tcp_layer is None:
             return
@@ -4524,6 +5147,8 @@ class PacketParser:
 
     def _update_http_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         tcp_layer = self._effective_tcp_layer(packet, effective_ip)
         if effective_ip is None or tcp_layer is None:
             return
@@ -4634,6 +5259,8 @@ class PacketParser:
 
     def _update_smtp_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         tcp_layer = self._effective_tcp_layer(packet, effective_ip)
         if effective_ip is None or tcp_layer is None:
             return
@@ -5101,6 +5728,263 @@ class PacketParser:
         if not pending:
             self.smtp_request_pending.pop(stream_key, None)
 
+    def _update_imap_metadata(self, record: PacketRecord) -> None:
+        if str(getattr(record, 'protocol', '') or '').upper() != 'IMAP':
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        metadata = record.metadata
+        imap_info = metadata.get('imap') if isinstance(metadata.get('imap'), dict) else self._imap_payload_info(
+            self._payload_bytes(packet),
+            int(getattr(tcp_layer, 'sport', 0) or 0),
+            int(getattr(tcp_layer, 'dport', 0) or 0),
+        )
+        if not isinstance(imap_info, dict):
+            return
+
+        metadata['imap'] = imap_info
+        stream_key = self._canonical_transport_key(
+            str(effective_ip.src),
+            int(getattr(tcp_layer, 'sport', 0) or 0),
+            str(effective_ip.dst),
+            int(getattr(tcp_layer, 'dport', 0) or 0),
+            'TCP',
+        )
+        kind = str(imap_info.get('kind', '') or '')
+        if kind == 'request':
+            metadata['imap_request_tag'] = str(imap_info.get('request_tag', '') or '')
+            self.imap_request_pending.setdefault(stream_key, []).append(record)
+            return
+
+        response_tag = str(imap_info.get('response_tag', '') or '')
+        if kind == 'response_untagged':
+            response_tag = str(imap_info.get('tagged_response_tag', '') or '')
+        if kind not in {'response', 'response_untagged'}:
+            return
+
+        tagged_response_line = str(imap_info.get('tagged_response_line', '') or '')
+        if tagged_response_line:
+            metadata['imap_tagged_response_line'] = tagged_response_line
+
+        if not response_tag[:1].isdigit():
+            for raw_line in reversed(self._payload_bytes(packet).split(b'\r\n')):
+                line_text = raw_line.decode(errors='ignore').strip()
+                if not line_text:
+                    continue
+                parts = line_text.split(' ', 2)
+                if len(parts) >= 2 and parts[0][:1].isdigit():
+                    response_tag = parts[0]
+                    metadata['imap_tagged_response_line'] = line_text
+                    break
+        if not response_tag[:1].isdigit():
+            return
+
+        pending = self.imap_request_pending.get(stream_key)
+        if not pending:
+            return
+
+        match_index = None
+        for index, request_record in enumerate(pending):
+            if str(request_record.metadata.get('imap_request_tag', '') or '') == response_tag:
+                match_index = index
+                break
+        if match_index is None:
+            return
+
+        request_record = pending.pop(match_index)
+        request_record.metadata['imap_response_frame'] = int(record.number)
+        record.metadata['imap_request_frame'] = int(request_record.number)
+        response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
+        record.metadata['imap_time_since_request_ms'] = max(0.0, float(response_delta))
+        if not pending:
+            self.imap_request_pending.pop(stream_key, None)
+
+    def _register_sdp_media(self, call_id: str, setup_frame: int, sdp_info: dict) -> None:
+        if not call_id or not isinstance(sdp_info, dict):
+            return
+        state = self.sdp_media_by_call.setdefault(call_id, {'frames': [], 'endpoints': set()})
+        frames = state.get('frames') if isinstance(state.get('frames'), list) else []
+        if setup_frame not in frames:
+            frames.append(setup_frame)
+        state['frames'] = frames
+
+        endpoints = state.get('endpoints')
+        if not isinstance(endpoints, set):
+            endpoints = set()
+        media_list = list(sdp_info.get('media', []) or [])
+        session_connection = str(sdp_info.get('session_connection', '') or '')
+        for media in media_list:
+            if not isinstance(media, dict):
+                continue
+            ip_addr = str(media.get('connection', '') or session_connection)
+            try:
+                port = int(media.get('port', 0) or 0)
+            except Exception:
+                port = 0
+            if ip_addr and port > 0:
+                endpoints.add((ip_addr, port))
+        state['endpoints'] = endpoints
+
+    def _update_sip_metadata(self, record: PacketRecord) -> None:
+        protocol = str(getattr(record, 'protocol', '') or '').upper()
+        if protocol not in {'SIP', 'SIP/SDP'}:
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        metadata = record.metadata
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        udp_layer = self._effective_udp_layer(packet, effective_ip)
+        if effective_ip is None or udp_layer is None:
+            return
+
+        sip_info = metadata.get('sip') if isinstance(metadata.get('sip'), dict) else self._sip_payload_info(
+            bytes(getattr(udp_layer, 'payload', b'')),
+            int(getattr(udp_layer, 'sport', 0) or 0),
+            int(getattr(udp_layer, 'dport', 0) or 0),
+        )
+        if not isinstance(sip_info, dict):
+            return
+
+        metadata['sip'] = sip_info
+        call_id = str(sip_info.get('call_id', '') or '')
+        cseq_method = str(sip_info.get('cseq_method', '') or '')
+        kind = str(sip_info.get('kind', '') or '')
+        stream_key = self._canonical_transport_key(
+            str(effective_ip.src),
+            int(getattr(udp_layer, 'sport', 0) or 0),
+            str(effective_ip.dst),
+            int(getattr(udp_layer, 'dport', 0) or 0),
+            'UDP',
+        )
+        pending_key = (stream_key, call_id, cseq_method)
+        if kind == 'request':
+            self.sip_request_pending.setdefault(pending_key, []).append(record)
+        elif kind == 'response':
+            pending = self.sip_request_pending.get(pending_key)
+            if pending:
+                request_record = pending[0]
+                request_record.metadata['sip_response_frame'] = int(record.number)
+                record.metadata['sip_request_frame'] = int(request_record.number)
+                response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
+                record.metadata['sip_response_time_ms'] = max(0.0, float(response_delta))
+                try:
+                    status_code = int(str(sip_info.get('status_code', '0') or '0'))
+                except Exception:
+                    status_code = 0
+                if status_code >= 200:
+                    pending.pop(0)
+                    if not pending:
+                        self.sip_request_pending.pop(pending_key, None)
+
+        if bool(sip_info.get('has_sdp', False)):
+            sdp_info = self._parse_sdp_body(bytes(sip_info.get('sdp_body', b'') or b''))
+            metadata['sdp'] = sdp_info
+            if call_id:
+                self._register_sdp_media(call_id, int(record.number), sdp_info)
+
+    def _update_rtp_metadata(self, record: PacketRecord) -> None:
+        if str(getattr(record, 'protocol', '') or '').upper() != 'RTP':
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        metadata = record.metadata
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        udp_layer = self._effective_udp_layer(packet, effective_ip)
+        if effective_ip is None or udp_layer is None:
+            return
+
+        rtp_info = metadata.get('rtp') if isinstance(metadata.get('rtp'), dict) else self._rtp_payload_info(
+            bytes(getattr(udp_layer, 'payload', b'')),
+            int(getattr(udp_layer, 'sport', 0) or 0),
+            int(getattr(udp_layer, 'dport', 0) or 0),
+        )
+        if not isinstance(rtp_info, dict):
+            return
+
+        metadata['rtp'] = rtp_info
+        endpoint_a = (str(effective_ip.src), int(getattr(udp_layer, 'sport', 0) or 0))
+        endpoint_b = (str(effective_ip.dst), int(getattr(udp_layer, 'dport', 0) or 0))
+        for call_id, state in self.sdp_media_by_call.items():
+            endpoints = state.get('endpoints') if isinstance(state, dict) else None
+            frames = state.get('frames') if isinstance(state, dict) else None
+            if not isinstance(endpoints, set) or not isinstance(frames, list) or not frames:
+                continue
+            if endpoint_a in endpoints and endpoint_b in endpoints:
+                metadata['rtp_setup_frame'] = int(min(frames))
+                metadata['rtp_setup_method'] = 'SDP'
+                metadata['rtp_setup_call_id'] = str(call_id)
+                break
+
+    def _update_snmp_metadata(self, record: PacketRecord) -> None:
+        if str(getattr(record, 'protocol', '') or '').upper() != 'SNMP':
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        metadata = record.metadata
+        snmp_info = metadata.get('snmp') if isinstance(metadata.get('snmp'), dict) else self._snmp_payload_info(packet)
+        if not isinstance(snmp_info, dict):
+            return
+
+        metadata['snmp'] = snmp_info
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        udp_layer = self._effective_udp_layer(packet, effective_ip)
+        if effective_ip is None or udp_layer is None:
+            return
+
+        stream_key = self._canonical_transport_key(
+            str(effective_ip.src),
+            int(getattr(udp_layer, 'sport', 0) or 0),
+            str(effective_ip.dst),
+            int(getattr(udp_layer, 'dport', 0) or 0),
+            'UDP',
+        )
+        request_id = int(snmp_info.get('request_id', 0) or 0)
+        pending_key = (stream_key, request_id)
+        pdu_name = str(snmp_info.get('pdu_name', '') or '')
+        if pdu_name in {'get-request', 'get-next-request', 'set-request', 'get-bulk-request', 'inform-request'}:
+            self.snmp_request_pending.setdefault(pending_key, []).append(record)
+            return
+
+        if pdu_name != 'get-response':
+            return
+
+        pending = self.snmp_request_pending.get(pending_key)
+        if not pending:
+            return
+
+        request_record = pending.pop(0)
+        request_record.metadata['snmp_response_frame'] = int(record.number)
+        record.metadata['snmp_request_frame'] = int(request_record.number)
+        response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
+        record.metadata['snmp_time_since_request_ms'] = max(0.0, float(response_delta))
+        if not pending:
+            self.snmp_request_pending.pop(pending_key, None)
+
     def _update_ntp_metadata(self, record: PacketRecord) -> None:
         protocol = str(getattr(record, 'protocol', '') or '').upper()
         if protocol != 'NTP':
@@ -5115,6 +5999,8 @@ class PacketParser:
             return
 
         effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
         udp_layer = self._effective_udp_layer(packet, effective_ip)
         if udp_layer is None:
             return
@@ -5203,6 +6089,14 @@ class PacketParser:
                 return 'Layer 2 Tunneling Protocol version 3'
             if protocol == 'LOOP':
                 return self._loop_function_name(self._payload_bytes(packet))
+            if protocol == 'EIGRP':
+                eigrp_info = metadata.get('eigrp') if isinstance(metadata.get('eigrp'), dict) else self._eigrp_payload_info(packet)
+                if not isinstance(eigrp_info, dict):
+                    return 'Cisco EIGRP'
+                opcode = int(eigrp_info.get('opcode', 0) or 0)
+                if opcode == 5 and int(eigrp_info.get('acknowledge', 0) or 0) > 0:
+                    return 'Hello (Ack)'
+                return self._eigrp_opcode_name(opcode)
             if protocol == 'CDP':
                 device_id, port_id = self._cdp_device_and_port(self._cdp_payload(packet))
                 if device_id and port_id:
@@ -5250,6 +6144,31 @@ class PacketParser:
                     except Exception:
                         pass
                 return 'Encapsulating Security Payload'
+            if protocol == 'PPPoED':
+                pppoe_info = metadata.get('pppoe') if isinstance(metadata.get('pppoe'), dict) else self._pppoe_payload_info(packet)
+                if not isinstance(pppoe_info, dict):
+                    return 'PPP-over-Ethernet Discovery'
+                code = int(pppoe_info.get('code', 0) or 0)
+                code_name = self._pppoe_discovery_code_name(code)
+                if code == 0x07:
+                    for tag in pppoe_info.get('tags', []) or []:
+                        if int(tag.get('type', 0) or 0) == 0x0102:
+                            try:
+                                ac_name = bytes(tag.get('value', b'') or b'').decode(errors='ignore')
+                            except Exception:
+                                ac_name = ''
+                            if ac_name:
+                                return f"{code_name} AC-Name='{ac_name}'"
+                return code_name
+            if protocol in {'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP'}:
+                pppoe_info = metadata.get('pppoe') if isinstance(metadata.get('pppoe'), dict) else self._pppoe_payload_info(packet)
+                if not isinstance(pppoe_info, dict):
+                    return 'Point-to-Point Protocol'
+                ppp_protocol = int(pppoe_info.get('ppp_protocol', 0) or 0)
+                code = int(pppoe_info.get('ppp_control_code', 0) or 0)
+                if ppp_protocol in {0xC021, 0x8021, 0x8057} and code > 0:
+                    return self._ppp_control_code_name(ppp_protocol, code)
+                return 'Point-to-Point Protocol'
             if protocol == 'TFTP':
                 kind = str(metadata.get('tftp_kind', '') or '')
                 if kind == 'WRQ':
@@ -5267,6 +6186,50 @@ class PacketParser:
                 payload = self._payload_bytes(packet)
                 first_line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
                 return f'{first_line} ' if first_line else 'Simple Service Discovery Protocol'
+            if protocol == 'SNMP':
+                snmp_info = metadata.get('snmp') if isinstance(metadata.get('snmp'), dict) else self._snmp_payload_info(packet)
+                if not isinstance(snmp_info, dict):
+                    return 'Simple Network Management Protocol'
+                first_oid = ''
+                varbinds = list(snmp_info.get('varbinds', []) or [])
+                if varbinds:
+                    first_oid = str(varbinds[0].get('oid', '') or '')
+                pdu_name = str(snmp_info.get('pdu_name', '') or 'snmp')
+                return f'{pdu_name} {first_oid}'.strip()
+            if protocol in {'SIP', 'SIP/SDP'}:
+                effective_ip = self._effective_ip_layer(packet)
+                udp = self._effective_udp_layer(packet, effective_ip)
+                sport = int(getattr(udp, 'sport', 0) or 0) if udp is not None else 0
+                dport = int(getattr(udp, 'dport', 0) or 0) if udp is not None else 0
+                sip_info = metadata.get('sip') if isinstance(metadata.get('sip'), dict) else self._sip_payload_info(self._payload_bytes(packet), sport, dport)
+                if not isinstance(sip_info, dict):
+                    return 'Session Initiation Protocol'
+                kind = str(sip_info.get('kind', '') or '')
+                if kind == 'request':
+                    method = str(sip_info.get('method', '') or '')
+                    uri = str(sip_info.get('request_uri', '') or '')
+                    return f'Request: {method} {uri} | '
+                status_code = str(sip_info.get('status_code', '') or '')
+                status_reason = str(sip_info.get('status_reason', '') or '')
+                cseq_method = str(sip_info.get('cseq_method', '') or '')
+                status_text = f'Status: {status_code} {status_reason}'.strip()
+                if status_code == '200' and cseq_method:
+                    status_text += f' ({cseq_method})'
+                return f'{status_text} | '
+            if protocol == 'RTP':
+                effective_ip = self._effective_ip_layer(packet)
+                udp = self._effective_udp_layer(packet, effective_ip)
+                sport = int(getattr(udp, 'sport', 0) or 0) if udp is not None else 0
+                dport = int(getattr(udp, 'dport', 0) or 0) if udp is not None else 0
+                rtp_info = metadata.get('rtp') if isinstance(metadata.get('rtp'), dict) else self._rtp_payload_info(self._payload_bytes(packet), sport, dport)
+                if not isinstance(rtp_info, dict):
+                    return 'Real-Time Transport Protocol'
+                return (
+                    f'PT={str(rtp_info.get("payload_type_name", "") or "")}, '
+                    f'SSRC=0x{int(rtp_info.get("ssrc", 0) or 0):08X}, '
+                    f'Seq={int(rtp_info.get("sequence", 0) or 0)}, '
+                    f'Time={int(rtp_info.get("timestamp", 0) or 0)}'
+                )
             if protocol == 'UDLD':
                 return self._udld_info_text(packet)
             if protocol == 'SSHv2':
@@ -5277,6 +6240,21 @@ class PacketParser:
                 return self._lldp_info_text(packet)
             if protocol == 'HSRPv2':
                 return self._hsrpv2_info_text(packet)
+            if protocol == 'IMAP':
+                effective_ip = self._effective_ip_layer(packet)
+                tcp = self._effective_tcp_layer(packet, effective_ip)
+                sport = int(getattr(tcp, 'sport', 0) or 0) if tcp is not None else 0
+                dport = int(getattr(tcp, 'dport', 0) or 0) if tcp is not None else 0
+                imap_info = metadata.get('imap') if isinstance(metadata.get('imap'), dict) else self._imap_payload_info(self._payload_bytes(packet), sport, dport)
+                if not isinstance(imap_info, dict):
+                    return 'Internet Message Access Protocol'
+                line = str(imap_info.get('line', '') or '').strip()
+                if not line:
+                    return 'Internet Message Access Protocol'
+                if str(imap_info.get('kind', '') or '') == 'request':
+                    return f'Request: {line}'
+                prefix = '[TCP Previous segment not captured] ' if bool(metadata.get('tcp_previous_segment_not_captured', False)) else ''
+                return f'{prefix}Response: {line}'
             if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
                 return self._ip_fragment_info_text(packet, metadata)
             if protocol == 'CAPWAP-Control':
@@ -5463,7 +6441,7 @@ class PacketParser:
                     return f'C: DATA fragment, {fragment_len} bytes'
                 line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
                 if kind == 'response':
-                    return f'S: {line}'
+                    return self._smtp_response_info_text(payload)
                 if kind == 'command':
                     return f'C: {line}'
                 return 'Simple Mail Transfer Protocol'

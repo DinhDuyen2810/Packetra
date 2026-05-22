@@ -585,6 +585,50 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 sections.append(_bytes_data_section(loop_payload[loop_header_len:], offset + loop_header_len))
             payload_handled = True
 
+        pppoe_meta = metadata.get('pppoe', {}) if isinstance(metadata.get('pppoe'), dict) else {}
+        should_render_pppoe = (
+            bool(pppoe_meta)
+            or getattr(record, 'protocol', '') in {'PPPoED', 'PPP', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'SIP', 'SIP/SDP', 'RTP'}
+        )
+        if should_render_pppoe:
+            pppoe_payload = bytes(packet)[offset:]
+            if len(pppoe_payload) >= 6:
+                pppoe_len = int.from_bytes(pppoe_payload[4:6], 'big')
+                pppoe_total_len = min(len(pppoe_payload), 6 + pppoe_len)
+            else:
+                pppoe_total_len = len(pppoe_payload)
+
+            sections.append(_pppoe_section(pppoe_payload, offset))
+
+            if len(pppoe_payload) >= 6:
+                pppoe_code = int(pppoe_payload[1])
+                if pppoe_code == 0x00:
+                    ppp_payload = pppoe_payload[6:pppoe_total_len]
+                    ppp_offset = offset + 6
+                    if len(ppp_payload) >= 2:
+                        sections.append(_ppp_section(ppp_payload, ppp_offset))
+                        ppp_proto = int.from_bytes(ppp_payload[:2], 'big')
+                        ppp_control_payload = ppp_payload[2:]
+                        if ppp_proto == 0xC021:
+                            sections.append(_ppp_lcp_section(ppp_control_payload, ppp_offset + 2))
+                        elif ppp_proto == 0x8021:
+                            sections.append(_ppp_ipcp_section(ppp_control_payload, ppp_offset + 2))
+                        elif ppp_proto == 0x8057:
+                            sections.append(_ppp_ipv6cp_section(ppp_control_payload, ppp_offset + 2))
+
+                        # For IP-over-PPP packets, consume only PPPoE+PPP headers (8 bytes)
+                        # so IPv4/UDP/SIP/RTP offsets remain correct.
+                        if ppp_proto == 0x0021:
+                            offset += 8
+                        else:
+                            payload_handled = True
+                            raw_payload_consumed = True
+                            offset += pppoe_total_len
+                else:
+                    payload_handled = True
+                    raw_payload_consumed = True
+                    offset += pppoe_total_len
+
     if packet.haslayer(ARP):
 
         sections.append(
@@ -758,6 +802,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             if getattr(record, 'protocol', '') == 'SMTP/IMF':
                 sections.append(_imf_section(record, offset))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'IMAP' and tcp_payload:
+            sections.append(_imap_section(tcp_payload, offset, record))
+            payload_handled = True
         elif getattr(record, 'protocol', '') == 'SSHv2' and tcp_payload:
             sections.append(_ssh_section(tcp_payload, offset, record))
             payload_handled = True
@@ -824,6 +871,18 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             ssdp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_ssdp_section(ssdp_payload, offset, record))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'SNMP':
+            snmp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_snmp_section(snmp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') in {'SIP', 'SIP/SDP'}:
+            sip_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_sip_section(sip_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'RTP':
+            rtp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_rtp_section(rtp_payload, offset, record))
+            payload_handled = True
         elif getattr(record, 'protocol', '') == 'ISAKMP':
             isakmp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_isakmp_section(isakmp_payload, offset))
@@ -834,6 +893,11 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             payload_handled = True
 
     if effective_ip_layer is not None and not parsed_mpls_inner_ip:
+        if getattr(record, 'protocol', '') == 'EIGRP':
+            eigrp_payload = bytes(metadata.get('eigrp', {}).get('payload', b'') or b'')
+            if eigrp_payload:
+                sections.append(_eigrp_section(eigrp_payload, offset, record))
+                payload_handled = True
         try:
             ip_proto = int(getattr(effective_ip_layer, 'proto', 0) or 0)
         except Exception:
@@ -851,6 +915,12 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_l2tpv3_section(l2tp_payload, offset))
             if len(l2tp_payload) > 4 and not _is_l2tpv3_control_payload(l2tp_payload):
                 sections.append(_bytes_data_section(l2tp_payload[4:], offset + 4))
+            payload_handled = True
+
+    if getattr(record, 'protocol', '') == 'EIGRP' and not payload_handled:
+        eigrp_payload = bytes(metadata.get('eigrp', {}).get('payload', b'') or b'')
+        if eigrp_payload:
+            sections.append(_eigrp_section(eigrp_payload, offset, record))
             payload_handled = True
 
     if packet.haslayer(ICMP):
@@ -1195,6 +1265,11 @@ def _frame_section(record) -> Dict[str, Any]:
             protocol_string = 'eth:ethertype:ip:udp:ldp'
     elif protocol == 'BGP':
         protocol_string = 'eth:ethertype:mpls:tcp:bgp' if eth_type == 0x8847 else 'eth:ethertype:ip:tcp:bgp'
+    elif protocol == 'EIGRP':
+        if eth_type == 0x8100:
+            protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:eigrp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:eigrp'
+        else:
+            protocol_string = 'eth:ethertype:ipv6:eigrp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:eigrp'
     elif protocol in {'L2TPv3', 'L2TPV3'}:
         if bool(metadata.get('l2tpv3_is_control', False)):
             protocol_string = 'eth:ethertype:mpls:l2tp'
@@ -1228,6 +1303,16 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:lldp'
     elif protocol == 'HSRPv2':
         protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:udp:hsrp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:udp:hsrp'
+    elif protocol == 'PPPoED':
+        protocol_string = 'eth:ethertype:vlan:ethertype:pppoed' if eth_type == 0x8100 else 'eth:ethertype:pppoed'
+    elif protocol == 'PPP':
+        protocol_string = 'eth:ethertype:vlan:ethertype:pppoes:ppp' if eth_type == 0x8100 else 'eth:ethertype:pppoes:ppp'
+    elif protocol == 'PPP LCP':
+        protocol_string = 'eth:ethertype:vlan:ethertype:pppoes:ppp:lcp' if eth_type == 0x8100 else 'eth:ethertype:pppoes:ppp:lcp'
+    elif protocol == 'PPP IPCP':
+        protocol_string = 'eth:ethertype:vlan:ethertype:pppoes:ppp:ipcp' if eth_type == 0x8100 else 'eth:ethertype:pppoes:ppp:ipcp'
+    elif protocol == 'PPP IPV6CP':
+        protocol_string = 'eth:ethertype:vlan:ethertype:pppoes:ppp:ipv6cp' if eth_type == 0x8100 else 'eth:ethertype:pppoes:ppp:ipv6cp'
     elif protocol == 'CDP':
         protocol_string = 'eth:llc:cdp'
     elif protocol == 'CAPWAP-Control':
@@ -1245,13 +1330,49 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ipv6:ipv6.hopopts:icmpv6' if has_hopopts else 'eth:ethertype:ipv6:icmpv6'
     elif protocol == 'HTTP':
         protocol_string = 'eth:ethertype:ip:tcp:http:data-text-lines' if bool(metadata.get('http_has_line_based_text', False)) else 'eth:ethertype:ip:tcp:http'
-    elif protocol == 'SMTP':
-        if str(metadata.get('smtp_kind', '') or '') == 'data':
-            protocol_string = 'eth:ethertype:ip:tcp:smtp:data-text-lines'
+    elif protocol == 'IMAP':
+        if eth_type == 0x8100:
+            protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:imap' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:imap'
         else:
-            protocol_string = 'eth:ethertype:ip:tcp:smtp'
+            protocol_string = 'eth:ethertype:ipv6:tcp:imap' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:imap'
+    elif protocol == 'SMTP':
+        transport_prefix = 'eth:ethertype:vlan:ethertype:ipv6:tcp' if eth_type == 0x8100 and bool(metadata.get('is_ipv6', False)) else (
+            'eth:ethertype:vlan:ethertype:ip:tcp' if eth_type == 0x8100 else (
+                'eth:ethertype:ipv6:tcp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp'
+            )
+        )
+        if str(metadata.get('smtp_kind', '') or '') == 'data':
+            protocol_string = f'{transport_prefix}:smtp:data-text-lines'
+        else:
+            protocol_string = f'{transport_prefix}:smtp'
     elif protocol == 'SMTP/IMF':
-        protocol_string = 'eth:ethertype:ip:tcp:smtp:imf'
+        if eth_type == 0x8100:
+            protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:smtp:imf' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:smtp:imf'
+        else:
+            protocol_string = 'eth:ethertype:ipv6:tcp:smtp:imf' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:smtp:imf'
+    elif protocol == 'SNMP':
+        if eth_type == 0x8100:
+            protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:udp:snmp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:udp:snmp'
+        else:
+            protocol_string = 'eth:ethertype:ipv6:udp:snmp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:udp:snmp'
+    elif protocol in {'SIP', 'SIP/SDP'}:
+        has_pppoe = isinstance(metadata.get('pppoe'), dict)
+        if has_pppoe:
+            protocol_string = 'eth:ethertype:vlan:ethertype:pppoes:ppp:ip:udp:sip'
+        elif bool(metadata.get('is_ipv6', False)):
+            protocol_string = 'eth:ethertype:ipv6:udp:sip'
+        else:
+            protocol_string = 'eth:ethertype:ip:udp:sip'
+        if protocol == 'SIP/SDP':
+            protocol_string += ':sdp'
+    elif protocol == 'RTP':
+        has_pppoe = isinstance(metadata.get('pppoe'), dict)
+        if has_pppoe:
+            protocol_string = 'eth:ethertype:vlan:ethertype:pppoes:ppp:ip:udp:rtp'
+        elif bool(metadata.get('is_ipv6', False)):
+            protocol_string = 'eth:ethertype:ipv6:udp:rtp'
+        else:
+            protocol_string = 'eth:ethertype:ip:udp:rtp'
     elif protocol == 'TCP':
         if eth_type == 0x8847:
             protocol_string = 'eth:ethertype:mpls:tcp'
@@ -1274,7 +1395,7 @@ def _frame_section(record) -> Dict[str, Any]:
     ):
         coloring_name = 'HTTP'
         coloring_string = 'http || tcp.port == 80 || http2'
-    elif protocol in {'SMTP', 'SMTP/IMF'}:
+    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP'}:
         coloring_name = 'TCP'
         coloring_string = 'tcp'
     elif protocol == 'LDP':
@@ -1290,10 +1411,10 @@ def _frame_section(record) -> Dict[str, Any]:
     elif protocol == 'DHCPv6':
         coloring_name = 'UDP'
         coloring_string = 'udp'
-    elif protocol in {'OSPF', 'CDP', 'BGP', 'HSRPv2'}:
+    elif protocol in {'OSPF', 'CDP', 'BGP', 'HSRPv2', 'EIGRP'}:
         coloring_name = 'Routing'
         coloring_string = 'hsrp || eigrp || ospf || bgp || cdp || vrrp || carp || gvrp || igmp || ismp'
-    elif protocol in {'RIPng', 'RIPv2', 'Syslog', 'NTP'}:
+    elif protocol in {'RIPng', 'RIPv2', 'Syslog', 'NTP', 'SNMP', 'SIP', 'SIP/SDP', 'RTP'}:
         coloring_name = 'UDP'
         coloring_string = 'udp'
     elif protocol in {'STP', 'LLDP', 'UDLD', 'LACP', 'VTP', 'DTP', '0x6002'}:
@@ -5444,6 +5565,1087 @@ def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
     }
 
 
+def _pppoe_code_name(code: int, discovery: bool) -> str:
+    if not discovery:
+        return 'Session Data' if int(code) == 0x00 else f'Code 0x{int(code):02x}'
+    return {
+        0x09: 'Active Discovery Initiation (PADI)',
+        0x07: 'Active Discovery Offer (PADO)',
+        0x19: 'Active Discovery Request (PADR)',
+        0x65: 'Active Discovery Session-confirmation (PADS)',
+        0xA7: 'Active Discovery Terminate (PADT)',
+    }.get(int(code), f'Code 0x{int(code):02x}')
+
+
+def _ppp_protocol_name(protocol: int) -> str:
+    return {
+        0xC021: 'Link Control Protocol',
+        0x8021: 'Internet Protocol Control Protocol',
+        0x8057: 'IPv6 Control Protocol',
+    }.get(int(protocol), f'0x{int(protocol):04x}')
+
+
+def _ppp_control_code_name(code: int) -> str:
+    return {
+        1: 'Configuration Request',
+        2: 'Configuration Ack',
+        3: 'Configuration Nak',
+        4: 'Configuration Reject',
+        5: 'Terminate Request',
+        6: 'Terminate Ack',
+        7: 'Code Reject',
+        8: 'Protocol Reject',
+        9: 'Echo Request',
+        10: 'Echo Reply',
+        11: 'Discard Request',
+    }.get(int(code), f'Code {int(code)}')
+
+
+def _pppoe_tag_name(tag_type: int) -> str:
+    return {
+        0x0101: 'Service-Name',
+        0x0102: 'AC-Name',
+        0x0103: 'Host-Uniq',
+        0x0104: 'AC-Cookie',
+    }.get(int(tag_type), f'Tag 0x{int(tag_type):04x}')
+
+
+def _pppoe_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    if len(payload) < 6:
+        return {
+            'title': 'PPP-over-Ethernet',
+            'offset': offset,
+            'length': len(payload),
+            'children': [],
+        }
+
+    version_type = int(payload[0])
+    version = (version_type >> 4) & 0x0F
+    pppoe_type = version_type & 0x0F
+    code = int(payload[1])
+    session_id = int.from_bytes(payload[2:4], 'big')
+    payload_length = int.from_bytes(payload[4:6], 'big')
+    total_len = min(len(payload), 6 + payload_length)
+    pppoe_payload = payload[6:total_len]
+    discovery = code != 0x00
+
+    code_name = _pppoe_code_name(code, discovery)
+    children: List[Dict[str, Any]] = [
+        {'title': f'{version:04b} .... = Version: {version}', 'offset': offset, 'length': 1},
+        {'title': f'.... {pppoe_type:04b} = Type: {pppoe_type}', 'offset': offset, 'length': 1},
+        {'title': f'Code: {code_name} (0x{code:02x})', 'offset': offset + 1, 'length': 1},
+        {'title': f'Session ID: 0x{session_id:04x}', 'offset': offset + 2, 'length': 2},
+        {'title': f'Payload Length: {payload_length}', 'offset': offset + 4, 'length': 2},
+    ]
+
+    if discovery and pppoe_payload:
+        tags_children: List[Dict[str, Any]] = []
+        pos = 0
+        while pos + 4 <= len(pppoe_payload):
+            tag_type = int.from_bytes(pppoe_payload[pos:pos + 2], 'big')
+            tag_len = int.from_bytes(pppoe_payload[pos + 2:pos + 4], 'big')
+            tag_end = pos + 4 + tag_len
+            if tag_end > len(pppoe_payload):
+                break
+            tag_value = pppoe_payload[pos + 4:tag_end]
+            if tag_type == 0x0101 and tag_len == 0:
+                pos = tag_end
+                continue
+            tag_name = _pppoe_tag_name(tag_type)
+            if tag_type == 0x0102:
+                display_value = tag_value.decode(errors='ignore')
+            else:
+                display_value = tag_value.hex()
+            tags_children.append({
+                'title': f'{tag_name}: {display_value}',
+                'offset': offset + 6 + pos + 4,
+                'length': tag_len,
+            })
+            pos = tag_end
+        children.append({
+            'title': 'PPPoE Tags',
+            **_byte_mapping(offset, 6, len(pppoe_payload)),
+            'children': tags_children,
+        })
+
+    return {
+        'title': 'PPP-over-Ethernet Discovery' if discovery else 'PPP-over-Ethernet Session',
+        'offset': offset,
+        'length': total_len if discovery else 6,
+        'children': children,
+    }
+
+
+def _ppp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    protocol = int.from_bytes(payload[:2], 'big') if len(payload) >= 2 else 0
+    return {
+        'title': 'Point-to-Point Protocol',
+        'offset': offset,
+        'length': min(len(payload), 4),
+        'children': [
+            {
+                'title': f'Protocol: {_ppp_protocol_name(protocol)} (0x{protocol:04x})',
+                'offset': offset,
+                'length': 2 if len(payload) >= 2 else 0,
+            }
+        ],
+    }
+
+
+def _ppp_lcp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    if len(payload) < 4:
+        return {'title': 'PPP Link Control Protocol', 'offset': offset, 'length': len(payload), 'children': []}
+
+    code = int(payload[0])
+    identifier = int(payload[1])
+    lcp_length = int.from_bytes(payload[2:4], 'big')
+    body_len = min(len(payload), max(4, lcp_length))
+    children: List[Dict[str, Any]] = [
+        {'title': f'Code: {_ppp_control_code_name(code)} ({code})', 'offset': offset, 'length': 1},
+        {'title': f'Identifier: {identifier} (0x{identifier:02x})', 'offset': offset + 1, 'length': 1},
+        {'title': f'Length: {lcp_length}', 'offset': offset + 2, 'length': 2},
+    ]
+
+    if code in {1, 2, 3, 4} and body_len > 4:
+        options_payload = payload[4:body_len]
+        option_nodes: List[Dict[str, Any]] = []
+        option_names: List[str] = []
+        pos = 0
+        while pos + 2 <= len(options_payload):
+            opt_type = int(options_payload[pos])
+            opt_len = int(options_payload[pos + 1])
+            if opt_len < 2 or pos + opt_len > len(options_payload):
+                break
+            opt_value = options_payload[pos + 2:pos + opt_len]
+            if opt_type == 1 and opt_len == 4:
+                mru = int.from_bytes(opt_value[:2], 'big')
+                option_names.append('Maximum Receive Unit')
+                option_nodes.append({
+                    'title': f'Maximum Receive Unit: {mru}',
+                    'offset': offset + 4 + pos,
+                    'length': opt_len,
+                    'children': [
+                        {'title': 'Type: Maximum Receive Unit (1)', 'offset': offset + 4 + pos, 'length': 1},
+                        {'title': 'Length: 4', 'offset': offset + 4 + pos + 1, 'length': 1},
+                        {'title': f'Maximum Receive Unit: {mru}', 'offset': offset + 4 + pos + 2, 'length': 2},
+                    ],
+                })
+            elif opt_type == 5 and opt_len == 6:
+                magic = int.from_bytes(opt_value[:4], 'big')
+                option_names.append('Magic Number')
+                option_nodes.append({
+                    'title': f'Magic Number: 0x{magic:08x}',
+                    'offset': offset + 4 + pos,
+                    'length': opt_len,
+                    'children': [
+                        {'title': 'Type: Magic Number (5)', 'offset': offset + 4 + pos, 'length': 1},
+                        {'title': 'Length: 6', 'offset': offset + 4 + pos + 1, 'length': 1},
+                        {'title': f'Magic Number: 0x{magic:08x}', 'offset': offset + 4 + pos + 2, 'length': 4},
+                    ],
+                })
+            else:
+                option_names.append(f'Option {opt_type}')
+                option_nodes.append({
+                    'title': f'Option {opt_type}: {opt_value.hex()}',
+                    'offset': offset + 4 + pos,
+                    'length': opt_len,
+                })
+            pos += opt_len
+        if option_nodes:
+            children.append({
+                'title': f'Options: ({len(options_payload)} bytes), {", ".join(option_names)}',
+                'offset': offset + 4,
+                'length': len(options_payload),
+                'children': option_nodes,
+            })
+    elif code in {9, 10, 11} and body_len > 4:
+        if body_len >= 8:
+            magic = int.from_bytes(payload[4:8], 'big')
+            children.append({'title': f'Magic Number: 0x{magic:08x}', 'offset': offset + 4, 'length': 4})
+        if body_len > 8:
+            data = payload[8:body_len]
+            children.append({'title': f'Data: {data.hex()}', 'offset': offset + 8, 'length': len(data)})
+
+    return {
+        'title': 'PPP Link Control Protocol',
+        'offset': offset,
+        'length': body_len,
+        'children': children,
+    }
+
+
+def _ppp_ip_control_section(payload: bytes, offset: int, ipv6: bool) -> Dict[str, Any]:
+    if len(payload) < 4:
+        title = 'PPP IPv6 Control Protocol' if ipv6 else 'PPP IP Control Protocol'
+        return {'title': title, 'offset': offset, 'length': len(payload), 'children': []}
+
+    code = int(payload[0])
+    identifier = int(payload[1])
+    proto_len = int.from_bytes(payload[2:4], 'big')
+    body_len = min(len(payload), max(4, proto_len))
+    title = 'PPP IPv6 Control Protocol' if ipv6 else 'PPP IP Control Protocol'
+    children: List[Dict[str, Any]] = [
+        {'title': f'Code: {_ppp_control_code_name(code)} ({code})', 'offset': offset, 'length': 1},
+        {'title': f'Identifier: {identifier} (0x{identifier:02x})', 'offset': offset + 1, 'length': 1},
+        {'title': f'Length: {proto_len}', 'offset': offset + 2, 'length': 2},
+    ]
+
+    if code in {1, 2, 3, 4} and body_len > 4:
+        options_payload = payload[4:body_len]
+        option_nodes: List[Dict[str, Any]] = []
+        option_names: List[str] = []
+        pos = 0
+        while pos + 2 <= len(options_payload):
+            opt_type = int(options_payload[pos])
+            opt_len = int(options_payload[pos + 1])
+            if opt_len < 2 or pos + opt_len > len(options_payload):
+                break
+            opt_value = options_payload[pos + 2:pos + opt_len]
+            if not ipv6 and opt_type == 3 and opt_len == 6:
+                ip_text = '.'.join(str(int(byte)) for byte in opt_value[:4])
+                option_names.append('IP Address')
+                option_nodes.append({
+                    'title': 'IP Address',
+                    'offset': offset + 4 + pos,
+                    'length': opt_len,
+                    'children': [
+                        {'title': 'Type: IP Address (3)', 'offset': offset + 4 + pos, 'length': 1},
+                        {'title': 'Length: 6', 'offset': offset + 4 + pos + 1, 'length': 1},
+                        {'title': f'IP Address: {ip_text}', 'offset': offset + 4 + pos + 2, 'length': 4},
+                    ],
+                })
+            elif ipv6 and opt_type == 1 and opt_len == 10:
+                iid_text = ':'.join(f'{int(byte):02x}' for byte in opt_value[:8])
+                option_names.append('Interface Identifier')
+                option_nodes.append({
+                    'title': 'Interface Identifier',
+                    'offset': offset + 4 + pos,
+                    'length': opt_len,
+                    'children': [
+                        {'title': 'Type: Interface Identifier (1)', 'offset': offset + 4 + pos, 'length': 1},
+                        {'title': 'Length: 10', 'offset': offset + 4 + pos + 1, 'length': 1},
+                        {'title': f'Interface Identifier: {iid_text}', 'offset': offset + 4 + pos + 2, 'length': 8},
+                    ],
+                })
+            else:
+                option_names.append(f'Option {opt_type}')
+                option_nodes.append({
+                    'title': f'Option {opt_type}: {opt_value.hex()}',
+                    'offset': offset + 4 + pos,
+                    'length': opt_len,
+                })
+            pos += opt_len
+        if option_nodes:
+            children.append({
+                'title': f'Options: ({len(options_payload)} bytes), {", ".join(option_names)}',
+                'offset': offset + 4,
+                'length': len(options_payload),
+                'children': option_nodes,
+            })
+
+    return {
+        'title': title,
+        'offset': offset,
+        'length': body_len,
+        'children': children,
+    }
+
+
+def _ppp_ipcp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    return _ppp_ip_control_section(payload, offset, ipv6=False)
+
+
+def _ppp_ipv6cp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    return _ppp_ip_control_section(payload, offset, ipv6=True)
+
+
+def _eigrp_opcode_name(opcode: int) -> str:
+    return {
+        1: 'Update',
+        3: 'Query',
+        4: 'Reply',
+        5: 'Hello',
+        6: 'IPX SAP',
+        10: 'SIA Query',
+        11: 'SIA Reply',
+    }.get(int(opcode), f'Opcode {int(opcode)}')
+
+
+def _eigrp_checksum(payload: bytes) -> int:
+    data = payload if len(payload) % 2 == 0 else payload + b'\x00'
+    checksum = 0
+    for index in range(0, len(data), 2):
+        checksum += (int(data[index]) << 8) | int(data[index + 1])
+        checksum = (checksum & 0xFFFF) + (checksum >> 16)
+    return (~checksum) & 0xFFFF
+
+
+def _eigrp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    eigrp = metadata.get('eigrp', {}) if isinstance(metadata.get('eigrp'), dict) else {}
+    if len(payload) < 20:
+        return {'title': 'Cisco EIGRP', 'offset': offset, 'length': len(payload), 'children': []}
+
+    version = int(eigrp.get('version', payload[0]) or payload[0])
+    opcode = int(eigrp.get('opcode', payload[1]) or payload[1])
+    checksum = int(eigrp.get('checksum', int.from_bytes(payload[2:4], 'big')) or 0)
+    flags = int(eigrp.get('flags', int.from_bytes(payload[4:8], 'big')) or 0)
+    sequence = int(eigrp.get('sequence', int.from_bytes(payload[8:12], 'big')) or 0)
+    acknowledge = int(eigrp.get('acknowledge', int.from_bytes(payload[12:16], 'big')) or 0)
+    virtual_router_id = int(eigrp.get('virtual_router_id', int.from_bytes(payload[16:18], 'big')) or 0)
+    autonomous_system = int(eigrp.get('autonomous_system', int.from_bytes(payload[18:20], 'big')) or 0)
+    checksum_ok = _eigrp_checksum(payload) == 0
+    flag_labels = []
+    if flags & 0x00000001:
+        flag_labels.append('Init')
+    if flags & 0x00000002:
+        flag_labels.append('Conditional Receive')
+    if flags & 0x00000004:
+        flag_labels.append('Restart')
+    if flags & 0x00000008:
+        flag_labels.append('End Of Table')
+    flags_title = f'Flags: 0x{flags:08x}' + (f', {", ".join(flag_labels)}' if flag_labels else '')
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'Version: {version}', 'offset': offset, 'length': 1},
+        {'title': f'Opcode: {_eigrp_opcode_name(opcode)} ({opcode})', 'offset': offset + 1, 'length': 1},
+        {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_ok else "incorrect"}]', 'offset': offset + 2, 'length': 2},
+        {'title': f'[Checksum Status: {"Good" if checksum_ok else "Bad"}]'},
+        {
+            'title': flags_title,
+            'offset': offset + 4,
+            'length': 4,
+            'children': [
+                {'title': f'.... .... .... .... .... .... .... ...{1 if flags & 0x00000001 else 0} = Init: {"Set" if flags & 0x00000001 else "Not set"}', 'offset': offset + 4, 'length': 4},
+                {'title': f'.... .... .... .... .... .... .... ..{1 if flags & 0x00000002 else 0}. = Conditional Receive: {"Set" if flags & 0x00000002 else "Not set"}', 'offset': offset + 4, 'length': 4},
+                {'title': f'.... .... .... .... .... .... .... .{1 if flags & 0x00000004 else 0}.. = Restart: {"Set" if flags & 0x00000004 else "Not set"}', 'offset': offset + 4, 'length': 4},
+                {'title': f'.... .... .... .... .... .... .... {1 if flags & 0x00000008 else 0}... = End Of Table: {"Set" if flags & 0x00000008 else "Not set"}', 'offset': offset + 4, 'length': 4},
+            ],
+        },
+        {'title': f'Sequence: {sequence}', 'offset': offset + 8, 'length': 4},
+        {'title': f'Acknowledge: {acknowledge}', 'offset': offset + 12, 'length': 4},
+        {'title': f'Virtual Router ID: {virtual_router_id} (Address-Family)', 'offset': offset + 16, 'length': 2},
+        {'title': f'Autonomous System: {autonomous_system}', 'offset': offset + 18, 'length': 2},
+    ]
+
+    for tlv in list(eigrp.get('tlvs', []) or []):
+        tlv_type = int(tlv.get('type', 0) or 0)
+        tlv_len = int(tlv.get('length', 0) or 0)
+        tlv_offset = offset + int(tlv.get('offset', 0) or 0)
+        if tlv_type == 0x0002:
+            auth_type = int(tlv.get('auth_type', 0) or 0)
+            key_size = int(tlv.get('key_size', 0) or 0)
+            key_id = int(tlv.get('key_id', 0) or 0)
+            key_sequence = int(tlv.get('key_sequence', 0) or 0)
+            nullpad = bytes(tlv.get('nullpad', b'') or b'').hex()
+            digest = bytes(tlv.get('digest', b'') or b'').hex()
+            children.append({
+                'title': 'Authentication MD5',
+                'offset': tlv_offset,
+                'length': tlv_len,
+                'children': [
+                    {'title': 'Type: Authentication (0x0002)', 'offset': tlv_offset, 'length': 2},
+                    {'title': f'Length: {tlv_len}', 'offset': tlv_offset + 2, 'length': 2},
+                    {'title': f'Type: {"MD5" if auth_type == 2 else auth_type} ({auth_type})', 'offset': tlv_offset + 4, 'length': 2},
+                    {'title': f'Length: {key_size}', 'offset': tlv_offset + 6, 'length': 2},
+                    {'title': f'Key ID: {key_id}', 'offset': tlv_offset + 8, 'length': 4},
+                    {'title': f'Key Sequence: {key_sequence}', 'offset': tlv_offset + 12, 'length': 4},
+                    {'title': f'Nullpad: {nullpad}', 'offset': tlv_offset + 16, 'length': 8},
+                    {'title': f'Digest: {digest}', 'offset': tlv_offset + 24, 'length': 16},
+                ],
+            })
+        elif tlv_type == 0x0001:
+            children.append({
+                'title': 'Parameters',
+                'offset': tlv_offset,
+                'length': tlv_len,
+                'children': [
+                    {'title': 'Type: Parameters (0x0001)', 'offset': tlv_offset, 'length': 2},
+                    {'title': f'Length: {tlv_len}', 'offset': tlv_offset + 2, 'length': 2},
+                    {'title': f'K1: {int(tlv.get("k1", 0) or 0)}', 'offset': tlv_offset + 4, 'length': 1},
+                    {'title': f'K2: {int(tlv.get("k2", 0) or 0)}', 'offset': tlv_offset + 5, 'length': 1},
+                    {'title': f'K3: {int(tlv.get("k3", 0) or 0)}', 'offset': tlv_offset + 6, 'length': 1},
+                    {'title': f'K4: {int(tlv.get("k4", 0) or 0)}', 'offset': tlv_offset + 7, 'length': 1},
+                    {'title': f'K5: {int(tlv.get("k5", 0) or 0)}', 'offset': tlv_offset + 8, 'length': 1},
+                    {'title': f'K6: {int(tlv.get("k6", 0) or 0)}', 'offset': tlv_offset + 9, 'length': 1},
+                    {'title': f'Hold Time: {int(tlv.get("hold_time", 0) or 0)}', 'offset': tlv_offset + 10, 'length': 2},
+                ],
+            })
+        elif tlv_type == 0x0004:
+            ios_major = int(tlv.get('ios_major', 0) or 0)
+            ios_minor = int(tlv.get('ios_minor', 0) or 0)
+            eigrp_major = int(tlv.get('eigrp_major', 0) or 0)
+            eigrp_minor = int(tlv.get('eigrp_minor', 0) or 0)
+            children.append({
+                'title': f'Software Version: EIGRP={ios_major}.{ios_minor}, TLV={eigrp_major}.{eigrp_minor}',
+                'offset': tlv_offset,
+                'length': tlv_len,
+                'children': [
+                    {'title': 'Type: Software Version (0x0004)', 'offset': tlv_offset, 'length': 2},
+                    {'title': f'Length: {tlv_len}', 'offset': tlv_offset + 2, 'length': 2},
+                    {'title': f'EIGRP Release: {ios_major}.{ios_minor:02d}', 'offset': tlv_offset + 4, 'length': 2},
+                    {'title': f'EIGRP TLV version: {eigrp_major}.{eigrp_minor:02d}', 'offset': tlv_offset + 6, 'length': 2},
+                ],
+            })
+
+    return {
+        'title': 'Cisco EIGRP',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _asn1_length(data: bytes, pos: int) -> tuple[int, int]:
+    if pos >= len(data):
+        return 0, 0
+    first = int(data[pos])
+    if first < 0x80:
+        return first, 1
+    count = first & 0x7F
+    if count <= 0 or pos + 1 + count > len(data):
+        return 0, 1
+    return int.from_bytes(data[pos + 1:pos + 1 + count], 'big'), 1 + count
+
+
+def _asn1_tlv(data: bytes, pos: int) -> Dict[str, int] | None:
+    if pos >= len(data):
+        return None
+    length, length_size = _asn1_length(data, pos + 1)
+    value_start = pos + 1 + length_size
+    end = min(len(data), value_start + length)
+    if value_start > len(data):
+        return None
+    return {
+        'tag': int(data[pos]),
+        'start': pos,
+        'header_length': 1 + length_size,
+        'length': length,
+        'value_start': value_start,
+        'end': end,
+    }
+
+
+def _snmp_version_name(version: int) -> str:
+    return {
+        0: 'v1',
+        1: 'v2c',
+        2: 'v2u',
+        3: 'v3',
+    }.get(int(version), f'v{int(version)}')
+
+
+def _snmp_pdu_name(code: int) -> str:
+    return {
+        0: 'get-request',
+        1: 'get-next-request',
+        2: 'get-response',
+        3: 'set-request',
+        5: 'get-bulk-request',
+        6: 'inform-request',
+    }.get(int(code), 'snmp')
+
+
+def _snmp_error_name(code: int) -> str:
+    return {
+        0: 'noError',
+        1: 'tooBig',
+        2: 'noSuchName',
+        3: 'badValue',
+        4: 'readOnly',
+        5: 'genErr',
+    }.get(int(code), str(int(code)))
+
+
+def _snmp_oid_display(oid: str) -> str:
+    if oid.startswith('1.'):
+        return f'{oid} (iso.{oid[2:]})'
+    return oid
+
+
+def _snmp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    snmp_meta = metadata.get('snmp', {}) if isinstance(metadata.get('snmp'), dict) else {}
+    outer = _asn1_tlv(payload, 0)
+    if outer is None or outer.get('tag') != 0x30:
+        return {'title': 'Simple Network Management Protocol', 'offset': offset, 'length': len(payload), 'children': []}
+
+    pos = int(outer['value_start'])
+    version_tlv = _asn1_tlv(payload, pos)
+    community_tlv = _asn1_tlv(payload, int(version_tlv['end'])) if version_tlv is not None else None
+    pdu_tlv = _asn1_tlv(payload, int(community_tlv['end'])) if community_tlv is not None else None
+    children: List[Dict[str, Any]] = []
+
+    if version_tlv is not None:
+        version_value = int.from_bytes(payload[int(version_tlv['value_start']):int(version_tlv['end'])], 'big') if int(version_tlv['end']) > int(version_tlv['value_start']) else 0
+        children.append({
+            'title': f'version: {_snmp_version_name(version_value)} ({version_value})',
+            'offset': offset + int(version_tlv['start']),
+            'length': int(version_tlv['end']) - int(version_tlv['start']),
+        })
+    if community_tlv is not None:
+        community = payload[int(community_tlv['value_start']):int(community_tlv['end'])].decode(errors='ignore')
+        children.append({
+            'title': f'community: {community}',
+            'offset': offset + int(community_tlv['start']),
+            'length': int(community_tlv['end']) - int(community_tlv['start']),
+        })
+    if pdu_tlv is not None:
+        pdu_code = int(pdu_tlv['tag']) - 0xA0
+        pdu_name = _snmp_pdu_name(pdu_code)
+        pdu_children: List[Dict[str, Any]] = []
+        pdu_pos = int(pdu_tlv['value_start'])
+        request_tlv = _asn1_tlv(payload, pdu_pos)
+        error_tlv = _asn1_tlv(payload, int(request_tlv['end'])) if request_tlv is not None else None
+        error_index_tlv = _asn1_tlv(payload, int(error_tlv['end'])) if error_tlv is not None else None
+        varbinds_tlv = _asn1_tlv(payload, int(error_index_tlv['end'])) if error_index_tlv is not None else None
+        request_id = int(snmp_meta.get('request_id', 0) or 0)
+        error_status = int(snmp_meta.get('error_status', 0) or 0)
+        error_index = int(snmp_meta.get('error_index', 0) or 0)
+        if request_tlv is not None:
+            pdu_children.append({'title': f'request-id: {request_id}', 'offset': offset + int(request_tlv['start']), 'length': int(request_tlv['end']) - int(request_tlv['start'])})
+        if error_tlv is not None:
+            pdu_children.append({'title': f'error-status: {_snmp_error_name(error_status)} ({error_status})', 'offset': offset + int(error_tlv['start']), 'length': int(error_tlv['end']) - int(error_tlv['start'])})
+        if error_index_tlv is not None:
+            pdu_children.append({'title': f'error-index: {error_index}', 'offset': offset + int(error_index_tlv['start']), 'length': int(error_index_tlv['end']) - int(error_index_tlv['start'])})
+        if varbinds_tlv is not None:
+            varbind_children: List[Dict[str, Any]] = []
+            vb_pos = int(varbinds_tlv['value_start'])
+            meta_varbinds = list(snmp_meta.get('varbinds', []) or [])
+            meta_index = 0
+            while vb_pos < int(varbinds_tlv['end']):
+                vb_tlv = _asn1_tlv(payload, vb_pos)
+                if vb_tlv is None:
+                    break
+                oid_tlv = _asn1_tlv(payload, int(vb_tlv['value_start']))
+                value_tlv = _asn1_tlv(payload, int(oid_tlv['end'])) if oid_tlv is not None else None
+                meta_varbind = meta_varbinds[meta_index] if meta_index < len(meta_varbinds) else {}
+                meta_index += 1
+                oid_text = str(meta_varbind.get('oid', '') or '')
+                value_type = str(meta_varbind.get('value_type', '') or '')
+                value_value = meta_varbind.get('value', None)
+                if value_type == 'NULL':
+                    title = f'{oid_text}: Value (Null)'
+                    value_title = 'Value (Null)'
+                else:
+                    title = f'{oid_text}: {value_value}'
+                    value_title = f'Value ({value_type.title()}): {value_value}'
+                vb_children = []
+                if oid_tlv is not None:
+                    vb_children.append({'title': f'Object Name: {_snmp_oid_display(oid_text)}', 'offset': offset + int(oid_tlv['start']), 'length': int(oid_tlv['end']) - int(oid_tlv['start'])})
+                if value_tlv is not None:
+                    vb_children.append({'title': value_title, 'offset': offset + int(value_tlv['start']), 'length': int(value_tlv['end']) - int(value_tlv['start'])})
+                varbind_children.append({
+                    'title': title,
+                    'offset': offset + int(vb_tlv['start']),
+                    'length': int(vb_tlv['end']) - int(vb_tlv['start']),
+                    'children': vb_children,
+                })
+                vb_pos = int(vb_tlv['end'])
+            item_count = len(varbind_children)
+            pdu_children.append({
+                'title': f'variable-bindings: {item_count} item' + ('' if item_count == 1 else 's'),
+                'offset': offset + int(varbinds_tlv['start']),
+                'length': int(varbinds_tlv['end']) - int(varbinds_tlv['start']),
+                'children': varbind_children,
+            })
+        children.append({
+            'title': f'data: {pdu_name} ({pdu_code})',
+            'offset': offset + int(pdu_tlv['start']),
+            'length': int(pdu_tlv['end']) - int(pdu_tlv['start']),
+            'children': [{
+                'title': pdu_name,
+                'offset': offset + int(pdu_tlv['start']),
+                'length': int(pdu_tlv['end']) - int(pdu_tlv['start']),
+                'children': pdu_children,
+            }],
+        })
+
+    response_frame = metadata.get('snmp_response_frame', None)
+    if response_frame is not None:
+        children.append({'title': f'[Response In: {int(response_frame)}]'})
+    request_frame = metadata.get('snmp_request_frame', None)
+    if request_frame is not None:
+        children.append({'title': f'[Response To: {int(request_frame)}]'})
+    response_time = metadata.get('snmp_time_since_request_ms', None)
+    if response_time is not None:
+        children.append({'title': f'[Time: {float(response_time):.6f} milliseconds]'})
+
+    return {
+        'title': 'Simple Network Management Protocol',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _imap_parse_request_line(line_text: str) -> Dict[str, str] | None:
+    parts = line_text.split(' ', 2)
+    if len(parts) < 1 or not parts[0]:
+        return None
+    return {
+        'tag': parts[0],
+        'command': parts[1] if len(parts) > 1 else '',
+    }
+
+
+def _imap_parse_response_line(line_text: str) -> Dict[str, str] | None:
+    if line_text.startswith('* OK ') or line_text.startswith('* '):
+        return None
+    parts = line_text.split(' ', 2)
+    if len(parts) < 2:
+        return None
+    return {
+        'tag': parts[0],
+        'status': parts[1],
+        'command': parts[2].split(' ', 1)[0] if len(parts) > 2 else '',
+    }
+
+
+def _imap_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    imap_meta = metadata.get('imap', {}) if isinstance(metadata.get('imap'), dict) else {}
+    tagged_response_line = str(metadata.get('imap_tagged_response_line', '') or '') or str(imap_meta.get('tagged_response_line', '') or '')
+    children: List[Dict[str, Any]] = []
+    cursor = 0
+    for raw_line in payload.splitlines(keepends=True):
+        line_text = raw_line.decode(errors='ignore').rstrip('\r\n')
+        line_display = raw_line.decode(errors='ignore').replace('\r', '\\r').replace('\n', '\\n')
+        line_children: List[Dict[str, Any]] = []
+        if cursor == 0 and str(imap_meta.get('kind', '') or '') == 'request':
+            request_info = _imap_parse_request_line(line_text)
+            if request_info is not None:
+                line_children.append({'title': f'Request: {line_text}', 'offset': offset + cursor, 'length': max(0, len(raw_line) - 2)})
+                line_children.append({'title': f'Request Tag: {request_info["tag"]}', 'offset': offset + cursor, 'length': len(request_info['tag'])})
+                if request_info['command']:
+                    line_children.append({'title': f'Request Command: {request_info["command"]}', 'offset': offset + cursor + len(request_info['tag']) + 1, 'length': len(request_info['command'])})
+                response_frame = metadata.get('imap_response_frame', None)
+                if response_frame is not None:
+                    line_children.append({'title': f'[Response In: {int(response_frame)}]'})
+        elif cursor == 0 and str(imap_meta.get('kind', '') or '') == 'response':
+            response_info = _imap_parse_response_line(line_text)
+            if response_info is not None:
+                line_children.append({'title': f'Response: {line_text}', 'offset': offset + cursor, 'length': max(0, len(raw_line) - 2)})
+                line_children.append({'title': f'Response Tag: {response_info["tag"]}', 'offset': offset + cursor, 'length': len(response_info['tag'])})
+                line_children.append({'title': f'Response Status: {response_info["status"]}', 'offset': offset + cursor + len(response_info['tag']) + 1, 'length': len(response_info['status'])})
+                if response_info['command']:
+                    command_offset = offset + cursor + len(response_info['tag']) + 1 + len(response_info['status']) + 1
+                    line_children.append({'title': f'Response Command: {response_info["command"]}', 'offset': command_offset, 'length': len(response_info['command'])})
+        elif cursor == 0 and str(imap_meta.get('kind', '') or '') in {'greeting', 'response_untagged'}:
+            line_children.append({'title': f'Response: {line_text}', 'offset': offset + cursor, 'length': max(0, len(raw_line) - 2)})
+        if tagged_response_line and line_text == tagged_response_line:
+            tagged_info = _imap_parse_response_line(line_text)
+            if tagged_info is not None:
+                line_children.append({'title': f'Response: {line_text}', 'offset': offset + cursor, 'length': max(0, len(raw_line) - 2)})
+                line_children.append({'title': f'Response Tag: {tagged_info["tag"]}', 'offset': offset + cursor, 'length': len(tagged_info['tag'])})
+                line_children.append({'title': f'Response Status: {tagged_info["status"]}', 'offset': offset + cursor + len(tagged_info['tag']) + 1, 'length': len(tagged_info['status'])})
+                if tagged_info['command']:
+                    command_offset = offset + cursor + len(tagged_info['tag']) + 1 + len(tagged_info['status']) + 1
+                    line_children.append({'title': f'Response Command: {tagged_info["command"]}', 'offset': command_offset, 'length': len(tagged_info['command'])})
+                request_frame = metadata.get('imap_request_frame', None)
+                if request_frame is not None:
+                    line_children.append({'title': f'[Request In: {int(request_frame)}]'})
+                response_time = metadata.get('imap_time_since_request_ms', None)
+                if response_time is not None:
+                    line_children.append({'title': f'[Response Time: {float(response_time):.6f} milliseconds]'})
+        line_node: Dict[str, Any] = {
+            'title': f'Line: {line_display}',
+            'offset': offset + cursor,
+            'length': len(raw_line),
+        }
+        if line_children:
+            line_node['children'] = line_children
+        children.append(line_node)
+        cursor += len(raw_line)
+
+    return {
+        'title': 'Internet Message Access Protocol',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _sip_header_lines(payload: bytes) -> tuple[List[Dict[str, Any]], int, int]:
+    header_end = payload.find(b'\r\n\r\n')
+    if header_end == -1:
+        header_blob = payload
+        body_offset = len(payload)
+    else:
+        header_blob = payload[:header_end]
+        body_offset = header_end + 4
+    lines: List[Dict[str, Any]] = []
+    cursor = 0
+    for raw_line in header_blob.split(b'\r\n'):
+        line_text = raw_line.decode(errors='ignore')
+        lines.append({
+            'text': line_text,
+            'offset': cursor,
+            'length': len(raw_line),
+        })
+        cursor += len(raw_line) + 2
+    return lines, body_offset, len(header_blob)
+
+
+def _sdp_section(body: bytes, offset: int) -> Dict[str, Any]:
+    children: List[Dict[str, Any]] = []
+    cursor = 0
+    for raw_line in body.splitlines(keepends=True):
+        line_text = raw_line.decode(errors='ignore').rstrip('\r\n')
+        if not line_text:
+            cursor += len(raw_line)
+            continue
+        if line_text.startswith('v='):
+            title = f'Session Description Protocol Version (v): {line_text[2:]}'
+        elif line_text.startswith('o='):
+            title = f'Owner/Creator, Session Id (o): {line_text[2:]}'
+        elif line_text.startswith('s='):
+            title = f'Session Name (s): {line_text[2:]}'
+        elif line_text.startswith('c='):
+            title = f'Connection Information (c): {line_text[2:]}'
+        elif line_text.startswith('t='):
+            title = f'Time Description, active time (t): {line_text[2:]}'
+        elif line_text.startswith('m='):
+            title = f'Media Description, name and address (m): {line_text[2:]}'
+        elif line_text.startswith('a='):
+            title = f'Media Attribute (a): {line_text[2:]}'
+        else:
+            title = line_text
+        children.append({
+            'title': title,
+            'offset': offset + cursor,
+            'length': max(0, len(raw_line) - 2),
+        })
+        cursor += len(raw_line)
+    return {
+        'title': 'Session Description Protocol',
+        'offset': offset,
+        'length': len(body),
+        'children': children,
+    }
+
+
+def _sip_split_uri(uri_text: str) -> Dict[str, Any]:
+    text = str(uri_text or '').strip()
+    result: Dict[str, Any] = {
+        'uri': text,
+        'user': '',
+        'host': '',
+        'params': [],
+    }
+    if not text:
+        return result
+
+    inner = text
+    if inner.startswith('<') and '>' in inner:
+        inner = inner[1:inner.find('>')]
+    if inner.lower().startswith('sip:'):
+        inner = inner[4:]
+
+    addr_part, sep, param_part = inner.partition(';')
+    if sep and param_part:
+        result['params'] = [item.strip() for item in param_part.split(';') if item.strip()]
+    if '@' in addr_part:
+        result['user'], result['host'] = addr_part.split('@', 1)
+    else:
+        result['host'] = addr_part
+    return result
+
+
+def _sip_header_children(name: str, value: str, line_offset: int) -> List[Dict[str, Any]]:
+    lower_name = str(name or '').lower()
+    text = str(value or '')
+    children: List[Dict[str, Any]] = []
+
+    if lower_name in {'max-forwards', 'content-length', 'content-type', 'allow', 'supported', 'allow-events', 'accept', 'accept-encoding', 'session-expires', 'min-se', 'user-agent'}:
+        return children
+
+    if lower_name == 'via':
+        via_main = text.split(';', 1)[0].strip()
+        via_parts = via_main.split()
+        if via_parts:
+            transport = via_parts[0].split('/')[-1]
+            children.append({'title': f'Transport: {transport}'})
+        if len(via_parts) > 1:
+            sent_by = via_parts[1]
+            host, _, port = sent_by.partition(':')
+            children.append({'title': f'Sent-by Address: {host}'})
+            if port.isdigit():
+                children.append({'title': f'Sent-by port: {int(port)}'})
+        for token in text.split(';')[1:]:
+            token = token.strip()
+            if token.startswith('branch='):
+                children.append({'title': f'Branch: {token.split("=", 1)[1]}'})
+        return children
+
+    if lower_name in {'to', 'from', 'contact', 'record-route', 'p-asserted-identity'}:
+        display = ''
+        if '"' in text and '<' in text:
+            first_q = text.find('"')
+            second_q = text.find('"', first_q + 1)
+            if second_q > first_q:
+                display = text[first_q:second_q + 1]
+        start_uri = text.find('<')
+        end_uri = text.find('>') if start_uri >= 0 else -1
+        uri_text = text[start_uri + 1:end_uri] if start_uri >= 0 and end_uri > start_uri else text.split(';', 1)[0].strip()
+        uri_parts = _sip_split_uri(uri_text)
+
+        label_prefix = {
+            'to': 'SIP to',
+            'from': 'SIP from',
+            'contact': 'Contact URI',
+            'record-route': 'Record-Route URI',
+            'p-asserted-identity': 'SIP PAI',
+        }.get(lower_name, name)
+
+        if display and lower_name == 'to':
+            children.append({'title': f'SIP to display info: {display}'})
+
+        uri_children: List[Dict[str, Any]] = []
+        if uri_parts.get('uri'):
+            uri_title = ''
+            if lower_name == 'to':
+                uri_title = f'SIP to address: {uri_parts["uri"]}'
+            elif lower_name == 'from':
+                uri_title = f'SIP from address: {uri_parts["uri"]}'
+            elif lower_name == 'p-asserted-identity':
+                uri_title = f'SIP PAI Address: {uri_parts["uri"]}'
+            else:
+                uri_title = f'{label_prefix}: {uri_parts["uri"]}'
+        else:
+            uri_title = ''
+
+        if uri_parts.get('user'):
+            user_label = {
+                'to': 'SIP to address User Part',
+                'from': 'SIP from address User Part',
+                'contact': 'Contact URI User Part',
+                'p-asserted-identity': 'SIP PAI User Part',
+            }.get(lower_name, f'{label_prefix} User Part')
+            uri_children.append({'title': f'{user_label}: {uri_parts["user"]}'})
+        if uri_parts.get('host'):
+            host_label = {
+                'to': 'SIP to address Host Part',
+                'from': 'SIP from address Host Part',
+                'contact': 'Contact URI Host Part',
+                'record-route': 'Record-Route Host Part',
+                'p-asserted-identity': 'SIP PAI Host Part',
+            }.get(lower_name, f'{label_prefix} Host Part')
+            uri_children.append({'title': f'{host_label}: {uri_parts["host"]}'})
+        for param in list(uri_parts.get('params', []) or []):
+            param_label = {
+                'to': 'SIP To URI parameter',
+                'from': 'SIP From URI parameter',
+                'contact': 'Contact URI parameter',
+                'record-route': 'Record-Route URI parameter',
+                'p-asserted-identity': 'SIP PAI URI parameter',
+            }.get(lower_name, 'URI parameter')
+            uri_children.append({'title': f'{param_label}: {param}'})
+
+        if uri_title:
+            uri_node: Dict[str, Any] = {'title': uri_title}
+            if uri_children:
+                uri_node['children'] = uri_children
+            children.append(uri_node)
+
+        if lower_name in {'to', 'from'} and ';tag=' in text:
+            tag_val = text.split(';tag=', 1)[1].split(';', 1)[0].strip()
+            tag_label = 'SIP to tag' if lower_name == 'to' else 'SIP from tag'
+            children.append({'title': f'{tag_label}: {tag_val}'})
+        if lower_name == 'contact':
+            tail = text[end_uri + 1:] if end_uri >= 0 else ''
+            for part in [item for item in tail.split(';') if item.strip()]:
+                children.append({'title': f'Contact parameter: {part.strip()}'})
+        return children
+
+    if lower_name == 'call-id':
+        children.append({'title': f'[Generated Call-ID: {text}]'})
+        return children
+
+    if lower_name == 'cseq':
+        parts = text.split()
+        if parts and parts[0].isdigit():
+            children.append({'title': f'Sequence Number: {int(parts[0])}'})
+        if len(parts) > 1:
+            children.append({'title': f'Method: {parts[1]}'})
+        return children
+
+    if lower_name == 'session-id':
+        children.append({'title': f'sess-id: {text}'})
+        return children
+    return children
+
+
+def _sip_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    sip_meta = metadata.get('sip', {}) if isinstance(metadata.get('sip'), dict) else {}
+    lines, body_offset, header_length = _sip_header_lines(payload)
+    if not lines:
+        return {'title': 'Session Initiation Protocol', 'offset': offset, 'length': len(payload), 'children': []}
+
+    first = lines[0]
+    first_text = str(first.get('text', '') or '')
+    children: List[Dict[str, Any]] = []
+    kind = str(sip_meta.get('kind', '') or '')
+    if kind == 'request':
+        parts = first_text.split(' ', 2)
+        line_children = []
+        if len(parts) >= 1:
+            line_children.append({'title': f'Method: {parts[0]}', 'offset': offset + int(first['offset']), 'length': len(parts[0])})
+        if len(parts) >= 2:
+            uri_offset = offset + int(first['offset']) + len(parts[0]) + 1
+            line_children.append({'title': f'Request-URI: {parts[1]}', 'offset': uri_offset, 'length': len(parts[1])})
+            uri_parts = _sip_split_uri(parts[1])
+            if uri_parts.get('user'):
+                line_children.append({'title': f'Request-URI User Part: {uri_parts["user"]}'})
+            if uri_parts.get('host'):
+                line_children.append({'title': f'Request-URI Host Part: {uri_parts["host"]}'})
+        line_children.append({'title': '[Resent Packet: False]'})
+        children.append({
+            'title': f'Request-Line: {first_text}',
+            'offset': offset + int(first['offset']),
+            'length': int(first['length']),
+            'children': line_children,
+        })
+    else:
+        parts = first_text.split(' ', 2)
+        status_code = parts[1] if len(parts) > 1 else str(sip_meta.get('status_code', '') or '')
+        line_children = []
+        if status_code:
+            line_children.append({'title': f'Status-Code: {status_code}', 'offset': offset + int(first['offset']) + 8, 'length': len(status_code)})
+        line_children.append({'title': '[Resent Packet: False]'})
+        request_frame = metadata.get('sip_request_frame', None)
+        if request_frame is not None:
+            line_children.append({'title': f'[Request Frame: {int(request_frame)}]'})
+        response_time = metadata.get('sip_response_time_ms', None)
+        if response_time is not None:
+            line_children.append({'title': f'[Response Time (ms): {int(float(response_time))}]'})
+        children.append({
+            'title': f'Status-Line: {first_text}',
+            'offset': offset + int(first['offset']),
+            'length': int(first['length']),
+            'children': line_children,
+        })
+
+    header_children: List[Dict[str, Any]] = []
+    for line in lines[1:]:
+        text = str(line.get('text', '') or '')
+        if not text:
+            continue
+        if ':' not in text:
+            header_children.append({
+                'title': text,
+                'offset': offset + int(line.get('offset', 0) or 0),
+                'length': int(line.get('length', 0) or 0),
+            })
+            continue
+        name, value = text.split(':', 1)
+        name = name.strip()
+        value = value.strip()
+        line_node = {
+            'title': f'{name}: {value}',
+            'offset': offset + int(line.get('offset', 0) or 0),
+            'length': int(line.get('length', 0) or 0),
+        }
+        sub_children = _sip_header_children(name, value, int(line_node['offset']))
+        if sub_children:
+            line_node['children'] = sub_children
+        header_children.append(line_node)
+    if header_children:
+        children.append({
+            'title': 'Message Header',
+            'offset': offset + int(lines[1].get('offset', 0) or 0) if len(lines) > 1 else offset,
+            'length': max(0, header_length - int(lines[0].get('length', 0) or 0) - 2),
+            'children': header_children,
+        })
+
+    body = payload[body_offset:] if body_offset < len(payload) else b''
+    if body:
+        body_children: List[Dict[str, Any]] = []
+        if str(getattr(record, 'protocol', '') or '') == 'SIP/SDP':
+            body_children.append(_sdp_section(body, offset + body_offset))
+        children.append({
+            'title': 'Message Body',
+            'offset': offset + body_offset,
+            'length': len(body),
+            'children': body_children,
+        })
+
+    title_suffix = ''
+    if kind == 'request':
+        title_suffix = f' ({str(sip_meta.get("method", "") or "")})'
+    elif kind == 'response':
+        title_suffix = f' ({str(sip_meta.get("status_code", "") or "")})'
+    return {
+        'title': f'Session Initiation Protocol{title_suffix}',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _rtp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    rtp_meta = metadata.get('rtp', {}) if isinstance(metadata.get('rtp'), dict) else {}
+    if len(payload) < 12:
+        return {'title': 'Real-Time Transport Protocol', 'offset': offset, 'length': len(payload), 'children': []}
+
+    version = int(rtp_meta.get('version', (payload[0] >> 6) & 0x03) or 0)
+    padding = bool(rtp_meta.get('padding', bool((payload[0] >> 5) & 0x01)))
+    extension = bool(rtp_meta.get('extension', bool((payload[0] >> 4) & 0x01)))
+    csrc_count = int(rtp_meta.get('csrc_count', payload[0] & 0x0F) or 0)
+    marker = bool(rtp_meta.get('marker', bool((payload[1] >> 7) & 0x01)))
+    payload_type = int(rtp_meta.get('payload_type', payload[1] & 0x7F) or 0)
+    payload_type_name = str(rtp_meta.get('payload_type_name', f'Payload type {payload_type}') or f'Payload type {payload_type}')
+    sequence = int(rtp_meta.get('sequence', int.from_bytes(payload[2:4], 'big')) or 0)
+    extended_sequence = int(rtp_meta.get('extended_sequence', 65536 + sequence) or 0)
+    timestamp = int(rtp_meta.get('timestamp', int.from_bytes(payload[4:8], 'big')) or 0)
+    extended_timestamp = int(rtp_meta.get('extended_timestamp', 4294967296 + timestamp) or 0)
+    ssrc = int(rtp_meta.get('ssrc', int.from_bytes(payload[8:12], 'big')) or 0)
+    header_length = int(rtp_meta.get('header_length', 12 + csrc_count * 4) or 12)
+
+    children: List[Dict[str, Any]] = []
+    setup_frame = metadata.get('rtp_setup_frame', None)
+    if setup_frame is not None:
+        setup_children = [
+            {'title': f'[Setup frame: {int(setup_frame)}]'},
+            {'title': f'[Setup Method: {str(metadata.get("rtp_setup_method", "SDP") or "SDP")}]'},
+        ]
+        call_id = str(metadata.get('rtp_setup_call_id', '') or '')
+        if call_id:
+            setup_children.append({'title': f'[Generated Call-ID: {call_id}]'})
+        children.append({'title': f'[Stream setup by SDP (frame {int(setup_frame)})]', 'children': setup_children})
+
+    children.extend([
+        {'title': f'{version:02b}.. .... = Version: RFC 1889 Version ({version})', 'offset': offset, 'length': 1},
+        {'title': f'..{1 if padding else 0}. .... = Padding: {"True" if padding else "False"}', 'offset': offset, 'length': 1},
+        {'title': f'...{1 if extension else 0} .... = Extension: {"True" if extension else "False"}', 'offset': offset, 'length': 1},
+        {'title': f'.... {csrc_count:04b} = Contributing source identifiers count: {csrc_count}', 'offset': offset, 'length': 1},
+        {'title': f'{1 if marker else 0}... .... = Marker: {"True" if marker else "False"}', 'offset': offset + 1, 'length': 1},
+        {'title': f'Payload type: {payload_type_name} ({payload_type})', 'offset': offset + 1, 'length': 1},
+        {'title': f'Sequence number: {sequence}', 'offset': offset + 2, 'length': 2},
+        {'title': f'[Extended sequence number: {extended_sequence}]'},
+        {'title': f'Timestamp: {timestamp}', 'offset': offset + 4, 'length': 4},
+        {'title': f'[Extended timestamp: {extended_timestamp}]'},
+        {'title': f'Synchronization Source identifier: 0x{ssrc:08x} ({ssrc})', 'offset': offset + 8, 'length': 4},
+    ])
+
+    if header_length < len(payload):
+        payload_preview = payload[header_length:].hex()[:240]
+        children.append({
+            'title': f'Payload […]: {payload_preview}',
+            'offset': offset + header_length,
+            'length': len(payload) - header_length,
+        })
+
+    return {
+        'title': 'Real-Time Transport Protocol',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
 def _ssdp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     base = _http_section(payload, offset, record)
     base['title'] = 'Simple Service Discovery Protocol'
@@ -6342,7 +7544,8 @@ def _smtp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     smtp_kind = str(metadata.get('smtp_kind', '') or '')
 
     if smtp_kind == 'response':
-        line = payload.split(b'\r\n', 1)[0]
+        raw_lines = payload.splitlines(keepends=True)
+        line = raw_lines[0].rstrip(b'\r\n') if raw_lines else payload.split(b'\r\n', 1)[0]
         line_text = line.decode(errors='ignore')
         code = str(metadata.get('smtp_response_code', '') or line_text[:3])
         param = str(metadata.get('smtp_response_parameter', '') or (line_text[4:].strip() if len(line_text) > 4 else ''))
@@ -6361,10 +7564,35 @@ def _smtp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 'offset': offset + 4,
                 'length': len(line) - 4,
             })
+        cursor = 0
+        for idx, raw_line in enumerate(raw_lines):
+            clean = raw_line.rstrip(b'\r\n')
+            text = clean.decode(errors='ignore').strip()
+            if not text:
+                cursor += len(raw_line)
+                continue
+            if idx == 0:
+                cursor += len(raw_line)
+                continue
+            if len(text) >= 4 and text[:3].isdigit():
+                param_text = text[4:].strip()
+                param_offset = offset + cursor + 4
+                param_length = max(0, len(clean) - 4)
+            else:
+                param_text = text
+                param_offset = offset + cursor
+                param_length = len(clean)
+            if param_text:
+                response_children.append({
+                    'title': f'Response parameter: {param_text}',
+                    'offset': param_offset,
+                    'length': param_length,
+                })
+            cursor += len(raw_line)
         children.append({
             'title': f'Response: {line_text}\\r\\n',
             'offset': offset,
-            'length': len(line) + 2,
+            'length': len(raw_lines[0]) if raw_lines else len(line) + 2,
             'children': response_children,
         })
     elif smtp_kind == 'command':
