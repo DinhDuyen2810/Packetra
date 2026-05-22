@@ -188,19 +188,24 @@ class PacketParser:
         layers = [layer.__name__.upper() for layer in packet.layers()]
         length = len(packet)
 
-        protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp)
-        info = self._quick_info(packet, protocol, effective_tcp, effective_udp)
-
-        stream_hint = ''
-        if sport is not None or dport is not None:
-            stream_hint = f'{src}:{sport or "-"} -> {dst}:{dport or "-"}'
-
         metadata = {
             'fast_preview': True,
             'frame_number': int(number),
             'frame_time_delta': frame_delta,
             'frame_time_delta_displayed': frame_delta,
         }
+        self._populate_stream_indices(packet, metadata)
+        self._update_transport_stream_metadata(packet, metadata, epoch_time)
+
+        protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp)
+        if protocol == 'TCP':
+            info = self._build_info(packet, protocol, metadata)
+        else:
+            info = self._quick_info(packet, protocol, effective_tcp, effective_udp)
+
+        stream_hint = ''
+        if sport is not None or dport is not None:
+            stream_hint = f'{src}:{sport or "-"} -> {dst}:{dport or "-"}'
 
         return PacketRecord(
             number=number,
@@ -223,6 +228,15 @@ class PacketParser:
     def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None) -> str:
         if packet.haslayer('ESP'):
             return 'ESP'
+        if self._is_ospf_ipv6_packet(packet):
+            return 'OSPF'
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is not None:
+            try:
+                if int(getattr(effective_ip, 'proto', 0) or 0) == 89:
+                    return 'OSPF'
+            except Exception:
+                pass
         if packet.haslayer(ARP):
             return 'ARP'
         if packet.haslayer(DNS):
@@ -238,6 +252,10 @@ class PacketParser:
             return 'ICMP'
         if tcp_layer is not None:
             payload = self._payload_bytes(packet)
+            sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+            dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+            if (sport == 179 or dport == 179) and self._is_bgp_payload(payload):
+                return 'BGP'
             if int(getattr(tcp_layer, 'sport', 0) or 0) == 22 or int(getattr(tcp_layer, 'dport', 0) or 0) == 22:
                 if payload.startswith(b'SSH-') or len(payload) >= 6:
                     return 'SSHv2'
@@ -284,6 +302,20 @@ class PacketParser:
             return 'HTTP'
         if protocol == 'SSHv2':
             return self._ssh_info_text(packet, None)
+        if protocol in {'DNS', 'MDNS'} and packet.haslayer(DNS):
+            return self._build_info(packet, protocol, {})
+        if protocol == 'BGP':
+            return self._bgp_message_type_name(self._payload_bytes(packet))
+        if protocol == 'OSPF':
+            ospf_payload = self._ospf_payload_bytes(packet)
+            msg_type = int(ospf_payload[1]) if len(ospf_payload) >= 2 else -1
+            return {
+                1: 'Hello Packet',
+                2: 'DB Description',
+                3: 'LS Request',
+                4: 'LS Update',
+                5: 'LS Acknowledge',
+            }.get(msg_type, f'OSPF Message ({msg_type})' if msg_type >= 0 else 'OSPF')
         if protocol == 'ISAKMP':
             return self._isakmp_info_text(packet)
         if protocol == 'TFTP':
@@ -313,7 +345,11 @@ class PacketParser:
         if protocol == 'TCP' and tcp_layer is not None:
             flags = self._tcp_flags_to_string(tcp_layer.flags)
             payload_len = self._tcp_payload_length(packet, tcp_layer)
-            return f'{tcp_layer.sport} -> {tcp_layer.dport} [{flags}] Len={payload_len}'
+            base = f'{tcp_layer.sport} -> {tcp_layer.dport} [{flags}] Len={payload_len}'
+            option_tokens = self._tcp_info_options(tcp_layer)
+            if option_tokens:
+                return f'{base} ' + ' '.join(option_tokens)
+            return base
         if protocol == 'UDP' and udp_layer is not None:
             udp_len = max(0, int(getattr(udp_layer, 'len', 8) or 8) - 8)
             return f'{udp_layer.sport} -> {udp_layer.dport} Len={udp_len}'
@@ -711,6 +747,9 @@ class PacketParser:
         is_out_of_order = False
         is_duplicate_ack = False
         is_window_update = False
+        is_keep_alive = False
+        is_keep_alive_ack = False
+        is_acked_unseen_segment = False
         previous_segment_not_captured = False
         duplicate_ack_count = None
         duplicate_ack_frame_number = None
@@ -761,8 +800,39 @@ class PacketParser:
                     highest_dir_end = seg_end
             if highest_dir_end is not None and self._tcp_seq_gt(seq, highest_dir_end):
                 previous_segment_not_captured = True
+            if (
+                has_ack_flag
+                and payload_len <= 1
+                and (tcp_flags & 0x07) == 0
+                and highest_dir_end is not None
+                and self._tcp_seq_cmp((seq + 1) & 0xFFFFFFFF, int(highest_dir_end)) == 0
+            ):
+                is_keep_alive = True
 
-        if ack_only and dir_packets:
+        keep_alive_probe = state.setdefault('keep_alive_probe', {})
+        if is_keep_alive:
+            keep_alive_probe[dir_key] = {
+                'frame_number': int(metadata.get('frame_number', 0) or 0),
+                'ack_expected': int((seq + 1) & 0xFFFFFFFF),
+            }
+        elif ack_only:
+            probe = keep_alive_probe.get(rev_key)
+            if isinstance(probe, dict):
+                expected_ack = int(probe.get('ack_expected', -1) or -1)
+                if expected_ack >= 0 and self._tcp_seq_cmp(ack, expected_ack) == 0:
+                    is_keep_alive_ack = True
+                    keep_alive_probe.pop(rev_key, None)
+
+        if has_ack_flag and ack > 0 and rev_packets:
+            highest_rev_end = None
+            for seg in rev_packets:
+                seg_end = int(seg.get('end_seq_raw', seg.get('seq_raw', 0)) or 0)
+                if highest_rev_end is None or self._tcp_seq_gt(seg_end, highest_rev_end):
+                    highest_rev_end = seg_end
+            if highest_rev_end is not None and self._tcp_seq_gt(ack, int(highest_rev_end)):
+                is_acked_unseen_segment = True
+
+        if ack_only and dir_packets and not is_keep_alive and not is_keep_alive_ack:
             same_ack_run = []
             for seg in reversed(dir_packets):
                 seg_flags = int(seg.get('tcp_flags', 0) or 0)
@@ -842,6 +912,12 @@ class PacketParser:
             metadata['tcp_is_window_update'] = True
         if previous_segment_not_captured:
             metadata['tcp_previous_segment_not_captured'] = True
+        if is_keep_alive:
+            metadata['tcp_is_keep_alive'] = True
+        if is_keep_alive_ack:
+            metadata['tcp_is_keep_alive_ack'] = True
+        if is_acked_unseen_segment:
+            metadata['tcp_is_acked_unseen_segment'] = True
         if is_duplicate_ack:
             metadata['tcp_is_duplicate_ack'] = True
         if duplicate_ack_count is not None:
@@ -1672,9 +1748,9 @@ class PacketParser:
         return 4 <= pdu_len <= max(4, len(payload) - 4)
 
     def _bgp_message_type_name(self, payload: bytes) -> str:
-        if len(payload) < 19:
+        messages = self._iter_bgp_messages(payload)
+        if not messages:
             return 'BGP Message'
-        msg_type = int(payload[18])
         names = {
             1: 'OPEN Message',
             2: 'UPDATE Message',
@@ -1682,7 +1758,7 @@ class PacketParser:
             4: 'KEEPALIVE Message',
             5: 'ROUTE-REFRESH Message',
         }
-        return names.get(msg_type, f'BGP Message ({msg_type})')
+        return ', '.join(names.get(msg_type, f'BGP Message ({msg_type})') for msg_type in messages)
 
     def _is_bgp_payload(self, payload: bytes) -> bool:
         if len(payload) < 19:
@@ -1694,6 +1770,23 @@ class PacketParser:
             return False
         msg_type = int(payload[18])
         return 1 <= msg_type <= 5
+
+    def _iter_bgp_messages(self, payload: bytes) -> list[int]:
+        message_types: list[int] = []
+        cursor = 0
+        total_len = len(payload)
+        while cursor + 19 <= total_len:
+            marker = payload[cursor:cursor + 16]
+            if marker != (b'\xff' * 16):
+                break
+            msg_len = int.from_bytes(payload[cursor + 16:cursor + 18], 'big')
+            if msg_len < 19 or cursor + msg_len > total_len:
+                break
+            msg_type = int(payload[cursor + 18])
+            if 1 <= msg_type <= 5:
+                message_types.append(msg_type)
+            cursor += msg_len
+        return message_types
 
     def _loop_function_name(self, payload: bytes) -> str:
         if len(payload) < 4:
@@ -3195,10 +3288,37 @@ class PacketParser:
     def _is_ospf_ipv6_packet(self, packet) -> bool:
         if not packet.haslayer(IPv6):
             return False
+        ospf_payload = self._ospf_payload_bytes(packet)
+        return len(ospf_payload) >= 4
+
+    def _ospf_payload_bytes(self, packet) -> bytes:
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is not None:
+            ip_proto = int(getattr(effective_ip, 'proto', 0) or 0)
+            if ip_proto == 89:
+                return bytes(getattr(effective_ip, 'payload', b''))
+            return b''
+        if not packet.haslayer(IPv6):
+            return b''
         try:
-            return int(getattr(packet[IPv6], 'nh', -1) or -1) == 89 and len(bytes(getattr(packet[IPv6], 'payload', b''))) >= 4
+            if packet.haslayer(IPv6ExtHdrHopByHop):
+                hop_layer = packet[IPv6ExtHdrHopByHop]
+                next_header = int(getattr(hop_layer, 'nh', -1) or -1)
+                payload = bytes(getattr(hop_layer, 'payload', b''))
+            else:
+                ipv6_layer = packet[IPv6]
+                next_header = int(getattr(ipv6_layer, 'nh', -1) or -1)
+                payload = bytes(getattr(ipv6_layer, 'payload', b''))
+            if next_header == 89:
+                return payload
+            if next_header == 51 and len(payload) >= 12:
+                ah_next_header = int(payload[0])
+                ah_header_len = (int(payload[1]) + 2) * 4
+                if ah_next_header == 89 and len(payload) >= ah_header_len:
+                    return payload[ah_header_len:]
         except Exception:
-            return False
+            return b''
+        return b''
 
     def _guess_protocol(self, packet, metadata: dict | None = None):
         metadata = metadata or {}
@@ -3725,6 +3845,7 @@ class PacketParser:
 
     def _tcp_info_options(self, tcp_layer) -> list[str]:
         tokens = []
+        has_md5 = False
         for option in getattr(tcp_layer, 'options', []) or []:
             if not isinstance(option, tuple) or not option:
                 continue
@@ -3740,6 +3861,10 @@ class PacketParser:
             elif name == 'Timestamp' and isinstance(value, tuple) and len(value) == 2:
                 tokens.append(f'TSval={int(value[0])}')
                 tokens.append(f'TSecr={int(value[1])}')
+            elif name in {'MD5', 'TCP-MD5', 'AO'}:
+                has_md5 = True
+        if has_md5:
+            tokens.append('MD5')
         return tokens
 
     def _http_payload_kind(self, payload: bytes) -> str | None:
@@ -4709,7 +4834,7 @@ class PacketParser:
                     return f'Port ID: {port_id}'
                 return 'Cisco Discovery Protocol'
             if protocol == 'OSPF':
-                payload = self._payload_bytes(packet)
+                payload = self._ospf_payload_bytes(packet)
                 msg_type = int(payload[1]) if len(payload) >= 2 else -1
                 msg_name = {
                     1: 'Hello Packet',
@@ -4826,6 +4951,7 @@ class PacketParser:
                     type_name_map = {
                         1: 'A',
                         2: 'NS',
+                        6: 'SOA',
                         5: 'CNAME',
                         12: 'PTR',
                         15: 'MX',
@@ -4985,6 +5111,12 @@ class PacketParser:
                     prefix = f'[TCP Dup ACK {dup_frame}#{dup_count}] '
                 elif bool(metadata.get('tcp_is_window_update', False)):
                     prefix = '[TCP Window Update] '
+                elif bool(metadata.get('tcp_is_keep_alive_ack', False)):
+                    prefix = '[TCP Keep-Alive ACK] '
+                elif bool(metadata.get('tcp_is_keep_alive', False)):
+                    prefix = '[TCP Keep-Alive] '
+                elif bool(metadata.get('tcp_is_acked_unseen_segment', False)):
+                    prefix = '[TCP ACKed unseen segment] '
                 elif bool(metadata.get('tcp_is_spurious_retransmission', False)):
                     prefix = '[TCP Spurious Retransmission] '
                 elif bool(metadata.get('tcp_is_out_of_order', False)):

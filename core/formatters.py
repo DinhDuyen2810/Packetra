@@ -594,9 +594,24 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 payload_handled = True
                 offset += len(icmpv6_payload)
         elif getattr(record, 'protocol', '') == 'OSPF':
-            ospf_payload = bytes(getattr(packet[IPv6], 'payload', b''))
+            if packet.haslayer(IPv6ExtHdrHopByHop):
+                upper_layer = packet[IPv6ExtHdrHopByHop]
+            else:
+                upper_layer = packet[IPv6]
+            ospf_payload = bytes(getattr(upper_layer, 'payload', b''))
+            ospf_offset = offset
+            try:
+                upper_nh = int(getattr(upper_layer, 'nh', -1) or -1)
+                if upper_nh == 51 and len(ospf_payload) >= 12:
+                    ah_next_header = int(ospf_payload[0])
+                    ah_header_len = (int(ospf_payload[1]) + 2) * 4
+                    if ah_next_header == 89 and len(ospf_payload) >= ah_header_len:
+                        ospf_payload = ospf_payload[ah_header_len:]
+                        ospf_offset += ah_header_len
+            except Exception:
+                pass
             if ospf_payload:
-                sections.append(_ospf_section(ospf_payload, offset))
+                sections.append(_ospf_section(ospf_payload, ospf_offset))
                 payload_handled = True
         elif getattr(record, 'protocol', '') == 'ESP':
             esp_payload = bytes(getattr(packet[IPv6], 'payload', b''))
@@ -7882,6 +7897,11 @@ def _dns_rdata_text(data: bytes, rr_type: int, full_raw: bytes | None = None, rd
         port = int.from_bytes(data[4:6], 'big')
         target, _ = _dns_read_name(source, start + 6)
         return f'{priority} {weight} {port} {target}'
+    if rr_type == 6:
+        source = full_raw if full_raw is not None else data
+        start = rdata_offset if full_raw is not None else 0
+        mname, _ = _dns_read_name(source, start)
+        return mname
     return data.hex()
 
 
