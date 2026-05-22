@@ -37,10 +37,15 @@ class PacketTable(QTableWidget):
         'LOOP': QColor(255, 255, 255),
         'QUIC': QColor(216, 237, 255),
         'HTTP': QColor(255, 245, 219),
+        'SSDP': QColor(255, 245, 219),
+        'SSHv2': QColor(227, 240, 255),
         'SMTP': QColor(255, 240, 216),
         'SMTP/IMF': QColor(255, 240, 216),
         'DHCP': QColor(229, 245, 238),
         'DHCPv6': QColor(229, 245, 238),
+        'TFTP': QColor(229, 245, 238),
+        'ESP': QColor(237, 233, 255),
+        'ISAKMP': QColor(237, 233, 255),
     }
 
     def __init__(self):

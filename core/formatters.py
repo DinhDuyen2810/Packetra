@@ -598,6 +598,11 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             if ospf_payload:
                 sections.append(_ospf_section(ospf_payload, offset))
                 payload_handled = True
+        elif getattr(record, 'protocol', '') == 'ESP':
+            esp_payload = bytes(getattr(packet[IPv6], 'payload', b''))
+            if esp_payload:
+                sections.append(_esp_section(esp_payload, offset))
+                payload_handled = True
 
     if effective_tcp_layer is not None:
 
@@ -650,6 +655,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_smtp_section(tcp_payload, offset, record))
             if getattr(record, 'protocol', '') == 'SMTP/IMF':
                 sections.append(_imf_section(record, offset))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'SSHv2' and tcp_payload:
+            sections.append(_ssh_section(tcp_payload, offset, record))
             payload_handled = True
         elif bool(metadata.get('tcp_is_retransmission', False)) and tcp_payload:
             payload_handled = True
@@ -705,6 +713,18 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'NTP':
             ntp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_ntp_section(ntp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'TFTP':
+            tftp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_tftp_section(tftp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'SSDP':
+            ssdp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_ssdp_section(ssdp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'ISAKMP':
+            isakmp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_isakmp_section(isakmp_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'HSRPv2':
             hsrp_payload = _udp_payload_bytes(packet, udp_layer)
@@ -5247,6 +5267,828 @@ def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
         'title': f'Line-based text data: {content_type} ({len(lines)} lines)',
         **_byte_mapping(offset, body_offset, len(body), byte_source),
         'children': lines,
+    }
+
+
+def _ssdp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    base = _http_section(payload, offset, record)
+    base['title'] = 'Simple Service Discovery Protocol'
+    try:
+        lines = payload.split(b'\r\n')
+        request_line = lines[0].decode(errors='ignore')
+        parts = request_line.split(' ', 2)
+        uri = parts[1].strip() if len(parts) >= 2 else ''
+        host = ''
+        for line in lines[1:]:
+            if line.lower().startswith(b'host:'):
+                host = line.split(b':', 1)[1].decode(errors='ignore').strip()
+                break
+        if host and uri:
+            base.setdefault('children', []).append({'title': f'[Full request URI: http://{host}{uri}]'})
+    except Exception:
+        pass
+    return base
+
+
+def _tftp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    opcode = int.from_bytes(payload[:2], 'big') if len(payload) >= 2 else 0
+    opcode_name = {1: 'Read Request', 2: 'Write Request', 3: 'Data Packet', 4: 'Acknowledgement', 5: 'Error Code'}.get(opcode, str(opcode))
+    children: List[Dict[str, Any]] = [
+        {'title': f'Opcode: {opcode_name} ({opcode})', 'offset': offset, 'length': 2 if len(payload) >= 2 else 0},
+    ]
+    if opcode in {1, 2}:
+        filename = str(metadata.get('tftp_filename', '') or '')
+        mode = str(metadata.get('tftp_mode', '') or '')
+        if filename:
+            children.append({'title': f'Destination File: {filename}', 'offset': offset + 2, 'length': len(filename)})
+        if mode:
+            mode_start = offset + 2 + len(filename) + 1
+            children.append({'title': f'Type: {mode}', 'offset': mode_start, 'length': len(mode)})
+    elif opcode in {3, 4} and len(payload) >= 4:
+        block = int.from_bytes(payload[2:4], 'big')
+        if opcode == 4:
+            filename = str(metadata.get('tftp_filename', '') or '')
+            req_frame = metadata.get('tftp_request_frame')
+            if filename:
+                children.append({'title': f'[Destination File: {filename}]'})
+            if req_frame is not None:
+                children.append({'title': f'[Write Request in frame {int(req_frame)}]'})
+        children.append({'title': f'Block: {block}', 'offset': offset + 2, 'length': 2})
+        if opcode == 4:
+            children.append({'title': f'[Full Block Number: {block}]'})
+    elif opcode == 5 and len(payload) >= 4:
+        err_code = int.from_bytes(payload[2:4], 'big')
+        err_msg = payload[4:].split(b'\x00', 1)[0].decode(errors='ignore')
+        children.append({'title': f'Error Code: {err_code}', 'offset': offset + 2, 'length': 2})
+        if err_msg:
+            children.append({'title': f'Error Message: {err_msg}', 'offset': offset + 4, 'length': len(err_msg)})
+    return {
+        'title': 'Trivial File Transfer Protocol',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _esp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    spi = int.from_bytes(payload[:4], 'big') if len(payload) >= 4 else 0
+    seq = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
+    return {
+        'title': 'Encapsulating Security Payload',
+        'offset': offset,
+        'length': len(payload),
+        'children': [
+            {'title': f'ESP SPI: 0x{spi:08x} ({spi})', 'offset': offset, 'length': 4 if len(payload) >= 4 else 0},
+            {'title': f'ESP Sequence: {seq}', 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0},
+        ],
+    }
+
+
+def _isakmp_payload_name(next_payload: int, major: int) -> str:
+    if int(major) == 2:
+        return {
+            0: 'NONE / No Next Payload',
+            33: 'Security Association',
+            34: 'Key Exchange',
+            35: 'Identification - Initiator',
+            36: 'Identification - Responder',
+            40: 'Nonce',
+            41: 'Notify',
+            43: 'Vendor ID',
+            46: 'Encrypted and Authenticated',
+        }.get(int(next_payload), f'Payload {int(next_payload)}')
+    return {
+        0: 'NONE / No Next Payload',
+        1: 'Security Association',
+        2: 'Proposal',
+        3: 'Transform',
+        4: 'Key Exchange',
+        5: 'Identification',
+        8: 'Hash',
+        10: 'Nonce',
+        13: 'Vendor ID',
+    }.get(int(next_payload), f'Payload {int(next_payload)}')
+
+
+def _isakmp_v2_exchange_name(value: int) -> str:
+    return {
+        34: 'IKE_SA_INIT',
+        35: 'IKE_AUTH',
+        36: 'CREATE_CHILD_SA',
+        37: 'INFORMATIONAL',
+    }.get(int(value), f'Exchange ({int(value)})')
+
+
+def _isakmp_v1_exchange_name(value: int) -> str:
+    return {
+        2: 'Identity Protection (Main Mode)',
+        4: 'Aggressive',
+        5: 'Informational',
+        32: 'Quick Mode',
+    }.get(int(value), f'Exchange ({int(value)})')
+
+
+def _isakmp_v2_transform_type_name(value: int) -> str:
+    return {
+        1: 'Encryption Algorithm (ENCR)',
+        2: 'Pseudo-random Function (PRF)',
+        3: 'Integrity Algorithm (INTEG)',
+        4: 'Key Exchange Method (KE)',
+        5: 'Extended Sequence Numbers (ESN)',
+    }.get(int(value), f'Transform Type ({int(value)})')
+
+
+def _isakmp_v2_transform_id_name(transform_type: int, transform_id: int) -> str:
+    transform_type = int(transform_type)
+    transform_id = int(transform_id)
+    if transform_type == 1:
+        return {12: 'ENCR_AES_CBC'}.get(transform_id, f'ENCR ({transform_id})')
+    if transform_type == 2:
+        return {7: 'PRF_HMAC_SHA2_512'}.get(transform_id, f'PRF ({transform_id})')
+    if transform_type == 3:
+        return {14: 'AUTH_HMAC_SHA2_512_256'}.get(transform_id, f'INTEG ({transform_id})')
+    if transform_type == 4:
+        return {20: '384-bit random ECP group'}.get(transform_id, str(transform_id))
+    return str(transform_id)
+
+
+def _isakmp_v1_attribute_name(attr_type: int) -> str:
+    return {
+        1: 'Encryption-Algorithm',
+        2: 'Hash-Algorithm',
+        3: 'Authentication-Method',
+        4: 'Group-Description',
+        11: 'Life-Type',
+        12: 'Life-Duration',
+        14: 'Key-Length',
+    }.get(int(attr_type), f'Attribute-{int(attr_type)}')
+
+
+def _isakmp_v1_attribute_value(attr_type: int, value: int) -> str:
+    attr_type = int(attr_type)
+    value = int(value)
+    if attr_type == 1:
+        return {7: 'AES-CBC'}.get(value, str(value))
+    if attr_type == 2:
+        return {2: 'SHA', 6: 'SHA2-512'}.get(value, str(value))
+    if attr_type == 3:
+        return {1: 'Pre-shared key'}.get(value, str(value))
+    if attr_type == 4:
+        return {2: 'Alternate 1024-bit MODP group', 20: '384-bit random ECP group'}.get(value, str(value))
+    if attr_type == 11:
+        return {1: 'Seconds'}.get(value, str(value))
+    return str(value)
+
+
+def _isakmp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    if len(payload) < 28:
+        return {
+            'title': 'Internet Security Association and Key Management Protocol',
+            'offset': offset,
+            'length': len(payload),
+            'children': [],
+        }
+
+    initiator_spi = payload[0:8]
+    responder_spi = payload[8:16]
+    next_payload = int(payload[16])
+    version = int(payload[17])
+    major = (version >> 4) & 0x0F
+    minor = version & 0x0F
+    exchange_type = int(payload[18])
+    flags = int(payload[19])
+    message_id = int.from_bytes(payload[20:24], 'big')
+    total_length = int.from_bytes(payload[24:28], 'big')
+    total_length = min(max(28, total_length), len(payload))
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'Initiator SPI: {initiator_spi.hex()}', 'offset': offset + 0, 'length': 8},
+        {'title': f'Responder SPI: {responder_spi.hex()}', 'offset': offset + 8, 'length': 8},
+        {'title': f'Next payload: {_isakmp_payload_name(next_payload, major)} ({next_payload})', 'offset': offset + 16, 'length': 1},
+        {
+            'title': f'Version: {major}.{minor}',
+            'offset': offset + 17,
+            'length': 1,
+            'children': [
+                {'title': f'{major:04b} .... = MjVer: 0x{major:x}', 'offset': offset + 17, 'length': 1},
+                {'title': f'.... {minor:04b} = MnVer: 0x{minor:x}', 'offset': offset + 17, 'length': 1},
+            ],
+        },
+    ]
+
+    if major == 2:
+        children.append({'title': f'Exchange type: {_isakmp_v2_exchange_name(exchange_type)} ({exchange_type})', 'offset': offset + 18, 'length': 1})
+        flag_children = [
+            {'title': f'.... {1 if flags & 0x08 else 0}... = Initiator: {"Initiator" if flags & 0x08 else "Responder"}', 'offset': offset + 19, 'length': 1},
+            {'title': f'...{1 if flags & 0x10 else 0} .... = Version: {"Higher version" if flags & 0x10 else "No higher version"}', 'offset': offset + 19, 'length': 1},
+            {'title': f'..{1 if flags & 0x20 else 0}. .... = Response: {"Response" if flags & 0x20 else "Request"}', 'offset': offset + 19, 'length': 1},
+        ]
+        flag_title = f'Flags: 0x{flags:02x} ({"Initiator" if flags & 0x08 else "Responder"}, {"Higher version" if flags & 0x10 else "No higher version"}, {"Response" if flags & 0x20 else "Request"})'
+    else:
+        children.append({'title': f'Exchange type: {_isakmp_v1_exchange_name(exchange_type)} ({exchange_type})', 'offset': offset + 18, 'length': 1})
+        flag_children = [
+            {'title': f'.... ...{1 if flags & 0x01 else 0} = Encryption: {"Encrypted" if flags & 0x01 else "Not encrypted"}', 'offset': offset + 19, 'length': 1},
+            {'title': f'.... ..{1 if flags & 0x02 else 0}. = Commit: {"Commit" if flags & 0x02 else "No commit"}', 'offset': offset + 19, 'length': 1},
+            {'title': f'.... .{1 if flags & 0x04 else 0}.. = Authentication: {"Authentication" if flags & 0x04 else "No authentication"}', 'offset': offset + 19, 'length': 1},
+        ]
+        flag_title = f'Flags: 0x{flags:02x}'
+
+    children.append({'title': flag_title, 'offset': offset + 19, 'length': 1, 'children': flag_children})
+    children.append({'title': f'Message ID: 0x{message_id:08x}', 'offset': offset + 20, 'length': 4})
+    children.append({'title': f'Length: {int(total_length)}', 'offset': offset + 24, 'length': 4})
+
+    if major == 1 and (flags & 0x01):
+        enc_len = max(0, total_length - 28)
+        children.append({'title': f'Encrypted Data ({enc_len} bytes)', 'offset': offset + 28, 'length': enc_len})
+        return {
+            'title': 'Internet Security Association and Key Management Protocol',
+            'offset': offset,
+            'length': total_length,
+            'children': children,
+        }
+
+    pos = 28
+    current_type = int(next_payload)
+    guard = 0
+    while pos + 4 <= total_length and guard < 32:
+        guard += 1
+        np = int(payload[pos])
+        flags_byte = int(payload[pos + 1])
+        plen = int.from_bytes(payload[pos + 2:pos + 4], 'big')
+        if plen < 4 or pos + plen > total_length:
+            break
+
+        p_name = _isakmp_payload_name(current_type, major)
+        p_children: List[Dict[str, Any]] = [
+            {'title': f'Next payload: {_isakmp_payload_name(np, major)} ({np})', 'offset': offset + pos, 'length': 1},
+            {'title': f'{"0... .... = Critical Bit: Not critical" if (flags_byte & 0x80) == 0 else "1... .... = Critical Bit: Critical"}' if major == 2 else 'Reserved: 00', 'offset': offset + pos + 1, 'length': 1},
+        ]
+        if major == 2:
+            p_children.append({'title': f'.{flags_byte & 0x7F:07b} = Reserved: 0x{flags_byte & 0x7F:02x}', 'offset': offset + pos + 1, 'length': 1})
+        p_children.append({'title': f'Payload length: {plen}', 'offset': offset + pos + 2, 'length': 2})
+
+        body = payload[pos + 4:pos + plen]
+        body_off = pos + 4
+
+        if current_type in {33, 1}:  # SA
+            if major == 2 and len(body) >= 12:
+                proposal_pos = 0
+                while proposal_pos + 8 <= len(body):
+                    p_next = int(body[proposal_pos])
+                    p_len = int.from_bytes(body[proposal_pos + 2:proposal_pos + 4], 'big')
+                    if p_len < 8 or proposal_pos + p_len > len(body):
+                        break
+                    p_number = int(body[proposal_pos + 4])
+                    p_proto = int(body[proposal_pos + 5])
+                    p_spi_size = int(body[proposal_pos + 6])
+                    p_transforms = int(body[proposal_pos + 7])
+                    proposal_children: List[Dict[str, Any]] = [
+                        {'title': f'Next payload: {_isakmp_payload_name(p_next, major)} ({p_next})', 'offset': offset + body_off + proposal_pos, 'length': 1},
+                        {'title': 'Reserved: 00', 'offset': offset + body_off + proposal_pos + 1, 'length': 1},
+                        {'title': f'Payload length: {p_len}', 'offset': offset + body_off + proposal_pos + 2, 'length': 2},
+                        {'title': f'Proposal number: {p_number}', 'offset': offset + body_off + proposal_pos + 4, 'length': 1},
+                        {'title': f'Protocol ID: {"IKE" if p_proto == 1 else p_proto} ({p_proto})', 'offset': offset + body_off + proposal_pos + 5, 'length': 1},
+                        {'title': f'SPI Size: {p_spi_size}', 'offset': offset + body_off + proposal_pos + 6, 'length': 1},
+                        {'title': f'Proposal transforms: {p_transforms}', 'offset': offset + body_off + proposal_pos + 7, 'length': 1},
+                    ]
+                    t_pos = proposal_pos + 8 + p_spi_size
+                    t_idx = 0
+                    while t_pos + 8 <= proposal_pos + p_len and t_pos + 8 <= len(body):
+                        t_idx += 1
+                        t_next = int(body[t_pos])
+                        t_len = int.from_bytes(body[t_pos + 2:t_pos + 4], 'big')
+                        if t_len < 8 or t_pos + t_len > len(body):
+                            break
+                        t_type = int(body[t_pos + 4])
+                        t_id = int.from_bytes(body[t_pos + 6:t_pos + 8], 'big')
+                        t_children: List[Dict[str, Any]] = [
+                            {'title': f'Next payload: {"Transform" if t_next == 3 else _isakmp_payload_name(t_next, major)} ({t_next})', 'offset': offset + body_off + t_pos, 'length': 1},
+                            {'title': 'Reserved: 00', 'offset': offset + body_off + t_pos + 1, 'length': 1},
+                            {'title': f'Payload length: {t_len}', 'offset': offset + body_off + t_pos + 2, 'length': 2},
+                            {'title': f'Transform Type: {_isakmp_v2_transform_type_name(t_type)} ({t_type})', 'offset': offset + body_off + t_pos + 4, 'length': 1},
+                            {'title': 'Reserved: 00', 'offset': offset + body_off + t_pos + 5, 'length': 1},
+                        ]
+                        id_name = _isakmp_v2_transform_id_name(t_type, t_id)
+                        t_children.append({'title': f'Transform ID ({"ENCR" if t_type==1 else "PRF" if t_type==2 else "INTEG" if t_type==3 else "KE" if t_type==4 else "T"}): {id_name} ({t_id})', 'offset': offset + body_off + t_pos + 6, 'length': 2})
+                        attr_pos = t_pos + 8
+                        while attr_pos + 4 <= t_pos + t_len:
+                            attr_type_val = int.from_bytes(body[attr_pos:attr_pos + 2], 'big')
+                            attr_val = int.from_bytes(body[attr_pos + 2:attr_pos + 4], 'big')
+                            af = 1 if (attr_type_val & 0x8000) else 0
+                            a_type = attr_type_val & 0x7FFF
+                            if af == 1:
+                                if a_type == 14:
+                                    t_children.append({
+                                        'title': f'Transform Attribute (t={a_type},l=2): Key Length: {attr_val}',
+                                        'offset': offset + body_off + attr_pos,
+                                        'length': 4,
+                                        'children': [
+                                            {'title': '1... .... .... .... = Format: Type/Value (TV)', 'offset': offset + body_off + attr_pos, 'length': 2},
+                                            {'title': f'Type: Key Length ({a_type})', 'offset': offset + body_off + attr_pos, 'length': 2},
+                                            {'title': f'Value: {attr_val:04x}', 'offset': offset + body_off + attr_pos + 2, 'length': 2},
+                                            {'title': f'Key Length: {attr_val}', 'offset': offset + body_off + attr_pos + 2, 'length': 2},
+                                        ],
+                                    })
+                                else:
+                                    t_children.append({'title': f'Transform Attribute (t={a_type},l=2): {attr_val}', 'offset': offset + body_off + attr_pos, 'length': 4})
+                                attr_pos += 4
+                            else:
+                                break
+                        proposal_children.append({
+                            'title': 'Payload: Transform (3)',
+                            'offset': offset + body_off + t_pos,
+                            'length': t_len,
+                            'children': t_children,
+                        })
+                        t_pos += t_len
+                    p_children.append({
+                        'title': f'Payload: Proposal (2) # {p_number}',
+                        'offset': offset + body_off + proposal_pos,
+                        'length': p_len,
+                        'children': proposal_children,
+                    })
+                    proposal_pos += p_len
+            elif major == 1 and len(body) >= 8:
+                doi = int.from_bytes(body[0:4], 'big')
+                situation = int.from_bytes(body[4:8], 'big')
+                p_children.append({'title': f'Domain of interpretation: {"IPSEC" if doi == 1 else doi} ({doi})', 'offset': offset + body_off + 0, 'length': 4})
+                p_children.append({
+                    'title': f'Situation: {situation:08x}',
+                    'offset': offset + body_off + 4,
+                    'length': 4,
+                    'children': [
+                        {'title': f'.... .... .... .... .... .... .... ...{1 if situation & 0x1 else 0} = Identity Only: {"True" if situation & 0x1 else "False"}', 'offset': offset + body_off + 4, 'length': 4},
+                        {'title': f'.... .... .... .... .... .... .... ..{1 if situation & 0x2 else 0}. = Secrecy: {"True" if situation & 0x2 else "False"}', 'offset': offset + body_off + 4, 'length': 4},
+                        {'title': f'.... .... .... .... .... .... .... .{1 if situation & 0x4 else 0}.. = Integrity: {"True" if situation & 0x4 else "False"}', 'offset': offset + body_off + 4, 'length': 4},
+                    ],
+                })
+                proposal_pos = 8
+                while proposal_pos + 8 <= len(body):
+                    p_next = int(body[proposal_pos])
+                    p_len = int.from_bytes(body[proposal_pos + 2:proposal_pos + 4], 'big')
+                    if p_len < 8 or proposal_pos + p_len > len(body):
+                        break
+                    p_number = int(body[proposal_pos + 4])
+                    p_proto = int(body[proposal_pos + 5])
+                    p_spi_size = int(body[proposal_pos + 6])
+                    p_transforms = int(body[proposal_pos + 7])
+                    proposal_children = [
+                        {'title': f'Next payload: {_isakmp_payload_name(p_next, major)} ({p_next})', 'offset': offset + body_off + proposal_pos, 'length': 1},
+                        {'title': 'Reserved: 00', 'offset': offset + body_off + proposal_pos + 1, 'length': 1},
+                        {'title': f'Payload length: {p_len}', 'offset': offset + body_off + proposal_pos + 2, 'length': 2},
+                        {'title': f'Proposal number: {p_number}', 'offset': offset + body_off + proposal_pos + 4, 'length': 1},
+                        {'title': f'Protocol ID: {"ISAKMP" if p_proto == 1 else p_proto} ({p_proto})', 'offset': offset + body_off + proposal_pos + 5, 'length': 1},
+                        {'title': f'SPI Size: {p_spi_size}', 'offset': offset + body_off + proposal_pos + 6, 'length': 1},
+                        {'title': f'Proposal transforms: {p_transforms}', 'offset': offset + body_off + proposal_pos + 7, 'length': 1},
+                    ]
+                    t_pos = proposal_pos + 8 + p_spi_size
+                    t_idx = 0
+                    while t_pos + 8 <= proposal_pos + p_len and t_pos + 8 <= len(body):
+                        t_idx += 1
+                        t_next = int(body[t_pos])
+                        t_len = int.from_bytes(body[t_pos + 2:t_pos + 4], 'big')
+                        if t_len < 8 or t_pos + t_len > len(body):
+                            break
+                        t_number = int(body[t_pos + 4])
+                        t_id = int(body[t_pos + 5])
+                        t_children = [
+                            {'title': f'Next payload: {_isakmp_payload_name(t_next, major)} ({t_next})', 'offset': offset + body_off + t_pos, 'length': 1},
+                            {'title': 'Reserved: 00', 'offset': offset + body_off + t_pos + 1, 'length': 1},
+                            {'title': f'Payload length: {t_len}', 'offset': offset + body_off + t_pos + 2, 'length': 2},
+                            {'title': f'Transform number: {t_number}', 'offset': offset + body_off + t_pos + 4, 'length': 1},
+                            {'title': f'Transform ID: {"KEY_IKE" if t_id == 1 else t_id} ({t_id})', 'offset': offset + body_off + t_pos + 5, 'length': 1},
+                            {'title': 'Reserved: 0000', 'offset': offset + body_off + t_pos + 6, 'length': 2},
+                        ]
+                        attr_pos = t_pos + 8
+                        while attr_pos + 4 <= t_pos + t_len:
+                            raw_type = int.from_bytes(body[attr_pos:attr_pos + 2], 'big')
+                            raw_val = int.from_bytes(body[attr_pos + 2:attr_pos + 4], 'big')
+                            tv = 1 if (raw_type & 0x8000) else 0
+                            attr_type = raw_type & 0x7FFF
+                            if tv != 1:
+                                break
+                            attr_name = _isakmp_v1_attribute_name(attr_type)
+                            value_name = _isakmp_v1_attribute_value(attr_type, raw_val)
+                            suffix = f': {value_name}' if attr_type not in {12, 14} else f': {raw_val}'
+                            if attr_type == 11:
+                                suffix = f': Life-Type: {value_name}'
+                            elif attr_type == 12:
+                                suffix = f': Life-Duration: {raw_val}'
+                            elif attr_type == 14:
+                                suffix = f': Key-Length: {raw_val}'
+                            elif attr_type == 1:
+                                suffix = f': Encryption-Algorithm: {value_name}'
+                            elif attr_type == 2:
+                                suffix = f': Hash-Algorithm: {value_name}'
+                            elif attr_type == 3:
+                                suffix = f': Authentication-Method: {value_name}'
+                            elif attr_type == 4:
+                                suffix = f': Group-Description: {value_name}'
+                            value_detail = f'Value: {raw_val}'
+                            if attr_type == 11:
+                                value_detail = f'Life Type: {value_name} ({raw_val})'
+                            elif attr_type == 12:
+                                value_detail = f'Life Duration: {raw_val}'
+                            elif attr_type == 14:
+                                value_detail = f'Key Length: {raw_val}'
+                            elif attr_type == 1:
+                                value_detail = f'Encryption Algorithm: {value_name} ({raw_val})'
+                            elif attr_type == 2:
+                                value_detail = f'HASH Algorithm: {value_name} ({raw_val})'
+                            elif attr_type == 3:
+                                value_detail = f'Authentication Method: {value_name} ({raw_val})'
+                            elif attr_type == 4:
+                                value_detail = f'Group Description: {value_name} ({raw_val})'
+                            t_children.append({
+                                'title': f'IKE Attribute (t={attr_type},l=2){suffix}',
+                                'offset': offset + body_off + attr_pos,
+                                'length': 4,
+                                'children': [
+                                    {'title': '1... .... .... .... = Format: Type/Value (TV)', 'offset': offset + body_off + attr_pos, 'length': 2},
+                                    {'title': f'Type: {attr_name} ({attr_type})', 'offset': offset + body_off + attr_pos, 'length': 2},
+                                    {'title': f'Value: {raw_val:04x}', 'offset': offset + body_off + attr_pos + 2, 'length': 2},
+                                    {'title': value_detail, 'offset': offset + body_off + attr_pos + 2, 'length': 2},
+                                ],
+                            })
+                            attr_pos += 4
+                        proposal_children.append({
+                            'title': f'Payload: Transform (3) # {t_idx}',
+                            'offset': offset + body_off + t_pos,
+                            'length': t_len,
+                            'children': t_children,
+                        })
+                        t_pos += t_len
+                    p_children.append({
+                        'title': f'Payload: Proposal (2) # {p_number}',
+                        'offset': offset + body_off + proposal_pos,
+                        'length': p_len,
+                        'children': proposal_children,
+                    })
+                    proposal_pos += p_len
+        elif current_type in {34, 4}:  # KE (v2/v1)
+            if major == 2 and len(body) >= 4:
+                ke_method = int.from_bytes(body[0:2], 'big')
+                p_children.append({'title': f'Key Exchange Method: {_isakmp_v2_transform_id_name(4, ke_method)} ({ke_method})', 'offset': offset + body_off + 0, 'length': 2})
+                p_children.append({'title': f'Reserved: {body[2:4].hex()}', 'offset': offset + body_off + 2, 'length': 2})
+                if len(body) > 4:
+                    preview = body[4:].hex()
+                    title = f'Key Exchange Data{" [â€¦]" if len(preview) > 320 else ""}: {preview[:320] if len(preview)>320 else preview}'
+                    p_children.append({'title': title, 'offset': offset + body_off + 4, 'length': len(body) - 4})
+            else:
+                preview = body.hex()
+                title = f'Key Exchange Data{" [â€¦]" if len(preview) > 320 else ""}: {preview[:320] if len(preview)>320 else preview}'
+                p_children.append({'title': title, 'offset': offset + body_off, 'length': len(body)})
+        elif current_type in {40, 10}:  # Nonce
+            p_children.append({'title': f'Nonce DATA: {body.hex()}', 'offset': offset + body_off, 'length': len(body)})
+        elif current_type == 5 and major == 1 and len(body) >= 4:  # ID
+            id_type = int(body[0])
+            proto_id = int(body[1])
+            port = int.from_bytes(body[2:4], 'big')
+            id_data = body[4:]
+            id_text = id_data.decode(errors='ignore')
+            p_children.append({'title': f'ID type: {"FQDN" if id_type == 2 else id_type} ({id_type})', 'offset': offset + body_off + 0, 'length': 1})
+            p_children.append({'title': f'Protocol ID: {"Unused" if proto_id == 0 else proto_id}', 'offset': offset + body_off + 1, 'length': 1})
+            p_children.append({'title': f'Port: {"Unused" if port == 0 else port}', 'offset': offset + body_off + 2, 'length': 2})
+            p_children.append({
+                'title': f'Identification Data:{id_text}',
+                'offset': offset + body_off + 4,
+                'length': len(id_data),
+                'children': [{'title': f'ID_FQDN: {id_text}', 'offset': offset + body_off + 4, 'length': len(id_data)}] if id_type == 2 else [],
+            })
+        elif current_type == 13 and major == 1:  # Vendor ID
+            vendor_hex = body.hex()
+            vendor_name = 'Unknown Vendor ID'
+            if vendor_hex.startswith('afcad71368a1f1c96b8696fc77570100'):
+                vendor_name = 'RFC 3706 DPD (Dead Peer Detection)'
+            elif vendor_hex.startswith('09002689dfd6b712'):
+                vendor_name = 'XAUTH'
+            p_children.append({'title': f'Vendor ID: {vendor_hex}', 'offset': offset + body_off, 'length': len(body)})
+            p_children.append({'title': f'Vendor ID: {vendor_name}'})
+        elif current_type == 46 and major == 2:
+            if len(body) >= 4:
+                p_children.append({'title': f'Initialization Vector: {body[:4].hex()}', 'offset': offset + body_off, 'length': 4})
+                if len(body) > 4:
+                    p_children.append({'title': 'Encrypted Data', 'offset': offset + body_off + 4, 'length': len(body) - 4})
+            else:
+                p_children.append({'title': 'Encrypted Data', 'offset': offset + body_off, 'length': len(body)})
+
+        node_title = f'Payload: {p_name} ({current_type})'
+        if current_type == 13 and major == 1 and len(body) > 0:
+            vendor_hex = body.hex()
+            if vendor_hex.startswith('afcad71368a1f1c96b8696fc77570100'):
+                node_title = 'Payload: Vendor ID (13) : RFC 3706 DPD (Dead Peer Detection)'
+            elif vendor_hex.startswith('09002689dfd6b712'):
+                node_title = 'Payload: Vendor ID (13) : XAUTH'
+            else:
+                node_title = 'Payload: Vendor ID (13) : Unknown Vendor ID'
+
+        children.append({
+            'title': node_title,
+            'offset': offset + pos,
+            'length': plen,
+            'children': p_children,
+        })
+
+        current_type = np
+        pos += plen
+        if current_type == 0:
+            break
+
+    return {
+        'title': 'Internet Security Association and Key Management Protocol',
+        'offset': offset,
+        'length': total_length,
+        'children': children,
+    }
+
+
+def _ssh_message_name(msg_code: int, kex_method: str = '') -> str:
+    method = str(kex_method or '').lower()
+    if int(msg_code) == 31 and 'group-exchange' in method:
+        return 'Diffie-Hellman Group Exchange Group'
+    names = {
+        1: 'Disconnect',
+        2: 'Ignore',
+        3: 'Unimplemented',
+        4: 'Debug',
+        5: 'Service Request',
+        6: 'Service Accept',
+        20: 'Key Exchange Init',
+        21: 'New Keys',
+        30: 'Diffie-Hellman Key Exchange Init',
+        31: 'Diffie-Hellman Key Exchange Reply',
+        32: 'Diffie-Hellman Group Exchange Init',
+        33: 'Diffie-Hellman Group Exchange Reply',
+        34: 'Diffie-Hellman Group Exchange Request',
+        50: 'User Authentication Request',
+        51: 'User Authentication Failure',
+        52: 'User Authentication Success',
+        53: 'User Authentication Banner',
+        80: 'Global Request',
+        81: 'Request Success',
+        82: 'Request Failure',
+    }
+    return names.get(int(msg_code), f'Message ({int(msg_code)})')
+
+
+def _ssh_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+    use_reassembled = False
+    if reassembled_hex:
+        try:
+            payload = bytes.fromhex(reassembled_hex)
+            use_reassembled = True
+            offset = 0
+        except Exception:
+            pass
+
+    byte_source = TCP_REASSEMBLED_BYTE_SOURCE if use_reassembled else PACKET_BYTE_SOURCE
+    base_offset = 0 if use_reassembled else int(offset)
+
+    def _map(rel_offset: int, length: int) -> Dict[str, Any]:
+        return _byte_mapping(base_offset, rel_offset, length, byte_source)
+
+    def _hex_preview(value: bytes, limit_chars: int = 320) -> tuple[str, bool]:
+        text = bytes(value or b'').hex()
+        if len(text) > limit_chars:
+            return text[:limit_chars], True
+        return text, False
+
+    def _read_u32(buf: bytes, pos: int) -> tuple[int, int] | None:
+        if pos + 4 > len(buf):
+            return None
+        return int.from_bytes(buf[pos:pos + 4], 'big'), pos + 4
+
+    def _read_string(buf: bytes, pos: int) -> tuple[bytes, int, int, int] | None:
+        parsed = _read_u32(buf, pos)
+        if parsed is None:
+            return None
+        length, next_pos = parsed
+        end_pos = next_pos + int(length)
+        if end_pos > len(buf):
+            return None
+        return buf[next_pos:end_pos], end_pos, pos, int(length)
+
+    def _read_mpint(buf: bytes, pos: int) -> tuple[bytes, int, int] | None:
+        parsed = _read_u32(buf, pos)
+        if parsed is None:
+            return None
+        mp_len, next_pos = parsed
+        end_pos = next_pos + int(mp_len)
+        if end_pos > len(buf):
+            return None
+        return buf[next_pos:end_pos], end_pos, int(mp_len)
+
+    children: List[Dict[str, Any]] = []
+    if payload.startswith(b'SSH-'):
+        line = payload.split(b'\n', 1)[0]
+        line_text = line.rstrip(b'\r').decode(errors='ignore')
+        children.append({
+            'title': f'Protocol Version Exchange: {line_text}',
+            **_map(0, len(line)),
+        })
+        if b'\n' in payload:
+            children.append({'title': '\\n', **_map(len(line), 1)})
+        return {
+            'title': 'SSH Protocol',
+            **_map(0, len(payload)),
+            'children': children,
+        }
+
+    tcp_layer = _effective_tcp_layer(getattr(record, 'raw', None), _effective_ip_layer(getattr(record, 'raw', None))) if record else None
+    direction = 'Server to Client' if tcp_layer is not None and int(getattr(tcp_layer, 'sport', 0) or 0) == 22 else 'Client to Server'
+    kex_method = str(metadata.get('ssh_kex_method', '') or 'diffie-hellman-group-exchange-sha1')
+    encryption = str(metadata.get('ssh_encryption', '') or 'aes128-cbc')
+    mac_name = str(metadata.get('ssh_mac', '') or 'hmac-sha1')
+    compression = str(metadata.get('ssh_compression', '') or 'none')
+
+    version_children: List[Dict[str, Any]] = []
+    if len(payload) >= 5:
+        packet_length = int.from_bytes(payload[0:4], 'big')
+        padding_length = int(payload[4])
+        if packet_length >= 2 and packet_length + 4 <= len(payload):
+            payload_end = 4 + packet_length - padding_length
+            version_children.append({'title': f'Packet Length: {packet_length}', **_map(0, 4)})
+            version_children.append({'title': f'Padding Length: {padding_length}', **_map(4, 1)})
+            if payload_end > 5:
+                msg_code = int(payload[5])
+                msg_name = _ssh_message_name(msg_code, kex_method)
+                key_exchange_children: List[Dict[str, Any]] = [
+                    {'title': f'Message Code: {msg_name} ({msg_code})', **_map(5, 1)}
+                ]
+                msg_payload = payload[6:payload_end]
+                msg_rel = 6
+
+                if msg_code == 20 and len(msg_payload) >= 16:
+                    algo_children: List[Dict[str, Any]] = [
+                        {'title': f'Cookie: {msg_payload[:16].hex()}', **_map(msg_rel, 16)}
+                    ]
+                    pos = 16
+                    fields = [
+                        'kex_algorithms',
+                        'server_host_key_algorithms',
+                        'encryption_algorithms_client_to_server',
+                        'encryption_algorithms_server_to_client',
+                        'mac_algorithms_client_to_server',
+                        'mac_algorithms_server_to_client',
+                        'compression_algorithms_client_to_server',
+                        'compression_algorithms_server_to_client',
+                        'languages_client_to_server',
+                        'languages_server_to_client',
+                    ]
+                    for field in fields:
+                        if pos + 4 > len(msg_payload):
+                            break
+                        name_len = int.from_bytes(msg_payload[pos:pos + 4], 'big')
+                        algo_children.append({'title': f'{field} length: {name_len}', **_map(msg_rel + pos, 4)})
+                        pos += 4
+                        value = msg_payload[pos:pos + name_len]
+                        text = value.decode(errors='ignore')
+                        title = f'{field} string [...]: {text}' if len(text) > 260 else f'{field} string: {text}'
+                        algo_children.append({'title': title, **_map(msg_rel + pos, len(value))})
+                        pos += len(value)
+                    if pos + 1 <= len(msg_payload):
+                        first_kex = int(msg_payload[pos])
+                        algo_children.append({'title': f'First KEX Packet Follows: {first_kex}', **_map(msg_rel + pos, 1)})
+                        pos += 1
+                    if pos + 4 <= len(msg_payload):
+                        algo_children.append({'title': f'Reserved: {msg_payload[pos:pos + 4].hex()}', **_map(msg_rel + pos, 4)})
+                        pos += 4
+                    key_exchange_children.append({
+                        'title': 'Algorithms',
+                        **_map(msg_rel, len(msg_payload)),
+                        'children': algo_children,
+                    })
+                elif msg_code == 34 and len(msg_payload) >= 12:
+                    min_bits = int.from_bytes(msg_payload[0:4], 'big')
+                    n_bits = int.from_bytes(msg_payload[4:8], 'big')
+                    max_bits = int.from_bytes(msg_payload[8:12], 'big')
+                    key_exchange_children.extend([
+                        {'title': f'DH GEX Min: {min_bits}', **_map(msg_rel, 4)},
+                        {'title': f'DH GEX Number of Bits: {n_bits}', **_map(msg_rel + 4, 4)},
+                        {'title': f'DH GEX Max: {max_bits}', **_map(msg_rel + 8, 4)},
+                    ])
+                elif msg_code == 31 and len(msg_payload) >= 4 and 'group-exchange' in kex_method.lower():
+                    parsed_mp = _read_mpint(msg_payload, 0)
+                    if parsed_mp is not None:
+                        mp_val, pos, mp_len = parsed_mp
+                        key_exchange_children.append({'title': f'Multi Precision Integer Length: {mp_len}', **_map(msg_rel, 4)})
+                        preview, truncated = _hex_preview(mp_val)
+                        mod_title = f'DH GEX modulus (P) [...]: {preview}' if truncated else f'DH GEX modulus (P): {preview}'
+                        key_exchange_children.append({'title': mod_title, **_map(msg_rel + 4, len(mp_val))})
+                        parsed_g = _read_mpint(msg_payload, pos)
+                        if parsed_g is not None:
+                            g_val, _, g_len = parsed_g
+                            key_exchange_children.append({'title': f'Multi Precision Integer Length: {g_len}', **_map(msg_rel + pos, 4)})
+                            g_preview, g_truncated = _hex_preview(g_val)
+                            g_title = f'DH GEX base (G) [...]: {g_preview}' if g_truncated else f'DH GEX base (G): {g_preview}'
+                            key_exchange_children.append({'title': g_title, **_map(msg_rel + pos + 4, len(g_val))})
+                elif msg_code == 32 and len(msg_payload) >= 4:
+                    parsed_e = _read_mpint(msg_payload, 0)
+                    if parsed_e is not None:
+                        e_val, _, e_len = parsed_e
+                        key_exchange_children.append({'title': f'Multi Precision Integer Length: {e_len}', **_map(msg_rel, 4)})
+                        e_preview, e_truncated = _hex_preview(e_val)
+                        e_title = f'DH client e [...]: {e_preview}' if e_truncated else f'DH client e: {e_preview}'
+                        key_exchange_children.append({'title': e_title, **_map(msg_rel + 4, len(e_val))})
+                elif msg_code == 33 and len(msg_payload) >= 4:
+                    pos = 0
+                    host_key = _read_string(msg_payload, pos)
+                    if host_key is not None:
+                        host_blob, pos, host_len_pos, host_len = host_key
+                        key_exchange_children.append({
+                            'title': 'KEX host key (type: ssh-rsa)',
+                            **_map(msg_rel + host_len_pos, 4 + host_len),
+                            'children': [],
+                        })
+                        host_children = key_exchange_children[-1]['children']
+                        host_children.append({'title': f'Host key length: {host_len}', **_map(msg_rel + host_len_pos, 4)})
+                        host_pos = 0
+                        key_type_parsed = _read_string(host_blob, host_pos)
+                        if key_type_parsed is not None:
+                            key_type_blob, host_pos, type_len_pos, type_len = key_type_parsed
+                            key_type = key_type_blob.decode(errors='ignore')
+                            host_children.append({'title': f'Host key type length: {type_len}', **_map(msg_rel + host_len_pos + 4 + type_len_pos, 4)})
+                            host_children.append({'title': f'Host key type: {key_type}', **_map(msg_rel + host_len_pos + 4 + type_len_pos + 4, len(key_type_blob))})
+                        exp_parsed = _read_mpint(host_blob, host_pos)
+                        if exp_parsed is not None:
+                            exp_val, host_pos, exp_len = exp_parsed
+                            host_children.append({'title': f'Multi Precision Integer Length: {exp_len}', **_map(msg_rel + host_len_pos + 4 + host_pos - exp_len - 4, 4)})
+                            host_children.append({'title': f'RSA public exponent (e): {exp_val.hex()}', **_map(msg_rel + host_len_pos + 4 + host_pos - exp_len, len(exp_val))})
+                        mod_parsed = _read_mpint(host_blob, host_pos)
+                        if mod_parsed is not None:
+                            mod_val, _, mod_len = mod_parsed
+                            host_children.append({'title': f'Multi Precision Integer Length: {mod_len}', **_map(msg_rel + host_len_pos + 4 + host_pos, 4)})
+                            mod_preview, mod_truncated = _hex_preview(mod_val)
+                            mod_title = f'RSA modulus (N) [...]: {mod_preview}' if mod_truncated else f'RSA modulus (N): {mod_preview}'
+                            host_children.append({'title': mod_title, **_map(msg_rel + host_len_pos + 4 + host_pos + 4, len(mod_val))})
+                    f_mpint = _read_mpint(msg_payload, pos)
+                    if f_mpint is not None:
+                        f_val, pos, f_len = f_mpint
+                        key_exchange_children.append({'title': f'Multi Precision Integer Length: {f_len}', **_map(msg_rel + pos - f_len - 4, 4)})
+                        f_preview, f_truncated = _hex_preview(f_val)
+                        f_title = f'DH server f [...]: {f_preview}' if f_truncated else f'DH server f: {f_preview}'
+                        key_exchange_children.append({'title': f_title, **_map(msg_rel + pos - f_len, len(f_val))})
+                    sig_str = _read_string(msg_payload, pos)
+                    if sig_str is not None:
+                        sig_blob, _, sig_len_pos, sig_len = sig_str
+                        sig_children: List[Dict[str, Any]] = []
+                        sig_children.append({'title': f'Host signature length: {sig_len}', **_map(msg_rel + sig_len_pos, 4)})
+                        sig_pos = 0
+                        sig_type_parsed = _read_string(sig_blob, sig_pos)
+                        if sig_type_parsed is not None:
+                            sig_type_blob, sig_pos, s_type_len_pos, s_type_len = sig_type_parsed
+                            sig_type = sig_type_blob.decode(errors='ignore')
+                            sig_children.append({'title': f'Host signature type length: {s_type_len}', **_map(msg_rel + sig_len_pos + 4 + s_type_len_pos, 4)})
+                            sig_children.append({'title': f'Host signature type: {sig_type}', **_map(msg_rel + sig_len_pos + 4 + s_type_len_pos + 4, len(sig_type_blob))})
+                        sig_mp = _read_mpint(sig_blob, sig_pos)
+                        if sig_mp is not None:
+                            sig_val, _, sig_mp_len = sig_mp
+                            sig_children.append({'title': f'Multi Precision Integer Length: {sig_mp_len}', **_map(msg_rel + sig_len_pos + 4 + sig_pos, 4)})
+                            sig_preview, sig_truncated = _hex_preview(sig_val)
+                            sig_title = f'RSA signature [...]: {sig_preview}' if sig_truncated else f'RSA signature: {sig_preview}'
+                            sig_children.append({'title': sig_title, **_map(msg_rel + sig_len_pos + 4 + sig_pos + 4, len(sig_val))})
+                        key_exchange_children.append({
+                            'title': 'KEX host signature (type: ssh-rsa)',
+                            **_map(msg_rel + sig_len_pos, 4 + sig_len),
+                            'children': sig_children,
+                        })
+
+                key_exchange_node = {
+                    'title': f'Key Exchange (method:{kex_method})',
+                    **_map(5, max(1, payload_end - 5)),
+                    'children': key_exchange_children,
+                }
+                version_children.append(key_exchange_node)
+
+            if padding_length > 0 and payload_end >= 0:
+                padding_bytes = payload[payload_end:4 + packet_length]
+                version_children.append({'title': f'Padding String: {padding_bytes.hex()}', **_map(payload_end, len(padding_bytes))})
+            if metadata.get('ssh_sequence_number', None) is not None:
+                version_children.append({'title': f"[Sequence number: {int(metadata.get('ssh_sequence_number', 0) or 0)}]"})
+        else:
+            mac_len = 20
+            encrypted_field = payload[4:max(4, len(payload) - mac_len)] if len(payload) > 4 else b''
+            mac_field = payload[max(4, len(payload) - mac_len):] if len(payload) >= 4 else b''
+            version_children.append({'title': f'Packet Length (encrypted): {payload[0:4].hex()}', **_map(0, min(4, len(payload)))})
+            if encrypted_field:
+                version_children.append({'title': f'Encrypted Packet: {encrypted_field.hex()}', **_map(4, len(encrypted_field))})
+            if mac_field:
+                version_children.append({'title': f'MAC: {mac_field.hex()}', **_map(len(payload) - len(mac_field), len(mac_field))})
+
+    children.append({
+        'title': f'SSH Version 2 (encryption:{encryption} mac:{mac_name} compression:{compression})',
+        **_map(0, len(payload)),
+        'children': version_children,
+    })
+    children.append({'title': f'[Direction: {direction}]'})
+
+    return {
+        'title': 'SSH Protocol',
+        **_map(0, len(payload)),
+        'children': children,
     }
 
 

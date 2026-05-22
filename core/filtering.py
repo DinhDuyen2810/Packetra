@@ -63,7 +63,7 @@ class DisplayFilter:
             return True
 
         aliases = {
-            'tcp', 'udp', 'dns', 'mdns', 'arp', 'icmp', 'icmpv6', 'igmp', 'tls', 'quic', 'http', 'smtp', 'imf', 'dhcp', 'ripng', 'ripv2', 'stp', 'syslog', 'ntp', 'lacp', 'vtp', 'dtp', 'lldp', 'udld', 'loop', 'hsrp', 'hsrpv2', 'ip', 'ipv6', 'eth'
+            'tcp', 'udp', 'dns', 'mdns', 'arp', 'icmp', 'icmpv6', 'igmp', 'tls', 'quic', 'http', 'smtp', 'imf', 'dhcp', 'ripng', 'ripv2', 'stp', 'syslog', 'ntp', 'lacp', 'vtp', 'dtp', 'lldp', 'udld', 'loop', 'hsrp', 'hsrpv2', 'ip', 'ipv6', 'eth', 'tftp', 'ssdp', 'esp', 'ssh', 'sshv2', 'isakmp', 'ike'
         }
         if low in aliases:
             proto_low = str(record.protocol or '').lower()

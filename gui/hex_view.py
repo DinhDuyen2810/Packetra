@@ -348,7 +348,7 @@ class PacketBytesView(QWidget):
                 reassembled_data = _tls_payload
         if reassembled_data:
             sources.append(
-                ('tcp_reassembled', f'Reassembled TCP ({len(reassembled_data)} bytes)', reassembled_data)
+                ('tcp_reassembled', f'Reassembled ({len(reassembled_data)} bytes)', reassembled_data)
             )
         decoded_utf8 = b''
         http_body = bytes(metadata.get('http_body', b'') or b'')

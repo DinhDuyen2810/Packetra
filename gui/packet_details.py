@@ -21,7 +21,7 @@ class PacketDetailsTree(QTreeWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self.itemSelectionChanged.connect(self._on_selection_changed)
-        # Persistent expand state by top-level section type.
+        # Persistent expand state by normalized tree path.
         self._expand_state = {}
 
     def _on_selection_changed(self):
@@ -170,20 +170,54 @@ class PacketDetailsTree(QTreeWidget):
             return low.split(',', 1)[0].strip()
         return low
 
+    def _normalize_state_title(self, title: str) -> str:
+        text = str(title or '').strip().lower()
+        if not text:
+            return ''
+        if text.startswith('frame'):
+            return 'frame'
+        if ' = ' in text:
+            text = text.split(' = ', 1)[1].strip()
+        if ':' in text:
+            text = text.split(':', 1)[0].strip()
+        if ',' in text:
+            text = text.split(',', 1)[0].strip()
+        return text
+
+    def _item_state_key(self, item: QTreeWidgetItem) -> str:
+        parts = []
+        node = item
+        while node is not None and node is not self.invisibleRootItem():
+            parts.append(self._normalize_state_title(node.text(0)))
+            node = node.parent()
+        parts.reverse()
+        return '/'.join(part for part in parts if part)
+
     def _save_expand_state(self):
-        # Save expand/collapse state by section type (top-level only).
-        self._expand_state.clear()
+        # Save expand/collapse state recursively by normalized path.
+        state: dict[str, bool] = {}
+
+        def walk(item: QTreeWidgetItem):
+            key = self._item_state_key(item)
+            if key:
+                state[key] = bool(item.isExpanded())
+            for idx in range(item.childCount()):
+                walk(item.child(idx))
+
         root = self.invisibleRootItem()
         for i in range(root.childCount()):
-            item = root.child(i)
-            key = self._top_level_state_key(item.text(0))
-            self._expand_state[key] = item.isExpanded()
+            walk(root.child(i))
+        self._expand_state = state
 
     def _restore_expand_state(self):
-        # Restore expand/collapse state by section type (top-level only).
+        # Restore expand/collapse state recursively by normalized path.
+        def walk(item: QTreeWidgetItem):
+            key = self._item_state_key(item)
+            if key in self._expand_state:
+                item.setExpanded(bool(self._expand_state.get(key)))
+            for idx in range(item.childCount()):
+                walk(item.child(idx))
+
         root = self.invisibleRootItem()
         for i in range(root.childCount()):
-            item = root.child(i)
-            key = self._top_level_state_key(item.text(0))
-            if key in self._expand_state:
-                item.setExpanded(self._expand_state[key])
+            walk(root.child(i))

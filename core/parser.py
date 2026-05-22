@@ -31,6 +31,7 @@ class PacketParser:
         self.dns_request_pending = {}
         self.smtp_request_pending = {}
         self.ntp_request_pending = {}
+        self.tftp_sessions = {}
         self.layer_stream_maps = {
             'ethernet': {},
             'ipv4': {},
@@ -101,7 +102,9 @@ class PacketParser:
         self._update_tls_stream_metadata(packet, metadata, int(number))
         self._update_http_stream_metadata(packet, metadata, epoch_time)
         self._update_smtp_stream_metadata(packet, metadata, epoch_time)
+        self._update_ssh_stream_metadata(packet, metadata, epoch_time)
         self._update_capwap_metadata(packet, metadata)
+        self._update_tftp_metadata(packet, metadata)
 
         protocol = self._guess_protocol(packet, metadata)
         if protocol not in {'CAPWAP-Control', 'CAPWAP-Data', '802.11'}:
@@ -218,6 +221,8 @@ class PacketParser:
         )
 
     def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None) -> str:
+        if packet.haslayer('ESP'):
+            return 'ESP'
         if packet.haslayer(ARP):
             return 'ARP'
         if packet.haslayer(DNS):
@@ -233,6 +238,9 @@ class PacketParser:
             return 'ICMP'
         if tcp_layer is not None:
             payload = self._payload_bytes(packet)
+            if int(getattr(tcp_layer, 'sport', 0) or 0) == 22 or int(getattr(tcp_layer, 'dport', 0) or 0) == 22:
+                if payload.startswith(b'SSH-') or len(payload) >= 6:
+                    return 'SSHv2'
             kind = self._http_payload_kind(payload)
             if kind is not None:
                 if b'xml' in payload.lower():
@@ -240,6 +248,19 @@ class PacketParser:
                 return 'HTTP'
             return 'TCP'
         if udp_layer is not None:
+            sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            dport = int(getattr(udp_layer, 'dport', 0) or 0)
+            payload = bytes(getattr(udp_layer, 'payload', b''))
+            if (sport in {500, 4500} or dport in {500, 4500}) and self._is_isakmp_packet_payload(payload):
+                return 'ISAKMP'
+            if len(payload) >= 2:
+                opcode = int.from_bytes(payload[:2], 'big')
+                if opcode in {1, 2, 3, 4, 5}:
+                    return 'TFTP'
+            if sport == 1900 or dport == 1900:
+                first = payload.split(b'\r\n', 1)[0].upper()
+                if first.startswith(b'M-SEARCH ') or first.startswith(b'NOTIFY ') or first.startswith(b'HTTP/1.'):
+                    return 'SSDP'
             return 'UDP'
         if packet.haslayer(IPv6):
             return 'IPv6'
@@ -261,6 +282,34 @@ class PacketParser:
                 if text:
                     return f'{text} '
             return 'HTTP'
+        if protocol == 'SSHv2':
+            return self._ssh_info_text(packet, None)
+        if protocol == 'ISAKMP':
+            return self._isakmp_info_text(packet)
+        if protocol == 'TFTP':
+            payload = bytes(getattr(udp_layer, 'payload', b'')) if udp_layer is not None else b''
+            if len(payload) >= 2:
+                opcode = int.from_bytes(payload[:2], 'big')
+                if opcode == 2:
+                    parts = payload[2:].split(b'\x00')
+                    fn = parts[0].decode(errors='ignore') if parts else ''
+                    mode = parts[1].decode(errors='ignore') if len(parts) > 1 else ''
+                    return f'Write Request, File: {fn}, Transfer type: {mode}'
+                if opcode == 4 and len(payload) >= 4:
+                    block = int.from_bytes(payload[2:4], 'big')
+                    return f'Acknowledgement, Block: {block}'
+            return 'Trivial File Transfer Protocol'
+        if protocol == 'SSDP':
+            payload = bytes(getattr(udp_layer, 'payload', b'')) if udp_layer is not None else b''
+            first_line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+            return f'{first_line} ' if first_line else 'Simple Service Discovery Protocol'
+        if protocol == 'ESP':
+            try:
+                esp_layer = packet['ESP']
+                spi = int(getattr(esp_layer, 'spi', 0) or 0)
+                return f'ESP (SPI=0x{spi:08x})'
+            except Exception:
+                return 'Encapsulating Security Payload'
         if protocol == 'TCP' and tcp_layer is not None:
             flags = self._tcp_flags_to_string(tcp_layer.flags)
             payload_len = self._tcp_payload_length(packet, tcp_layer)
@@ -279,6 +328,54 @@ class PacketParser:
         if left <= right:
             return (proto, left, right)
         return (proto, right, left)
+
+    def _update_tftp_metadata(self, packet, metadata: dict) -> None:
+        udp = self._effective_udp_layer(packet)
+        ip_layer = self._effective_ip_layer(packet)
+        if udp is None or ip_layer is None:
+            return
+        payload = bytes(getattr(udp, 'payload', b''))
+        if len(payload) < 2:
+            return
+        opcode = int.from_bytes(payload[:2], 'big')
+        if opcode not in {1, 2, 3, 4, 5}:
+            return
+        src = str(getattr(ip_layer, 'src', '') or '')
+        dst = str(getattr(ip_layer, 'dst', '') or '')
+        sport = int(getattr(udp, 'sport', 0) or 0)
+        dport = int(getattr(udp, 'dport', 0) or 0)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'UDP')
+        session = self.tftp_sessions.get(stream_key, {})
+
+        metadata['tftp_opcode'] = opcode
+        if opcode in {1, 2}:
+            parts = payload[2:].split(b'\x00')
+            filename = parts[0].decode(errors='ignore') if parts else ''
+            mode = parts[1].decode(errors='ignore') if len(parts) > 1 else ''
+            metadata['tftp_filename'] = filename
+            metadata['tftp_mode'] = mode
+            metadata['tftp_kind'] = 'RRQ' if opcode == 1 else 'WRQ'
+            session['filename'] = filename
+            session['request_frame'] = int(metadata.get('frame_number', 0) or 0)
+        elif opcode == 3 and len(payload) >= 4:
+            block = int.from_bytes(payload[2:4], 'big')
+            metadata['tftp_block'] = block
+            metadata['tftp_kind'] = 'DATA'
+        elif opcode == 4 and len(payload) >= 4:
+            block = int.from_bytes(payload[2:4], 'big')
+            metadata['tftp_block'] = block
+            metadata['tftp_kind'] = 'ACK'
+            if session.get('filename'):
+                metadata['tftp_filename'] = str(session.get('filename'))
+            if session.get('request_frame'):
+                metadata['tftp_request_frame'] = int(session.get('request_frame'))
+        elif opcode == 5 and len(payload) >= 4:
+            code = int.from_bytes(payload[2:4], 'big')
+            message = payload[4:].split(b'\x00', 1)[0].decode(errors='ignore')
+            metadata['tftp_error_code'] = code
+            metadata['tftp_error_message'] = message
+            metadata['tftp_kind'] = 'ERROR'
+        self.tftp_sessions[stream_key] = session
 
     def _tcp_seq_cmp(self, a: int, b: int) -> int:
         """Compare 32-bit TCP sequence values with wrap-around awareness."""
@@ -3136,6 +3233,8 @@ class PacketParser:
 
         if eth_type == 0x8035 and packet.haslayer(ARP):
             return 'RARP'
+        if packet.haslayer('ESP'):
+            return 'ESP'
         if eth_type == 0x9000 or (eth_type == 0x8100 and self._inner_eth_type(packet) == 0x9000):
             return 'LOOP'
         if self._is_cdp_packet(packet):
@@ -3183,6 +3282,15 @@ class PacketParser:
         if effective_udp is not None:
             sport = int(getattr(effective_udp, 'sport', 0) or 0)
             dport = int(getattr(effective_udp, 'dport', 0) or 0)
+            udp_payload = bytes(getattr(effective_udp, 'payload', b''))
+            if (sport in {500, 4500} or dport in {500, 4500}) and self._is_isakmp_packet_payload(udp_payload):
+                return 'ISAKMP'
+            if str(metadata.get('tftp_kind', '') or ''):
+                return 'TFTP'
+            first_line = udp_payload.split(b'\r\n', 1)[0].upper()
+            if sport == 1900 or dport == 1900:
+                if first_line.startswith(b'M-SEARCH ') or first_line.startswith(b'NOTIFY ') or first_line.startswith(b'HTTP/1.'):
+                    return 'SSDP'
             if (sport in {5246, 5247} or dport in {5246, 5247}) and _ensure_capwap_metadata() is not None:
                 if str(metadata.get('capwap_transport', '') or '') == 'control':
                     return 'CAPWAP-Control'
@@ -3195,6 +3303,11 @@ class PacketParser:
         if effective_tcp is not None:
             sport = int(getattr(effective_tcp, 'sport', 0) or 0)
             dport = int(getattr(effective_tcp, 'dport', 0) or 0)
+            if not bool(metadata.get('tcp_is_retransmission', False)) and not bool(metadata.get('tcp_is_duplicate_ack', False)):
+                if sport == 22 or dport == 22:
+                    ssh_payload = self._payload_bytes(packet)
+                    if ssh_payload.startswith(b'SSH-') or len(ssh_payload) >= 6:
+                        return 'SSHv2'
             if (
                 not bool(metadata.get('tcp_is_retransmission', False))
                 and (sport == 646 or dport == 646)
@@ -4130,6 +4243,255 @@ class PacketParser:
             }
             self._update_smtp_stream_metadata(packet, metadata, epoch_time)
 
+    def _update_ssh_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
+        effective_ip = self._effective_ip_layer(packet)
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if tcp_layer is None:
+            return
+
+        if effective_ip is not None:
+            src = str(effective_ip.src)
+            dst = str(effective_ip.dst)
+        elif packet.haslayer(IPv6):
+            src = str(packet[IPv6].src)
+            dst = str(packet[IPv6].dst)
+        else:
+            return
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        if sport != 22 and dport != 22:
+            return
+
+        payload = self._payload_bytes(packet)
+        if not payload:
+            return
+
+        # Do not process protocol version exchange lines as binary packets.
+        if payload.startswith(b'SSH-'):
+            return
+
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+
+        frame_number = int(metadata.get('frame_number', 0) or 0)
+        dir_key = (src, sport, dst, dport)
+        ssh_state = state.setdefault('ssh', {})
+        ssh_state.setdefault('kexinit_by_role', {})
+        ssh_state.setdefault('seq_by_dir', {'client': 0, 'server': 0})
+        ssh_state.setdefault('negotiated', {})
+        pending_by_dir = ssh_state.setdefault('pending_by_dir', {})
+        pending = pending_by_dir.get(dir_key)
+
+        candidate = bytes(payload)
+        segment_start = 0
+        if pending is not None:
+            existing = bytes(pending.get('payload', b''))
+            segment_start = len(existing)
+            candidate = existing + candidate
+
+        current_segment = {
+            'frame_number': frame_number,
+            'payload_start': int(segment_start),
+            'payload_length': int(len(payload)),
+            'tcp_start_offset_in_payload': 0,
+        }
+
+        if len(candidate) < 5:
+            segments = list(pending.get('segments', [])) if pending is not None else []
+            segments.append(current_segment)
+            pending_by_dir[dir_key] = {
+                'payload': candidate,
+                'segments': segments,
+                'start_epoch': float(pending.get('start_epoch', epoch_time) if pending is not None else epoch_time),
+            }
+            return
+
+        packet_length = int.from_bytes(candidate[0:4], 'big')
+        if packet_length < 2:
+            if len(payload) >= 24:
+                metadata['ssh_encrypted'] = True
+                metadata['ssh_encrypted_packet_len'] = int(len(payload))
+            return
+        total_len = 4 + packet_length
+        if total_len <= 5 or total_len > 262144:
+            if len(payload) >= 24:
+                metadata['ssh_encrypted'] = True
+                metadata['ssh_encrypted_packet_len'] = int(len(payload))
+            return
+
+        if len(candidate) < total_len:
+            segments = list(pending.get('segments', [])) if pending is not None else []
+            segments.append(current_segment)
+            pending_by_dir[dir_key] = {
+                'payload': candidate,
+                'segments': segments,
+                'start_epoch': float(pending.get('start_epoch', epoch_time) if pending is not None else epoch_time),
+            }
+            return
+
+        full_payload = candidate[:total_len]
+        current_segment['payload_length'] = int(max(0, min(len(payload), total_len - segment_start)))
+        segments = list(pending.get('segments', [])) if pending is not None else []
+        segments.append(current_segment)
+        pending_by_dir.pop(dir_key, None)
+        self._ssh_mark_plain_packet_metadata(
+            metadata=metadata,
+            state=state,
+            ssh_state=ssh_state,
+            src=src,
+            sport=sport,
+            full_payload=full_payload,
+        )
+
+        if len(segments) > 1:
+            metadata['tcp_reassembled_segments'] = segments
+            metadata['tcp_reassembled_length'] = int(total_len)
+            metadata['tcp_reassembled_data_hex'] = full_payload.hex()
+            metadata['ssh_reassembled_payload'] = full_payload
+            metadata['ssh_is_reassembled'] = True
+
+            for segment in segments[:-1]:
+                segment_record = self._find_stream_record(state, int(segment.get('frame_number', 0) or 0))
+                if segment_record is None:
+                    continue
+                segment_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
+                segment_record.metadata['tcp_segment_data_length'] = int(segment.get('payload_length', 0) or 0)
+                segment_record.metadata['tcp_segment_data_offset'] = int(segment.get('tcp_start_offset_in_payload', 0) or 0)
+                segment_record.protocol = 'TCP'
+                segment_record.info = self._build_info(segment_record.raw, 'TCP', segment_record.metadata)
+
+    def _ssh_list_split(self, text: str) -> list[str]:
+        return [item.strip() for item in str(text or '').split(',') if item.strip()]
+
+    def _ssh_choose_common(self, client_text: str, server_text: str) -> str:
+        client_list = self._ssh_list_split(client_text)
+        server_set = set(self._ssh_list_split(server_text))
+        for item in client_list:
+            if item in server_set:
+                return item
+        return client_list[0] if client_list else ''
+
+    def _ssh_parse_kexinit(self, msg_payload: bytes) -> dict | None:
+        if len(msg_payload) < 16:
+            return None
+        result: dict[str, str] = {'cookie': msg_payload[:16].hex()}
+        pos = 16
+        fields = [
+            'kex_algorithms',
+            'server_host_key_algorithms',
+            'encryption_algorithms_client_to_server',
+            'encryption_algorithms_server_to_client',
+            'mac_algorithms_client_to_server',
+            'mac_algorithms_server_to_client',
+            'compression_algorithms_client_to_server',
+            'compression_algorithms_server_to_client',
+            'languages_client_to_server',
+            'languages_server_to_client',
+        ]
+        for field in fields:
+            if pos + 4 > len(msg_payload):
+                return None
+            text_len = int.from_bytes(msg_payload[pos:pos + 4], 'big')
+            pos += 4
+            if pos + text_len > len(msg_payload):
+                return None
+            result[field] = msg_payload[pos:pos + text_len].decode(errors='ignore')
+            pos += text_len
+        if pos + 1 <= len(msg_payload):
+            result['first_kex_packet_follows'] = str(int(msg_payload[pos]))
+            pos += 1
+        if pos + 4 <= len(msg_payload):
+            result['reserved'] = msg_payload[pos:pos + 4].hex()
+        return result
+
+    def _ssh_update_negotiated(self, state: dict, ssh_state: dict) -> None:
+        kex_by_role = ssh_state.get('kexinit_by_role', {}) or {}
+        client = kex_by_role.get('client')
+        server = kex_by_role.get('server')
+        if not isinstance(client, dict) or not isinstance(server, dict):
+            return
+
+        negotiated = {
+            'kex_method': self._ssh_choose_common(
+                str(client.get('kex_algorithms', '') or ''),
+                str(server.get('kex_algorithms', '') or ''),
+            ),
+            'encryption': self._ssh_choose_common(
+                str(client.get('encryption_algorithms_client_to_server', '') or ''),
+                str(server.get('encryption_algorithms_client_to_server', '') or ''),
+            ),
+            'mac': self._ssh_choose_common(
+                str(client.get('mac_algorithms_client_to_server', '') or ''),
+                str(server.get('mac_algorithms_client_to_server', '') or ''),
+            ),
+            'compression': self._ssh_choose_common(
+                str(client.get('compression_algorithms_client_to_server', '') or ''),
+                str(server.get('compression_algorithms_client_to_server', '') or ''),
+            ),
+        }
+        ssh_state['negotiated'] = negotiated
+
+        for stream_record in state.get('records', []):
+            if str(getattr(stream_record, 'protocol', '') or '') != 'SSHv2':
+                continue
+            stream_record.metadata['ssh_kex_method'] = str(negotiated.get('kex_method', '') or '')
+            stream_record.metadata['ssh_encryption'] = str(negotiated.get('encryption', '') or '')
+            stream_record.metadata['ssh_mac'] = str(negotiated.get('mac', '') or '')
+            stream_record.metadata['ssh_compression'] = str(negotiated.get('compression', '') or '')
+            stream_record.info = self._build_info(stream_record.raw, 'SSHv2', stream_record.metadata)
+
+    def _ssh_mark_plain_packet_metadata(
+        self,
+        metadata: dict,
+        state: dict,
+        ssh_state: dict,
+        src: str,
+        sport: int,
+        full_payload: bytes,
+    ) -> None:
+        if len(full_payload) < 6:
+            return
+        packet_length = int.from_bytes(full_payload[0:4], 'big')
+        padding_length = int(full_payload[4])
+        payload_end = 4 + packet_length - padding_length
+        if payload_end <= 5 or payload_end > len(full_payload):
+            return
+
+        msg_code = int(full_payload[5])
+        msg_payload = full_payload[6:payload_end]
+        metadata['ssh_packet_length'] = int(packet_length)
+        metadata['ssh_padding_length'] = int(padding_length)
+        metadata['ssh_message_code'] = int(msg_code)
+
+        role = 'client' if (src, int(sport)) == state.get('client_endpoint') else 'server'
+        seq_by_dir = ssh_state.setdefault('seq_by_dir', {'client': 0, 'server': 0})
+        current_seq = int(seq_by_dir.get(role, 0) or 0)
+        is_duplicate_segment = bool(
+            metadata.get('tcp_is_retransmission', False)
+            or metadata.get('tcp_is_spurious_retransmission', False)
+            or metadata.get('tcp_is_out_of_order', False)
+        )
+        if is_duplicate_segment:
+            metadata['ssh_sequence_number'] = max(0, current_seq - 1)
+        else:
+            metadata['ssh_sequence_number'] = current_seq
+            seq_by_dir[role] = current_seq + 1
+
+        if msg_code == 20:
+            parsed_kexinit = self._ssh_parse_kexinit(msg_payload)
+            if parsed_kexinit is not None:
+                ssh_state.setdefault('kexinit_by_role', {})[role] = parsed_kexinit
+                self._ssh_update_negotiated(state, ssh_state)
+
+        negotiated = ssh_state.get('negotiated', {}) or {}
+        if negotiated:
+            metadata['ssh_kex_method'] = str(negotiated.get('kex_method', '') or '')
+            metadata['ssh_encryption'] = str(negotiated.get('encryption', '') or '')
+            metadata['ssh_mac'] = str(negotiated.get('mac', '') or '')
+            metadata['ssh_compression'] = str(negotiated.get('compression', '') or '')
+
     def _update_http_metadata(self, record: PacketRecord) -> None:
         if str(getattr(record, 'protocol', '') or '').upper() not in {'HTTP', 'HTTP/XML'}:
             return
@@ -4375,8 +4737,38 @@ class PacketParser:
                 return self._syslog_info_text(packet)
             if protocol == 'NTP':
                 return self._ntp_info_text(packet)
+            if protocol == 'ESP':
+                if packet.haslayer('ESP'):
+                    try:
+                        esp_layer = packet['ESP']
+                        spi = int(getattr(esp_layer, 'spi', 0) or 0)
+                        return f'ESP (SPI=0x{spi:08x})'
+                    except Exception:
+                        pass
+                return 'Encapsulating Security Payload'
+            if protocol == 'TFTP':
+                kind = str(metadata.get('tftp_kind', '') or '')
+                if kind == 'WRQ':
+                    return f'Write Request, File: {str(metadata.get("tftp_filename", "") or "")}, Transfer type: {str(metadata.get("tftp_mode", "") or "")}'
+                if kind == 'RRQ':
+                    return f'Read Request, File: {str(metadata.get("tftp_filename", "") or "")}, Transfer type: {str(metadata.get("tftp_mode", "") or "")}'
+                if kind == 'ACK':
+                    return f'Acknowledgement, Block: {int(metadata.get("tftp_block", 0) or 0)}'
+                if kind == 'DATA':
+                    return f'Data Packet, Block: {int(metadata.get("tftp_block", 0) or 0)}'
+                if kind == 'ERROR':
+                    return f'Error Code: {int(metadata.get("tftp_error_code", 0) or 0)} ({str(metadata.get("tftp_error_message", "") or "")})'
+                return 'Trivial File Transfer Protocol'
+            if protocol == 'SSDP':
+                payload = self._payload_bytes(packet)
+                first_line = payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+                return f'{first_line} ' if first_line else 'Simple Service Discovery Protocol'
             if protocol == 'UDLD':
                 return self._udld_info_text(packet)
+            if protocol == 'SSHv2':
+                return self._ssh_info_text(packet, metadata)
+            if protocol == 'ISAKMP':
+                return self._isakmp_info_text(packet)
             if protocol == 'LLDP':
                 return self._lldp_info_text(packet)
             if protocol == 'HSRPv2':
@@ -4629,6 +5021,135 @@ class PacketParser:
             return packet.summary()
         except Exception:
             return packet.summary()
+
+    def _ssh_message_name(self, msg_code: int, kex_method: str = '') -> str:
+        method = str(kex_method or '').lower()
+        if int(msg_code) == 31 and 'group-exchange' in method:
+            return 'Diffie-Hellman Group Exchange Group'
+        names = {
+            1: 'Disconnect',
+            2: 'Ignore',
+            3: 'Unimplemented',
+            4: 'Debug',
+            5: 'Service Request',
+            6: 'Service Accept',
+            20: 'Key Exchange Init',
+            21: 'New Keys',
+            30: 'Diffie-Hellman Key Exchange Init',
+            31: 'Diffie-Hellman Key Exchange Reply',
+            32: 'Diffie-Hellman Group Exchange Init',
+            33: 'Diffie-Hellman Group Exchange Reply',
+            34: 'Diffie-Hellman Group Exchange Request',
+            50: 'User Authentication Request',
+            51: 'User Authentication Failure',
+            52: 'User Authentication Success',
+            53: 'User Authentication Banner',
+            80: 'Global Request',
+            81: 'Request Success',
+            82: 'Request Failure',
+        }
+        return names.get(int(msg_code), f'Message ({int(msg_code)})')
+
+    def _ssh_info_text(self, packet, metadata: dict | None = None) -> str:
+        tcp = self._effective_tcp_layer(packet)
+        meta = metadata or {}
+        payload = self._payload_bytes(packet)
+        try:
+            reassembled_hex = str(meta.get('tcp_reassembled_data_hex', '') or '')
+            if reassembled_hex:
+                payload = bytes.fromhex(reassembled_hex)
+        except Exception:
+            pass
+        side = 'Server' if tcp is not None and int(getattr(tcp, 'sport', 0) or 0) == 22 else 'Client'
+        kex_method = str(meta.get('ssh_kex_method', '') or '')
+
+        if bool(meta.get('ssh_encrypted', False)):
+            enc_len = int(meta.get('ssh_encrypted_packet_len', len(payload)) or len(payload))
+            return f'{side}: Encrypted packet (len={enc_len})'
+        if payload.startswith(b'SSH-'):
+            line = payload.split(b'\n', 1)[0].rstrip(b'\r').decode(errors='ignore')
+            return f'{side}: Protocol ({line})'
+        msg_code_meta = meta.get('ssh_message_code', None)
+        if msg_code_meta is not None:
+            try:
+                msg_code = int(msg_code_meta)
+                return f'{side}: {self._ssh_message_name(msg_code, kex_method)}'
+            except Exception:
+                pass
+        if len(payload) >= 6:
+            packet_length = int.from_bytes(payload[0:4], 'big')
+            padding_length = int(payload[4])
+            if packet_length >= 2 and packet_length + 4 <= len(payload):
+                payload_end = 4 + packet_length - padding_length
+                if payload_end > 5:
+                    msg_code = int(payload[5])
+                    return f'{side}: {self._ssh_message_name(msg_code, kex_method)}'
+            else:
+                return f'{side}: Encrypted packet (len={len(payload)})'
+        return f'{side}: Secure Shell Data'
+
+    def _parse_isakmp_header(self, payload: bytes) -> dict | None:
+        if len(payload) < 28:
+            return None
+        version = int(payload[17])
+        major = (version >> 4) & 0x0F
+        minor = version & 0x0F
+        if major not in {1, 2}:
+            return None
+        msg_len = int.from_bytes(payload[24:28], 'big')
+        if msg_len < 28 or msg_len > len(payload):
+            return None
+        return {
+            'initiator_spi': payload[0:8].hex(),
+            'responder_spi': payload[8:16].hex(),
+            'next_payload': int(payload[16]),
+            'version': version,
+            'major': major,
+            'minor': minor,
+            'exchange_type': int(payload[18]),
+            'flags': int(payload[19]),
+            'message_id': int.from_bytes(payload[20:24], 'big'),
+            'length': msg_len,
+        }
+
+    def _is_isakmp_packet_payload(self, payload: bytes) -> bool:
+        return self._parse_isakmp_header(bytes(payload or b'')) is not None
+
+    def _isakmp_v2_exchange_name(self, value: int) -> str:
+        return {
+            34: 'IKE_SA_INIT',
+            35: 'IKE_AUTH',
+            36: 'CREATE_CHILD_SA',
+            37: 'INFORMATIONAL',
+        }.get(int(value), f'EXCHANGE_{int(value)}')
+
+    def _isakmp_v1_exchange_name(self, value: int) -> str:
+        return {
+            2: 'Identity Protection (Main Mode)',
+            4: 'Aggressive',
+            5: 'Informational',
+            32: 'Quick Mode',
+        }.get(int(value), f'Exchange ({int(value)})')
+
+    def _isakmp_info_text(self, packet) -> str:
+        udp_layer = self._effective_udp_layer(packet, self._effective_ip_layer(packet))
+        if udp_layer is None:
+            return 'Internet Security Association and Key Management Protocol'
+        payload = bytes(getattr(udp_layer, 'payload', b''))
+        header = self._parse_isakmp_header(payload)
+        if header is None:
+            return 'Internet Security Association and Key Management Protocol'
+
+        major = int(header.get('major', 0) or 0)
+        exchange_type = int(header.get('exchange_type', 0) or 0)
+        flags = int(header.get('flags', 0) or 0)
+        message_id = int(header.get('message_id', 0) or 0)
+        if major == 2:
+            exchange = self._isakmp_v2_exchange_name(exchange_type)
+            role = 'Initiator' if (flags & 0x08) else 'Responder'
+            direction = 'Response' if (flags & 0x20) else 'Request'
+            return f'{exchange} MID={message_id:02x} {role} {direction}'
+        return self._isakmp_v1_exchange_name(exchange_type)
 
     def _icmp_echo_info_text(self, packet, request_frame: int | None = None, response_frame: int | None = None, no_response: bool = False) -> str:
         if not packet.haslayer(ICMP):

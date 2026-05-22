@@ -3,6 +3,8 @@ import re
 import os
 import hashlib
 import time
+import threading
+import queue
 from collections import Counter
 from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer
 from PySide6.QtWidgets import (
@@ -224,6 +226,12 @@ class CaptureView(QWidget):
         self._auto_output_written_files = []
         self._auto_output_base_path = ''
         self._rollover_file_counter = 0
+        self._refine_thread = None
+        self._refine_queue = queue.Queue()
+        self._refine_stop = threading.Event()
+        self._refine_timer = QTimer(self)
+        self._refine_timer.setInterval(30)
+        self._refine_timer.timeout.connect(self._drain_refine_queue)
 
         self._build_ui()
         self._update_status('Ready')
@@ -915,6 +923,7 @@ class CaptureView(QWidget):
 
 
     def clear_packets(self, reset_file_path: bool = False):
+        self._stop_refine_thread()
         self.records.clear()
         self.visible_indices.clear()
         self.table.setRowCount(0)
@@ -932,6 +941,97 @@ class CaptureView(QWidget):
         self._set_dirty(False)
         if reset_file_path:
             self.loaded_file_path = None
+
+    def _stop_refine_thread(self):
+        self._refine_stop.set()
+        self._refine_timer.stop()
+        try:
+            if self._refine_thread is not None and self._refine_thread.is_alive():
+                self._refine_thread.join(timeout=0.2)
+        except Exception:
+            pass
+        self._refine_thread = None
+        self._refine_stop = threading.Event()
+        while True:
+            try:
+                self._refine_queue.get_nowait()
+            except Exception:
+                break
+
+    def _start_refine_thread(self):
+        self._stop_refine_thread()
+        if not self.records:
+            return
+
+        snapshot = list(self.records)
+        index_by_frame = {int(getattr(rec, 'number', 0) or 0): idx for idx, rec in enumerate(snapshot)}
+        stop_event = self._refine_stop
+        out_q = self._refine_queue
+
+        def worker():
+            parser = PacketParser()
+            parsed_by_frame = {}
+            for idx, fast_record in enumerate(snapshot):
+                if stop_event.is_set():
+                    break
+                try:
+                    full_record = parser.parse(fast_record.raw, int(fast_record.number), fast_record.iface)
+                except Exception:
+                    continue
+                parsed_by_frame[int(full_record.number)] = full_record
+                out_q.put((idx, full_record))
+                segments = list(full_record.metadata.get('tcp_reassembled_segments', []) or [])
+                if len(segments) > 1:
+                    for segment in segments[:-1]:
+                        seg_frame = int(segment.get('frame_number', 0) or 0)
+                        seg_idx = index_by_frame.get(seg_frame, -1)
+                        seg_record = parsed_by_frame.get(seg_frame)
+                        if seg_idx >= 0 and seg_record is not None:
+                            out_q.put((seg_idx, seg_record))
+            out_q.put((-1, None))
+
+        self._refine_thread = threading.Thread(target=worker, daemon=True)
+        self._refine_thread.start()
+        self._refine_timer.start()
+
+    def _update_table_row_from_record(self, row: int, record):
+        values = [
+            str(record.number),
+            f'{record.relative_time:.9f}',
+            record.src,
+            record.dst,
+            record.protocol,
+            str(record.length),
+            record.info,
+        ]
+        for col, value in enumerate(values):
+            item = self.table.item(row, col)
+            if item is not None:
+                item.setText(value)
+        self.table._paint_row(row, record.protocol)
+
+    def _drain_refine_queue(self):
+        processed = 0
+        while processed < 300:
+            try:
+                idx, full_record = self._refine_queue.get_nowait()
+            except Exception:
+                break
+            if idx == -1:
+                self._refine_timer.stop()
+                return
+            if full_record is None or idx < 0 or idx >= len(self.records):
+                continue
+            applied = self._apply_capture_metadata_to_record(full_record, int(full_record.number))
+            self.records[idx] = applied
+            # Update row only if currently visible.
+            try:
+                row = self.visible_indices.index(idx)
+            except ValueError:
+                row = -1
+            if row >= 0:
+                self._update_table_row_from_record(row, applied)
+            processed += 1
 
     def _rollover_live_output_if_needed(self):
         output = self.output_settings or {}
@@ -1267,6 +1367,7 @@ class CaptureView(QWidget):
                 self.apply_display_filter()
             if self.visible_indices:
                 self.goto_first_packet()
+            self._start_refine_thread()
             self._remember_recent_file(self.loaded_file_path)
             self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')
         finally:
