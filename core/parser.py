@@ -5,7 +5,7 @@ import ipaddress
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, bind_layers
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
-from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NS, ICMPv6ND_NA, IPv6ExtHdrHopByHop
+from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NS, ICMPv6ND_NA, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment
 from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
@@ -27,11 +27,14 @@ class PacketParser:
         self.conversations = Counter()
         self.transport_stream_state = {}
         self.icmp_echo_pending = {}
+        self.icmpv6_echo_pending = {}
         self.http_request_pending = {}
         self.dns_request_pending = {}
         self.smtp_request_pending = {}
         self.ntp_request_pending = {}
         self.tftp_sessions = {}
+        self.ipv4_fragment_state = {}
+        self.ipv6_fragment_state = {}
         self.layer_stream_maps = {
             'ethernet': {},
             'ipv4': {},
@@ -97,6 +100,7 @@ class PacketParser:
             metadata['dns_qr'] = self._safe_attr(packet[DNS], 'qr')
 
         self._populate_stream_indices(packet, metadata)
+        self._update_ip_fragment_metadata(packet, metadata, int(number))
 
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
         self._update_tls_stream_metadata(packet, metadata, int(number))
@@ -162,6 +166,7 @@ class PacketParser:
         self._update_smtp_metadata(record)
         self._update_ntp_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
+        self._update_icmpv6_echo_metadata(packet, record)
         self._update_dns_metadata(packet, record)
 
         return record
@@ -195,13 +200,14 @@ class PacketParser:
             'frame_time_delta_displayed': frame_delta,
         }
         self._populate_stream_indices(packet, metadata)
+        self._update_ip_fragment_metadata(packet, metadata, int(number))
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
 
-        protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp)
+        protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp, metadata)
         if protocol == 'TCP':
             info = self._build_info(packet, protocol, metadata)
         else:
-            info = self._quick_info(packet, protocol, effective_tcp, effective_udp)
+            info = self._quick_info(packet, protocol, effective_tcp, effective_udp, metadata)
 
         stream_hint = ''
         if sport is not None or dport is not None:
@@ -225,7 +231,11 @@ class PacketParser:
             iface=iface,
         )
 
-    def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None) -> str:
+    def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
+        metadata = metadata or {}
+        fragment_override = self._fragment_override_protocol(packet, metadata)
+        if fragment_override:
+            return fragment_override
         if packet.haslayer('ESP'):
             return 'ESP'
         if self._is_ospf_ipv6_packet(packet):
@@ -271,7 +281,9 @@ class PacketParser:
             payload = bytes(getattr(udp_layer, 'payload', b''))
             if (sport in {500, 4500} or dport in {500, 4500}) and self._is_isakmp_packet_payload(payload):
                 return 'ISAKMP'
-            if len(payload) >= 2:
+            if (sport == 646 or dport == 646) and self._is_ldp_payload(payload):
+                return 'LDP'
+            if (sport == 69 or dport == 69) and len(payload) >= 2:
                 opcode = int.from_bytes(payload[:2], 'big')
                 if opcode in {1, 2, 3, 4, 5}:
                     return 'TFTP'
@@ -286,7 +298,10 @@ class PacketParser:
             return 'IPv4'
         return 'ETH'
 
-    def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None) -> str:
+    def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
+        metadata = metadata or {}
+        if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
+            return self._ip_fragment_info_text(packet, metadata)
         if protocol in {'HTTP', 'HTTP/XML'}:
             payload = self._payload_bytes(packet)
             kind = self._http_payload_kind(payload)
@@ -301,11 +316,15 @@ class PacketParser:
                     return f'{text} '
             return 'HTTP'
         if protocol == 'SSHv2':
-            return self._ssh_info_text(packet, None)
-        if protocol in {'DNS', 'MDNS'} and packet.haslayer(DNS):
-            return self._build_info(packet, protocol, {})
+            return self._ssh_info_text(packet, metadata)
+        if protocol.startswith('TLS'):
+            return self._build_info(packet, protocol, metadata)
+        if protocol in {'DNS', 'MDNS'}:
+            return self._build_info(packet, protocol, metadata)
         if protocol == 'BGP':
             return self._bgp_message_type_name(self._payload_bytes(packet))
+        if protocol == 'LDP':
+            return self._ldp_message_type_name(self._payload_bytes(packet))
         if protocol == 'OSPF':
             ospf_payload = self._ospf_payload_bytes(packet)
             msg_type = int(ospf_payload[1]) if len(ospf_payload) >= 2 else -1
@@ -318,6 +337,8 @@ class PacketParser:
             }.get(msg_type, f'OSPF Message ({msg_type})' if msg_type >= 0 else 'OSPF')
         if protocol == 'ISAKMP':
             return self._isakmp_info_text(packet)
+        if protocol == 'ICMPv6':
+            return self._icmpv6_info_text(packet, metadata) or 'Internet Control Message Protocol v6'
         if protocol == 'TFTP':
             payload = bytes(getattr(udp_layer, 'payload', b'')) if udp_layer is not None else b''
             if len(payload) >= 2:
@@ -370,17 +391,20 @@ class PacketParser:
         ip_layer = self._effective_ip_layer(packet)
         if udp is None or ip_layer is None:
             return
+        src = str(getattr(ip_layer, 'src', '') or '')
+        dst = str(getattr(ip_layer, 'dst', '') or '')
+        sport = int(getattr(udp, 'sport', 0) or 0)
+        dport = int(getattr(udp, 'dport', 0) or 0)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'UDP')
+        known_session = stream_key in self.tftp_sessions
+        if sport != 69 and dport != 69 and not known_session:
+            return
         payload = bytes(getattr(udp, 'payload', b''))
         if len(payload) < 2:
             return
         opcode = int.from_bytes(payload[:2], 'big')
         if opcode not in {1, 2, 3, 4, 5}:
             return
-        src = str(getattr(ip_layer, 'src', '') or '')
-        dst = str(getattr(ip_layer, 'dst', '') or '')
-        sport = int(getattr(udp, 'sport', 0) or 0)
-        dport = int(getattr(udp, 'dport', 0) or 0)
-        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'UDP')
         session = self.tftp_sessions.get(stream_key, {})
 
         metadata['tftp_opcode'] = opcode
@@ -1688,6 +1712,234 @@ class PacketParser:
         except Exception:
             pass
         return b''
+
+    def _reassemble_ip_fragments(self, parts: dict[int, bytes]) -> bytes | None:
+        if 0 not in parts:
+            return None
+        assembled = bytearray()
+        cursor = 0
+        for start in sorted(parts.keys()):
+            chunk = bytes(parts[start] or b'')
+            if start > cursor:
+                return None
+            if start + len(chunk) <= cursor:
+                continue
+            cut = max(0, cursor - start)
+            assembled.extend(chunk[cut:])
+            cursor = start + len(chunk)
+        return bytes(assembled)
+
+    def _fragment_override_protocol(self, packet, metadata: dict) -> str | None:
+        if not bool(metadata.get('ip_is_fragmented', False)):
+            return None
+        role = str(metadata.get('ip_fragment_role', '') or '')
+        if role == 'first':
+            if packet.haslayer(IP):
+                return 'IPv4'
+            if packet.haslayer(IPv6):
+                return 'IPv6'
+            return 'IP'
+        if role == 'last':
+            if str(metadata.get('dns_reassembled_data_hex', '') or ''):
+                if bool(metadata.get('dns_is_mdns_transport', False)):
+                    return 'MDNS'
+                return 'DNS'
+            if packet.haslayer(IP):
+                return 'IPv4'
+            if packet.haslayer(IPv6):
+                return 'IPv6'
+            return 'IP'
+        return None
+
+    def _update_ip_fragment_metadata(self, packet, metadata: dict, frame_number: int) -> None:
+        # IPv4 fragmentation
+        if packet.haslayer(IP):
+            ip_layer = packet[IP]
+            frag_units = int(getattr(ip_layer, 'frag', 0) or 0)
+            flags = int(getattr(ip_layer, 'flags', 0) or 0)
+            more_fragments = bool(flags & 0x1)
+            is_fragment = bool(more_fragments or frag_units > 0)
+            if is_fragment:
+                src = str(getattr(ip_layer, 'src', '') or '')
+                dst = str(getattr(ip_layer, 'dst', '') or '')
+                proto = int(getattr(ip_layer, 'proto', 0) or 0)
+                ident = int(getattr(ip_layer, 'id', 0) or 0)
+                offset_bytes = int(frag_units) * 8
+                fragment_payload = bytes(getattr(ip_layer, 'payload', b''))
+                key = ('ipv4', src, dst, ident, proto)
+                state = self.ipv4_fragment_state.setdefault(key, {'parts': {}, 'frames': {}, 'has_last': False})
+                state['parts'][offset_bytes] = fragment_payload
+                state['frames'][offset_bytes] = int(frame_number)
+                if not more_fragments:
+                    state['has_last'] = True
+
+                metadata['ip_is_fragmented'] = True
+                metadata['ip_fragment_version'] = 4
+                metadata['ip_fragment_id'] = ident
+                metadata['ip_fragment_offset'] = offset_bytes
+                metadata['ip_fragment_more'] = more_fragments
+                metadata['ip_fragment_proto'] = proto
+                metadata['ip_fragment_payload_len'] = int(len(fragment_payload))
+                metadata['ip_fragment_role'] = 'first' if offset_bytes == 0 and more_fragments else ('last' if offset_bytes > 0 and not more_fragments else 'middle')
+
+                if metadata['ip_fragment_role'] == 'first' and state.get('has_last'):
+                    max_off = max(state['frames'].keys(), default=0)
+                    metadata['ip_reassembled_in_frame'] = int(state['frames'].get(max_off, 0) or 0)
+
+                if metadata['ip_fragment_role'] == 'last':
+                    reassembled = self._reassemble_ip_fragments(state.get('parts', {}))
+                    if reassembled:
+                        fragment_entries = []
+                        running = 0
+                        for frag_off in sorted(state['frames'].keys()):
+                            frag_len = len(state['parts'].get(frag_off, b''))
+                            fragment_entries.append({
+                                'frame_number': int(state['frames'][frag_off]),
+                                'payload_start': int(frag_off),
+                                'payload_length': int(frag_len),
+                            })
+                            running = max(running, frag_off + frag_len)
+                        metadata['ip_reassembled_fragments'] = fragment_entries
+                        metadata['ip_reassembled_length'] = int(running)
+                        metadata['ip_reassembled_payload_hex'] = reassembled.hex()
+                        metadata['tcp_reassembled_data_hex'] = reassembled.hex()
+
+                        if proto == 17 and len(reassembled) >= 8:
+                            udp_len = int.from_bytes(reassembled[4:6], 'big')
+                            udp_total = udp_len if udp_len >= 8 else len(reassembled)
+                            udp_total = min(udp_total, len(reassembled))
+                            udp_payload = reassembled[8:udp_total]
+                            metadata['udp_reassembled_payload_hex'] = reassembled[:udp_total].hex()
+                            if len(udp_payload) >= 12:
+                                metadata['dns_reassembled_data_hex'] = udp_payload.hex()
+                                dns_dst_port = int.from_bytes(reassembled[2:4], 'big')
+                                dns_src_port = int.from_bytes(reassembled[0:2], 'big')
+                                metadata['dns_is_mdns_transport'] = bool(dns_src_port == 5353 or dns_dst_port == 5353)
+                        if proto == 17 and len(reassembled) >= 4:
+                            try:
+                                src_port = int.from_bytes(reassembled[0:2], 'big')
+                                dst_port = int.from_bytes(reassembled[2:4], 'big')
+                                stream_key = self._canonical_transport_key(src, src_port, dst, dst_port, 'UDP')
+                                stream_state = self.transport_stream_state.get(stream_key)
+                            except Exception:
+                                stream_state = None
+                            if stream_state is not None:
+                                for frag_off in sorted(state['frames'].keys()):
+                                    if frag_off == offset_bytes:
+                                        continue
+                                    frag_frame = int(state['frames'].get(frag_off, 0) or 0)
+                                    stream_record = self._find_stream_record(stream_state, frag_frame)
+                                    if stream_record is None:
+                                        continue
+                                    stream_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
+                                    stream_record.info = self._build_info(
+                                        stream_record.raw,
+                                        str(stream_record.protocol or 'IPv4'),
+                                        stream_record.metadata,
+                                    )
+
+        # IPv6 fragmentation header
+        if packet.haslayer(IPv6) and packet.haslayer(IPv6ExtHdrFragment):
+            ip6_layer = packet[IPv6]
+            frag_hdr = packet[IPv6ExtHdrFragment]
+            more_fragments = bool(int(getattr(frag_hdr, 'm', 0) or 0))
+            offset_bytes = int(getattr(frag_hdr, 'offset', 0) or 0) * 8
+            next_header = int(getattr(frag_hdr, 'nh', 0) or 0)
+            ident = int(getattr(frag_hdr, 'id', 0) or 0)
+            src = str(getattr(ip6_layer, 'src', '') or '')
+            dst = str(getattr(ip6_layer, 'dst', '') or '')
+            fragment_payload = bytes(getattr(frag_hdr, 'payload', b''))
+            key = ('ipv6', src, dst, ident, next_header)
+            state = self.ipv6_fragment_state.setdefault(key, {'parts': {}, 'frames': {}, 'has_last': False})
+            state['parts'][offset_bytes] = fragment_payload
+            state['frames'][offset_bytes] = int(frame_number)
+            if not more_fragments:
+                state['has_last'] = True
+
+            metadata['ip_is_fragmented'] = True
+            metadata['ip_fragment_version'] = 6
+            metadata['ip_fragment_id'] = ident
+            metadata['ip_fragment_offset'] = offset_bytes
+            metadata['ip_fragment_more'] = more_fragments
+            metadata['ip_fragment_proto'] = next_header
+            metadata['ip_fragment_payload_len'] = int(len(fragment_payload))
+            metadata['ip_fragment_role'] = 'first' if offset_bytes == 0 and more_fragments else ('last' if offset_bytes > 0 and not more_fragments else 'middle')
+
+            if metadata['ip_fragment_role'] == 'first' and state.get('has_last'):
+                max_off = max(state['frames'].keys(), default=0)
+                metadata['ip_reassembled_in_frame'] = int(state['frames'].get(max_off, 0) or 0)
+
+            if metadata['ip_fragment_role'] == 'last':
+                reassembled = self._reassemble_ip_fragments(state.get('parts', {}))
+                if reassembled:
+                    fragment_entries = []
+                    running = 0
+                    for frag_off in sorted(state['frames'].keys()):
+                        frag_len = len(state['parts'].get(frag_off, b''))
+                        fragment_entries.append({
+                            'frame_number': int(state['frames'][frag_off]),
+                            'payload_start': int(frag_off),
+                            'payload_length': int(frag_len),
+                        })
+                        running = max(running, frag_off + frag_len)
+                    metadata['ip_reassembled_fragments'] = fragment_entries
+                    metadata['ip_reassembled_length'] = int(running)
+                    metadata['ip_reassembled_payload_hex'] = reassembled.hex()
+                    metadata['tcp_reassembled_data_hex'] = reassembled.hex()
+
+                    if next_header == 17 and len(reassembled) >= 8:
+                        udp_len = int.from_bytes(reassembled[4:6], 'big')
+                        udp_total = udp_len if udp_len >= 8 else len(reassembled)
+                        udp_total = min(udp_total, len(reassembled))
+                        udp_payload = reassembled[8:udp_total]
+                        metadata['udp_reassembled_payload_hex'] = reassembled[:udp_total].hex()
+                        if len(udp_payload) >= 12:
+                            metadata['dns_reassembled_data_hex'] = udp_payload.hex()
+                            dns_dst_port = int.from_bytes(reassembled[2:4], 'big')
+                            dns_src_port = int.from_bytes(reassembled[0:2], 'big')
+                            metadata['dns_is_mdns_transport'] = bool(dns_src_port == 5353 or dns_dst_port == 5353)
+                    if next_header == 17 and len(reassembled) >= 4:
+                        try:
+                            src_port = int.from_bytes(reassembled[0:2], 'big')
+                            dst_port = int.from_bytes(reassembled[2:4], 'big')
+                            stream_key = self._canonical_transport_key(src, src_port, dst, dst_port, 'UDP')
+                            stream_state = self.transport_stream_state.get(stream_key)
+                        except Exception:
+                            stream_state = None
+                        if stream_state is not None:
+                            for frag_off in sorted(state['frames'].keys()):
+                                if frag_off == offset_bytes:
+                                    continue
+                                frag_frame = int(state['frames'].get(frag_off, 0) or 0)
+                                stream_record = self._find_stream_record(stream_state, frag_frame)
+                                if stream_record is None:
+                                    continue
+                                stream_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
+                                stream_record.info = self._build_info(
+                                    stream_record.raw,
+                                    str(stream_record.protocol or 'IPv6'),
+                                    stream_record.metadata,
+                                )
+
+    def _ip_fragment_info_text(self, packet, metadata: dict) -> str:
+        version = int(metadata.get('ip_fragment_version', 0) or 0)
+        offset_bytes = int(metadata.get('ip_fragment_offset', 0) or 0)
+        more = bool(metadata.get('ip_fragment_more', False))
+        ident = int(metadata.get('ip_fragment_id', 0) or 0)
+        proto = int(metadata.get('ip_fragment_proto', 0) or 0)
+        if version == 4:
+            proto_name = {1: 'ICMP', 6: 'TCP', 17: 'UDP'}.get(proto, str(proto))
+            base = f'Fragmented IP protocol (proto={proto_name} {proto}, off={offset_bytes}, ID={ident:04x})'
+            reassembled_in = int(metadata.get('ip_reassembled_in_frame', 0) or 0)
+            if reassembled_in > 0 and offset_bytes == 0 and more:
+                return f'{base} [Reassembled in #{reassembled_in}]'
+            return base
+        if version == 6:
+            return (
+                f'IPv6 fragment (off={offset_bytes // 8} more={"y" if more else "n"} '
+                f'ident=0x{ident:08x} nxt={proto})'
+            )
+        return packet.summary()
 
     def _ldp_message_name(self, msg_type: int) -> str:
         return {
@@ -3161,7 +3413,8 @@ class PacketParser:
         except Exception:
             return False
 
-    def _icmpv6_info_text(self, packet) -> str | None:
+    def _icmpv6_info_text(self, packet, metadata: dict | None = None) -> str | None:
+        metadata = metadata or {}
         payload = self._icmpv6_payload_bytes(packet)
         if len(payload) < 4:
             return None
@@ -3181,6 +3434,8 @@ class PacketParser:
             return None
 
         icmpv6_type = int(payload[0])
+        code = int(payload[1]) if len(payload) >= 2 else 0
+        hop_limit = int(getattr(packet[IPv6], 'hlim', 0) or 0) if packet.haslayer(IPv6) else 0
         if icmpv6_type == 143:
             return 'Multicast Listener Report Message v2'
         if icmpv6_type == 133:
@@ -3213,13 +3468,36 @@ class PacketParser:
                     info += f' is at {target_mac}'
                 return info
             return 'Neighbor Advertisement'
+        if icmpv6_type in {128, 129} and len(payload) >= 8:
+            identifier = int.from_bytes(payload[4:6], 'big')
+            sequence = int.from_bytes(payload[6:8], 'big')
+            base = (
+                f'Echo (ping) {"request" if icmpv6_type == 128 else "reply"} '
+                f'id=0x{identifier:04x}, seq={sequence}, hop limit={hop_limit}'
+            )
+            if icmpv6_type == 128 and metadata.get('icmpv6_response_frame') is not None:
+                return f'{base} (reply in {int(metadata.get("icmpv6_response_frame", 0) or 0)})'
+            if icmpv6_type == 129 and metadata.get('icmpv6_request_frame') is not None:
+                return f'{base} (request in {int(metadata.get("icmpv6_request_frame", 0) or 0)})'
+            return base
+
+        if icmpv6_type == 1:
+            code_text = {
+                0: 'No route to destination',
+                1: 'Administratively prohibited',
+                2: 'Beyond scope of source address',
+                3: 'Address unreachable',
+                4: 'Port unreachable',
+                5: 'Source address failed ingress/egress policy',
+                6: 'Reject route to destination',
+            }.get(code, f'Code {code}')
+            return f'Destination Unreachable ({code_text})'
+
         return {
-            128: 'Echo (ping) request',
-            129: 'Echo (ping) reply',
             130: 'Multicast Listener Query',
             131: 'Multicast Listener Report',
             132: 'Multicast Listener Done',
-            3: f'Time Exceeded ({"Hop limit exceeded in transit" if int(payload[1]) == 0 else "Fragment reassembly time exceeded"})',
+            3: f'Time Exceeded ({"Hop limit exceeded in transit" if code == 0 else "Fragment reassembly time exceeded"})',
         }.get(icmpv6_type, f'ICMPv6 Type {icmpv6_type}')
 
     def _dhcpv6_message_name(self, msg_type: int) -> str:
@@ -3322,6 +3600,9 @@ class PacketParser:
 
     def _guess_protocol(self, packet, metadata: dict | None = None):
         metadata = metadata or {}
+        fragment_override = self._fragment_override_protocol(packet, metadata)
+        if fragment_override:
+            return fragment_override
         eth_type = self._ether_type(packet)
         effective_ip = self._effective_ip_layer(packet)
         effective_tcp = self._effective_tcp_layer(packet, effective_ip)
@@ -3536,6 +3817,34 @@ class PacketParser:
         except Exception:
             return ''
 
+    def _dns_question_from_raw(self, raw_dns: bytes) -> tuple[str, str]:
+        if len(raw_dns) < 16:
+            return '', ''
+        try:
+            from core.formatters import _dns_read_name
+
+            name, next_pos = _dns_read_name(raw_dns, 12)
+            if next_pos + 2 > len(raw_dns):
+                return name.rstrip('.'), ''
+            qtype_value = int.from_bytes(raw_dns[next_pos:next_pos + 2], 'big')
+            qtype_name = {
+                1: 'A',
+                2: 'NS',
+                5: 'CNAME',
+                6: 'SOA',
+                12: 'PTR',
+                15: 'MX',
+                16: 'TXT',
+                28: 'AAAA',
+                33: 'SRV',
+                41: 'OPT',
+                48: 'DNSKEY',
+                46: 'RRSIG',
+            }.get(qtype_value, str(qtype_value))
+            return str(name or '').rstrip('.'), qtype_name
+        except Exception:
+            return '', ''
+
     def _tls_version_name(self, version: int) -> str:
         return {
             0x0301: 'TLSv1.0',
@@ -3558,6 +3867,76 @@ class PacketParser:
             16: 'Client Key Exchange',
             20: 'Finished',
         }.get(int(handshake_type or -1), f'Handshake ({int(handshake_type or 0)})')
+
+    def _tls_client_hello_sni(self, packet) -> str:
+        payload = self._payload_bytes(packet)
+        if len(payload) < 5:
+            return ''
+        cursor = 0
+        while cursor + 5 <= len(payload):
+            content_type = int(payload[cursor])
+            version = int.from_bytes(payload[cursor + 1:cursor + 3], 'big')
+            record_len = int.from_bytes(payload[cursor + 3:cursor + 5], 'big')
+            if content_type not in {20, 21, 22, 23} or version not in {0x0301, 0x0302, 0x0303, 0x0304}:
+                cursor += 1
+                continue
+            record_start = cursor + 5
+            record_end = min(len(payload), record_start + record_len)
+            if content_type != 22 or record_end - record_start < 4:
+                cursor = record_end
+                continue
+            hs_pos = record_start
+            while hs_pos + 4 <= record_end:
+                hs_type = int(payload[hs_pos])
+                hs_len = int.from_bytes(payload[hs_pos + 1:hs_pos + 4], 'big')
+                hs_body_start = hs_pos + 4
+                hs_body_end = hs_body_start + hs_len
+                if hs_body_end > record_end or hs_type != 1:
+                    break
+                body = payload[hs_body_start:hs_body_end]
+                if len(body) < 34:
+                    break
+                pos = 0
+                pos += 2  # client_version
+                pos += 32  # random
+                if pos + 1 > len(body):
+                    break
+                sid_len = int(body[pos]); pos += 1
+                pos += sid_len
+                if pos + 2 > len(body):
+                    break
+                cs_len = int.from_bytes(body[pos:pos + 2], 'big'); pos += 2
+                pos += cs_len
+                if pos + 1 > len(body):
+                    break
+                comp_len = int(body[pos]); pos += 1
+                pos += comp_len
+                if pos + 2 > len(body):
+                    break
+                ext_len = int.from_bytes(body[pos:pos + 2], 'big'); pos += 2
+                ext_end = min(len(body), pos + ext_len)
+                while pos + 4 <= ext_end:
+                    ext_type = int.from_bytes(body[pos:pos + 2], 'big')
+                    ext_size = int.from_bytes(body[pos + 2:pos + 4], 'big')
+                    ext_data_start = pos + 4
+                    ext_data_end = min(ext_end, ext_data_start + ext_size)
+                    if ext_type == 0 and ext_data_end - ext_data_start >= 5:
+                        data = body[ext_data_start:ext_data_end]
+                        list_len = int.from_bytes(data[0:2], 'big')
+                        list_end = min(len(data), 2 + list_len)
+                        entry_pos = 2
+                        while entry_pos + 3 <= list_end:
+                            name_type = int(data[entry_pos])
+                            name_len = int.from_bytes(data[entry_pos + 1:entry_pos + 3], 'big')
+                            name_start = entry_pos + 3
+                            name_end = min(list_end, name_start + name_len)
+                            if name_type == 0 and name_end > name_start:
+                                return data[name_start:name_end].decode(errors='ignore')
+                            entry_pos = name_end
+                    pos = ext_data_end
+                break
+            cursor = record_end
+        return ''
 
     def _tls_record_summary(self, packet) -> dict | None:
         records = self._tls_record_summaries(packet)
@@ -4898,6 +5277,8 @@ class PacketParser:
                 return self._lldp_info_text(packet)
             if protocol == 'HSRPv2':
                 return self._hsrpv2_info_text(packet)
+            if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
+                return self._ip_fragment_info_text(packet, metadata)
             if protocol == 'CAPWAP-Control':
                 message_name = str(metadata.get('capwap_message_name', '') or '').strip()
                 if message_name:
@@ -4913,22 +5294,50 @@ class PacketParser:
                     return wlan_info
                 return 'IEEE 802.11'
             if protocol in {'DNS', 'MDNS'}:
-                dns = packet[DNS]
+                dns = None
+                if packet.haslayer(DNS):
+                    dns = packet[DNS]
+                else:
+                    dns_hex = str(metadata.get('dns_reassembled_data_hex', '') or '')
+                    if dns_hex:
+                        try:
+                            dns = DNS(bytes.fromhex(dns_hex))
+                        except Exception:
+                            dns = None
+                if dns is None:
+                    return 'Domain Name System'
                 if protocol == 'MDNS':
                     return self._mdns_info_text(packet)
+                raw_dns = b''
+                try:
+                    raw_dns = bytes(dns)
+                except Exception:
+                    raw_dns = b''
                 qname = self._dns_qname(packet)
                 qtype_name = ''
+                if raw_dns:
+                    raw_qname, raw_qtype = self._dns_question_from_raw(raw_dns)
+                    if raw_qname:
+                        qname = raw_qname
+                    if raw_qtype:
+                        qtype_name = raw_qtype
                 try:
-                    qtype_value = int(getattr(getattr(dns, 'qd', None), 'qtype', 0) or 0)
-                    qtype_name = {
-                        1: 'A',
-                        2: 'NS',
-                        5: 'CNAME',
-                        12: 'PTR',
-                        15: 'MX',
-                        16: 'TXT',
-                        28: 'AAAA',
-                    }.get(qtype_value, str(qtype_value))
+                    if not qtype_name:
+                        qtype_value = int(getattr(getattr(dns, 'qd', None), 'qtype', 0) or 0)
+                        qtype_name = {
+                            1: 'A',
+                            2: 'NS',
+                            5: 'CNAME',
+                            6: 'SOA',
+                            12: 'PTR',
+                            15: 'MX',
+                            16: 'TXT',
+                            28: 'AAAA',
+                            33: 'SRV',
+                            41: 'OPT',
+                            46: 'RRSIG',
+                            48: 'DNSKEY',
+                        }.get(qtype_value, str(qtype_value))
                 except Exception:
                     qtype_name = ''
                 if getattr(dns, 'qr', 0) == 0:
@@ -4936,7 +5345,6 @@ class PacketParser:
                     return f'Standard query 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}'
                 answer_suffix = ''
                 try:
-                    raw_dns = bytes(dns)
                     records_text = []
                     from core.formatters import _dns_read_name, _dns_rdata_text
                     pos = 12
@@ -4957,6 +5365,10 @@ class PacketParser:
                         15: 'MX',
                         16: 'TXT',
                         28: 'AAAA',
+                        33: 'SRV',
+                        41: 'OPT',
+                        46: 'RRSIG',
+                        48: 'DNSKEY',
                     }
                     for _ in range(total_rr):
                         _, next_pos = _dns_read_name(raw_dns, pos)
@@ -4970,7 +5382,9 @@ class PacketParser:
                             break
                         rr_type_name = type_name_map.get(rr_type, str(rr_type))
                         rr_text = _dns_rdata_text(raw_dns[rdata_start:rdata_end], rr_type, raw_dns, rdata_start)
-                        if rr_type_name and rr_text:
+                        if rr_type in {41, 46, 48} and rr_type_name:
+                            records_text.append(rr_type_name)
+                        elif rr_type_name and rr_text:
                             records_text.append(f'{rr_type_name} {rr_text}')
                         pos = rdata_end
                     if records_text:
@@ -5059,18 +5473,24 @@ class PacketParser:
                     return 'Transport Layer Security'
 
                 info_parts: list[str] = []
+                sni_name = self._tls_client_hello_sni(packet)
                 for summary in tls_summaries:
                     content_type = int(summary.get('content_type', 0) or 0)
                     if content_type == 22:
                         names = list(summary.get('handshake_names', []))
                         if names:
-                            info_parts.extend(str(name) for name in names)
+                            for name in names:
+                                label = str(name)
+                                if label == 'Client Hello' and sni_name:
+                                    label = f'Client Hello (SNI={sni_name})'
+                                info_parts.append(label)
                         else:
                             info_parts.append('Encrypted Handshake Message')
                     elif content_type == 20:
                         info_parts.append('Change Cipher Spec')
                     elif content_type == 21:
-                        info_parts.append('Alert')
+                        record_len = int(summary.get('record_len', 0) or 0)
+                        info_parts.append('Encrypted Alert' if record_len > 2 else 'Alert')
                     elif content_type == 23:
                         names = list(summary.get('handshake_names', []))
                         if names:
@@ -5142,7 +5562,7 @@ class PacketParser:
                 payload_len = max(0, udp.len - 8)
                 return f'{udp.sport} -> {udp.dport} Len={payload_len}'
             if protocol == 'ICMPv6':
-                return self._icmpv6_info_text(packet) or packet.summary()
+                return self._icmpv6_info_text(packet, metadata) or packet.summary()
             if protocol == 'ICMP':
                 raw = bytes(packet[ICMP]) if packet.haslayer(ICMP) else b''
                 if raw[:1] in {b'\x08', b'\x00'}:
@@ -5352,6 +5772,39 @@ class PacketParser:
             return
 
         record.info = self._icmp_echo_info_text(packet)
+
+    def _update_icmpv6_echo_metadata(self, packet, record: PacketRecord) -> None:
+        if not packet.haslayer(IPv6):
+            return
+        payload = self._icmpv6_payload_bytes(packet)
+        if len(payload) < 8:
+            return
+        icmpv6_type = int(payload[0])
+        if icmpv6_type not in {128, 129}:
+            return
+        src = str(getattr(packet[IPv6], 'src', '') or '')
+        dst = str(getattr(packet[IPv6], 'dst', '') or '')
+        identifier = int.from_bytes(payload[4:6], 'big')
+        sequence = int.from_bytes(payload[6:8], 'big')
+        body = payload[8:]
+        key = (src, dst, identifier, sequence, body)
+        if icmpv6_type == 128:
+            self.icmpv6_echo_pending[key] = record
+            record.info = self._icmpv6_info_text(packet, record.metadata) or record.info
+            return
+
+        reverse_key = (dst, src, identifier, sequence, body)
+        pending = self.icmpv6_echo_pending.get(reverse_key)
+        if pending is not None:
+            request_record = pending
+            self.icmpv6_echo_pending.pop(reverse_key, None)
+            request_record.metadata['icmpv6_response_frame'] = int(record.number)
+            record.metadata['icmpv6_request_frame'] = int(request_record.number)
+            request_record.info = self._icmpv6_info_text(request_record.raw, request_record.metadata) or request_record.info
+            record.info = self._icmpv6_info_text(packet, record.metadata) or record.info
+            return
+
+        record.info = self._icmpv6_info_text(packet, record.metadata) or record.info
 
     def _update_dns_metadata(self, packet, record: PacketRecord) -> None:
         if not packet.haslayer(DNS):

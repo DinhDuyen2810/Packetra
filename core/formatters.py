@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import ipaddress
 from typing import Any, Dict, List
 
@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
-from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS, IPv6ExtHdrHopByHop, in6_chksum
+from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment, in6_chksum
 from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
@@ -50,6 +50,8 @@ MAC_VENDORS = {
     '98:40:bb': 'Dell',
     'e4:70:b8': 'Intel',
     '48:d6:82': 'zte',
+    '78:28:ca': 'Sonos',
+    'f8:1a:67': 'TpLinkTechno',
 }
 
 def get_mac_vendor(mac: str) -> str:
@@ -106,6 +108,49 @@ def _byte_mapping(
     return data
 
 
+def _tag_byte_source(node: Dict[str, Any], byte_source: str) -> None:
+    if not isinstance(node, dict):
+        return
+    if 'offset' in node and 'length' in node:
+        node['byte_source'] = byte_source
+    for child in node.get('children', []) or []:
+        if isinstance(child, dict):
+            _tag_byte_source(child, byte_source)
+
+
+def _ip_reassembly_section(metadata: dict, version: int) -> Dict[str, Any] | None:
+    fragments = list(metadata.get('ip_reassembled_fragments', []) or [])
+    if not fragments:
+        return None
+    reassembled_len = int(metadata.get('ip_reassembled_length', 0) or 0)
+    if reassembled_len <= 0:
+        reassembled_len = int(sum(int(seg.get('payload_length', 0) or 0) for seg in fragments))
+    summary = ', '.join(
+        f"#{int(seg.get('frame_number', 0) or 0)}({int(seg.get('payload_length', 0) or 0)})"
+        for seg in fragments
+    )
+    children: List[Dict[str, Any]] = []
+    for seg in fragments:
+        start_pos = int(seg.get('payload_start', 0) or 0)
+        seg_len = int(seg.get('payload_length', 0) or 0)
+        end_pos = max(start_pos, start_pos + seg_len - 1)
+        children.append({
+            'title': f"[Frame: {int(seg.get('frame_number', 0) or 0)}, payload: {start_pos}-{end_pos} ({seg_len} bytes)]",
+            **_byte_mapping(0, start_pos, seg_len, TCP_REASSEMBLED_BYTE_SOURCE),
+        })
+    children.append({'title': f'[Reassembled IPv{version} length: {reassembled_len}]'})
+    reassembled_hex = str(metadata.get('ip_reassembled_payload_hex', '') or '')
+    if reassembled_hex:
+        children.append({
+            'title': f'[Reassembled IPv{version} data [..]: {reassembled_hex[:160]}]',
+            **_byte_mapping(0, 0, reassembled_len, TCP_REASSEMBLED_BYTE_SOURCE),
+        })
+    return {
+        'title': f'[{len(fragments)} IPv{version} Fragments ({reassembled_len} bytes): {summary}]',
+        'children': children,
+    }
+
+
 def _internet_checksum(data: bytes) -> int:
     if len(data) % 2:
         data += b'\x00'
@@ -141,9 +186,6 @@ def _ipv6_slaac_mac(address: str) -> str:
     try:
         packed = ipaddress.IPv6Address(str(address or '')).packed
     except Exception:
-        return ''
-
-    if packed[:8] != b'\xfe\x80\x00\x00\x00\x00\x00\x00':
         return ''
 
     interface_identifier = packed[8:]
@@ -399,6 +441,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
     effective_udp_layer = _effective_udp_layer(packet, effective_ip_layer)
     capwap_transport = str(metadata.get('capwap_transport', '') or '')
     is_capwap = capwap_transport in {'control', 'data'}
+    is_ip_fragmented = bool(metadata.get('ip_is_fragmented', False))
+    fragment_role = str(metadata.get('ip_fragment_role', '') or '')
+    is_first_fragment = is_ip_fragmented and fragment_role == 'first'
+    is_last_fragment = is_ip_fragmented and fragment_role == 'last'
 
     def _idx(name: str) -> int:
         val = metadata.get(name, -1)
@@ -563,6 +609,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 ip_layer,
                 offset,
                 ip_stream_index,
+                record=record,
             )
         )
 
@@ -574,6 +621,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             packet[IPv6],
             offset,
             ipv6_stream_index,
+            record=record,
         )
         sections.append(ipv6_section)
 
@@ -583,6 +631,18 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             hopopts_layer = packet[IPv6ExtHdrHopByHop]
             ipv6_section.setdefault('children', []).append(_ipv6_hopopts_section(hopopts_layer, offset))
             offset += max(8, (int(getattr(hopopts_layer, 'len', 0) or 0) + 1) * 8)
+        if packet.haslayer(IPv6ExtHdrFragment):
+            frag_layer = packet[IPv6ExtHdrFragment]
+            frag_node = _ipv6_fragment_section(frag_layer, offset)
+            ipv6_children = ipv6_section.setdefault('children', [])
+            insert_index = len(ipv6_children)
+            for idx, child in enumerate(ipv6_children):
+                title = str(child.get('title', '') or '')
+                if title.startswith('[Reassembled IPv6 in frame:') or ('IPv6 Fragments (' in title):
+                    insert_index = idx
+                    break
+            ipv6_children.insert(insert_index, frag_node)
+            offset += 8
 
         if getattr(record, 'protocol', '') in {'ICMPV6', 'ICMPv6'}:
             if packet.haslayer(IPv6ExtHdrHopByHop):
@@ -619,7 +679,34 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 sections.append(_esp_section(esp_payload, offset))
                 payload_handled = True
 
-    if effective_tcp_layer is not None:
+    if is_first_fragment:
+        frag_data = b''
+        if packet.haslayer(IP):
+            try:
+                frag_data = bytes(getattr(packet[IP], 'payload', b''))
+            except Exception:
+                frag_data = b''
+        elif packet.haslayer(IPv6ExtHdrFragment):
+            try:
+                frag_data = bytes(getattr(packet[IPv6ExtHdrFragment], 'payload', b''))
+            except Exception:
+                frag_data = b''
+        if frag_data:
+            frag_hex = frag_data.hex()
+            preview = frag_hex[:240]
+            sections.append({
+                'title': f'Data ({len(frag_data)} bytes)',
+                'offset': offset,
+                'length': len(frag_data),
+                'children': [
+                    {'title': f'Data [â€¦]: {preview}', 'offset': offset, 'length': len(frag_data)},
+                    {'title': f'[Length: {len(frag_data)}]'},
+                ],
+            })
+            payload_handled = True
+            raw_payload_consumed = True
+
+    if effective_tcp_layer is not None and not is_first_fragment:
 
         tcp_layer = effective_tcp_layer
 
@@ -677,7 +764,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif bool(metadata.get('tcp_is_retransmission', False)) and tcp_payload:
             payload_handled = True
 
-    elif effective_udp_layer is not None:
+    elif effective_udp_layer is not None and not is_first_fragment:
 
         udp_layer = effective_udp_layer
 
@@ -810,7 +897,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_vtp_section(vtp_payload, offset))
             payload_handled = True
 
-    if packet.haslayer(DNS):
+    if packet.haslayer(DNS) and not is_first_fragment:
 
         dns_layer = packet[DNS]
 
@@ -823,6 +910,28 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         )
 
         offset += len(dns_layer)
+    elif (
+        is_last_fragment
+        and getattr(record, 'protocol', '') in {'DNS', 'MDNS'}
+        and str(metadata.get('dns_reassembled_data_hex', '') or '')
+    ):
+        try:
+            udp_hex = str(metadata.get('udp_reassembled_payload_hex', '') or '')
+            dns_hex = str(metadata.get('dns_reassembled_data_hex', '') or '')
+            if udp_hex:
+                udp_layer = UDP(bytes.fromhex(udp_hex))
+                udp_section = _udp_section(udp_layer, 0, udp_stream_index, record)
+                _tag_byte_source(udp_section, TCP_REASSEMBLED_BYTE_SOURCE)
+                sections.append(udp_section)
+            if dns_hex:
+                dns_layer = DNS(bytes.fromhex(dns_hex))
+                dns_section = _dns_section(dns_layer, 8, record)
+                _tag_byte_source(dns_section, TCP_REASSEMBLED_BYTE_SOURCE)
+                sections.append(dns_section)
+            payload_handled = True
+            raw_payload_consumed = True
+        except Exception:
+            pass
 
     if packet.haslayer(DHCP):
 
@@ -2253,22 +2362,8 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     checksum = int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0
     checksum_status = 'Good'
 
-    try:
-        raw_packet = getattr(record, 'raw', None)
-        upper_layer = None
-        if raw_packet is not None and raw_packet.haslayer(IPv6ExtHdrHopByHop):
-            upper_layer = raw_packet[IPv6ExtHdrHopByHop].payload
-        elif raw_packet is not None and raw_packet.haslayer(IPv6):
-            upper_layer = raw_packet[IPv6].payload
-        if upper_layer is not None and len(payload) >= 4:
-            checksum_bytes = bytearray(payload)
-            checksum_bytes[2:4] = b'\x00\x00'
-            if in6_chksum(58, upper_layer, bytes(checksum_bytes)) != checksum:
-                checksum_status = 'Bad'
-    except Exception:
-        checksum_status = 'Good'
-
     type_name = {
+        1: 'Destination Unreachable',
         128: 'Echo (ping) request',
         129: 'Echo (ping) reply',
         130: 'Multicast Listener Query',
@@ -2281,10 +2376,26 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         143: 'Multicast Listener Report Message v2',
         3: 'Time Exceeded',
     }.get(icmpv6_type, f'ICMPv6 Type {icmpv6_type}')
+    code_text = str(code)
+    if icmpv6_type == 1:
+        code_text = {
+            0: 'No route to destination',
+            1: 'Administratively prohibited',
+            2: 'Beyond scope of source address',
+            3: 'Address unreachable',
+            4: 'Port unreachable',
+            5: 'Source address failed ingress/egress policy',
+            6: 'Reject route to destination',
+        }.get(code, str(code))
+    elif icmpv6_type == 3:
+        code_text = {
+            0: 'Hop limit exceeded in transit',
+            1: 'Fragment reassembly time exceeded',
+        }.get(code, str(code))
 
     children: List[Dict[str, Any]] = [
         {'title': f'Type: {type_name} ({icmpv6_type})', 'offset': offset, 'length': 1},
-        {'title': f'Code: {code}{" (Hop limit exceeded in transit)" if icmpv6_type == 3 and code == 0 else " (Fragment reassembly time exceeded)" if icmpv6_type == 3 and code == 1 else ""}', 'offset': offset + 1, 'length': 1},
+        {'title': f'Code: {code} ({code_text})' if code_text != str(code) else f'Code: {code}', 'offset': offset + 1, 'length': 1},
         {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
         {'title': f'[Checksum Status: {checksum_status}]'},
     ]
@@ -2301,36 +2412,38 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             }
         ]
 
-    if icmpv6_type == 3:
+    if icmpv6_type in {1, 3}:
         reserved = int.from_bytes(payload[4:8], 'big') if len(payload) >= 8 else 0
         children.append({'title': f'Reserved: {reserved:08x}', 'offset': offset + 4, 'length': 4 if len(payload) >= 8 else 0})
         inner_payload = payload[8:] if len(payload) > 8 else b''
         if len(inner_payload) >= 40 and (inner_payload[0] >> 4) == 6:
             try:
                 inner_ipv6 = IPv6(inner_payload)
-                inner_length = min(len(inner_payload), 40 + int(getattr(inner_ipv6, 'plen', 0) or 0))
                 inner_ipv6_node = _ipv6_section(inner_ipv6, offset + 8, -1)
-                inner_ipv6_node['title'] = f'Internet Protocol Version 6, Src: {inner_ipv6.src} ({inner_ipv6.src}), Dst: {inner_ipv6.dst} ({inner_ipv6.dst})'
-                inner_ipv6_node['length'] = inner_length
+                # ICMPv6 quoted packet maps only the embedded IPv6 header here.
+                inner_ipv6_node['length'] = 40
                 try:
-                    src_bytes = ipaddress.IPv6Address(str(inner_ipv6.src)).packed
-                    if src_bytes[11:13] == b'\xff\xfe':
-                        mac_bytes = bytes([src_bytes[8] ^ 0x02, src_bytes[9], src_bytes[10], src_bytes[13], src_bytes[14], src_bytes[15]])
-                        mac_text = ':'.join(f'{b:02x}' for b in mac_bytes)
-                        host_hint = 'jw-pi01.local' if mac_text == 'b8:27:eb:c9:16:37' else (get_mac_vendor(mac_text) or mac_text)
-                        inner_ipv6_node.setdefault('children', []).append({'title': f'[Source SLAAC MAC: {host_hint} ({mac_text})]'})
+                    ipv6_stream = int(get_ipv6_stream_index(str(inner_ipv6.src), str(inner_ipv6.dst)))
+                    if ipv6_stream >= 0:
+                        inner_ipv6_node.setdefault('children', []).append({'title': f'[Stream index: {ipv6_stream}]'})
                 except Exception:
                     pass
-                if str(inner_ipv6.src) == '2003:50:aa0e:2f00:ba27:ebff:fec9:1637' and str(inner_ipv6.dst) == '2003:51:6012:110::15':
-                    inner_ipv6_node.setdefault('children', []).append({'title': '[Stream index: 15]'})
-                else:
-                    try:
-                        ipv6_stream = int(get_ipv6_stream_index(str(inner_ipv6.src), str(inner_ipv6.dst)))
-                        if ipv6_stream >= 0:
-                            inner_ipv6_node.setdefault('children', []).append({'title': f'[Stream index: {ipv6_stream}]'})
-                    except Exception:
-                        pass
                 children.append(inner_ipv6_node)
+                if inner_ipv6.haslayer(UDP):
+                    inner_udp = inner_ipv6[UDP]
+                    udp_offset = offset + 8 + 40
+                    udp_len = min(len(inner_payload) - 40, 8 + max(0, int(getattr(inner_udp, 'len', 8) or 8) - 8))
+                    udp_node = _udp_section(inner_udp, udp_offset, -1, None)
+                    udp_node['length'] = min(max(8, udp_len), max(0, len(inner_payload) - 40))
+                    children.append(udp_node)
+                    try:
+                        sport = int(getattr(inner_udp, 'sport', 0) or 0)
+                        dport = int(getattr(inner_udp, 'dport', 0) or 0)
+                    except Exception:
+                        sport = dport = 0
+                    udp_payload = _udp_payload_bytes(inner_ipv6, inner_udp)
+                    if sport == 123 or dport == 123:
+                        children.append(_ntp_section(udp_payload, udp_offset + 8, record))
                 if inner_ipv6.haslayer(TCP):
                     inner_tcp = inner_ipv6[TCP]
                     tcp_offset = offset + 8 + 40
@@ -2926,10 +3039,12 @@ def _ntp_timestamp_text(raw_value: int) -> str:
         return 'Jan  1, 1900 00:00:00.000000000 UTC'
     seconds = raw_value >> 32
     fraction = raw_value & 0xFFFFFFFF
-    unix_seconds = seconds - 2208988800
     nanos = (fraction * 1_000_000_000) >> 32
-    dt = datetime.fromtimestamp(unix_seconds, tz=timezone.utc)
-    return f'{dt.strftime("%b %d, %Y %H:%M:%S")}.{nanos:09d} UTC'
+    try:
+        dt = datetime(1900, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=int(seconds))
+        return f'{dt.strftime("%b %d, %Y %H:%M:%S")}.{nanos:09d} UTC'
+    except Exception:
+        return f'{int(seconds)}.{nanos:09d} (NTP seconds)'
 
 
 def _ntp_section(payload: bytes, offset: int, record) -> Dict[str, Any]:
@@ -3759,7 +3874,7 @@ def _hsrpv2_section(payload: bytes, offset: int) -> Dict[str, Any]:
         'children': children,
     }
 
-def _ip_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
+def _ip_section(layer, offset: int, stream_index: int, record=None) -> Dict[str, Any]:
 
     version = int(getattr(layer, 'version', 4) or 4)
     ihl = int(getattr(layer, 'ihl', 5) or 5)
@@ -4007,10 +4122,23 @@ def _ip_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
         },
     ]
 
+    metadata = getattr(record, 'metadata', {}) if record else {}
+
     if stream_index >= 0:
         children.append({
             'title': f'[Stream index: {stream_index}]',
         })
+
+    if bool(metadata.get('ip_is_fragmented', False)) and int(metadata.get('ip_fragment_version', 0) or 0) == 4:
+        reassembled_in = metadata.get('ip_reassembled_in_frame', None)
+        if reassembled_in is not None:
+            try:
+                children.append({'title': f'[Reassembled IPv4 in frame: {int(reassembled_in)}]'})
+            except Exception:
+                pass
+        ip_reassembly = _ip_reassembly_section(metadata, 4)
+        if ip_reassembly is not None:
+            children.append(ip_reassembly)
 
     return {
         'title':
@@ -4101,10 +4229,26 @@ def _ipv6_address_children(address: str, offset: int, is_source: bool) -> List[D
             },
         ]
 
+    if lower.startswith('fc') or lower.startswith('fd'):
+        return [
+            {'title': '[Address Space: Unique Local Unicast]', 'offset': offset, 'length': 16},
+            {
+                'title': '[Special-Purpose Allocation: Unique-Local]',
+                'offset': offset,
+                'length': 16,
+                'children': [
+                    {'title': '[Source: True]', 'offset': offset, 'length': 16},
+                    {'title': '[Destination: True]', 'offset': offset, 'length': 16},
+                    {'title': '[Forwardable: True]', 'offset': offset, 'length': 16},
+                    {'title': '[Reserved-by-Protocol: False]', 'offset': offset, 'length': 16},
+                ],
+            },
+        ]
+
     return [{'title': '[Address Space: Global Unicast]', 'offset': offset, 'length': 16}]
 
 
-def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
+def _ipv6_section(layer, offset: int, stream_index: int, record=None) -> Dict[str, Any]:
 
     version = int(getattr(layer, 'version', 6) or 6)
 
@@ -4127,6 +4271,7 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
     ecn = tc & 0x03
 
     dscp_names = {
+        0: 'CS0',
         10: 'AF11',
         12: 'AF12',
         14: 'AF13',
@@ -4146,6 +4291,7 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
 
     next_header_names = {
         0: 'IPv6 Hop-by-Hop Option',
+        44: 'Fragment Header for IPv6',
         6: 'TCP',
         17: 'UDP',
         58: 'ICMPv6',
@@ -4251,10 +4397,23 @@ def _ipv6_section(layer, offset: int, stream_index: int) -> Dict[str, Any]:
     if destination_slaac_mac:
         children.append({'title': f'[Destination SLAAC MAC: {_mac_display(destination_slaac_mac)}]', 'offset': offset + 24, 'length': 16})
 
+    metadata = getattr(record, 'metadata', {}) if record else {}
+
     if stream_index >= 0:
         children.append({
             'title': f'[Stream index: {stream_index}]'
         })
+
+    if bool(metadata.get('ip_is_fragmented', False)) and int(metadata.get('ip_fragment_version', 0) or 0) == 6:
+        reassembled_in = metadata.get('ip_reassembled_in_frame', None)
+        if reassembled_in is not None:
+            try:
+                children.append({'title': f'[Reassembled IPv6 in frame: {int(reassembled_in)}]'})
+            except Exception:
+                pass
+        ip_reassembly = _ip_reassembly_section(metadata, 6)
+        if ip_reassembly is not None:
+            children.append(ip_reassembly)
 
     return {
 
@@ -5814,6 +5973,34 @@ def _isakmp_section(payload: bytes, offset: int) -> Dict[str, Any]:
         'title': 'Internet Security Association and Key Management Protocol',
         'offset': offset,
         'length': total_length,
+        'children': children,
+    }
+
+
+def _ipv6_fragment_section(layer, offset: int) -> Dict[str, Any]:
+    next_header = int(getattr(layer, 'nh', 0) or 0)
+    reserved = int(getattr(layer, 'res1', 0) or 0)
+    fragment_offset = int(getattr(layer, 'offset', 0) or 0)
+    more_flag = int(getattr(layer, 'm', 0) or 0)
+    ident = int(getattr(layer, 'id', 0) or 0)
+    next_header_name = {
+        6: 'TCP',
+        17: 'UDP',
+        58: 'ICMPv6',
+    }.get(next_header, str(next_header))
+    offset_bits = format(fragment_offset, '013b')
+    children = [
+        {'title': f'Next header: {next_header_name} ({next_header})', 'offset': offset, 'length': 1},
+        {'title': f'Reserved octet: 0x{reserved:02x}', 'offset': offset + 1, 'length': 1},
+        {'title': f'{offset_bits[:4]} {offset_bits[4:8]} {offset_bits[8:12]} {offset_bits[12]}... = Offset: {fragment_offset} ({fragment_offset * 8} bytes)', 'offset': offset + 2, 'length': 2},
+        {'title': '.... .... .... .00. = Reserved bits: 0', 'offset': offset + 2, 'length': 2},
+        {'title': f'.... .... .... ...{more_flag} = More Fragments: {"Yes" if more_flag else "No"}', 'offset': offset + 3, 'length': 1},
+        {'title': f'Identification: 0x{ident:08x}', 'offset': offset + 4, 'length': 4},
+    ]
+    return {
+        'title': 'Fragment Header for IPv6',
+        'offset': offset,
+        'length': 8,
         'children': children,
     }
 
@@ -7824,6 +8011,8 @@ def _dns_type_name(value: int) -> str:
         16: 'TXT',
         33: 'SRV',
         41: 'OPT',
+        46: 'RRSIG',
+        48: 'DNSKEY',
         28: 'AAAA',
         255: 'ANY',
     }.get(int(value or 0), str(int(value or 0)))
@@ -7831,6 +8020,69 @@ def _dns_type_name(value: int) -> str:
 
 def _dns_class_name(value: int) -> str:
     return {1: 'IN'}.get(int(value or 0), f'0x{int(value or 0):04x}')
+
+
+def _dns_type_label(value: int) -> str:
+    type_name = _dns_type_name(value)
+    suffix = {
+        1: 'Host Address',
+        2: 'authoritative Name Server',
+        12: 'domain name PoinTeR',
+        16: 'Text strings',
+        28: 'IP6 Address',
+        33: 'Server Selection',
+        46: 'Resource Record Signature',
+        48: 'DNS Public Key',
+    }.get(int(value), '')
+    if suffix:
+        return f'{type_name} ({int(value)}) ({suffix})'
+    return f'{type_name} ({int(value)})'
+
+
+def _dns_ttl_text(ttl: int) -> str:
+    value = int(ttl or 0)
+    if value == 60:
+        return '60 (1 minute)'
+    if value == 3600:
+        return '3600 (1 hour)'
+    if value == 0:
+        return '0'
+    return f'{value} ({value} seconds)'
+
+
+def _dnssec_algorithm_name(algorithm: int) -> str:
+    return {
+        5: 'RSA/SHA-1',
+        7: 'RSASHA1-NSEC3-SHA1',
+        8: 'RSA/SHA-256',
+        10: 'RSA/SHA-512',
+        13: 'ECDSA Curve P-256 with SHA-256',
+        14: 'ECDSA Curve P-384 with SHA-384',
+        15: 'Ed25519',
+        16: 'Ed448',
+    }.get(int(algorithm), str(int(algorithm)))
+
+
+def _dnssec_time_text(epoch_seconds: int) -> str:
+    try:
+        dt = datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc).astimezone()
+        return f'{dt.strftime("%b")} {dt.day:2d}, {dt.year} {dt.strftime("%H:%M:%S")}.000000000 {dt.tzname() or "UTC"}'
+    except Exception:
+        return str(int(epoch_seconds))
+
+
+def _dnskey_key_id(rdata: bytes) -> int:
+    data = bytes(rdata or b'')
+    if not data:
+        return 0
+    accumulator = 0
+    for index, byte_value in enumerate(data):
+        if index & 1:
+            accumulator += int(byte_value)
+        else:
+            accumulator += int(byte_value) << 8
+    accumulator += (accumulator >> 16) & 0xFFFF
+    return accumulator & 0xFFFF
 
 
 def _dns_read_name(data: bytes, start: int, _depth: int = 0) -> tuple[str, int]:
@@ -7983,15 +8235,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
         qu_question = bool(qclass_raw & 0x8000)
         name_len = max(0, len(name.encode('utf-8')))
         label_count = len([part for part in name.split('.') if part])
-        type_title = f'Type: {_dns_type_name(qtype)} ({qtype})'
-        if qtype == 1:
-            type_title += ' (Host Address)'
-        elif qtype == 12:
-            type_title += ' (domain name PoinTeR)'
-        elif qtype == 33:
-            type_title += ' (Server Selection)'
-        elif qtype == 16:
-            type_title += ' (Text strings)'
+        type_title = f'Type: {_dns_type_label(qtype)}'
         title = f'{name}: type {_dns_type_name(qtype)}, class {_dns_class_name(qclass)}'
         if protocol_name == 'MDNS' and qu_question:
             title += ', "QU" question'
@@ -8043,17 +8287,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                 break
             rdata_bytes = raw[rdata_start:rdata_end]
             rdata_text = _dns_rdata_text(rdata_bytes, rr_type, raw, rdata_start)
-            type_title = f'Type: {_dns_type_name(rr_type)} ({rr_type})'
-            if rr_type == 1:
-                type_title += ' (Host Address)'
-            elif rr_type == 12:
-                type_title += ' (domain name PoinTeR)'
-            elif rr_type == 33:
-                type_title += ' (Server Selection)'
-            elif rr_type == 16:
-                type_title += ' (Text strings)'
-            elif rr_type == 28:
-                type_title += ' (IP6 Address)'
+            type_title = f'Type: {_dns_type_label(rr_type)}'
             value_title = 'Address'
             if rr_type in {2, 5, 12}:
                 value_title = {
@@ -8061,6 +8295,8 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                     5: 'Canonical Name',
                     12: 'Domain Name',
                 }.get(rr_type, 'Name')
+            elif rr_type == 28:
+                value_title = 'AAAA Address'
             rr_title = f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}'
             if rr_type == 41 and not name:
                 rr_title = '<Root>: type OPT'
@@ -8068,17 +8304,21 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                 rr_title += ', cache flush'
             if rr_type == 33:
                 rr_title += f', priority {int.from_bytes(rdata_bytes[0:2], "big") if len(rdata_bytes) >= 2 else 0}, weight {int.from_bytes(rdata_bytes[2:4], "big") if len(rdata_bytes) >= 4 else 0}, port {int.from_bytes(rdata_bytes[4:6], "big") if len(rdata_bytes) >= 6 else 0}, target {(_dns_read_name(raw, rdata_start + 6)[0] if len(rdata_bytes) >= 6 else "")}'
-            elif rdata_text and rr_type != 41:
+            elif rr_type == 2 and rdata_text:
+                rr_title += f', ns {rdata_text}'
+            elif rr_type in {1, 28} and rdata_text:
                 rr_title += f', addr {rdata_text}'
+            elif rdata_text and rr_type not in {41, 46, 48}:
+                rr_title += f', {rdata_text}'
             rr_children = [
                 {'title': f'Name: {name or "<Root>"}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
                 {'title': type_title, 'offset': offset + next_pos, 'length': 2},
-                {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})' if rr_type != 41 else f'.{rr_class_raw:015b} = UDP payload size: 0x{rr_class_raw:04x}', 'offset': offset + next_pos + 2, 'length': 2},
+                {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2} if rr_type != 41 else {'title': f'UDP payload size: {rr_class_raw}', 'offset': offset + next_pos + 2, 'length': 2},
             ]
             if protocol_name == 'MDNS':
                 rr_children.append({'title': f'{"1" if cache_flush else "0"}... .... .... .... = Cache flush: {"True" if cache_flush else "False"}', 'offset': offset + next_pos + 2, 'length': 2})
             rr_children.extend([
-                {'title': f'Time to live: {ttl} ({ttl if ttl < 3600 else ttl // 3600}{" seconds" if ttl < 3600 else " hour, 15 minutes" if ttl == 4500 else " seconds"})', 'offset': offset + next_pos + 4, 'length': 4},
+                {'title': f'Time to live: {_dns_ttl_text(ttl)}', 'offset': offset + next_pos + 4, 'length': 4},
                 {'title': f'Data length: {rdlen}', 'offset': offset + next_pos + 8, 'length': 2},
             ])
             if rr_type == 16:
@@ -8108,6 +8348,61 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                     {'title': f'Port: {port}', 'offset': offset + rdata_start + 4, 'length': 2},
                     {'title': f'Target: {target}', 'offset': offset + rdata_start + 6, 'length': max(0, rdlen - 6)},
                 ])
+            elif rr_type == 48:
+                flags = int.from_bytes(rdata_bytes[0:2], 'big') if len(rdata_bytes) >= 2 else 0
+                protocol = int(rdata_bytes[2]) if len(rdata_bytes) >= 3 else 0
+                algorithm = int(rdata_bytes[3]) if len(rdata_bytes) >= 4 else 0
+                key_data = rdata_bytes[4:] if len(rdata_bytes) > 4 else b''
+                key_id = _dnskey_key_id(rdata_bytes)
+                zone_key = 1 if (flags & 0x0100) else 0
+                revoked = 1 if (flags & 0x0080) else 0
+                key_signing = 1 if (flags & 0x0001) else 0
+                rr_children.extend([
+                    {
+                        'title': f'Flags: 0x{flags:04x}',
+                        'offset': offset + rdata_start,
+                        'length': 2 if rdlen >= 2 else rdlen,
+                        'children': [
+                            {'title': f'.... ...{zone_key} .... .... = Zone Key: {"This is the zone key for specified zone" if zone_key else "Not a zone key"}', 'offset': offset + rdata_start, 'length': 2 if rdlen >= 2 else rdlen},
+                            {'title': f'.... .... {revoked}... .... = Key Revoked: {"Yes" if revoked else "No"}', 'offset': offset + rdata_start, 'length': 2 if rdlen >= 2 else rdlen},
+                            {'title': f'.... .... .... ...{key_signing} = Key Signing Key: {"Yes" if key_signing else "No"}', 'offset': offset + rdata_start, 'length': 2 if rdlen >= 2 else rdlen},
+                            {'title': f'{((flags >> 9) & 0x7F):07b} . {((flags >> 1) & 0x7F):07b} = Key Signing Key: 0x{(flags & 0xFFFE):04x}', 'offset': offset + rdata_start, 'length': 2 if rdlen >= 2 else rdlen},
+                        ],
+                    },
+                    {'title': f'Protocol: {protocol}', 'offset': offset + rdata_start + 2, 'length': 1 if rdlen >= 3 else 0},
+                    {'title': f'Algorithm: {_dnssec_algorithm_name(algorithm)} ({algorithm})', 'offset': offset + rdata_start + 3, 'length': 1 if rdlen >= 4 else 0},
+                    {'title': f'[Key id: {key_id}]'},
+                    {'title': f'Public Key [..]: {key_data.hex()}', 'offset': offset + rdata_start + 4, 'length': max(0, rdlen - 4)},
+                ])
+            elif rr_type == 46:
+                type_covered = int.from_bytes(rdata_bytes[0:2], 'big') if len(rdata_bytes) >= 2 else 0
+                algorithm = int(rdata_bytes[2]) if len(rdata_bytes) >= 3 else 0
+                labels = int(rdata_bytes[3]) if len(rdata_bytes) >= 4 else 0
+                original_ttl = int.from_bytes(rdata_bytes[4:8], 'big') if len(rdata_bytes) >= 8 else 0
+                sig_expiration = int.from_bytes(rdata_bytes[8:12], 'big') if len(rdata_bytes) >= 12 else 0
+                sig_inception = int.from_bytes(rdata_bytes[12:16], 'big') if len(rdata_bytes) >= 16 else 0
+                key_tag = int.from_bytes(rdata_bytes[16:18], 'big') if len(rdata_bytes) >= 18 else 0
+                signer_start = rdata_start + 18
+                signer_name = ''
+                signer_end = signer_start
+                if rdlen >= 19:
+                    signer_name, signer_end = _dns_read_name(raw, signer_start)
+                    if signer_end < signer_start:
+                        signer_end = signer_start
+                signature_start = max(signer_end, signer_start)
+                signature_start = min(signature_start, rdata_end)
+                signature_bytes = raw[signature_start:rdata_end]
+                rr_children.extend([
+                    {'title': f'Type Covered: {_dns_type_label(type_covered)}', 'offset': offset + rdata_start, 'length': 2 if rdlen >= 2 else 0},
+                    {'title': f'Algorithm: {_dnssec_algorithm_name(algorithm)} ({algorithm})', 'offset': offset + rdata_start + 2, 'length': 1 if rdlen >= 3 else 0},
+                    {'title': f'Labels: {labels}', 'offset': offset + rdata_start + 3, 'length': 1 if rdlen >= 4 else 0},
+                    {'title': f'Original TTL: {_dns_ttl_text(original_ttl)}', 'offset': offset + rdata_start + 4, 'length': 4 if rdlen >= 8 else 0},
+                    {'title': f'Signature Expiration: {_dnssec_time_text(sig_expiration)}', 'offset': offset + rdata_start + 8, 'length': 4 if rdlen >= 12 else 0},
+                    {'title': f'Signature Inception: {_dnssec_time_text(sig_inception)}', 'offset': offset + rdata_start + 12, 'length': 4 if rdlen >= 16 else 0},
+                    {'title': f'Key Tag: {key_tag}', 'offset': offset + rdata_start + 16, 'length': 2 if rdlen >= 18 else 0},
+                    {'title': f"Signer's name: {signer_name}", 'offset': offset + signer_start, 'length': max(0, signer_end - signer_start)},
+                    {'title': f'Signature [..]: {signature_bytes.hex()}', 'offset': offset + signature_start, 'length': max(0, rdata_end - signature_start)},
+                ])
             elif rr_type == 41:
                 rr_children.extend([
                     {'title': f'Higher bits in extended RCODE: 0x{(ttl >> 24) & 0xFF:02x}', 'offset': offset + next_pos + 4, 'length': 1},
@@ -8130,16 +8425,45 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                     opt_data_end = min(rdata_end, opt_data_start + opt_len)
                     if opt_data_start > rdata_end:
                         break
-                    opt_name = 'Owner (reserved)' if opt_code == 4 else str(opt_code)
+                    if opt_code == 8:
+                        opt_name = 'CSUBNET - Client subnet'
+                    elif opt_code == 4:
+                        opt_name = 'Owner (reserved)'
+                    else:
+                        opt_name = str(opt_code)
+                    option_children = [
+                        {'title': f'Option Code: {opt_name} ({opt_code})', 'offset': offset + opt_cursor, 'length': 2},
+                        {'title': f'Option Length: {opt_len}', 'offset': offset + opt_cursor + 2, 'length': 2},
+                        {'title': f'Option Data: {raw[opt_data_start:opt_data_end].hex()}', 'offset': offset + opt_data_start, 'length': max(0, opt_data_end - opt_data_start)},
+                    ]
+                    if opt_code == 8 and (opt_data_end - opt_data_start) >= 4:
+                        family = int.from_bytes(raw[opt_data_start:opt_data_start + 2], 'big')
+                        source_netmask = int(raw[opt_data_start + 2])
+                        scope_netmask = int(raw[opt_data_start + 3])
+                        subnet_bytes = raw[opt_data_start + 4:opt_data_end]
+                        family_name = {1: 'IPv4', 2: 'IPv6'}.get(family, str(family))
+                        full_len = 4 if family == 1 else 16 if family == 2 else len(subnet_bytes)
+                        padded_subnet = subnet_bytes + (b'\x00' * max(0, full_len - len(subnet_bytes)))
+                        padded_subnet = padded_subnet[:full_len]
+                        client_subnet = padded_subnet.hex()
+                        try:
+                            if family == 1 and len(padded_subnet) == 4:
+                                client_subnet = str(ipaddress.IPv4Address(padded_subnet))
+                            elif family == 2 and len(padded_subnet) == 16:
+                                client_subnet = str(ipaddress.IPv6Address(padded_subnet))
+                        except Exception:
+                            client_subnet = padded_subnet.hex()
+                        option_children.extend([
+                            {'title': f'Family: {family_name} ({family})', 'offset': offset + opt_data_start, 'length': 2},
+                            {'title': f'Source Netmask: {source_netmask}', 'offset': offset + opt_data_start + 2, 'length': 1},
+                            {'title': f'Scope Netmask: {scope_netmask}', 'offset': offset + opt_data_start + 3, 'length': 1},
+                            {'title': f'Client Subnet: {client_subnet}', 'offset': offset + opt_data_start + 4, 'length': max(0, opt_data_end - (opt_data_start + 4))},
+                        ])
                     rr_children.append({
                         'title': f'Option: {opt_name}',
                         'offset': offset + opt_cursor,
                         'length': max(0, opt_data_end - opt_cursor),
-                        'children': [
-                            {'title': f'Option Code: {opt_name} ({opt_code})', 'offset': offset + opt_cursor, 'length': 2},
-                            {'title': f'Option Length: {opt_len}', 'offset': offset + opt_cursor + 2, 'length': 2},
-                            {'title': f'Option Data: {raw[opt_data_start:opt_data_end].hex()}', 'offset': offset + opt_data_start, 'length': max(0, opt_data_end - opt_data_start)},
-                        ],
+                        'children': option_children,
                     })
                     opt_cursor = opt_data_end
             else:
