@@ -36,6 +36,8 @@ class PacketParser:
         self.imap_request_pending = {}
         self.sip_request_pending = {}
         self.snmp_request_pending = {}
+        self.whois_request_pending = {}
+        self.whois_stream_context = {}
         self.sdp_media_by_call = {}
         self.ntp_request_pending = {}
         self.tftp_sessions = {}
@@ -113,6 +115,7 @@ class PacketParser:
         self._update_http_stream_metadata(packet, metadata, epoch_time)
         self._update_smtp_stream_metadata(packet, metadata, epoch_time)
         self._update_ssh_stream_metadata(packet, metadata, epoch_time)
+        self._update_whois_stream_metadata(packet, metadata, epoch_time)
         self._update_capwap_metadata(packet, metadata)
         self._update_tftp_metadata(packet, metadata)
 
@@ -173,6 +176,7 @@ class PacketParser:
         self._update_imap_metadata(record)
         self._update_sip_metadata(record)
         self._update_snmp_metadata(record)
+        self._update_whois_metadata(record)
         self._update_rtp_metadata(record)
         self._update_ntp_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
@@ -306,6 +310,33 @@ class PacketParser:
             if imap_info is not None:
                 metadata['imap'] = imap_info
                 return 'IMAP'
+            whois_meta = metadata.get('whois') if isinstance(metadata.get('whois'), dict) else None
+            if isinstance(whois_meta, dict):
+                kind = str(whois_meta.get('kind', '') or '')
+                if kind == 'query' and dport == 43:
+                    return 'WHOIS'
+                if kind == 'answer' and sport == 43:
+                    return 'WHOIS'
+            whois_payload = payload
+            if not whois_payload:
+                reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+                if reassembled_hex:
+                    try:
+                        whois_payload = bytes.fromhex(reassembled_hex)
+                    except Exception:
+                        whois_payload = b''
+            whois_info = self._whois_payload_info(whois_payload, sport, dport)
+            if whois_info is not None:
+                kind = str(whois_info.get('kind', '') or '')
+                tcp_flags = int(getattr(tcp_layer, 'flags', 0) or 0)
+                has_fin = bool(tcp_flags & 0x01)
+                if kind == 'query' and dport == 43:
+                    metadata['whois'] = whois_info
+                    return 'WHOIS'
+                if kind == 'answer' and sport == 43:
+                    if has_fin or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
+                        metadata['whois'] = whois_info
+                        return 'WHOIS'
             kind = self._http_payload_kind(payload)
             if kind is not None:
                 if b'xml' in payload.lower():
@@ -352,7 +383,7 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP'}:
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS'}:
             return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
@@ -1480,6 +1511,55 @@ class PacketParser:
             'response_command': parts[2].split(' ', 1)[0] if len(parts) > 2 else '',
         }
 
+    def _whois_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
+        if sport != 43 and dport != 43:
+            return None
+        line = payload.split(b'\r\n', 1)[0] if payload else b''
+        if not line:
+            return None
+        if any(byte < 0x09 or (0x0D < byte < 0x20) for byte in line):
+            return None
+        line_text = line.decode(errors='ignore').strip()
+        if not line_text:
+            return None
+        if dport == 43:
+            return {
+                'kind': 'query',
+                'line': line_text,
+                'query': line_text,
+            }
+        return {
+            'kind': 'answer',
+            'line': line_text,
+            'answer': line_text,
+        }
+
+    def _whois_payload_for_record(self, packet, metadata: dict) -> bytes:
+        payload = self._payload_bytes(packet)
+        if payload:
+            return payload
+        reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+        if not reassembled_hex:
+            return b''
+        try:
+            return bytes.fromhex(reassembled_hex)
+        except Exception:
+            return b''
+
+    def _ntp_has_nts_extensions(self, payload: bytes) -> bool:
+        if len(payload) <= 48:
+            return False
+        cursor = 48
+        while cursor + 4 <= len(payload):
+            field_type = int.from_bytes(payload[cursor:cursor + 2], 'big')
+            field_length = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+            if field_length < 4 or cursor + field_length > len(payload):
+                break
+            if field_type in {0x0104, 0x0204, 0x0304, 0x0404}:
+                return True
+            cursor += field_length
+        return False
+
     def _sip_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
         if not payload:
             return None
@@ -2091,7 +2171,8 @@ class PacketParser:
             5: 'broadcast',
             6: 'control',
         }.get(mode, str(mode))
-        return f'NTP Version {version}, {mode_name}'
+        nts_suffix = ', NTS' if self._ntp_has_nts_extensions(payload) else ''
+        return f'NTP Version {version}, {mode_name}{nts_suffix}'
 
     def _cdp_device_and_port(self, payload: bytes):
         device_id = ''
@@ -4306,6 +4387,26 @@ class PacketParser:
                 if imap_info is not None:
                     metadata['imap'] = imap_info
                     return 'IMAP'
+                whois_meta = metadata.get('whois') if isinstance(metadata.get('whois'), dict) else None
+                if isinstance(whois_meta, dict):
+                    kind = str(whois_meta.get('kind', '') or '')
+                    if kind == 'query' and dport == 43:
+                        return 'WHOIS'
+                    if kind == 'answer' and sport == 43:
+                        return 'WHOIS'
+                whois_payload = self._whois_payload_for_record(packet, metadata)
+                whois_info = self._whois_payload_info(whois_payload, sport, dport)
+                if whois_info is not None:
+                    kind = str(whois_info.get('kind', '') or '')
+                    tcp_flags = int(getattr(effective_tcp, 'flags', 0) or 0)
+                    has_fin = bool(tcp_flags & 0x01)
+                    if kind == 'query' and dport == 43:
+                        metadata['whois'] = whois_info
+                        return 'WHOIS'
+                    if kind == 'answer' and sport == 43:
+                        if has_fin or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
+                            metadata['whois'] = whois_info
+                            return 'WHOIS'
             if (
                 not bool(metadata.get('tcp_is_retransmission', False))
                 and not bool(metadata.get('tcp_is_duplicate_ack', False))
@@ -5493,6 +5594,102 @@ class PacketParser:
                 segment_record.protocol = 'TCP'
                 segment_record.info = self._build_info(segment_record.raw, 'TCP', segment_record.metadata)
 
+    def _update_whois_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        src = str(effective_ip.src)
+        dst = str(effective_ip.dst)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        if sport != 43 and dport != 43:
+            return
+
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+
+        frame_number = int(metadata.get('frame_number', 0) or 0)
+        payload = self._payload_bytes(packet)
+        tcp_flags = int(getattr(tcp_layer, 'flags', 0) or 0)
+        has_fin = bool(tcp_flags & 0x01)
+
+        context = self.whois_stream_context.setdefault(stream_key, {})
+        if not isinstance(context, dict):
+            context = {}
+            self.whois_stream_context[stream_key] = context
+
+        if dport == 43 and payload:
+            query_info = self._whois_payload_info(payload, sport, dport)
+            if isinstance(query_info, dict) and str(query_info.get('kind', '') or '') == 'query':
+                query_text = str(query_info.get('query', '') or query_info.get('line', '') or '').strip()
+                if query_text:
+                    context['query_frame'] = frame_number
+                    context['query_time'] = float(epoch_time)
+                    context['query_text'] = query_text
+
+        if sport != 43:
+            return
+
+        answer_data = bytes(context.get('answer_data', b'') or b'')
+        answer_segments = list(context.get('answer_segments', []) or [])
+        if payload:
+            answer_segments.append({
+                'frame_number': frame_number,
+                'payload_start': int(len(answer_data)),
+                'payload_length': int(len(payload)),
+                'tcp_start_offset_in_payload': 0,
+            })
+            answer_data += bytes(payload)
+            context['answer_data'] = answer_data
+            context['answer_segments'] = answer_segments
+
+        if not has_fin:
+            return
+
+        if not answer_segments:
+            answer_segments = [{
+                'frame_number': frame_number,
+                'payload_start': 0,
+                'payload_length': 0,
+                'tcp_start_offset_in_payload': 0,
+            }]
+        elif int(answer_segments[-1].get('frame_number', -1) or -1) != frame_number:
+            answer_segments.append({
+                'frame_number': frame_number,
+                'payload_start': int(len(answer_data)),
+                'payload_length': 0,
+                'tcp_start_offset_in_payload': 0,
+            })
+
+        metadata['tcp_reassembled_segments'] = answer_segments
+        metadata['tcp_reassembled_length'] = int(len(answer_data))
+        metadata['tcp_reassembled_data_hex'] = answer_data.hex()
+
+        query_text = str(context.get('query_text', '') or '').strip()
+        if query_text:
+            metadata['whois_query_value'] = query_text
+        metadata['whois'] = {
+            'kind': 'answer',
+            'line': query_text,
+            'answer': query_text,
+        }
+
+        for segment in answer_segments[:-1]:
+            segment_record = self._find_stream_record(state, int(segment.get('frame_number', 0) or 0))
+            if segment_record is None:
+                continue
+            segment_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
+            segment_record.metadata['tcp_segment_data_length'] = int(segment.get('payload_length', 0) or 0)
+            segment_record.metadata['tcp_segment_data_offset'] = int(segment.get('tcp_start_offset_in_payload', 0) or 0)
+            segment_record.protocol = 'TCP'
+            segment_record.info = self._build_info(segment_record.raw, 'TCP', segment_record.metadata)
+
     def _ssh_list_split(self, text: str) -> list[str]:
         return [item.strip() for item in str(text or '').split(',') if item.strip()]
 
@@ -5808,6 +6005,99 @@ class PacketParser:
         record.metadata['imap_time_since_request_ms'] = max(0.0, float(response_delta))
         if not pending:
             self.imap_request_pending.pop(stream_key, None)
+
+    def _update_whois_metadata(self, record: PacketRecord) -> None:
+        if str(getattr(record, 'protocol', '') or '').upper() != 'WHOIS':
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        metadata = record.metadata
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        whois_info = metadata.get('whois') if isinstance(metadata.get('whois'), dict) else self._whois_payload_info(
+            self._whois_payload_for_record(packet, metadata),
+            sport,
+            dport,
+        )
+        stream_key = self._canonical_transport_key(
+            str(effective_ip.src),
+            sport,
+            str(effective_ip.dst),
+            dport,
+            'TCP',
+        )
+
+        if not isinstance(whois_info, dict):
+            whois_info = {}
+        else:
+            metadata['whois'] = whois_info
+
+        kind = str(whois_info.get('kind', '') or '')
+        if not kind and stream_key in self.whois_stream_context and sport == 43:
+            context = self.whois_stream_context.get(stream_key, {}) if isinstance(self.whois_stream_context.get(stream_key), dict) else {}
+            query_text = str(context.get('query_text', '') or '')
+            whois_info = {
+                'kind': 'answer',
+                'line': query_text,
+                'answer': query_text,
+            }
+            metadata['whois'] = whois_info
+            kind = 'answer'
+
+        if kind == 'query':
+            query_text = str(whois_info.get('query', '') or whois_info.get('line', '') or '')
+            self.whois_stream_context[stream_key] = {
+                'query_frame': int(record.number),
+                'query_time': float(record.epoch_time),
+                'query_text': query_text,
+                'query_record': record,
+            }
+            self.whois_request_pending.setdefault(stream_key, []).append(record)
+            return
+        if kind != 'answer':
+            return
+
+        context = self.whois_stream_context.get(stream_key, {}) if isinstance(self.whois_stream_context.get(stream_key), dict) else {}
+        query_frame_context = int(context.get('query_frame', 0) or 0)
+        query_time_context = float(context.get('query_time', 0.0) or 0.0)
+        if query_frame_context > 0:
+            metadata['whois_query_frame'] = query_frame_context
+        if query_time_context > 0.0:
+            metadata['whois_time_since_query_ms'] = max(0.0, (float(record.epoch_time) - query_time_context) * 1000.0)
+        query_text_context = str(context.get('query_text', '') or '')
+        if query_text_context:
+            metadata['whois_query_value'] = query_text_context
+        query_record_context = context.get('query_record', None)
+        if query_record_context is not None:
+            try:
+                query_record_context.metadata['whois_answer_frame'] = int(record.number)
+            except Exception:
+                pass
+
+        pending = self.whois_request_pending.get(stream_key)
+        if not pending:
+            return
+
+        request_record = pending.pop(0)
+        request_record.metadata['whois_answer_frame'] = int(record.number)
+        record.metadata['whois_query_frame'] = int(request_record.number)
+        query_text = str(request_record.metadata.get('whois', {}).get('query', '') or request_record.metadata.get('whois', {}).get('line', '') or '') if isinstance(request_record.metadata.get('whois'), dict) else ''
+        if query_text:
+            record.metadata['whois_query_value'] = query_text
+        response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
+        record.metadata['whois_time_since_query_ms'] = max(0.0, float(response_delta))
+        if not pending:
+            self.whois_request_pending.pop(stream_key, None)
 
     def _register_sdp_media(self, call_id: str, setup_frame: int, sdp_info: dict) -> None:
         if not call_id or not isinstance(sdp_info, dict):
@@ -6318,8 +6608,52 @@ class PacketParser:
                         }.get(qtype_value, str(qtype_value))
                 except Exception:
                     qtype_name = ''
-                if getattr(dns, 'qr', 0) == 0:
+                is_response = int(getattr(dns, 'qr', 0) or 0) == 1
+                opcode = int(getattr(dns, 'opcode', 0) or 0)
+                if not is_response:
                     qtype_prefix = f'{qtype_name} ' if qtype_name else ''
+                    if opcode == 5:
+                        update_suffix = ''
+                        try:
+                            from core.formatters import _dns_read_name, _dns_rdata_text
+                            pos = 12
+                            qdcount = int(getattr(dns, 'qdcount', 0) or 0)
+                            ancount = int(getattr(dns, 'ancount', 0) or 0)
+                            nscount = int(getattr(dns, 'nscount', 0) or 0)
+                            for _ in range(qdcount):
+                                _, next_pos = _dns_read_name(raw_dns, pos)
+                                pos = next_pos + 4
+                            for _ in range(ancount):
+                                _, next_pos = _dns_read_name(raw_dns, pos)
+                                if next_pos + 10 > len(raw_dns):
+                                    break
+                                rdlen = int.from_bytes(raw_dns[next_pos + 8:next_pos + 10], 'big')
+                                pos = next_pos + 10 + rdlen
+                            if nscount > 0:
+                                _, next_pos = _dns_read_name(raw_dns, pos)
+                                if next_pos + 10 <= len(raw_dns):
+                                    rr_type = int.from_bytes(raw_dns[next_pos:next_pos + 2], 'big')
+                                    rdlen = int.from_bytes(raw_dns[next_pos + 8:next_pos + 10], 'big')
+                                    rdata_start = next_pos + 10
+                                    rdata_end = rdata_start + rdlen
+                                    if rdata_end <= len(raw_dns):
+                                        rr_type_name = {
+                                            1: 'A',
+                                            2: 'NS',
+                                            5: 'CNAME',
+                                            6: 'SOA',
+                                            12: 'PTR',
+                                            15: 'MX',
+                                            16: 'TXT',
+                                            28: 'AAAA',
+                                            33: 'SRV',
+                                        }.get(rr_type, str(rr_type))
+                                        rr_text = _dns_rdata_text(raw_dns[rdata_start:rdata_end], rr_type, raw_dns, rdata_start)
+                                        if rr_type_name and rr_text:
+                                            update_suffix = f' {rr_type_name} {rr_text}'
+                        except Exception:
+                            update_suffix = ''
+                        return f'Dynamic update 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}{update_suffix}'
                     return f'Standard query 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}'
                 answer_suffix = ''
                 try:
@@ -6333,6 +6667,11 @@ class PacketParser:
                     for _ in range(qdcount):
                         _, next_pos = _dns_read_name(raw_dns, pos)
                         pos = next_pos + 4
+                    if opcode == 5 and nscount > 0:
+                        pos = 12
+                        for _ in range(qdcount + ancount):
+                            _, next_pos = _dns_read_name(raw_dns, pos)
+                            pos = next_pos + 4 if _ < qdcount else next_pos + 10 + int.from_bytes(raw_dns[next_pos + 8:next_pos + 10], 'big')
                     total_rr = ancount + nscount + arcount
                     type_name_map = {
                         1: 'A',
@@ -6370,7 +6709,41 @@ class PacketParser:
                 except Exception:
                     answer_suffix = ''
                 qtype_prefix = f'{qtype_name} ' if qtype_name else ''
+                if opcode == 5:
+                    return f'Dynamic update response 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}'
                 return f'Standard query response 0x{getattr(dns, "id", 0):04x} {qtype_prefix}{qname or "(unknown)"}{answer_suffix}'
+            if protocol == 'WHOIS':
+                tcp = self._effective_tcp_layer(packet)
+                sport = int(getattr(tcp, 'sport', 0) or 0) if tcp is not None else 0
+                dport = int(getattr(tcp, 'dport', 0) or 0) if tcp is not None else 0
+                payload = self._whois_payload_for_record(packet, metadata)
+                whois_info = metadata.get('whois') if isinstance(metadata.get('whois'), dict) else self._whois_payload_info(payload, sport, dport)
+                if not isinstance(whois_info, dict):
+                    ip_layer = self._effective_ip_layer(packet)
+                    if ip_layer is None and packet.haslayer(IPv6):
+                        ip_layer = packet[IPv6]
+                    if ip_layer is not None and (sport == 43 or dport == 43):
+                        stream_key = self._canonical_transport_key(
+                            str(ip_layer.src),
+                            sport,
+                            str(ip_layer.dst),
+                            dport,
+                            'TCP',
+                        )
+                        context = self.whois_stream_context.get(stream_key, {}) if isinstance(self.whois_stream_context.get(stream_key), dict) else {}
+                        query_text = str(context.get('query_text', '') or '').strip()
+                        if sport == 43 and query_text:
+                            return f'Answer: {query_text}'
+                    return 'WHOIS'
+                line = str(whois_info.get('line', '') or '').strip()
+                kind = str(whois_info.get('kind', '') or '')
+                if kind == 'query' and line:
+                    return f'Query: {line}'
+                if kind == 'answer':
+                    answer_line = str(metadata.get('whois_query_value', '') or '').strip() or line
+                    if answer_line:
+                        return f'Answer: {answer_line}'
+                return 'WHOIS'
             if protocol == 'DHCPv6':
                 return self._dhcpv6_info_text(packet) or 'DHCPv6'
             if protocol == 'DHCP':
@@ -6547,6 +6920,9 @@ class PacketParser:
                     return self._icmp_echo_info_text(packet)
                 if raw[:1] in {b'\x0d', b'\x0e'}:
                     return self._icmp_timestamp_info_text(packet)
+                error_text = self._icmp_error_info_text(packet)
+                if error_text != packet.summary():
+                    return error_text
                 return packet.summary()
             return packet.summary()
         except Exception:
@@ -6680,6 +7056,41 @@ class PacketParser:
             direction = 'Response' if (flags & 0x20) else 'Request'
             return f'{exchange} MID={message_id:02x} {role} {direction}'
         return self._isakmp_v1_exchange_name(exchange_type)
+
+    def _icmp_error_info_text(self, packet) -> str:
+        if not packet.haslayer(ICMP):
+            return packet.summary()
+        raw = bytes(packet[ICMP])
+        if len(raw) < 8:
+            return packet.summary()
+
+        icmp_type = int(raw[0])
+        code = int(raw[1])
+        type_name = {
+            3: 'Destination unreachable',
+            11: 'Time-to-live exceeded',
+        }.get(icmp_type)
+        if not type_name:
+            return packet.summary()
+
+        code_name_map = {
+            3: {
+                0: 'Network unreachable',
+                1: 'Host unreachable',
+                2: 'Protocol unreachable',
+                3: 'Port unreachable',
+                4: 'Fragmentation needed',
+                5: 'Source route failed',
+            },
+            11: {
+                0: 'Time to live exceeded in transit',
+                1: 'Fragment reassembly time exceeded',
+            },
+        }
+        code_name = code_name_map.get(icmp_type, {}).get(code)
+        if code_name:
+            return f'{type_name} ({code_name})'
+        return f'{type_name} (code {code})'
 
     def _icmp_echo_info_text(self, packet, request_frame: int | None = None, response_frame: int | None = None, no_response: bool = False) -> str:
         if not packet.haslayer(ICMP):

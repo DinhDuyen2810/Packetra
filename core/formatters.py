@@ -805,6 +805,28 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'IMAP' and tcp_payload:
             sections.append(_imap_section(tcp_payload, offset, record))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'WHOIS':
+            whois_payload = tcp_payload
+            whois_uses_reassembled = False
+            if not whois_payload:
+                reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+                if reassembled_hex:
+                    try:
+                        whois_payload = bytes.fromhex(reassembled_hex)
+                        whois_uses_reassembled = True
+                    except Exception:
+                        whois_payload = b''
+            if not whois_payload:
+                query_value = str(metadata.get('whois_query_value', '') or '')
+                if query_value:
+                    whois_payload = (query_value + '\n').encode('utf-8', errors='ignore')
+            if whois_payload:
+                whois_offset = 0 if whois_uses_reassembled else offset
+                whois_section = _whois_section(whois_payload, whois_offset, record)
+                if whois_uses_reassembled:
+                    _tag_byte_source(whois_section, TCP_REASSEMBLED_BYTE_SOURCE)
+                sections.append(whois_section)
+                payload_handled = True
         elif getattr(record, 'protocol', '') == 'SSHv2' and tcp_payload:
             sections.append(_ssh_section(tcp_payload, offset, record))
             payload_handled = True
@@ -1335,6 +1357,11 @@ def _frame_section(record) -> Dict[str, Any]:
             protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:imap' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:imap'
         else:
             protocol_string = 'eth:ethertype:ipv6:tcp:imap' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:imap'
+    elif protocol == 'WHOIS':
+        if eth_type == 0x8100:
+            protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:whois' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:whois'
+        else:
+            protocol_string = 'eth:ethertype:ipv6:tcp:whois' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:whois'
     elif protocol == 'SMTP':
         transport_prefix = 'eth:ethertype:vlan:ethertype:ipv6:tcp' if eth_type == 0x8100 and bool(metadata.get('is_ipv6', False)) else (
             'eth:ethertype:vlan:ethertype:ip:tcp' if eth_type == 0x8100 else (
@@ -1395,7 +1422,7 @@ def _frame_section(record) -> Dict[str, Any]:
     ):
         coloring_name = 'HTTP'
         coloring_string = 'http || tcp.port == 80 || http2'
-    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP'}:
+    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP', 'WHOIS'}:
         coloring_name = 'TCP'
         coloring_string = 'tcp'
     elif protocol == 'LDP':
@@ -1836,16 +1863,39 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
     type_name = {
         0: 'Echo (ping) reply',
         8: 'Echo (ping) request',
+        3: 'Destination unreachable',
+        11: 'Time-to-live exceeded',
         13: 'Timestamp request',
         14: 'Timestamp reply',
     }.get(icmp_type, f'Type {icmp_type}')
 
+    code_name = str(code)
+    if icmp_type == 3:
+        code_name = {
+            0: 'Network unreachable',
+            1: 'Host unreachable',
+            2: 'Protocol unreachable',
+            3: 'Port unreachable',
+            4: 'Fragmentation needed',
+            5: 'Source route failed',
+        }.get(code, str(code))
+    elif icmp_type == 11:
+        code_name = {
+            0: 'Time to live exceeded in transit',
+            1: 'Fragment reassembly time exceeded',
+        }.get(code, str(code))
+
     children = [
         {'title': f'Type: {type_name} ({icmp_type})', 'offset': offset, 'length': 1},
-        {'title': f'Code: {code}', 'offset': offset + 1, 'length': 1},
+        {'title': f'Code: {code_name} ({code})', 'offset': offset + 1, 'length': 1},
         {'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_status == "Good" else "incorrect"}]', 'offset': offset + 2, 'length': 2},
         {'title': f'[Checksum Status: {checksum_status}]'},
     ]
+
+    if icmp_type == 3 and code == 3:
+        children.append({'title': '[Destination unreachable (Port unreachable)]'})
+    if icmp_type == 11 and code == 0:
+        children.append({'title': '[Time to live exceeded in transit]'})
 
     if icmp_type in {0, 8, 13, 14}:
         children.extend([
@@ -1854,6 +1904,8 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
             {'title': f'Sequence Number (BE): {sequence_be} (0x{sequence_be:04x})', 'offset': offset + 6, 'length': 2},
             {'title': f'Sequence Number (LE): {sequence_le} (0x{sequence_le:04x})', 'offset': offset + 6, 'length': 2},
         ])
+    elif len(raw) >= 8:
+        children.append({'title': f'Unused: 0x{int.from_bytes(raw[4:8], "big"):08x}', 'offset': offset + 4, 'length': 4})
 
     if icmp_type in {13, 14} and len(raw) >= 20:
         originate = int.from_bytes(raw[8:12], 'big')
@@ -1904,15 +1956,43 @@ def _icmp_section(layer, offset: int, record=None) -> Dict[str, Any]:
         children.append({'title': f'[Response time: {float(response_time_ms):.3f} ms]'})
 
     if payload:
-        children.append({
-            'title': f'Data ({len(payload)} bytes)',
-            'offset': offset + 8,
-            'length': len(payload),
-            'children': [
-                {'title': f'Data: {payload.hex()}'},
-                {'title': f'[Length: {len(payload)}]'},
-            ],
-        })
+        if icmp_type in {3, 11} and len(payload) >= 20 and (payload[0] >> 4) == 4:
+            try:
+                quoted_ip = IP(payload)
+                ip_header_len = int(getattr(quoted_ip, 'ihl', 5) or 5) * 4
+                nested_children = [_ip_section(quoted_ip, offset + 8, -1, None)]
+                if len(payload) >= ip_header_len + 8:
+                    ip_proto = int(getattr(quoted_ip, 'proto', 0) or 0)
+                    if ip_proto == 17:
+                        quoted_udp = UDP(payload[ip_header_len:ip_header_len + 8])
+                        nested_children.append(_udp_section(quoted_udp, offset + 8 + ip_header_len, -1, None))
+                        udp_payload = payload[ip_header_len + 8:]
+                        if len(udp_payload) >= 12 and ((udp_payload[0] >> 6) & 0x03) == 2:
+                            nested_children.append(_rtp_section(udp_payload, offset + 8 + ip_header_len + 8, record))
+                    elif ip_proto == 1:
+                        quoted_icmp = ICMP(payload[ip_header_len:])
+                        nested_children.append(_icmp_section(quoted_icmp, offset + 8 + ip_header_len, None))
+                children.extend(nested_children)
+            except Exception:
+                children.append({
+                    'title': f'Data ({len(payload)} bytes)',
+                    'offset': offset + 8,
+                    'length': len(payload),
+                    'children': [
+                        {'title': f'Data: {payload.hex()}'},
+                        {'title': f'[Length: {len(payload)}]'},
+                    ],
+                })
+        else:
+            children.append({
+                'title': f'Data ({len(payload)} bytes)',
+                'offset': offset + 8,
+                'length': len(payload),
+                'children': [
+                    {'title': f'Data: {payload.hex()}'},
+                    {'title': f'[Length: {len(payload)}]'},
+                ],
+            })
 
     return {
         'title': 'Internet Control Message Protocol',
@@ -3275,6 +3355,51 @@ def _ntp_section(payload: bytes, offset: int, record) -> Dict[str, Any]:
     ]
     if bracket_node is not None:
         children.insert(1, bracket_node)
+
+    cursor = 48
+    while cursor + 4 <= len(payload):
+        field_type = int.from_bytes(payload[cursor:cursor + 2], 'big')
+        field_len = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+        if field_len < 4 or cursor + field_len > len(payload):
+            break
+        field_value = payload[cursor + 4:cursor + field_len]
+        field_name = {
+            0x0104: 'Unique Identifier',
+            0x0204: 'NTS Cookie/Autokey Request',
+            0x0304: 'NTS Cookie/Autokey Response',
+            0x0404: 'NTS Authenticator and Encrypted Extension Fields',
+        }.get(field_type, f'Extension Field 0x{field_type:04x}')
+        ext_children: List[Dict[str, Any]] = [
+            {'title': f'Field Type: {field_name} (0x{field_type:04x})', 'offset': offset + cursor, 'length': 2},
+            {'title': f'Length: {field_len}', 'offset': offset + cursor + 2, 'length': 2},
+            {'title': f'Value: {field_value.hex()}', 'offset': offset + cursor + 4, 'length': max(0, field_len - 4)},
+        ]
+        if field_type == 0x0404 and len(field_value) >= 4:
+            nonce_len = int.from_bytes(field_value[0:2], 'big')
+            ciphertext_len = int.from_bytes(field_value[2:4], 'big')
+            nonce_start = cursor + 8
+            nonce_end = min(cursor + field_len, nonce_start + nonce_len)
+            cipher_start = nonce_end
+            cipher_end = min(cursor + field_len, cipher_start + ciphertext_len)
+            nts_children: List[Dict[str, Any]] = [
+                {'title': f'Nonce Length: {nonce_len}', 'offset': offset + cursor + 4, 'length': 2},
+                {'title': f'Ciphertext Length: {ciphertext_len}', 'offset': offset + cursor + 6, 'length': 2},
+                {'title': f'Nonce: {payload[nonce_start:nonce_end].hex()}', 'offset': offset + nonce_start, 'length': max(0, nonce_end - nonce_start)},
+                {'title': f'Ciphertext: {payload[cipher_start:cipher_end].hex()}', 'offset': offset + cipher_start, 'length': max(0, cipher_end - cipher_start)},
+            ]
+            ext_children.append({
+                'title': 'Network Time Security',
+                'offset': offset + cursor + 4,
+                'length': max(0, field_len - 4),
+                'children': nts_children,
+            })
+        children.append({
+            'title': f'Extension Field: {field_name}',
+            'offset': offset + cursor,
+            'length': field_len,
+            'children': ext_children,
+        })
+        cursor += field_len
     return {
         'title': f'Network Time Protocol (NTP Version {version}, {mode_name})',
         'offset': offset,
@@ -6260,6 +6385,67 @@ def _imap_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
 
     return {
         'title': 'Internet Message Access Protocol',
+        'offset': offset,
+        'length': len(payload),
+        'children': children,
+    }
+
+
+def _whois_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    whois_meta = metadata.get('whois', {}) if isinstance(metadata.get('whois'), dict) else {}
+    kind = str(whois_meta.get('kind', '') or '')
+
+    children: List[Dict[str, Any]] = []
+    cursor = 0
+    for raw_line in payload.splitlines(keepends=True):
+        line_text = raw_line.decode(errors='ignore').rstrip('\r\n')
+        if not line_text:
+            cursor += len(raw_line)
+            continue
+        line_len = max(0, len(raw_line.rstrip(b'\r\n')))
+        if kind == 'answer':
+            children.append({
+                'title': f'Answer: {line_text}',
+                'offset': offset + cursor,
+                'length': line_len,
+            })
+        else:
+            children.append({
+                'title': f'Query: {line_text}',
+                'offset': offset + cursor,
+                'length': line_len,
+            })
+        cursor += len(raw_line)
+
+    if kind == 'query':
+        answer_frame = metadata.get('whois_answer_frame', None)
+        if answer_frame is not None:
+            children.append({'title': f'[Answer In: {int(answer_frame)}]'})
+    elif kind == 'answer':
+        query_frame = metadata.get('whois_query_frame', None)
+        if query_frame is not None:
+            children.append({'title': f'[Query In: {int(query_frame)}]'})
+        response_time = metadata.get('whois_time_since_query_ms', None)
+        if response_time is not None:
+            children.append({'title': f'[Response Time: {float(response_time):.6f} milliseconds]'})
+        children.append({
+            'title': 'WHOIS has no mechanism to indicate encoding (RFC 3912), assuming UTF-8',
+            'children': [
+                {
+                    'title': '[Expert Info (Chat/Assumption): WHOIS has no mechanism to indicate encoding (RFC 3912), assuming UTF-8]',
+                    'children': [
+                        {'title': '[WHOIS has no mechanism to indicate encoding (RFC 3912), assuming UTF-8]'},
+                        {'title': '[Severity level: Chat]'},
+                        {'title': '[Group: Assumption]'},
+                    ],
+                },
+            ],
+        })
+
+    title = 'WHOIS: Query' if kind == 'query' else 'WHOIS: Answer'
+    return {
+        'title': title,
         'offset': offset,
         'length': len(payload),
         'children': children,
@@ -9412,12 +9598,18 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
     ra = (flags >> 7) & 0x1
     rcode = flags & 0xF
 
-    opcode_name = {0: 'Standard query', 1: 'Inverse query', 2: 'Server status request'}.get(opcode, str(opcode))
+    opcode_name = {
+        0: 'Standard query',
+        1: 'Inverse query',
+        2: 'Server status request',
+        5: 'Dynamic update',
+    }.get(opcode, str(opcode))
     rcode_name = {0: 'No error', 1: 'Format error', 2: 'Server failure', 3: 'Name Error'}.get(rcode, str(rcode))
     z_bit = (flags >> 6) & 0x1
     ad_bit = (flags >> 5) & 0x1
     cd_bit = (flags >> 4) & 0x1
 
+    is_dynamic_update = opcode == 5
     flag_children = [
         {'title': f'{qr}... .... .... .... = Response: {"Message is a response" if qr else "Message is a query"}', 'offset': offset + 2, 'length': 2},
         {'title': f'.{opcode:04b} .... .... .... = Opcode: {opcode_name} ({opcode})', 'offset': offset + 2, 'length': 2},
@@ -9426,7 +9618,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
         flag_children.append({'title': f'.... .{aa}.. .... .... = Authoritative: {"Server is an authority for domain" if aa else "Server is not an authority for domain"}', 'offset': offset + 2, 'length': 2})
     flag_children.extend([
         {'title': f'.... ..{tc}. .... .... = Truncated: {"Message is truncated" if tc else "Message is not truncated"}', 'offset': offset + 2, 'length': 2},
-        {'title': f'.... ...{rd} .... .... = Recursion desired: {"Do query recursively" if rd else "Do not query recursively"}', 'offset': offset + 2, 'length': 2},
+        {'title': '.... ...{} .... .... = Recursion desired: {}'.format(rd, 'Do query recursively' if rd else "Don't do query recursively"), 'offset': offset + 2, 'length': 2},
     ])
     if qr:
         flag_children.append({'title': f'.... .... {ra}... .... = Recursion available: {"Server can do recursive queries" if ra else "Server cannot do recursive queries"}', 'offset': offset + 2, 'length': 2})
@@ -9437,17 +9629,20 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
     if qr:
         flag_children.append({'title': f'.... .... .... {rcode:04b} = Reply code: {rcode_name} ({rcode})', 'offset': offset + 2, 'length': 2})
 
+    questions_title = 'Zones' if is_dynamic_update else 'Questions'
+    answers_title = 'Prerequisites' if is_dynamic_update else 'Answer RRs'
+    authorities_title = 'Updates' if is_dynamic_update else 'Authority RRs'
     children = [
         {'title': f'Transaction ID: 0x{transaction_id:04x}', 'offset': offset, 'length': 2},
         {
-            'title': f'Flags: 0x{flags:04x} {("Standard query response, " + rcode_name) if qr and opcode == 0 else (opcode_name if not qr else opcode_name + ", " + rcode_name)}',
+            'title': f'Flags: 0x{flags:04x} {(("Dynamic update response, " + rcode_name) if qr and is_dynamic_update else (("Standard query response, " + rcode_name) if qr and opcode == 0 else (opcode_name if not qr else opcode_name + ", " + rcode_name)))}',
             'offset': offset + 2,
             'length': 2,
             'children': flag_children,
         },
-        {'title': f'Questions: {qdcount}', 'offset': offset + 4, 'length': 2},
-        {'title': f'Answer RRs: {ancount}', 'offset': offset + 6, 'length': 2},
-        {'title': f'Authority RRs: {nscount}', 'offset': offset + 8, 'length': 2},
+        {'title': f'{questions_title}: {qdcount}', 'offset': offset + 4, 'length': 2},
+        {'title': f'{answers_title}: {ancount}', 'offset': offset + 6, 'length': 2},
+        {'title': f'{authorities_title}: {nscount}', 'offset': offset + 8, 'length': 2},
         {'title': f'Additional RRs: {arcount}', 'offset': offset + 10, 'length': 2},
     ]
 
@@ -9490,7 +9685,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             for item in question_children
         )
         children.append({
-            'title': 'Queries',
+            'title': 'Zone' if is_dynamic_update else 'Queries',
             'offset': query_start,
             'length': max(0, query_end - query_start),
             'children': question_children,
@@ -9706,7 +9901,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             pos = rdata_end
         return items, pos
 
-    answers, _ = parse_rr_section(ancount, 'Answers')
+    answers, _ = parse_rr_section(ancount, 'Prerequisites' if is_dynamic_update else 'Answers')
     if answers:
         answer_start = answers[0].get('offset', offset)
         answer_end = max(
@@ -9714,13 +9909,13 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             for item in answers
         )
         children.append({
-            'title': 'Answers',
+            'title': 'Prerequisites' if is_dynamic_update else 'Answers',
             'offset': answer_start,
             'length': max(0, answer_end - answer_start),
             'children': answers,
         })
 
-    authorities, _ = parse_rr_section(nscount, 'Authorities')
+    authorities, _ = parse_rr_section(nscount, 'Updates' if is_dynamic_update else 'Authorities')
     if authorities:
         authority_start = authorities[0].get('offset', offset)
         authority_end = max(
@@ -9728,13 +9923,13 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             for item in authorities
         )
         children.append({
-            'title': 'Authorities',
+            'title': 'Updates' if is_dynamic_update else 'Authorities',
             'offset': authority_start,
             'length': max(0, authority_end - authority_start),
             'children': authorities,
         })
 
-    additionals, _ = parse_rr_section(arcount, 'Additional records')
+    additionals, _ = parse_rr_section(arcount, 'Additional RRs' if is_dynamic_update else 'Additional records')
     if additionals:
         additional_start = additionals[0].get('offset', offset)
         additional_end = max(
@@ -9742,7 +9937,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             for item in additionals
         )
         children.append({
-            'title': 'Additional records',
+            'title': 'Additional RRs' if is_dynamic_update else 'Additional records',
             'offset': additional_start,
             'length': max(0, additional_end - additional_start),
             'children': additionals,
