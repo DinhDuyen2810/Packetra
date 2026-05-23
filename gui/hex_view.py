@@ -296,6 +296,7 @@ class PacketBytesView(QWidget):
             'tcp_reassembled': PacketHexView(),
             'decoded_utf8': PacketHexView(),
             'http_dechunked': PacketHexView(),
+            'zabbix_uncompressed': PacketHexView(),
         }
         self._tab_sources = []
 
@@ -384,6 +385,13 @@ class PacketBytesView(QWidget):
         if dechunked_body:
             sources.append(
                 ('http_dechunked', f'De-chunked entity body ({len(dechunked_body)} bytes)', dechunked_body)
+            )
+
+        zabbix_uncompressed = bytes(metadata.get('zabbix_uncompressed_body', b'') or b'')
+        zabbix_body = bytes(metadata.get('zabbix_body', b'') or b'')
+        if protocol_name == 'Zabbix' and zabbix_uncompressed and zabbix_uncompressed != zabbix_body:
+            sources.append(
+                ('zabbix_uncompressed', f'Uncompressed entity body ({len(zabbix_uncompressed)} bytes)', zabbix_uncompressed)
             )
 
         self._reset_tabs(sources)

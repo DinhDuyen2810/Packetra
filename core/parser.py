@@ -2,6 +2,8 @@ from __future__ import annotations
 from collections import Counter
 from decimal import Decimal
 import ipaddress
+import json
+import zlib
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, bind_layers
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
@@ -40,6 +42,7 @@ class PacketParser:
         self.whois_stream_context = {}
         self.sdp_media_by_call = {}
         self.ntp_request_pending = {}
+        self.zabbix_request_pending = {}
         self.tftp_sessions = {}
         self.ftp_control_streams = {}
         self.ftp_data_sessions = {}
@@ -195,6 +198,7 @@ class PacketParser:
         self._update_whois_metadata(record)
         self._update_rtp_metadata(record)
         self._update_ntp_metadata(record)
+        self._update_zabbix_metadata(record)
         self._update_icmp_echo_metadata(packet, record)
         self._update_icmpv6_echo_metadata(packet, record)
         self._update_dns_metadata(packet, record)
@@ -359,6 +363,10 @@ class PacketParser:
                 if ftp_info is not None:
                     metadata['ftp'] = ftp_info
                     return 'FTP'
+            zabbix_info = self._zabbix_payload_info(payload)
+            if zabbix_info is not None:
+                metadata['zabbix'] = zabbix_info
+                return 'Zabbix'
             payload_lower = payload.lower()
             if b'application/ocsp-request' in payload_lower or b'application/ocsp-response' in payload_lower:
                 return 'OCSP'
@@ -486,7 +494,7 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP', 'HSRP', 'HSRPv2'}:
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP', 'HSRP', 'HSRPv2', 'Zabbix'}:
             return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
@@ -2763,6 +2771,143 @@ class PacketParser:
         if sport == 514:
             return 'Server -> Client data'
         return 'Remote Shell data'
+
+    def _zabbix_payload_info(self, payload: bytes) -> dict | None:
+        raw = bytes(payload or b'')
+        if len(raw) < 13 or not raw.startswith(b'ZBXD'):
+            return None
+
+        flags = int(raw[4])
+        if (flags & 0x01) == 0:
+            return None
+
+        length = int.from_bytes(raw[5:9], 'little')
+        aux = int.from_bytes(raw[9:13], 'little')
+        body_start = 13
+        body_end = min(len(raw), body_start + max(0, length))
+        body = raw[body_start:body_end]
+
+        uncompressed = body
+        if flags & 0x02:
+            try:
+                uncompressed = zlib.decompress(body)
+            except Exception:
+                try:
+                    uncompressed = zlib.decompress(body, -15)
+                except Exception:
+                    uncompressed = body
+
+        text = ''
+        try:
+            text = uncompressed.decode('utf-8', errors='ignore')
+        except Exception:
+            text = ''
+
+        json_obj = None
+        if text:
+            try:
+                json_obj = json.loads(text)
+            except Exception:
+                json_obj = None
+
+        request_name = ''
+        response_name = ''
+        host_name = ''
+        session = ''
+        version = ''
+        if isinstance(json_obj, dict):
+            request_name = str(json_obj.get('request', '') or '')
+            response_name = str(json_obj.get('response', '') or '')
+            host_name = str(json_obj.get('host', '') or '')
+            if not host_name:
+                data_items = list(json_obj.get('data', []) or [])
+                if data_items and isinstance(data_items[0], dict):
+                    host_name = str(data_items[0].get('host', '') or '')
+            session = str(json_obj.get('session', '') or '')
+            version = str(json_obj.get('version', '') or '')
+
+        return {
+            'flags': flags,
+            'length': int(length),
+            'aux': int(aux),
+            'body': body,
+            'uncompressed': uncompressed,
+            'text': text,
+            'json': json_obj,
+            'request': request_name,
+            'response': response_name,
+            'host': host_name,
+            'session': session,
+            'version': version,
+        }
+
+    def _zabbix_payload_for_record(self, packet, metadata: dict) -> bytes:
+        payload = self._payload_bytes(packet)
+        if payload.startswith(b'ZBXD'):
+            return payload
+        reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+        if reassembled_hex:
+            try:
+                reassembled = bytes.fromhex(reassembled_hex)
+                if reassembled.startswith(b'ZBXD'):
+                    return reassembled
+            except Exception:
+                pass
+        return payload
+
+    def _zabbix_info_text(self, packet, metadata: dict) -> str:
+        tcp_layer = self._effective_tcp_layer(packet)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0) if tcp_layer is not None else 0
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0) if tcp_layer is not None else 0
+
+        zabbix = metadata.get('zabbix') if isinstance(metadata.get('zabbix'), dict) else None
+        if not isinstance(zabbix, dict):
+            payload = self._zabbix_payload_for_record(packet, metadata)
+            zabbix = self._zabbix_payload_info(payload)
+            if isinstance(zabbix, dict):
+                metadata['zabbix'] = zabbix
+        if not isinstance(zabbix, dict):
+            return f'Zabbix ({sport} -> {dport})'
+
+        request_name = str(zabbix.get('request', '') or '')
+        response_name = str(zabbix.get('response', '') or '')
+        host_name = str(zabbix.get('host', '') or '')
+        length = int(zabbix.get('length', 0) or 0)
+        flags = int(zabbix.get('flags', 0) or 0)
+
+        if request_name == 'agent data':
+            return f'Zabbix Agent data from "{host_name}", Len={length} ({sport} -> {dport})'
+        if request_name == 'active check heartbeat':
+            return f'Zabbix Agent heartbeat from "{host_name}", Len={length} ({sport} -> {dport})'
+        if request_name == 'active checks':
+            return f'Zabbix Agent request for active checks for "{host_name}", Len={length} ({sport} -> {dport})'
+        if request_name == 'proxy data':
+            return f'Zabbix Proxy data request to passive proxy, Len={length} ({sport} -> {dport})'
+        if request_name == 'proxy config':
+            return f'Zabbix Protocol request, Flags=0x{flags:02x}, Len={length} ({sport} -> {dport})'
+
+        if response_name == 'success':
+            version = str(zabbix.get('version', '') or '')
+            if version:
+                return f'Zabbix Protocol response, Flags=0x{flags:02x}, Len={length} ({sport} -> {dport})'
+            if sport == 10051:
+                req_name = str(metadata.get('zabbix_request_agent_name', '') or '')
+                if not req_name:
+                    ip_layer = self._effective_ip_layer(packet)
+                    if ip_layer is not None:
+                        src_addr = str(getattr(ip_layer, 'src', '') or '')
+                        dst_addr = str(getattr(ip_layer, 'dst', '') or '')
+                        stream_key = self._canonical_transport_key(src_addr, sport, dst_addr, dport, 'TCP')
+                        pending = self.zabbix_request_pending.get(stream_key, [])
+                        if pending:
+                            req_name = str(pending[0].metadata.get('zabbix_host', '') or '')
+                return f'Zabbix Server/proxy response for agent data for "{req_name}", Len={length} ({sport} -> {dport})'
+            return f'Zabbix Server response for passive proxy data (success), Len={length} ({sport} -> {dport})'
+
+        if str(zabbix.get('session', '') or '') and str(zabbix.get('version', '') or '') and sport == 10051:
+            return f'Zabbix Passive proxy data response, Len={length} ({sport} -> {dport})'
+
+        return f'Zabbix Protocol data, Len={length} ({sport} -> {dport})'
 
     def _icmp_timestamp_info_text(self, packet) -> str:
         if not packet.haslayer(ICMP) or not packet.haslayer(IP):
@@ -5167,6 +5312,11 @@ class PacketParser:
                         return 'SSHv2'
             if self._is_rsh_packet(packet):
                 return 'RSH'
+            zabbix_payload = self._zabbix_payload_for_record(packet, metadata)
+            zabbix_info = self._zabbix_payload_info(zabbix_payload)
+            if zabbix_info is not None:
+                metadata['zabbix'] = zabbix_info
+                return 'Zabbix'
             if (
                 not bool(metadata.get('tcp_is_retransmission', False))
                 and (sport == 646 or dport == 646)
@@ -7614,6 +7764,76 @@ class PacketParser:
         if not pending:
             self.ntp_request_pending.pop(stream_key, None)
 
+    def _update_zabbix_metadata(self, record: PacketRecord) -> None:
+        protocol = str(getattr(record, 'protocol', '') or '')
+        if protocol != 'Zabbix':
+            return
+
+        packet = getattr(record, 'raw', None)
+        if packet is None:
+            return
+
+        metadata = getattr(record, 'metadata', {}) if isinstance(getattr(record, 'metadata', {}), dict) else {}
+        zabbix = metadata.get('zabbix') if isinstance(metadata.get('zabbix'), dict) else None
+        if not isinstance(zabbix, dict):
+            payload = self._zabbix_payload_for_record(packet, metadata)
+            zabbix = self._zabbix_payload_info(payload)
+            if not isinstance(zabbix, dict):
+                return
+            metadata['zabbix'] = zabbix
+
+        metadata['zabbix_flags'] = int(zabbix.get('flags', 0) or 0)
+        metadata['zabbix_length'] = int(zabbix.get('length', 0) or 0)
+        metadata['zabbix_aux'] = int(zabbix.get('aux', 0) or 0)
+        metadata['zabbix_body'] = bytes(zabbix.get('body', b'') or b'')
+        metadata['zabbix_uncompressed_body'] = bytes(zabbix.get('uncompressed', b'') or b'')
+        metadata['zabbix_json_text'] = str(zabbix.get('text', '') or '')
+        metadata['zabbix_request'] = str(zabbix.get('request', '') or '')
+        metadata['zabbix_response'] = str(zabbix.get('response', '') or '')
+        metadata['zabbix_host'] = str(zabbix.get('host', '') or '')
+        metadata['zabbix_session'] = str(zabbix.get('session', '') or '')
+        metadata['zabbix_version'] = str(zabbix.get('version', '') or '')
+        metadata['zabbix_is_compressed'] = bool(int(metadata.get('zabbix_flags', 0) or 0) & 0x02)
+
+        tcp_layer = self._effective_tcp_layer(packet)
+        ip_layer = self._effective_ip_layer(packet)
+        if tcp_layer is None or ip_layer is None:
+            return
+
+        src_addr = str(getattr(ip_layer, 'src', '') or '')
+        dst_addr = str(getattr(ip_layer, 'dst', '') or '')
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        stream_key = self._canonical_transport_key(src_addr, sport, dst_addr, dport, 'TCP')
+
+        request_name = str(metadata.get('zabbix_request', '') or '')
+        response_name = str(metadata.get('zabbix_response', '') or '')
+        is_response = bool(response_name)
+        if not is_response and not request_name and sport == 10051 and metadata.get('zabbix_session'):
+            is_response = True
+
+        if not is_response:
+            self.zabbix_request_pending.setdefault(stream_key, []).append(record)
+            return
+
+        pending = self.zabbix_request_pending.get(stream_key)
+        if not pending:
+            return
+
+        request_record = pending.pop(0)
+        request_record.metadata['zabbix_response_frame'] = int(record.number)
+        record.metadata['zabbix_request_frame'] = int(request_record.number)
+
+        req_host = str(request_record.metadata.get('zabbix_host', '') or '')
+        if req_host:
+            record.metadata['zabbix_request_agent_name'] = req_host
+
+        response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
+        record.metadata['zabbix_time_since_request_ms'] = max(0.0, float(response_delta))
+
+        if not pending:
+            self.zabbix_request_pending.pop(stream_key, None)
+
     def _build_info(self, packet, protocol: str, metadata: dict | None = None) -> str:
         metadata = metadata or {}
         try:
@@ -7804,6 +8024,8 @@ class PacketParser:
                 return self._hsrpv2_info_text(packet)
             if protocol == 'RSH':
                 return self._rsh_info_text(packet)
+            if protocol == 'Zabbix':
+                return self._zabbix_info_text(packet, metadata)
             if protocol == 'IMAP':
                 effective_ip = self._effective_ip_layer(packet)
                 tcp = self._effective_tcp_layer(packet, effective_ip)

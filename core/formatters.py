@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import ipaddress
+import json
 from typing import Any, Dict, List
 
 
@@ -19,6 +20,7 @@ PRINTABLE = set(range(32, 127))
 PACKET_BYTE_SOURCE = 'packet'
 TCP_REASSEMBLED_BYTE_SOURCE = 'tcp_reassembled'
 DECODED_UTF8_BYTE_SOURCE = 'decoded_utf8'
+ZABBIX_UNCOMPRESSED_BYTE_SOURCE = 'zabbix_uncompressed'
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -940,6 +942,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'RSH' and tcp_payload:
             sections.append(_rsh_section(tcp_payload, offset, record))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'Zabbix':
+            sections.append(_zabbix_section(tcp_payload, offset, record))
+            payload_handled = True
         elif getattr(record, 'protocol', '') == 'SSHv2' and tcp_payload:
             sections.append(_ssh_section(tcp_payload, offset, record))
             payload_handled = True
@@ -1562,6 +1567,8 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ip:tcp:lpd'
     elif protocol == 'RSH':
         protocol_string = 'eth:ethertype:ipv6:tcp:rsh' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:rsh'
+    elif protocol == 'Zabbix':
+        protocol_string = 'eth:ethertype:ipv6:tcp:zabbix' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:zabbix'
     elif protocol == 'GRE':
         protocol_string = 'eth:ethertype:ip:gre:ip:gre'
     elif protocol == 'CFLOW':
@@ -4342,6 +4349,165 @@ def _rsh_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         'children': [
             {'title': f'{direction}: {payload.hex()}', **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE)},
         ],
+    }
+
+
+def _zabbix_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    raw_payload = bytes(payload or b'')
+    zabbix_body = bytes(metadata.get('zabbix_body', b'') or b'')
+    if not raw_payload.startswith(b'ZBXD') and zabbix_body:
+        flags = int(metadata.get('zabbix_flags', 0) or 0)
+        length = int(metadata.get('zabbix_length', len(zabbix_body)) or len(zabbix_body))
+        aux = int(metadata.get('zabbix_aux', 0) or 0)
+        raw_payload = b'ZBXD' + bytes([flags & 0xFF]) + int(length).to_bytes(4, 'little') + int(aux).to_bytes(4, 'little') + zabbix_body
+
+    if len(raw_payload) < 13 or not raw_payload.startswith(b'ZBXD'):
+        return {
+            'title': 'Zabbix Protocol',
+            **_byte_mapping(offset, 0, len(raw_payload), PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'Data ({len(raw_payload)} bytes)', **_byte_mapping(offset, 0, len(raw_payload), PACKET_BYTE_SOURCE)},
+            ],
+        }
+
+    flags = int(raw_payload[4])
+    length = int.from_bytes(raw_payload[5:9], 'little')
+    aux = int.from_bytes(raw_payload[9:13], 'little')
+    body_start = 13
+    body_end = min(len(raw_payload), body_start + max(0, length))
+    body = raw_payload[body_start:body_end]
+
+    uncompressed = bytes(metadata.get('zabbix_uncompressed_body', b'') or b'')
+    if not uncompressed:
+        uncompressed = body
+
+    json_text = str(metadata.get('zabbix_json_text', '') or '')
+    if not json_text and uncompressed:
+        json_text = uncompressed.decode(errors='ignore')
+
+    json_obj = None
+    if json_text:
+        try:
+            json_obj = json.loads(json_text)
+        except Exception:
+            json_obj = None
+
+    request_name = str(metadata.get('zabbix_request', '') or '')
+    response_name = str(metadata.get('zabbix_response', '') or '')
+    host_name = str(metadata.get('zabbix_host', '') or '')
+    session = str(metadata.get('zabbix_session', '') or '')
+    version = str(metadata.get('zabbix_version', '') or '')
+    if isinstance(json_obj, dict):
+        request_name = request_name or str(json_obj.get('request', '') or '')
+        response_name = response_name or str(json_obj.get('response', '') or '')
+        host_name = host_name or str(json_obj.get('host', '') or '')
+        session = session or str(json_obj.get('session', '') or '')
+        version = version or str(json_obj.get('version', '') or '')
+        if not host_name:
+            data_items = list(json_obj.get('data', []) or [])
+            if data_items and isinstance(data_items[0], dict):
+                host_name = str(data_items[0].get('host', '') or '')
+
+    def _fmt_response_time(ms: float) -> str:
+        value = max(0.0, float(ms))
+        if value < 1.0:
+            return f'{value * 1000.0:.3f} microseconds'
+        return f'{value:.3f} milliseconds'
+
+    flags_tokens: List[str] = []
+    if flags & 0x02:
+        flags_tokens.append('Compressed')
+    if flags & 0x01:
+        flags_tokens.append('Zabbix communications protocol')
+    flags_text = ', '.join(flags_tokens) if flags_tokens else '0'
+
+    children: List[Dict[str, Any]] = [
+        {'title': 'Header: ZBXD', **_byte_mapping(offset, 0, 4, PACKET_BYTE_SOURCE)},
+        {
+            'title': f'Flags: 0x{flags:02x}, {flags_text}',
+            **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'{(flags >> 3) & 0x1F:05b} ... = Reserved bits: {(flags >> 3) & 0x1F}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .{1 if (flags & 0x04) else 0}.. = Large packet: {"Yes" if (flags & 0x04) else "No"}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.... ..{1 if (flags & 0x02) else 0}. = Compressed: {"Yes" if (flags & 0x02) else "No"}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.... ...{1 if (flags & 0x01) else 0} = Zabbix communications protocol: {"Yes" if (flags & 0x01) else "No"}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+            ],
+        },
+        {'title': f'Length: {length}', **_byte_mapping(offset, 5, 4, PACKET_BYTE_SOURCE)},
+    ]
+
+    if flags & 0x02:
+        children.append({'title': f'Uncompressed length: {aux}', **_byte_mapping(offset, 9, 4, PACKET_BYTE_SOURCE)})
+    else:
+        children.append({'title': f'Reserved: {aux}', **_byte_mapping(offset, 9, 4, PACKET_BYTE_SOURCE)})
+
+    request_lower = request_name.lower()
+    is_agent_connection = request_lower in {'agent data', 'active checks', 'active check heartbeat'} or (host_name and 'proxy' not in request_lower)
+    is_proxy_connection = request_lower in {'proxy data', 'proxy config'} or (session and version and not request_name)
+
+    if is_agent_connection:
+        children.append({'title': '[This is an agent connection]'})
+    elif is_proxy_connection:
+        children.append({'title': '[This is a proxy connection]'})
+
+    if request_lower == 'agent data':
+        children.append({'title': 'Zabbix agent data: Yes'})
+        if host_name:
+            children.append({'title': f'Agent name: {host_name}'})
+        if session:
+            children.append({'title': f'Session: {session}'})
+    elif request_lower == 'active check heartbeat':
+        children.append({'title': 'Agent heartbeat: Yes'})
+        if host_name:
+            children.append({'title': f'Agent name: {host_name}'})
+        if isinstance(json_obj, dict) and 'heartbeat_freq' in json_obj:
+            children.append({'title': f'Agent heartbeat frequency: {int(json_obj.get("heartbeat_freq", 0) or 0)}'})
+    elif request_lower == 'active checks':
+        children.append({'title': 'Zabbix agent config: Yes'})
+        if host_name:
+            children.append({'title': f'Agent name: {host_name}'})
+    elif request_lower == 'proxy data':
+        children.append({'title': 'Proxy data: Yes'})
+    elif request_lower == 'proxy config':
+        pass
+    elif session and version and not request_name and not response_name:
+        children.append({'title': 'Proxy data: Yes'})
+        children.append({'title': f'Version: {version}'})
+        children.append({'title': f'Session: {session}'})
+
+    if response_name:
+        children.append({'title': f'Success: {"Yes" if response_name.lower() == "success" else response_name}'})
+        request_agent = str(metadata.get('zabbix_request_agent_name', '') or '')
+        if request_agent:
+            children.append({'title': f'[Agent name: {request_agent} (from the request)]'})
+        if version and request_lower != 'proxy config':
+            children.append({'title': f'Version: {version}'})
+        if request_lower in {'proxy data', 'proxy config'} or (not request_name and not host_name):
+            children.append({'title': 'Proxy data: Yes'})
+
+    data_source = ZABBIX_UNCOMPRESSED_BYTE_SOURCE if (flags & 0x02) else PACKET_BYTE_SOURCE
+    data_offset = 0 if data_source == ZABBIX_UNCOMPRESSED_BYTE_SOURCE else body_start
+    data_len = len(uncompressed) if data_source == ZABBIX_UNCOMPRESSED_BYTE_SOURCE else len(body)
+    if data_len > 0:
+        children.append({'title': f'Data: {json_text if json_text else body.hex()}', **_byte_mapping(offset, data_offset, data_len, data_source)})
+
+    if request_name:
+        children.append({'title': 'This is Zabbix request'})
+    elif response_name or (session and version):
+        children.append({'title': 'This is Zabbix response'})
+
+    response_ms = metadata.get('zabbix_time_since_request_ms', None)
+    if response_ms is not None:
+        try:
+            children.append({'title': f'[Response time: {_fmt_response_time(float(response_ms))}]'})
+        except Exception:
+            pass
+
+    return {
+        'title': str(getattr(record, 'info', '') or 'Zabbix Protocol'),
+        **_byte_mapping(offset, 0, len(raw_payload), PACKET_BYTE_SOURCE),
+        'children': children,
     }
 
 
