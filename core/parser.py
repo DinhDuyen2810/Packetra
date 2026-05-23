@@ -312,6 +312,11 @@ class PacketParser:
             try:
                 if int(getattr(effective_ip, 'proto', 0) or 0) == 89:
                     return 'OSPF'
+                if int(getattr(effective_ip, 'proto', 0) or 0) == 112:
+                    vrrp_info = self._vrrp_payload_info(packet, effective_ip)
+                    if vrrp_info is not None:
+                        metadata['vrrp'] = vrrp_info
+                        return 'VRRP'
             except Exception:
                 pass
             eigrp_info = self._eigrp_payload_info(packet, effective_ip)
@@ -420,6 +425,11 @@ class PacketParser:
             sport = int(getattr(udp_layer, 'sport', 0) or 0)
             dport = int(getattr(udp_layer, 'dport', 0) or 0)
             payload = bytes(getattr(udp_layer, 'payload', b''))
+            if sport == 3222 or dport == 3222:
+                glbp_info = self._glbp_payload_info(payload)
+                if glbp_info is not None:
+                    metadata['glbp'] = glbp_info
+                    return 'GLBP'
             if sport == 3785 or dport == 3785:
                 return 'BFD Echo'
             if sport == 3784 or dport == 3784:
@@ -468,7 +478,7 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO'}:
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP'}:
             return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
@@ -765,6 +775,94 @@ class PacketParser:
             'required_min_echo': int.from_bytes(raw[20:24], 'big'),
         }
 
+    def _glbp_payload_info(self, payload: bytes) -> dict | None:
+        raw = bytes(payload or b'')
+        if len(raw) < 12:
+            return None
+        if int(raw[0]) != 1:
+            return None
+        group = int.from_bytes(raw[2:4], 'big')
+        owner_id = raw[6:12]
+        tlvs = []
+        cursor = 12
+        hello_addr_type = 0
+        while cursor + 2 <= len(raw):
+            tlv_type = int(raw[cursor])
+            tlv_len = int(raw[cursor + 1])
+            if tlv_len < 2 or cursor + tlv_len > len(raw):
+                break
+            value_start = cursor + 2
+            value_end = cursor + tlv_len
+            value = raw[value_start:value_end]
+            tlvs.append({
+                'type': tlv_type,
+                'length': tlv_len,
+                'value': value,
+            })
+            if tlv_type == 1 and len(value) >= 22:
+                hello_addr_type = int(value[20])
+            cursor += tlv_len
+        if not tlvs:
+            return None
+        return {
+            'version': int(raw[0]),
+            'unknown1': int(raw[1]),
+            'group': group,
+            'unknown2': raw[4:6],
+            'owner_id': owner_id,
+            'tlvs': tlvs,
+            'hello_addr_type': hello_addr_type,
+        }
+
+    def _vrrp_payload_info(self, packet, ip_layer=None) -> dict | None:
+        effective_ip = ip_layer if ip_layer is not None else self._effective_ip_layer(packet)
+        if effective_ip is None:
+            return None
+        try:
+            proto = int(getattr(effective_ip, 'proto', 0) or 0)
+        except Exception:
+            return None
+        if proto != 112:
+            return None
+        payload = self._ip_payload_bytes(packet, effective_ip)
+        if len(payload) < 8:
+            return None
+        version = (int(payload[0]) >> 4) & 0x0F
+        ptype = int(payload[0]) & 0x0F
+        if version == 0 or ptype == 0:
+            return None
+        ipcount = int(payload[3])
+        header_len = 8 + (ipcount * 4)
+        if len(payload) < header_len:
+            return None
+        addrlist = []
+        addr_cursor = 8
+        for _ in range(ipcount):
+            if addr_cursor + 4 > len(payload):
+                break
+            addr_bytes = payload[addr_cursor:addr_cursor + 4]
+            addrlist.append('.'.join(str(int(b)) for b in addr_bytes))
+            addr_cursor += 4
+        auth_data = b''
+        if len(payload) >= header_len + 8:
+            auth_data = payload[header_len:header_len + 8]
+        trailer = payload[header_len + 8:] if len(payload) > header_len + 8 else b''
+        md5_data = trailer[-16:] if len(trailer) >= 16 else b''
+        return {
+            'version': version,
+            'type': ptype,
+            'vrid': int(payload[1]),
+            'priority': int(payload[2]),
+            'ipcount': ipcount,
+            'authtype': int(payload[4]),
+            'adv': int(payload[5]),
+            'checksum': int.from_bytes(payload[6:8], 'big'),
+            'addrlist': addrlist,
+            'auth_data': auth_data,
+            'md5_data': md5_data,
+            'payload': payload,
+        }
+
     def _isis_system_id_text(self, data: bytes) -> str:
         value = bytes(data or b'')
         if len(value) < 6:
@@ -794,10 +892,12 @@ class PacketParser:
         if int(payload[0]) != 0x83:
             return None
         pdu_type = int(payload[4]) & 0x1F
-        if pdu_type == 25 and len(payload) >= 33:
+        if pdu_type in {24, 25} and len(payload) >= 33:
+            level = 'L1' if pdu_type == 24 else 'L2'
             return {
                 'protocol': 'ISIS CSNP',
                 'pdu_type': pdu_type,
+                'level': level,
                 'source_id': self._isis_system_id_text(payload[10:16]),
                 'source_id_circuit': int(payload[16]),
                 'start_lsp_id': self._isis_lsp_id_text(payload[17:25]),
@@ -4771,6 +4871,11 @@ class PacketParser:
                 return 'L2TPv3'
             if ip_proto == 89:
                 return 'OSPF'
+            if ip_proto == 112:
+                vrrp_info = self._vrrp_payload_info(packet, effective_ip)
+                if vrrp_info is not None:
+                    metadata['vrrp'] = vrrp_info
+                    return 'VRRP'
             eigrp_info = self._eigrp_payload_info(packet, effective_ip)
             if eigrp_info is not None:
                 metadata['eigrp'] = eigrp_info
@@ -4822,6 +4927,11 @@ class PacketParser:
             sport = int(getattr(effective_udp, 'sport', 0) or 0)
             dport = int(getattr(effective_udp, 'dport', 0) or 0)
             udp_payload = bytes(getattr(effective_udp, 'payload', b''))
+            if sport == 3222 or dport == 3222:
+                glbp_info = self._glbp_payload_info(udp_payload)
+                if glbp_info is not None:
+                    metadata['glbp'] = glbp_info
+                    return 'GLBP'
             if sport == 3785 or dport == 3785:
                 return 'BFD Echo'
             if sport == 3784 or dport == 3784:
@@ -7867,11 +7977,12 @@ class PacketParser:
                 isis_info = metadata.get('isis') if isinstance(metadata.get('isis'), dict) else self._isis_payload_info(packet)
                 if not isinstance(isis_info, dict):
                     return 'ISIS CSNP'
+                level = str(isis_info.get('level', 'L2') or 'L2')
                 source = str(isis_info.get('source_id', '') or '')
                 circuit = int(isis_info.get('source_id_circuit', 0) or 0)
                 start_lsp = str(isis_info.get('start_lsp_id', '') or '')
                 end_lsp = str(isis_info.get('end_lsp_id', '') or '')
-                return f'L2 CSNP, Source-ID: {source}.{circuit:02x}, Start LSP-ID: {start_lsp}, End LSP-ID: {end_lsp}'
+                return f'{level} CSNP, Source-ID: {source}.{circuit:02x}, Start LSP-ID: {start_lsp}, End LSP-ID: {end_lsp}'
             if protocol == 'ISIS HELLO':
                 isis_info = metadata.get('isis') if isinstance(metadata.get('isis'), dict) else self._isis_payload_info(packet)
                 if not isinstance(isis_info, dict):
@@ -7879,6 +7990,45 @@ class PacketParser:
                 level = str(isis_info.get('level', 'L1') or 'L1')
                 system_id = str(isis_info.get('system_id', '') or '')
                 return f'{level} HELLO, System-ID: {system_id}'
+            if protocol == 'GLBP':
+                glbp_info = metadata.get('glbp') if isinstance(metadata.get('glbp'), dict) else None
+                if not isinstance(glbp_info, dict):
+                    udp = self._effective_udp_layer(packet)
+                    udp_payload = bytes(getattr(udp, 'payload', b'')) if udp is not None else b''
+                    glbp_info = self._glbp_payload_info(udp_payload)
+                if not isinstance(glbp_info, dict):
+                    return 'Gateway Load Balancing Protocol'
+                group = int(glbp_info.get('group', 0) or 0)
+                tokens = []
+                hello_addr_token = ''
+                for tlv in list(glbp_info.get('tlvs', []) or []):
+                    tlv_type = int(tlv.get('type', 0) or 0)
+                    if tlv_type == 3:
+                        tokens.append('Auth')
+                    elif tlv_type == 4:
+                        tokens.append('4')
+                    elif tlv_type == 1:
+                        tokens.append('Hello')
+                        addr_type = int(glbp_info.get('hello_addr_type', 0) or 0)
+                        if addr_type == 1:
+                            hello_addr_token = 'IPv4'
+                        elif addr_type == 2:
+                            hello_addr_token = 'IPv6'
+                    elif tlv_type == 2:
+                        tokens.append('Request/Response?')
+                    else:
+                        tokens.append(str(tlv_type))
+                if hello_addr_token:
+                    insert_pos = tokens.index('Hello') + 1 if 'Hello' in tokens else len(tokens)
+                    tokens.insert(insert_pos, hello_addr_token)
+                tail = ', '.join(tokens)
+                return f'G: {group}, {tail}' if tail else f'G: {group}'
+            if protocol == 'VRRP':
+                vrrp_info = metadata.get('vrrp') if isinstance(metadata.get('vrrp'), dict) else self._vrrp_payload_info(packet)
+                if isinstance(vrrp_info, dict):
+                    version = int(vrrp_info.get('version', 0) or 0)
+                    return f'Announcement (v{version})'
+                return 'Virtual Router Redundancy Protocol'
             if protocol == 'DHCPv6':
                 return self._dhcpv6_info_text(packet) or 'DHCPv6'
             if protocol == 'DHCP':

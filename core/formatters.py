@@ -987,6 +987,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             ssdp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_ssdp_section(ssdp_payload, offset, record))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'GLBP':
+            glbp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_glbp_section(glbp_payload, offset, record))
+            payload_handled = True
         elif getattr(record, 'protocol', '') == 'SNMP':
             snmp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_snmp_section(snmp_payload, offset, record))
@@ -1043,6 +1047,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_l2tpv3_section(l2tp_payload, offset))
             if len(l2tp_payload) > 4 and not _is_l2tpv3_control_payload(l2tp_payload):
                 sections.append(_bytes_data_section(l2tp_payload[4:], offset + 4))
+            payload_handled = True
+        if ip_proto == 112 and getattr(record, 'protocol', '') == 'VRRP':
+            vrrp_payload = _ip_payload_bytes(packet, effective_ip_layer)
+            sections.append(_vrrp_section(vrrp_payload, offset, record))
             payload_handled = True
 
     if getattr(record, 'protocol', '') == 'EIGRP' and not payload_handled:
@@ -1446,6 +1454,10 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:lldp'
     elif protocol == 'HSRPv2':
         protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:udp:hsrp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:udp:hsrp'
+    elif protocol == 'GLBP':
+        protocol_string = 'eth:ethertype:ipv6:udp:glbp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:udp:glbp'
+    elif protocol == 'VRRP':
+        protocol_string = 'eth:ethertype:ip:vrrp'
     elif protocol == 'PPPoED':
         protocol_string = 'eth:ethertype:vlan:ethertype:pppoed' if eth_type == 0x8100 else 'eth:ethertype:pppoed'
     elif protocol == 'PPP':
@@ -6981,6 +6993,213 @@ def _bfd_echo_section(payload: bytes, offset: int, record=None) -> Dict[str, Any
     ]
     return {
         'title': 'BFD Echo message',
+        **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _glbp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    if len(raw) < 12:
+        return {
+            'title': 'Gateway Load Balancing Protocol',
+            **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+            'children': [{'title': f'Data ({len(raw)} bytes)', **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE)}],
+        }
+
+    group = int.from_bytes(raw[2:4], 'big')
+
+    def _glbp_mac_display(mac_bytes: bytes) -> str:
+        mac_text = _mac_text_from_bytes(mac_bytes)
+        parts = mac_text.split(':')
+        if len(parts) == 6 and ':'.join(parts[:3]) in {'00:07:b4', '00:15:62', '00:25:45'}:
+            return f'Cisco_{":".join(parts[-3:])} ({mac_text})'
+        return _mac_display(mac_text)
+
+    owner_mac = _glbp_mac_display(raw[6:12])
+    children: List[Dict[str, Any]] = [
+        {'title': f'Version?: {int(raw[0])}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'Unknown1: {int(raw[1])}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'Group: {group}', **_byte_mapping(offset, 2, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'Unknown2: {raw[4:6].hex()}', **_byte_mapping(offset, 4, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'Owner ID: {owner_mac}', **_byte_mapping(offset, 6, 6, PACKET_BYTE_SOURCE)},
+    ]
+
+    def _tlv_short_name(tlv_type: int) -> str:
+        if tlv_type == 1:
+            return 'Hello'
+        if tlv_type == 2:
+            return 'Request/Response?'
+        if tlv_type == 3:
+            return 'Auth'
+        if tlv_type == 4:
+            return '4'
+        return str(tlv_type)
+
+    cursor = 12
+    while cursor + 2 <= len(raw):
+        tlv_type = int(raw[cursor])
+        tlv_len = int(raw[cursor + 1])
+        if tlv_len < 2 or cursor + tlv_len > len(raw):
+            break
+        value_start = cursor + 2
+        value_end = cursor + tlv_len
+        value = raw[value_start:value_end]
+        tlv_children: List[Dict[str, Any]] = []
+        if tlv_type == 1:
+            type_text = 'Hello'
+        elif tlv_type == 2:
+            type_text = 'Request/Response?'
+        elif tlv_type == 3:
+            type_text = 'Auth'
+        else:
+            type_text = 'Unknown'
+        tlv_children.append({'title': f'Type: {type_text} ({tlv_type})', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+        tlv_children.append({'title': f'Length: {tlv_len}', **_byte_mapping(offset, cursor + 1, 1, PACKET_BYTE_SOURCE)})
+
+        if tlv_type == 3 and len(value) >= 2:
+            auth_type = int(value[0])
+            auth_len = int(value[1])
+            auth_text = {
+                1: 'Plaintext',
+                2: 'MD5 string',
+            }.get(auth_type, str(auth_type))
+            tlv_children.extend([
+                {'title': f'Authtype: {auth_text} ({auth_type})', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Authlength: {auth_len}', **_byte_mapping(offset, value_start + 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'MD5-string hash: {value[2:].hex()}', **_byte_mapping(offset, value_start + 2, max(1, len(value) - 2), PACKET_BYTE_SOURCE)},
+            ])
+        elif tlv_type == 4:
+            tlv_children.append({'title': f'Unknown TLV data: {value.hex()}', **_byte_mapping(offset, value_start, len(value), PACKET_BYTE_SOURCE)})
+        elif tlv_type == 1 and len(value) >= 22:
+            vg_state = int(value[1])
+            vg_state_text = {16: 'Standby', 32: 'Active'}.get(vg_state, str(vg_state))
+            addr_type = int(value[20])
+            addr_len = int(value[21]) if len(value) > 21 else 0
+            addr_value = value[22:22 + addr_len] if len(value) >= 22 + addr_len else b''
+            tlv_children.extend([
+                {'title': f'Unknown1-0: {value[0]:02x}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'VG state?: {vg_state_text} ({vg_state})', **_byte_mapping(offset, value_start + 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Unknown1-1: {value[2]:02x}', **_byte_mapping(offset, value_start + 2, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Priority: {int(value[3])}', **_byte_mapping(offset, value_start + 3, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Unknown1-2: {value[4:6].hex()}', **_byte_mapping(offset, value_start + 4, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Helloint: {int.from_bytes(value[6:10], "big")}', **_byte_mapping(offset, value_start + 6, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Holdint: {int.from_bytes(value[10:14], "big")}', **_byte_mapping(offset, value_start + 10, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Redirect: {int.from_bytes(value[14:16], "big")}', **_byte_mapping(offset, value_start + 14, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Timeout: {int.from_bytes(value[16:18], "big")}', **_byte_mapping(offset, value_start + 16, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Unknown1-3: {value[18:20].hex()}', **_byte_mapping(offset, value_start + 18, 2, PACKET_BYTE_SOURCE)},
+            ])
+            if addr_type == 1:
+                addr_text = '.'.join(str(int(b)) for b in addr_value[:4]) if len(addr_value) >= 4 else addr_value.hex()
+                tlv_children.append({'title': 'Address type: IPv4 (1)', **_byte_mapping(offset, value_start + 20, 1, PACKET_BYTE_SOURCE)})
+                tlv_children.append({'title': f'Address length: {addr_len}', **_byte_mapping(offset, value_start + 21, 1, PACKET_BYTE_SOURCE)})
+                tlv_children.append({'title': f'Virtual IPv4: {addr_text}', **_byte_mapping(offset, value_start + 22, max(1, min(4, len(addr_value))), PACKET_BYTE_SOURCE)})
+            elif addr_type == 2:
+                try:
+                    addr_text = str(ipaddress.IPv6Address(addr_value[:16])) if len(addr_value) >= 16 else addr_value.hex()
+                except Exception:
+                    addr_text = addr_value.hex()
+                tlv_children.append({'title': 'Address type: IPv6 (2)', **_byte_mapping(offset, value_start + 20, 1, PACKET_BYTE_SOURCE)})
+                tlv_children.append({'title': f'Address length: {addr_len}', **_byte_mapping(offset, value_start + 21, 1, PACKET_BYTE_SOURCE)})
+                tlv_children.append({'title': f'Virtual IPv6: {addr_text}', **_byte_mapping(offset, value_start + 22, max(1, min(16, len(addr_value))), PACKET_BYTE_SOURCE)})
+            else:
+                tlv_children.append({'title': f'Address type: {addr_type}', **_byte_mapping(offset, value_start + 20, 1, PACKET_BYTE_SOURCE)})
+                tlv_children.append({'title': f'Address length: {addr_len}', **_byte_mapping(offset, value_start + 21, 1, PACKET_BYTE_SOURCE)})
+        elif tlv_type == 2 and len(value) >= 18:
+            vf_state = int(value[1])
+            vf_state_text = {16: 'Standby', 32: 'Active'}.get(vf_state, str(vf_state))
+            virtual_mac = _glbp_mac_display(value[12:18])
+            tlv_children.extend([
+                {'title': f'Forwarder?: {int(value[0])}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'VF state?: {vf_state_text} ({vf_state})', **_byte_mapping(offset, value_start + 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Unknown2-1: {value[2]:02x}', **_byte_mapping(offset, value_start + 2, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Priority: {int(value[3])}', **_byte_mapping(offset, value_start + 3, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Weight: {int(value[4])}', **_byte_mapping(offset, value_start + 4, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Unknown2-2: {value[5:12].hex()}', **_byte_mapping(offset, value_start + 5, 7, PACKET_BYTE_SOURCE)},
+                {'title': f'Virtualmac: {virtual_mac}', **_byte_mapping(offset, value_start + 12, 6, PACKET_BYTE_SOURCE)},
+            ])
+
+        children.append({
+            'title': f'TLV l={tlv_len}, t={_tlv_short_name(tlv_type)}',
+            **_byte_mapping(offset, cursor, tlv_len, PACKET_BYTE_SOURCE),
+            'children': tlv_children,
+        })
+        cursor += tlv_len
+
+    return {
+        'title': 'Gateway Load Balancing Protocol',
+        **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _vrrp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    if len(raw) < 8:
+        return {
+            'title': 'Virtual Router Redundancy Protocol',
+            **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+            'children': [{'title': f'Data ({len(raw)} bytes)', **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE)}],
+        }
+
+    version = (int(raw[0]) >> 4) & 0x0F
+    ptype = int(raw[0]) & 0x0F
+    vrid = int(raw[1])
+    priority = int(raw[2])
+    ipcount = int(raw[3])
+    authtype = int(raw[4])
+    advert_int = int(raw[5])
+    checksum = int.from_bytes(raw[6:8], 'big')
+    header_len = 8 + (ipcount * 4)
+    auth_header_len = header_len + 8 if len(raw) >= header_len + 8 else header_len
+    checksum_ok = _internet_checksum(raw) == 0 if len(raw) >= 8 else False
+
+    type_text = {1: 'Advertisement'}.get(ptype, str(ptype))
+    authtype_text = {
+        0: 'No Authentication',
+        1: 'Simple text password',
+        2: 'IP Authentication Header',
+        254: 'Cisco VRRP MD5 authentication',
+    }.get(authtype, str(authtype))
+
+    version_node: Dict[str, Any] = {
+        'title': f'Version {version}, Packet type {ptype} ({type_text})',
+        **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE),
+        'children': [
+            {'title': f'{version:04b} .... = VRRP protocol version: {version}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... {ptype:04b} = VRRP packet type: {type_text} ({ptype})', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        ],
+    }
+
+    children: List[Dict[str, Any]] = [version_node]
+    children.append({'title': f'Virtual Rtr ID: {vrid}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)})
+    if priority == 100:
+        children.append({'title': 'Priority: 100 (Default priority for a backup VRRP router)', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)})
+    else:
+        children.append({'title': f'Priority: {priority}', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)})
+    children.append({'title': f'Addr Count: {ipcount}', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)})
+    children.append({'title': f'Auth Type: {authtype_text} ({authtype})', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)})
+    children.append({'title': f'Adver Int: {advert_int}', **_byte_mapping(offset, 5, 1, PACKET_BYTE_SOURCE)})
+    children.append({
+        'title': f'Checksum: 0x{checksum:04x} [{"correct" if checksum_ok else "incorrect"}]',
+        **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE),
+        'children': [{'title': f'[Checksum Status: {"Good" if checksum_ok else "Bad"}]'}],
+    })
+
+    addr_cursor = 8
+    for _ in range(ipcount):
+        if addr_cursor + 4 > len(raw):
+            break
+        ip_text = '.'.join(str(int(b)) for b in raw[addr_cursor:addr_cursor + 4])
+        children.append({'title': f'IP Address: {ip_text}', **_byte_mapping(offset, addr_cursor, 4, PACKET_BYTE_SOURCE)})
+        addr_cursor += 4
+
+    if authtype == 254 and len(raw) >= 16:
+        md5_data = raw[-16:]
+        children.append({'title': f'MD5 Authentication Data: {md5_data.hex()}', **_byte_mapping(offset, len(raw) - 16, 16, PACKET_BYTE_SOURCE)})
+
+    return {
+        'title': 'Virtual Router Redundancy Protocol',
         **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
         'children': children,
     }
