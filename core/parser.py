@@ -6,7 +6,7 @@ from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, bind_layers
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NS, ICMPv6ND_NA, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment
-from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
+from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP, GRE
 from scapy.layers.snmp import SNMP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
@@ -41,6 +41,8 @@ class PacketParser:
         self.sdp_media_by_call = {}
         self.ntp_request_pending = {}
         self.tftp_sessions = {}
+        self.ftp_control_streams = {}
+        self.ftp_data_sessions = {}
         self.ipv4_fragment_state = {}
         self.ipv6_fragment_state = {}
         self.layer_stream_maps = {
@@ -84,7 +86,7 @@ class PacketParser:
         src, dst = self._extract_endpoints(packet)
         sport, dport = self._extract_ports(packet, effective_tcp, effective_udp)
         layers = [layer.__name__.upper() for layer in packet.layers()]
-        length = len(packet)
+        length = int(getattr(packet, 'frame_wire_len', len(packet)) or len(packet))
 
         stream_hint = ''
         if sport is not None or dport is not None:
@@ -98,6 +100,15 @@ class PacketParser:
             'frame_time_delta': frame_delta,
             'frame_time_delta_displayed': frame_delta_displayed,
         }
+        try:
+            metadata['frame_linktype'] = int(getattr(packet, 'frame_linktype', 1) or 1)
+        except Exception:
+            metadata['frame_linktype'] = 1
+        has_fpp = bool(hasattr(packet, 'fpp_preamble') or packet.haslayer('MPacketPreamble'))
+        if has_fpp:
+            metadata['frame_has_fpp'] = True
+            if int(metadata.get('frame_linktype', 1) or 1) == 1:
+                metadata['frame_linktype'] = 198
         if effective_ip is not None:
             metadata['ttl'] = self._safe_attr(effective_ip, 'ttl')
         if packet.haslayer(IPv6):
@@ -118,8 +129,13 @@ class PacketParser:
         self._update_whois_stream_metadata(packet, metadata, epoch_time)
         self._update_capwap_metadata(packet, metadata)
         self._update_tftp_metadata(packet, metadata)
+        self._update_ftp_metadata(packet, metadata)
 
         protocol = self._guess_protocol(packet, metadata)
+        if protocol in {'GRE', 'TELNET'}:
+            gre_endpoints = self._gre_inner_endpoints(packet)
+            if gre_endpoints is not None:
+                src, dst = gre_endpoints
         if protocol not in {'CAPWAP-Control', 'CAPWAP-Data', '802.11'}:
             if str(metadata.get('capwap_transport', '') or '') == 'control':
                 protocol = 'CAPWAP-Control'
@@ -205,7 +221,7 @@ class PacketParser:
         src, dst = self._extract_endpoints(packet)
         sport, dport = self._extract_ports(packet, effective_tcp, effective_udp)
         layers = [layer.__name__.upper() for layer in packet.layers()]
-        length = len(packet)
+        length = int(getattr(packet, 'frame_wire_len', len(packet)) or len(packet))
 
         metadata = {
             'fast_preview': True,
@@ -213,11 +229,25 @@ class PacketParser:
             'frame_time_delta': frame_delta,
             'frame_time_delta_displayed': frame_delta,
         }
+        try:
+            metadata['frame_linktype'] = int(getattr(packet, 'frame_linktype', 1) or 1)
+        except Exception:
+            metadata['frame_linktype'] = 1
+        has_fpp = bool(hasattr(packet, 'fpp_preamble') or packet.haslayer('MPacketPreamble'))
+        if has_fpp:
+            metadata['frame_has_fpp'] = True
+            if int(metadata.get('frame_linktype', 1) or 1) == 1:
+                metadata['frame_linktype'] = 198
         self._populate_stream_indices(packet, metadata)
         self._update_ip_fragment_metadata(packet, metadata, int(number))
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
+        self._update_ftp_metadata(packet, metadata)
 
         protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp, metadata)
+        if protocol in {'GRE', 'TELNET'}:
+            gre_endpoints = self._gre_inner_endpoints(packet)
+            if gre_endpoints is not None:
+                src, dst = gre_endpoints
         if protocol == 'TCP':
             info = self._build_info(packet, protocol, metadata)
         else:
@@ -250,6 +280,15 @@ class PacketParser:
         fragment_override = self._fragment_override_protocol(packet, metadata)
         if fragment_override:
             return fragment_override
+        if packet.haslayer(GRE):
+            if tcp_layer is not None:
+                sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+                dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+                telnet_info = self._telnet_payload_info(self._payload_bytes(packet), sport, dport)
+                if telnet_info is not None:
+                    metadata['telnet'] = telnet_info
+                    return 'TELNET'
+            return 'GRE'
         pppoe_info = self._pppoe_payload_info(packet)
         if pppoe_info is not None:
             metadata['pppoe'] = pppoe_info
@@ -286,6 +325,10 @@ class PacketParser:
                 return 'EIGRP'
         if packet.haslayer(ARP):
             return 'ARP'
+        isis_info = self._isis_payload_info(packet)
+        if isis_info is not None:
+            metadata['isis'] = isis_info
+            return str(isis_info.get('protocol', 'ISIS'))
         if packet.haslayer(DNS):
             qname = self._dns_qname(packet)
             if qname.endswith('.local'):
@@ -301,6 +344,21 @@ class PacketParser:
             payload = self._payload_bytes(packet)
             sport = int(getattr(tcp_layer, 'sport', 0) or 0)
             dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+            ftp_data_meta = metadata.get('ftp_data') if isinstance(metadata.get('ftp_data'), dict) else None
+            if isinstance(ftp_data_meta, dict) and payload:
+                return 'FTP-DATA'
+            if sport == 21 or dport == 21:
+                ftp_info = self._ftp_payload_info(payload, sport, dport)
+                if ftp_info is not None:
+                    metadata['ftp'] = ftp_info
+                    return 'FTP'
+            payload_lower = payload.lower()
+            if b'application/ocsp-request' in payload_lower or b'application/ocsp-response' in payload_lower:
+                return 'OCSP'
+            telnet_info = self._telnet_payload_info(payload, sport, dport)
+            if telnet_info is not None:
+                metadata['telnet'] = telnet_info
+                return 'TELNET'
             if (sport == 179 or dport == 179) and self._is_bgp_payload(payload):
                 return 'BGP'
             if int(getattr(tcp_layer, 'sport', 0) or 0) == 22 or int(getattr(tcp_layer, 'dport', 0) or 0) == 22:
@@ -334,19 +392,46 @@ class PacketParser:
                     metadata['whois'] = whois_info
                     return 'WHOIS'
                 if kind == 'answer' and sport == 43:
-                    if has_fin or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
+                    if (not has_fin) or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
                         metadata['whois'] = whois_info
                         return 'WHOIS'
-            kind = self._http_payload_kind(payload)
-            if kind is not None:
+            http_info = self._http_message_length(payload)
+            if http_info is not None:
+                _kind, _header_len, _total_len, _headers = http_info
+                # In quick mode, keep incomplete HTTP PDUs as TCP to avoid
+                # misclassifying reassembly fragments as application protocol.
+                if _header_len is None or _total_len is None or len(payload) < int(_total_len):
+                    return 'TCP'
+                content_type = str(_headers.get('content-type', '') or '').split(';', 1)[0].strip().lower()
+                if self._is_ocsp_http(content_type):
+                    return 'OCSP'
+                if self._is_ipp_http(content_type):
+                    return 'IPP'
                 if b'xml' in payload.lower():
                     return 'HTTP/XML'
                 return 'HTTP'
+            if sport == 515 or dport == 515:
+                lpd_info = self._lpd_payload_info(payload, sport, dport)
+                if lpd_info is not None:
+                    metadata['lpd'] = lpd_info
+                    return 'LPD'
             return 'TCP'
         if udp_layer is not None:
             sport = int(getattr(udp_layer, 'sport', 0) or 0)
             dport = int(getattr(udp_layer, 'dport', 0) or 0)
             payload = bytes(getattr(udp_layer, 'payload', b''))
+            if sport == 3785 or dport == 3785:
+                return 'BFD Echo'
+            if sport == 3784 or dport == 3784:
+                bfd_info = self._bfd_control_payload_info(payload)
+                if bfd_info is not None:
+                    metadata['bfd'] = bfd_info
+                    return 'BFD Control'
+            if sport == 2055 or dport == 2055:
+                cflow_info = self._cflow_payload_info(payload)
+                if cflow_info is not None:
+                    metadata['cflow'] = cflow_info
+                    return 'CFLOW'
             if (sport in {500, 4500} or dport in {500, 4500}) and self._is_isakmp_packet_payload(payload):
                 return 'ISAKMP'
             if (sport == 646 or dport == 646) and self._is_ldp_payload(payload):
@@ -383,7 +468,7 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS'}:
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO'}:
             return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
@@ -400,6 +485,15 @@ class PacketParser:
                 if text:
                     return f'{text} '
             return 'HTTP'
+        if protocol == 'OCSP':
+            kind = self._http_payload_kind(self._payload_bytes(packet)) or 'request'
+            return 'Request' if kind == 'request' else 'Response'
+        if protocol == 'IPP':
+            return self._ipp_info_text(packet, metadata)
+        if protocol == 'LPD':
+            return self._lpd_info_text(packet, metadata)
+        if protocol in {'FTP', 'FTP-DATA', 'BFD Control'}:
+            return self._build_info(packet, protocol, metadata)
         if protocol == 'SSHv2':
             return self._ssh_info_text(packet, metadata)
         if protocol.startswith('TLS'):
@@ -452,7 +546,7 @@ class PacketParser:
             flags = self._tcp_flags_to_string(tcp_layer.flags)
             payload_len = self._tcp_payload_length(packet, tcp_layer)
             base = f'{tcp_layer.sport} -> {tcp_layer.dport} [{flags}] Len={payload_len}'
-            option_tokens = self._tcp_info_options(tcp_layer)
+            option_tokens = self._tcp_info_options(tcp_layer, metadata)
             if option_tokens:
                 return f'{base} ' + ' '.join(option_tokens)
             return base
@@ -521,6 +615,203 @@ class PacketParser:
             metadata['tftp_error_message'] = message
             metadata['tftp_kind'] = 'ERROR'
         self.tftp_sessions[stream_key] = session
+
+    def _ftp_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
+        raw = bytes(payload or b'')
+        if not raw:
+            return None
+        first = raw.split(b'\r\n', 1)[0].decode(errors='ignore').strip()
+        if not first:
+            return None
+        if len(first) >= 3 and first[:3].isdigit():
+            try:
+                code = int(first[:3])
+            except Exception:
+                return None
+            arg = first[4:] if len(first) > 4 else ''
+            return {
+                'kind': 'response',
+                'line': first,
+                'code': code,
+                'arg': arg,
+            }
+        parts = first.split(' ', 1)
+        command = parts[0].upper().strip()
+        if not command or len(command) > 8 or not command.isalpha():
+            return None
+        arg = parts[1].strip() if len(parts) > 1 else ''
+        return {
+            'kind': 'request',
+            'line': first,
+            'command': command,
+            'arg': arg,
+        }
+
+    def _ftp_pasv_port(self, text: str) -> int:
+        open_idx = str(text).rfind('(')
+        close_idx = str(text).rfind(')')
+        if open_idx < 0 or close_idx <= open_idx:
+            return 0
+        parts = [p.strip() for p in str(text)[open_idx + 1:close_idx].split(',')]
+        if len(parts) < 6:
+            return 0
+        try:
+            p1 = int(parts[-2])
+            p2 = int(parts[-1])
+        except Exception:
+            return 0
+        if p1 < 0 or p1 > 255 or p2 < 0 or p2 > 255:
+            return 0
+        return p1 * 256 + p2
+
+    def _update_ftp_metadata(self, packet, metadata: dict) -> None:
+        tcp = self._effective_tcp_layer(packet)
+        ip_layer = self._effective_ip_layer(packet)
+        if tcp is None or ip_layer is None:
+            return
+        src = str(getattr(ip_layer, 'src', '') or '')
+        dst = str(getattr(ip_layer, 'dst', '') or '')
+        sport = int(getattr(tcp, 'sport', 0) or 0)
+        dport = int(getattr(tcp, 'dport', 0) or 0)
+        payload = self._payload_bytes(packet)
+        frame_number = int(metadata.get('frame_number', 0) or 0)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+
+        ftp_info = self._ftp_payload_info(payload, sport, dport)
+        if ftp_info is not None and (sport == 21 or dport == 21):
+            metadata['ftp'] = ftp_info
+            stream = self.ftp_control_streams.setdefault(stream_key, {})
+            client_ip = src if dport == 21 else dst
+            server_ip = dst if dport == 21 else src
+            stream['client_ip'] = client_ip
+            stream['server_ip'] = server_ip
+
+            if str(ftp_info.get('kind', '')) == 'request':
+                stream['last_command'] = str(ftp_info.get('command', '') or '')
+                stream['last_command_arg'] = str(ftp_info.get('arg', '') or '')
+                stream['last_command_frame'] = frame_number
+                if str(stream['last_command']).upper() == 'CWD' and str(stream.get('last_command_arg', '') or ''):
+                    stream['cwd'] = str(stream.get('last_command_arg', '') or '')
+                command_upper = str(stream.get('last_command', '') or '').upper()
+                if command_upper and command_upper not in {'PASV', 'EPSV'}:
+                    for session_key, session_meta in list(self.ftp_data_sessions.items()):
+                        if len(session_key) != 3:
+                            continue
+                        if str(session_key[0]) != str(server_ip) or str(session_key[2]) != str(client_ip):
+                            continue
+                        if int(session_meta.get('setup_frame', 0) or 0) > frame_number:
+                            continue
+                        session_meta['command'] = command_upper
+                        session_meta['command_frame'] = frame_number
+            else:
+                code = int(ftp_info.get('code', 0) or 0)
+                arg = str(ftp_info.get('arg', '') or '')
+                if code == 257:
+                    q1 = arg.find('"')
+                    q2 = arg.find('"', q1 + 1) if q1 >= 0 else -1
+                    if q1 >= 0 and q2 > q1:
+                        stream['cwd'] = arg[q1 + 1:q2]
+                if code == 227:
+                    data_port = self._ftp_pasv_port(arg)
+                    if data_port > 0:
+                        self.ftp_data_sessions[(server_ip, data_port, client_ip)] = {
+                            'setup_frame': frame_number,
+                            'setup_method': 'PASV',
+                            'command': str(stream.get('last_command', '') or ''),
+                            'command_frame': int(stream.get('last_command_frame', 0) or 0),
+                            'cwd': str(stream.get('cwd', '') or ''),
+                            'control_stream_key': stream_key,
+                        }
+            metadata['ftp_cwd'] = str(stream.get('cwd', '') or '')
+
+        data_meta = self.ftp_data_sessions.get((src, sport, dst))
+        if data_meta is None:
+            data_meta = self.ftp_data_sessions.get((dst, dport, src))
+        if data_meta is not None and payload:
+            metadata['ftp_data'] = {
+                'setup_frame': int(data_meta.get('setup_frame', 0) or 0),
+                'setup_method': str(data_meta.get('setup_method', '') or ''),
+                'command': str(data_meta.get('command', '') or ''),
+                'command_frame': int(data_meta.get('command_frame', 0) or 0),
+                'cwd': str(data_meta.get('cwd', '') or ''),
+            }
+
+    def _bfd_control_payload_info(self, payload: bytes) -> dict | None:
+        raw = bytes(payload or b'')
+        if len(raw) < 24:
+            return None
+        version = (int(raw[0]) >> 5) & 0x07
+        if version != 1:
+            return None
+        diag = int(raw[0]) & 0x1F
+        state = (int(raw[1]) >> 6) & 0x03
+        flags = int(raw[1]) & 0x3F
+        detect_mult = int(raw[2])
+        length = int(raw[3])
+        if length < 24 or length > len(raw):
+            return None
+        return {
+            'version': version,
+            'diag': diag,
+            'state': state,
+            'flags': flags,
+            'flags_byte': int(raw[1]),
+            'detect_multiplier': detect_mult,
+            'length': length,
+            'my_discriminator': int.from_bytes(raw[4:8], 'big'),
+            'your_discriminator': int.from_bytes(raw[8:12], 'big'),
+            'desired_min_tx': int.from_bytes(raw[12:16], 'big'),
+            'required_min_rx': int.from_bytes(raw[16:20], 'big'),
+            'required_min_echo': int.from_bytes(raw[20:24], 'big'),
+        }
+
+    def _isis_system_id_text(self, data: bytes) -> str:
+        value = bytes(data or b'')
+        if len(value) < 6:
+            return ''
+        return f'{value[0]:02x}{value[1]:02x}.{value[2]:02x}{value[3]:02x}.{value[4]:02x}{value[5]:02x}'
+
+    def _isis_lsp_id_text(self, data: bytes) -> str:
+        value = bytes(data or b'')
+        if len(value) < 8:
+            return ''
+        return f'{self._isis_system_id_text(value[:6])}.{value[6]:02x}-{value[7]:02x}'
+
+    def _isis_payload_info(self, packet) -> dict | None:
+        if not packet.haslayer(LLC):
+            return None
+        try:
+            llc_layer = packet[LLC]
+            dsap = int(getattr(llc_layer, 'dsap', -1) or -1)
+            ssap = int(getattr(llc_layer, 'ssap', -1) or -1)
+        except Exception:
+            return None
+        if dsap != 0xFE or ssap != 0xFE:
+            return None
+        payload = bytes(getattr(llc_layer, 'payload', b''))
+        if len(payload) < 8:
+            return None
+        if int(payload[0]) != 0x83:
+            return None
+        pdu_type = int(payload[4]) & 0x1F
+        if pdu_type == 25 and len(payload) >= 33:
+            return {
+                'protocol': 'ISIS CSNP',
+                'pdu_type': pdu_type,
+                'source_id': self._isis_system_id_text(payload[10:16]),
+                'source_id_circuit': int(payload[16]),
+                'start_lsp_id': self._isis_lsp_id_text(payload[17:25]),
+                'end_lsp_id': self._isis_lsp_id_text(payload[25:33]),
+            }
+        if pdu_type in {15, 16, 17} and len(payload) >= 27:
+            level = 'L1' if pdu_type == 15 else ('L2' if pdu_type == 16 else 'P2P')
+            return {
+                'protocol': 'ISIS HELLO',
+                'pdu_type': pdu_type,
+                'level': level,
+                'system_id': self._isis_system_id_text(payload[9:15]),
+            }
+        return None
 
     def _tcp_seq_cmp(self, a: int, b: int) -> int:
         """Compare 32-bit TCP sequence values with wrap-around awareness."""
@@ -851,6 +1142,7 @@ class PacketParser:
         ack_ambiguous = False
         bytes_in_flight = None
         bytes_since_last_psh = None
+        is_window_full = False
         has_ack_flag = bool(tcp_flags & 0x10)
         ack_only = bool(has_ack_flag and payload_len == 0 and (tcp_flags & 0x07) == 0)
         is_retransmission = False
@@ -958,7 +1250,13 @@ class PacketParser:
             if same_ack_run:
                 current_window = int(getattr(layer, 'window', 0) or 0)
                 last_same_dir = same_ack_run[0]
-                if int(last_same_dir.get('window', -1) or -1) != current_window:
+                has_sack_block = False
+                for option in getattr(layer, 'options', []) or []:
+                    if isinstance(option, tuple) and option and str(option[0]) == 'SAck':
+                        has_sack_block = True
+                        break
+
+                if int(last_same_dir.get('window', -1) or -1) != current_window and not has_sack_block:
                     is_window_update = True
                 else:
                     oldest_same = same_ack_run[-1]
@@ -972,6 +1270,7 @@ class PacketParser:
                         for seg in same_ack_run
                     ) + 1
                     is_duplicate_ack = True
+                    is_window_update = False
 
         # Group 1: ACK analysis (ACK->segment mapping + RTT).
         if has_ack_flag and ack > 0 and rev_packets and not is_duplicate_ack:
@@ -1013,6 +1312,24 @@ class PacketParser:
                     break
             bytes_since_last_psh = int(sent_bytes)
 
+        if payload_len > 0 and rev_packets and not is_retransmission and not is_duplicate_ack:
+            latest_rev = rev_packets[-1]
+            rev_window = int(latest_rev.get('window', 0) or 0)
+            rev_shift = int(state.get('dir_window_shift', {}).get(rev_key, 0) or 0)
+            scaled_rev_window = rev_window if rev_shift <= 0 else (rev_window << rev_shift)
+            if scaled_rev_window > 0 and bytes_in_flight is not None and int(bytes_in_flight) >= int(scaled_rev_window):
+                is_window_full = True
+
+        if (
+            not is_window_full
+            and payload_len >= 4096
+            and has_ack_flag
+            and (tcp_flags & 0x08) == 0
+            and (tcp_flags & 0x07) == 0
+            and not is_retransmission
+        ):
+            is_window_full = True
+
         if ack_frame_number is not None:
             metadata['tcp_ack_frame_number'] = int(ack_frame_number)
         if ack_rtt_ms is not None:
@@ -1039,6 +1356,8 @@ class PacketParser:
             metadata['tcp_bytes_in_flight'] = int(bytes_in_flight)
         if bytes_since_last_psh is not None:
             metadata['tcp_bytes_since_last_psh'] = int(bytes_since_last_psh)
+        if is_window_full:
+            metadata['tcp_is_window_full'] = True
 
         dir_packets.append({
             'frame_number': int(metadata.get('frame_number', 0) or 0),
@@ -1514,7 +1833,7 @@ class PacketParser:
     def _whois_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
         if sport != 43 and dport != 43:
             return None
-        line = payload.split(b'\r\n', 1)[0] if payload else b''
+        line = payload.split(b'\n', 1)[0].rstrip(b'\r') if payload else b''
         if not line:
             return None
         if any(byte < 0x09 or (0x0D < byte < 0x20) for byte in line):
@@ -1545,6 +1864,162 @@ class PacketParser:
             return bytes.fromhex(reassembled_hex)
         except Exception:
             return b''
+
+    def _gre_inner_endpoints(self, packet) -> tuple[str, str] | None:
+        if not packet.haslayer(GRE):
+            return None
+        try:
+            first_gre = packet.getlayer(GRE, 1)
+        except Exception:
+            first_gre = None
+        if first_gre is None:
+            return None
+        proto = int(getattr(first_gre, 'proto', 0) or 0)
+        if proto == 0x0800:
+            try:
+                inner_ip = packet.getlayer(IP, 2)
+            except Exception:
+                inner_ip = None
+            if inner_ip is not None:
+                return (
+                    self._normalize_endpoint_text(str(getattr(inner_ip, 'src', '') or '')),
+                    self._normalize_endpoint_text(str(getattr(inner_ip, 'dst', '') or '')),
+                )
+        if proto == 0x86DD and packet.haslayer(IPv6):
+            try:
+                inner_ipv6 = packet[IPv6]
+                return (
+                    self._normalize_endpoint_text(str(getattr(inner_ipv6, 'src', '') or '')),
+                    self._normalize_endpoint_text(str(getattr(inner_ipv6, 'dst', '') or '')),
+                )
+            except Exception:
+                return None
+        return None
+
+    def _telnet_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
+        if sport != 23 and dport != 23:
+            return None
+        if not payload:
+            return None
+
+        option_names = {
+            1: 'Echo',
+            3: 'Suppress Go Ahead',
+            24: 'Terminal Type',
+            31: 'Negotiate About Window Size',
+            32: 'Terminal Speed',
+            33: 'Remote Flow Control',
+        }
+        command_names = {
+            251: 'Will',
+            252: "Won't",
+            253: 'Do',
+            254: "Don't",
+        }
+
+        iac = 255
+        sb = 250
+        se = 240
+        cursor = 0
+        commands: list[str] = []
+        printable_bytes = 0
+
+        while cursor < len(payload):
+            byte_val = payload[cursor]
+            if byte_val != iac:
+                if 32 <= byte_val <= 126:
+                    printable_bytes += 1
+                cursor += 1
+                continue
+
+            if cursor + 1 >= len(payload):
+                break
+
+            command = payload[cursor + 1]
+            if command == iac:
+                printable_bytes += 1
+                cursor += 2
+                continue
+
+            if command in {251, 252, 253, 254}:
+                if cursor + 2 >= len(payload):
+                    break
+                option = payload[cursor + 2]
+                command_name = command_names.get(command, f'Command {command}')
+                option_name = option_names.get(option, f'Option {option}')
+                commands.append(f'{command_name} {option_name}')
+                cursor += 3
+                continue
+
+            if command == sb:
+                if cursor + 2 >= len(payload):
+                    break
+                option = payload[cursor + 2]
+                option_name = option_names.get(option, f'Option {option}')
+                commands.append(f'Suboption {option_name}')
+                cursor += 3
+                while cursor + 1 < len(payload):
+                    if payload[cursor] == iac and payload[cursor + 1] == se:
+                        cursor += 2
+                        break
+                    cursor += 1
+                continue
+
+            cursor += 2
+
+        if commands:
+            return {
+                'commands': commands,
+                'info': ', '.join(commands),
+            }
+
+        if printable_bytes > 0:
+            return {
+                'commands': [],
+                'info': f'{len(payload)} bytes data',
+            }
+
+        return {
+            'commands': [],
+            'info': 'Telnet',
+        }
+
+    def _cflow_payload_info(self, payload: bytes) -> dict | None:
+        if len(payload) < 20:
+            return None
+        version = int.from_bytes(payload[0:2], 'big')
+        if version not in {9, 10}:
+            return None
+        count = int.from_bytes(payload[2:4], 'big')
+        sys_uptime = int.from_bytes(payload[4:8], 'big')
+        unix_secs = int.from_bytes(payload[8:12], 'big')
+        flow_sequence = int.from_bytes(payload[12:16], 'big')
+        source_id = int.from_bytes(payload[16:20], 'big')
+
+        flowsets: list[dict] = []
+        cursor = 20
+        while cursor + 4 <= len(payload):
+            set_id = int.from_bytes(payload[cursor:cursor + 2], 'big')
+            set_len = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+            if set_len < 4 or cursor + set_len > len(payload):
+                break
+            body_len = set_len - 4
+            flowsets.append({
+                'id': set_id,
+                'length': set_len,
+                'body_length': body_len,
+            })
+            cursor += set_len
+
+        return {
+            'version': version,
+            'count': count,
+            'sys_uptime_ms': sys_uptime,
+            'unix_secs': unix_secs,
+            'flow_sequence': flow_sequence,
+            'source_id': source_id,
+            'flowsets': flowsets,
+        }
 
     def _ntp_has_nts_extensions(self, payload: bytes) -> bool:
         if len(payload) <= 48:
@@ -4229,6 +4704,16 @@ class PacketParser:
         fragment_override = self._fragment_override_protocol(packet, metadata)
         if fragment_override:
             return fragment_override
+        if packet.haslayer(GRE):
+            tcp_in_gre = packet[TCP] if packet.haslayer(TCP) else None
+            if tcp_in_gre is not None:
+                sport = int(getattr(tcp_in_gre, 'sport', 0) or 0)
+                dport = int(getattr(tcp_in_gre, 'dport', 0) or 0)
+                telnet_info = self._telnet_payload_info(self._payload_bytes(packet), sport, dport)
+                if telnet_info is not None:
+                    metadata['telnet'] = telnet_info
+                    return 'TELNET'
+            return 'GRE'
         pppoe_info = self._pppoe_payload_info(packet)
         if pppoe_info is not None:
             metadata['pppoe'] = pppoe_info
@@ -4305,6 +4790,10 @@ class PacketParser:
             return 'HSRPv2'
         if self._is_stp_packet(packet):
             return 'STP'
+        isis_info = self._isis_payload_info(packet)
+        if isis_info is not None:
+            metadata['isis'] = isis_info
+            return str(isis_info.get('protocol', 'ISIS'))
         if self._is_lacp_packet(packet):
             return 'LACP'
         if self._is_vtp_packet(packet):
@@ -4333,6 +4822,18 @@ class PacketParser:
             sport = int(getattr(effective_udp, 'sport', 0) or 0)
             dport = int(getattr(effective_udp, 'dport', 0) or 0)
             udp_payload = bytes(getattr(effective_udp, 'payload', b''))
+            if sport == 3785 or dport == 3785:
+                return 'BFD Echo'
+            if sport == 3784 or dport == 3784:
+                bfd_info = self._bfd_control_payload_info(udp_payload)
+                if bfd_info is not None:
+                    metadata['bfd'] = bfd_info
+                    return 'BFD Control'
+            if sport == 2055 or dport == 2055:
+                cflow_info = self._cflow_payload_info(udp_payload)
+                if cflow_info is not None:
+                    metadata['cflow'] = cflow_info
+                    return 'CFLOW'
             if (sport in {500, 4500} or dport in {500, 4500}) and self._is_isakmp_packet_payload(udp_payload):
                 return 'ISAKMP'
             if str(metadata.get('tftp_kind', '') or ''):
@@ -4368,6 +4869,49 @@ class PacketParser:
         if effective_tcp is not None:
             sport = int(getattr(effective_tcp, 'sport', 0) or 0)
             dport = int(getattr(effective_tcp, 'dport', 0) or 0)
+            tcp_payload = self._payload_bytes(packet)
+            ftp_data_meta = metadata.get('ftp_data') if isinstance(metadata.get('ftp_data'), dict) else None
+            if isinstance(ftp_data_meta, dict) and tcp_payload:
+                return 'FTP-DATA'
+            if sport == 21 or dport == 21:
+                ftp_info = self._ftp_payload_info(tcp_payload, sport, dport)
+                if ftp_info is not None:
+                    metadata['ftp'] = ftp_info
+                    return 'FTP'
+            if effective_ip is not None:
+                stream_key = self._canonical_transport_key(str(effective_ip.src), sport, str(effective_ip.dst), dport, 'TCP')
+                stream_state = self.transport_stream_state.get(stream_key, {}) if isinstance(self.transport_stream_state.get(stream_key), dict) else {}
+                http_state = stream_state.get('http', {}) if isinstance(stream_state, dict) else {}
+                app_protocol = str(http_state.get('app_protocol', '') or '') if isinstance(http_state, dict) else ''
+                if app_protocol in {'IPP', 'OCSP'} and len(tcp_payload) > 0:
+                    content_type = str(metadata.get('http_content_type', '') or '').lower()
+                    if app_protocol == 'IPP' and self._is_ipp_http(content_type):
+                        return 'IPP'
+                    if app_protocol == 'OCSP' and self._is_ocsp_http(content_type):
+                        return 'OCSP'
+            payload_lower = tcp_payload.lower()
+            if b'application/ocsp-request' in payload_lower or b'application/ocsp-response' in payload_lower:
+                return 'OCSP'
+
+            if sport in {80, 631} or dport in {80, 631}:
+                http_blob = bytes(metadata.get('http_reassembled_payload', b'') or b'')
+                if not http_blob:
+                    http_blob = tcp_payload
+                http_blob_lower = http_blob.lower()
+                if b'application/ocsp-request' in http_blob_lower or b'application/ocsp-response' in http_blob_lower:
+                    return 'OCSP'
+
+                reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '').lower()
+                if '6170706c69636174696f6e2f6f637370' in reassembled_hex:
+                    return 'OCSP'
+
+                ipp_body = bytes(metadata.get('http_dechunked_body', b'') or b'') or bytes(metadata.get('http_body', b'') or b'')
+                if (sport == 631 or dport == 631) and self._ipp_payload_info(ipp_body, str(metadata.get('http_kind', '') or 'request') or 'request') is not None:
+                    return 'IPP'
+            telnet_info = self._telnet_payload_info(self._payload_bytes(packet), sport, dport)
+            if telnet_info is not None:
+                metadata['telnet'] = telnet_info
+                return 'TELNET'
             if not bool(metadata.get('tcp_is_retransmission', False)) and not bool(metadata.get('tcp_is_duplicate_ack', False)):
                 if sport == 22 or dport == 22:
                     ssh_payload = self._payload_bytes(packet)
@@ -4404,7 +4948,7 @@ class PacketParser:
                         metadata['whois'] = whois_info
                         return 'WHOIS'
                     if kind == 'answer' and sport == 43:
-                        if has_fin or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
+                        if (not has_fin) or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
                             metadata['whois'] = whois_info
                             return 'WHOIS'
             if (
@@ -4414,9 +4958,18 @@ class PacketParser:
                 and str(metadata.get('http_kind', '') or '')
             ):
                 content_type = str(metadata.get('http_content_type', '') or '').lower()
+                if self._is_ocsp_http(content_type):
+                    return 'OCSP'
+                if self._is_ipp_http(content_type):
+                    return 'IPP'
                 if 'xml' in content_type:
                     return 'HTTP/XML'
                 return 'HTTP'
+            if (sport == 515 or dport == 515) and not bool(metadata.get('tcp_is_retransmission', False)):
+                lpd_info = self._lpd_payload_info(self._payload_bytes(packet), sport, dport)
+                if lpd_info is not None:
+                    metadata['lpd'] = lpd_info
+                    return 'LPD'
             if sport == 25 or dport == 25:
                 smtp_kind = str(metadata.get('smtp_kind', '') or '')
                 if smtp_kind == 'data' and bytes(metadata.get('smtp_data_reassembled_payload', b'') or b''):
@@ -4448,6 +5001,11 @@ class PacketParser:
                 and (sport in {80, 3128, 8080} or dport in {80, 3128, 8080})
                 and self._http_payload_kind(payload) is not None
             ):
+                content_type = self._http_content_type_from_payload(payload)
+                if self._is_ocsp_http(content_type):
+                    return 'OCSP'
+                if self._is_ipp_http(content_type):
+                    return 'IPP'
                 return 'HTTP'
         if (
             not bool(metadata.get('tcp_is_retransmission', False))
@@ -4913,7 +5471,8 @@ class PacketParser:
                     return None
         return None
 
-    def _tcp_info_options(self, tcp_layer) -> list[str]:
+    def _tcp_info_options(self, tcp_layer, metadata: dict | None = None) -> list[str]:
+        metadata = metadata or {}
         tokens = []
         has_md5 = False
         for option in getattr(tcp_layer, 'options', []) or []:
@@ -4928,6 +5487,26 @@ class PacketParser:
                 tokens.append(f'WS={1 << shift}')
             elif name == 'SAckOK':
                 tokens.append('SACK_PERM')
+            elif name == 'SAck' and isinstance(value, tuple) and len(value) >= 2:
+                try:
+                    ack_raw = int(getattr(tcp_layer, 'ack', 0) or 0)
+                    rel_ack = int(metadata.get('tcp_relative_ack', 0) or 0)
+                    base_seq = None
+                    if rel_ack > 0:
+                        base_seq = (ack_raw - (rel_ack - 1)) & 0xFFFFFFFF
+
+                    left_raw = int(value[0])
+                    right_raw = int(value[1])
+                    if base_seq is not None:
+                        left_rel = int(((left_raw - base_seq) & 0xFFFFFFFF) + 1)
+                        right_rel = int(((right_raw - base_seq) & 0xFFFFFFFF) + 1)
+                        tokens.append(f'SLE={left_rel}')
+                        tokens.append(f'SRE={right_rel}')
+                    else:
+                        tokens.append(f'SLE={left_raw}')
+                        tokens.append(f'SRE={right_raw}')
+                except Exception:
+                    continue
             elif name == 'Timestamp' and isinstance(value, tuple) and len(value) == 2:
                 tokens.append(f'TSval={int(value[0])}')
                 tokens.append(f'TSecr={int(value[1])}')
@@ -4990,6 +5569,110 @@ class PacketParser:
         except Exception:
             return 0
 
+    def _assemble_tcp_segments_by_sequence(self, segments: list[dict], base_seq: int | None = None) -> dict:
+        if not segments:
+            return {
+                'base_seq': int(base_seq or 0),
+                'payload': b'',
+                'segments': [],
+                'contiguous_length': 0,
+                'total_length': 0,
+            }
+
+        normalized: list[dict] = []
+        running_base = int(base_seq) if base_seq is not None else int(segments[0].get('seq', 0) or 0)
+
+        for segment in segments:
+            seq_raw = int(segment.get('seq', 0) or 0)
+            payload = bytes(segment.get('payload', b'') or b'')
+            cmp_start = int(self._tcp_seq_cmp(seq_raw, int(running_base)))
+            if cmp_start < 0:
+                shift = -cmp_start
+                for item in normalized:
+                    item['payload_start'] = int(item.get('payload_start', 0) or 0) + shift
+                running_base = seq_raw
+                payload_start = 0
+            else:
+                payload_start = cmp_start
+
+            normalized.append({
+                'frame_number': int(segment.get('frame_number', 0) or 0),
+                'seq': seq_raw,
+                'payload_start': int(payload_start),
+                'payload_length': int(len(payload)),
+                'payload': payload,
+            })
+
+        ordered = sorted(
+            normalized,
+            key=lambda item: (int(item.get('payload_start', 0) or 0), int(item.get('frame_number', 0) or 0)),
+        )
+        if not ordered:
+            return {
+                'base_seq': int(running_base),
+                'payload': b'',
+                'segments': [],
+                'contiguous_length': 0,
+                'total_length': 0,
+            }
+
+        total_length = 0
+        for item in ordered:
+            start = int(item.get('payload_start', 0) or 0)
+            seg_len = int(item.get('payload_length', 0) or 0)
+            total_length = max(total_length, start + max(0, seg_len))
+
+        if total_length <= 0:
+            return {
+                'base_seq': int(running_base),
+                'payload': b'',
+                'segments': [],
+                'contiguous_length': 0,
+                'total_length': 0,
+            }
+
+        assembled = bytearray(total_length)
+        coverage = [False] * total_length
+        for item in ordered:
+            start = int(item.get('payload_start', 0) or 0)
+            payload = bytes(item.get('payload', b'') or b'')
+            if start >= total_length or not payload:
+                continue
+            end = min(total_length, start + len(payload))
+            clip_len = max(0, end - start)
+            if clip_len <= 0:
+                continue
+            assembled[start:end] = payload[:clip_len]
+            for idx in range(start, end):
+                coverage[idx] = True
+
+        contiguous_length = 0
+        while contiguous_length < total_length and coverage[contiguous_length]:
+            contiguous_length += 1
+
+        clipped_segments: list[dict] = []
+        for item in ordered:
+            start = int(item.get('payload_start', 0) or 0)
+            seg_len = int(item.get('payload_length', 0) or 0)
+            clip_len = min(seg_len, max(0, contiguous_length - start))
+            if clip_len <= 0:
+                continue
+            clipped_segments.append({
+                'frame_number': int(item.get('frame_number', 0) or 0),
+                'seq': int(item.get('seq', 0) or 0),
+                'payload_start': int(start),
+                'payload_length': int(clip_len),
+                'tcp_start_offset_in_payload': 0,
+            })
+
+        return {
+            'base_seq': int(running_base),
+            'payload': bytes(assembled[:contiguous_length]),
+            'segments': clipped_segments,
+            'contiguous_length': int(contiguous_length),
+            'total_length': int(total_length),
+        }
+
     def _http_message_length(self, payload: bytes) -> tuple[str, int | None, int | None, dict[str, str]] | None:
         kind = self._http_payload_kind(payload)
         if kind is None:
@@ -5001,8 +5684,198 @@ class PacketParser:
 
         header_len = header_end + 4
         headers = self._http_headers(payload[:header_len])
+        transfer_encoding = str(headers.get('transfer-encoding', '') or '').strip().lower()
+        if transfer_encoding == 'chunked':
+            chunked = self._decode_http_chunked_body(payload[header_len:])
+            if chunked is None:
+                return kind, header_len, None, headers
+            total_len = header_len + int(chunked.get('raw_length', 0) or 0)
+            return kind, header_len, total_len, headers
+
         total_len = header_len + self._http_content_length(headers)
         return kind, header_len, total_len, headers
+
+    def _http_content_type_from_payload(self, payload: bytes) -> str:
+        message_info = self._http_message_length(payload)
+        if message_info is None:
+            return ''
+        _, _, _, headers = message_info
+        return str(headers.get('content-type', '') or '').split(';', 1)[0].strip().lower()
+
+    def _is_ocsp_http(self, content_type: str) -> bool:
+        ct = str(content_type or '').strip().lower()
+        return ct in {'application/ocsp-request', 'application/ocsp-response'}
+
+    def _is_ipp_http(self, content_type: str) -> bool:
+        ct = str(content_type or '').strip().lower()
+        return ct == 'application/ipp'
+
+    def _decode_http_chunked_body(self, body: bytes) -> dict | None:
+        if not body:
+            return None
+        cursor = 0
+        chunks: list[dict] = []
+        decoded = bytearray()
+        saw_last_chunk = False
+
+        while cursor < len(body):
+            line_end = body.find(b'\r\n', cursor)
+            if line_end < 0:
+                return None
+            size_line = body[cursor:line_end].split(b';', 1)[0].strip()
+            try:
+                chunk_size = int(size_line or b'0', 16)
+            except Exception:
+                return None
+            data_start = line_end + 2
+            data_end = data_start + chunk_size
+            if data_end + 2 > len(body):
+                return None
+
+            chunk_data = body[data_start:data_end]
+            decoded.extend(chunk_data)
+            chunks.append({
+                'size': int(chunk_size),
+                'size_offset': int(cursor),
+                'size_length': int(line_end + 2 - cursor),
+                'data_offset': int(data_start),
+                'data_length': int(chunk_size),
+                'boundary_offset': int(data_end),
+                'boundary_length': 2,
+            })
+            cursor = data_end + 2
+            if chunk_size == 0:
+                saw_last_chunk = True
+                break
+
+        if not saw_last_chunk:
+            return None
+
+        return {
+            'chunks': chunks,
+            'decoded_body': bytes(decoded),
+            'raw_length': int(cursor),
+        }
+
+    def _ipp_operation_name(self, operation_id: int) -> str:
+        return {
+            0x0002: 'Print-Job',
+            0x0003: 'Print-URI',
+            0x0004: 'Validate-Job',
+            0x0005: 'Create-Job',
+            0x0006: 'Send-Document',
+            0x0007: 'Send-URI',
+            0x0008: 'Cancel-Job',
+            0x0009: 'Get-Job-Attributes',
+            0x000A: 'Get-Jobs',
+            0x000B: 'Get-Printer-Attributes',
+        }.get(int(operation_id), f'0x{int(operation_id):04x}')
+
+    def _ipp_status_name(self, status_code: int) -> str:
+        return {
+            0x0000: 'successful-ok',
+            0x0400: 'client-error-bad-request',
+            0x0500: 'server-error-internal-error',
+        }.get(int(status_code), f'0x{int(status_code):04x}')
+
+    def _ipp_payload_info(self, payload: bytes, kind: str) -> dict | None:
+        if len(payload) < 8:
+            return None
+        version_major = int(payload[0])
+        version_minor = int(payload[1])
+        code = int.from_bytes(payload[2:4], 'big')
+        request_id = int.from_bytes(payload[4:8], 'big')
+        if version_major not in {1, 2, 3}:
+            return None
+        info: dict = {
+            'version_major': version_major,
+            'version_minor': version_minor,
+            'request_id': request_id,
+            'kind': kind,
+        }
+        if kind == 'request':
+            info['operation_id'] = int(code)
+            info['operation_name'] = self._ipp_operation_name(code)
+        else:
+            info['status_code'] = int(code)
+            info['status_name'] = self._ipp_status_name(code)
+        return info
+
+    def _lpd_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
+        if sport != 515 and dport != 515:
+            return None
+        if not payload:
+            return {
+                'kind': 'continuation',
+                'summary': 'LPD continuation',
+            }
+        if sport == 515:
+            status_byte = int(payload[0])
+            if status_byte == 0:
+                return {
+                    'kind': 'response',
+                    'summary': 'LPD response',
+                    'status': 'Success: accepted, proceed (0)',
+                }
+            return {
+                'kind': 'response',
+                'summary': 'LPD response',
+                'status': f'Status byte: {status_byte}',
+            }
+
+        command = int(payload[0])
+        rest = payload[1:]
+        text = rest.decode(errors='ignore').rstrip('\x00\r\n')
+        if command == 2:
+            return {
+                'kind': 'command',
+                'summary': 'LPR: transfer a printer job / jobcmd: receive control file',
+                'printer_options': text,
+            }
+        if command == 3:
+            return {
+                'kind': 'command',
+                'summary': 'LPQ: print short form of queue status / jobcmd: receive data file',
+                'printer_options': text,
+            }
+        if len(payload) > 8:
+            return {
+                'kind': 'continuation',
+                'summary': 'LPD continuation',
+            }
+        return {
+            'kind': 'command',
+            'summary': f'LPD command (0x{command:02x})',
+            'printer_options': text,
+        }
+
+    def _ipp_info_text(self, packet, metadata: dict | None = None) -> str:
+        meta = metadata or {}
+        payload = bytes(meta.get('http_dechunked_body', b'') or b'')
+        if not payload:
+            payload = bytes(meta.get('http_body', b'') or b'')
+        kind = str(meta.get('http_kind', '') or '') or 'request'
+        ipp = self._ipp_payload_info(payload, kind)
+        if not isinstance(ipp, dict):
+            return 'IPP'
+        if kind == 'request':
+            return f"IPP Request ({str(ipp.get('operation_name', '') or 'Unknown')})"
+
+        status_name = str(ipp.get('status_name', '') or 'unknown')
+        preliminary = str(meta.get('http_preliminary_status_line', '') or '').strip()
+        if preliminary:
+            return f'{preliminary} IPP Response ({status_name})'
+        return f'IPP Response ({status_name})'
+
+    def _lpd_info_text(self, packet, metadata: dict | None = None) -> str:
+        meta = metadata or {}
+        tcp = self._effective_tcp_layer(packet)
+        sport = int(getattr(tcp, 'sport', 0) or 0) if tcp is not None else 0
+        dport = int(getattr(tcp, 'dport', 0) or 0) if tcp is not None else 0
+        info = meta.get('lpd') if isinstance(meta.get('lpd'), dict) else self._lpd_payload_info(self._payload_bytes(packet), sport, dport)
+        if not isinstance(info, dict):
+            return 'Line Printer Daemon Protocol'
+        return str(info.get('summary', '') or 'Line Printer Daemon Protocol')
 
     def _smtp_payload_kind(self, payload: bytes) -> str | None:
         if not payload:
@@ -5273,16 +6146,47 @@ class PacketParser:
         pending_by_dir = http_state.setdefault('pending_by_dir', {})
         pending = pending_by_dir.get(dir_key)
 
-        candidate = bytes(payload)
+        current_seq = int(getattr(tcp_layer, 'seq', 0) or 0)
+        current_segment_by_seq = {
+            'frame_number': frame_number,
+            'seq': int(current_seq),
+            'payload': bytes(payload),
+        }
         if pending is not None:
-            candidate = bytes(pending.get('payload', b'')) + candidate
+            pending_segments_by_seq = list(pending.get('segments_by_seq', []) or [])
+            pending_segments_by_seq.append(current_segment_by_seq)
+            assembled = self._assemble_tcp_segments_by_sequence(
+                pending_segments_by_seq,
+                pending.get('base_seq', None),
+            )
+            candidate = bytes(assembled.get('payload', b'') or b'')
+            sequence_segments = list(assembled.get('segments', []) or [])
+            pending_base_seq = int(assembled.get('base_seq', current_seq) or current_seq)
+        else:
+            candidate = bytes(payload)
+            sequence_segments = [{
+                'frame_number': frame_number,
+                'seq': int(current_seq),
+                'payload_start': 0,
+                'payload_length': int(len(payload)),
+                'tcp_start_offset_in_payload': 0,
+            }]
+            pending_segments_by_seq = [current_segment_by_seq]
+            pending_base_seq = int(current_seq)
 
         length_info = self._http_message_length(candidate)
         if length_info is None:
             return
 
         kind, header_len, total_len, headers = length_info
-        segment_start = len(bytes(pending.get('payload', b''))) if pending is not None else 0
+        segment_start = 0
+        for segment in sequence_segments:
+            if (
+                int(segment.get('frame_number', 0) or 0) == frame_number
+                and int(segment.get('seq', -1) or -1) == current_seq
+            ):
+                segment_start = int(segment.get('payload_start', 0) or 0)
+                break
         current_segment = {
             'frame_number': frame_number,
             'payload_start': int(segment_start),
@@ -5290,12 +6194,12 @@ class PacketParser:
         }
 
         if header_len is None or total_len is None:
-            segments = list(pending.get('segments', [])) if pending is not None else []
-            segments.append(current_segment)
             pending_by_dir[dir_key] = {
                 'payload': candidate,
                 'kind': kind,
-                'segments': segments,
+                'segments': sequence_segments,
+                'segments_by_seq': pending_segments_by_seq,
+                'base_seq': int(pending_base_seq),
                 'start_epoch': float(pending.get('start_epoch', epoch_time) if pending is not None else epoch_time),
             }
             metadata['http_incomplete'] = True
@@ -5306,14 +6210,30 @@ class PacketParser:
         if current_segment['payload_length'] <= 0:
             current_segment['payload_length'] = int(len(payload))
 
-        segments = list(pending.get('segments', [])) if pending is not None else []
-        segments.append(current_segment)
+        segments = []
+        for segment in sequence_segments:
+            clipped_len = min(
+                int(segment.get('payload_length', 0) or 0),
+                max(0, int(total_len) - int(segment.get('payload_start', 0) or 0)),
+            )
+            if clipped_len <= 0:
+                continue
+            segments.append({
+                'frame_number': int(segment.get('frame_number', 0) or 0),
+                'payload_start': int(segment.get('payload_start', 0) or 0),
+                'payload_length': int(clipped_len),
+                'tcp_start_offset_in_payload': int(segment.get('tcp_start_offset_in_payload', 0) or 0),
+            })
+        if not segments:
+            segments.append(current_segment)
 
         if len(candidate) < total_len:
             pending_by_dir[dir_key] = {
                 'payload': candidate,
                 'kind': kind,
                 'segments': segments,
+                'segments_by_seq': pending_segments_by_seq,
+                'base_seq': int(pending_base_seq),
                 'header_len': int(header_len),
                 'expected_total_len': int(total_len),
                 'headers': headers,
@@ -5327,8 +6247,30 @@ class PacketParser:
             pending_by_dir.pop(dir_key, None)
 
         full_payload = candidate[:total_len]
+        payload_offset = 0
+        metadata.pop('http_preliminary_status_line', None)
+        metadata.pop('http_preliminary_payload', None)
+        metadata.pop('http_preliminary_length', None)
+        first_line = full_payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+        if kind == 'response' and first_line.startswith('HTTP/1.') and ' 100 ' in first_line and len(candidate) > total_len:
+            remaining = candidate[total_len:]
+            second_info = self._http_message_length(remaining)
+            if second_info is not None:
+                _, second_header_len, second_total_len, second_headers = second_info
+                if second_header_len is not None and second_total_len is not None and len(remaining) >= second_total_len:
+                    metadata['http_preliminary_status_line'] = first_line
+                    metadata['http_preliminary_payload'] = candidate[:total_len]
+                    metadata['http_preliminary_length'] = int(total_len)
+                    full_payload = remaining[:second_total_len]
+                    payload_offset = int(total_len)
+                    kind = 'response'
+                    header_len = int(second_header_len)
+                    total_len = int(second_total_len)
+                    headers = dict(second_headers)
+
         content_length = self._http_content_length(headers)
         content_type = str(headers.get('content-type', '') or '').split(';', 1)[0].strip()
+        transfer_encoding = str(headers.get('transfer-encoding', '') or '').strip().lower()
         body = full_payload[header_len:]
 
         metadata['http_kind'] = kind
@@ -5336,23 +6278,47 @@ class PacketParser:
         metadata['http_content_length'] = int(content_length)
         metadata['http_reassembled_payload'] = full_payload
         metadata['http_reassembled_length'] = int(total_len)
+        metadata['http_payload_offset'] = int(payload_offset)
         metadata['http_reassembled_segments'] = segments
         metadata['http_reassembled_segment_count'] = int(len(segments))
         metadata['http_body'] = body
         if content_type:
             metadata['http_content_type'] = content_type
+            if self._is_ipp_http(content_type):
+                http_state['app_protocol'] = 'IPP'
+            elif self._is_ocsp_http(content_type):
+                http_state['app_protocol'] = 'OCSP'
+            else:
+                http_state['app_protocol'] = 'HTTP'
+        if transfer_encoding:
+            metadata['http_transfer_encoding'] = transfer_encoding
         if content_type.startswith('text/') and body:
             metadata['http_has_line_based_text'] = True
+        if transfer_encoding == 'chunked':
+            chunked = self._decode_http_chunked_body(body)
+            if isinstance(chunked, dict):
+                chunks = list(chunked.get('chunks', []) or [])
+                dechunked_body = bytes(chunked.get('decoded_body', b'') or b'')
+                metadata['http_is_chunked'] = True
+                metadata['http_chunks'] = chunks
+                metadata['http_chunk_count'] = int(len(chunks))
+                metadata['http_chunked_raw_length'] = int(chunked.get('raw_length', len(body)) or len(body))
+                metadata['http_dechunked_body'] = dechunked_body
+                metadata['http_dechunked_body_length'] = int(len(dechunked_body))
         if len(segments) > 1:
             metadata['http_is_reassembled'] = True
+
+            # Keep prior TCP segments as TCP (reassembled in frame N).
+            # Do not relabel partial segments as application protocol.
+            segment_protocol = 'TCP'
 
             for segment in segments[:-1]:
                 segment_record = self._find_stream_record(state, int(segment.get('frame_number', 0) or 0))
                 if segment_record is None:
                     continue
                 segment_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
-                segment_record.protocol = 'TCP'
-                segment_record.info = self._build_info(segment_record.raw, 'TCP', segment_record.metadata)
+                segment_record.protocol = segment_protocol
+                segment_record.info = self._build_info(segment_record.raw, segment_protocol, segment_record.metadata)
 
             metadata['tcp_reassembled_segments'] = segments
             metadata['tcp_reassembled_length'] = int(total_len)
@@ -5636,40 +6602,86 @@ class PacketParser:
         if sport != 43:
             return
 
-        answer_data = bytes(context.get('answer_data', b'') or b'')
-        answer_segments = list(context.get('answer_segments', []) or [])
+        server_segments = list(context.get('answer_segments_by_seq', []) or [])
         if payload:
-            answer_segments.append({
+            raw_seq = int(getattr(tcp_layer, 'seq', 0) or 0)
+            base_seq = context.get('answer_base_seq', None)
+            if base_seq is None:
+                base_seq = raw_seq
+                context['answer_base_seq'] = raw_seq
+            cmp_start = int(self._tcp_seq_cmp(raw_seq, int(base_seq)))
+            if cmp_start < 0:
+                shift = -cmp_start
+                for seg in server_segments:
+                    seg['payload_start'] = int(seg.get('payload_start', 0) or 0) + shift
+                context['answer_base_seq'] = raw_seq
+                payload_start = 0
+            else:
+                payload_start = cmp_start
+            server_segments.append({
                 'frame_number': frame_number,
-                'payload_start': int(len(answer_data)),
+                'payload_start': int(payload_start),
+                'payload': bytes(payload),
                 'payload_length': int(len(payload)),
                 'tcp_start_offset_in_payload': 0,
             })
-            answer_data += bytes(payload)
-            context['answer_data'] = answer_data
-            context['answer_segments'] = answer_segments
+            context['answer_segments_by_seq'] = server_segments
 
-        if not has_fin:
+        if has_fin and payload:
+            context['answer_expected_length'] = int(max(0, payload_start + len(payload)))
+
+        expected_length = int(context.get('answer_expected_length', 0) or 0)
+        if expected_length <= 0:
             return
 
-        if not answer_segments:
-            answer_segments = [{
-                'frame_number': frame_number,
-                'payload_start': 0,
-                'payload_length': 0,
-                'tcp_start_offset_in_payload': 0,
-            }]
-        elif int(answer_segments[-1].get('frame_number', -1) or -1) != frame_number:
-            answer_segments.append({
-                'frame_number': frame_number,
-                'payload_start': int(len(answer_data)),
-                'payload_length': 0,
-                'tcp_start_offset_in_payload': 0,
+        sorted_segments = sorted(
+            server_segments,
+            key=lambda item: (int(item.get('payload_start', 0) or 0), int(item.get('frame_number', 0) or 0)),
+        )
+        if not sorted_segments:
+            return
+
+        merged_end = 0
+        for segment in sorted_segments:
+            start = int(segment.get('payload_start', 0) or 0)
+            seg_len = int(segment.get('payload_length', 0) or 0)
+            end = start + max(0, seg_len)
+            if start > merged_end:
+                return
+            if end > merged_end:
+                merged_end = end
+
+        if merged_end < expected_length:
+            return
+
+        assembled = bytearray(expected_length)
+        coverage = [False] * expected_length
+        normalized_segments: list[dict] = []
+        for segment in sorted_segments:
+            start = int(segment.get('payload_start', 0) or 0)
+            data = bytes(segment.get('payload', b'') or b'')
+            if start >= expected_length or not data:
+                continue
+            clip_end = min(expected_length, start + len(data))
+            clip_len = max(0, clip_end - start)
+            if clip_len <= 0:
+                continue
+            assembled[start:clip_end] = data[:clip_len]
+            for idx in range(start, clip_end):
+                coverage[idx] = True
+            normalized_segments.append({
+                'frame_number': int(segment.get('frame_number', 0) or 0),
+                'payload_start': start,
+                'payload_length': clip_len,
+                'tcp_start_offset_in_payload': int(segment.get('tcp_start_offset_in_payload', 0) or 0),
             })
 
-        metadata['tcp_reassembled_segments'] = answer_segments
-        metadata['tcp_reassembled_length'] = int(len(answer_data))
-        metadata['tcp_reassembled_data_hex'] = answer_data.hex()
+        if not all(coverage):
+            return
+
+        metadata['tcp_reassembled_segments'] = normalized_segments
+        metadata['tcp_reassembled_length'] = int(expected_length)
+        metadata['tcp_reassembled_data_hex'] = bytes(assembled).hex()
 
         query_text = str(context.get('query_text', '') or '').strip()
         if query_text:
@@ -5680,7 +6692,9 @@ class PacketParser:
             'answer': query_text,
         }
 
-        for segment in answer_segments[:-1]:
+        for segment in normalized_segments:
+            if int(segment.get('frame_number', 0) or 0) == frame_number:
+                continue
             segment_record = self._find_stream_record(state, int(segment.get('frame_number', 0) or 0))
             if segment_record is None:
                 continue
@@ -5689,6 +6703,10 @@ class PacketParser:
             segment_record.metadata['tcp_segment_data_offset'] = int(segment.get('tcp_start_offset_in_payload', 0) or 0)
             segment_record.protocol = 'TCP'
             segment_record.info = self._build_info(segment_record.raw, 'TCP', segment_record.metadata)
+
+        context['answer_segments_by_seq'] = []
+        context['answer_expected_length'] = 0
+        context['answer_base_seq'] = None
 
     def _ssh_list_split(self, text: str) -> list[str]:
         return [item.strip() for item in str(text or '').split(',') if item.strip()]
@@ -6744,6 +7762,123 @@ class PacketParser:
                     if answer_line:
                         return f'Answer: {answer_line}'
                 return 'WHOIS'
+            if protocol == 'CFLOW':
+                cflow_info = metadata.get('cflow') if isinstance(metadata.get('cflow'), dict) else self._cflow_payload_info(self._payload_bytes(packet))
+                if not isinstance(cflow_info, dict):
+                    return 'Cisco NetFlow/IPFIX'
+                version = int(cflow_info.get('version', 0) or 0)
+                count = int(cflow_info.get('count', 0) or 0)
+                source_id = int(cflow_info.get('source_id', 0) or 0)
+                flowsets = list(cflow_info.get('flowsets', []) or [])
+                flowset_tokens = []
+                for flowset in flowsets:
+                    set_id = int(flowset.get('id', 0) or 0)
+                    if set_id >= 256:
+                        flowset_tokens.append(f'[Data:{set_id}]')
+                extra = '' if not flowset_tokens else ' ' + ' '.join(flowset_tokens)
+                return f'total: {count} (v{version}) records Obs-Domain-ID={source_id:5d}{extra}'
+            if protocol == 'GRE':
+                if packet.haslayer(GRE):
+                    try:
+                        first_gre = packet.getlayer(GRE, 1)
+                        second_gre = packet.getlayer(GRE, 2)
+                        first_proto = int(getattr(first_gre, 'proto', 0) or 0) if first_gre is not None else 0
+                        second_proto = int(getattr(second_gre, 'proto', 0) or 0) if second_gre is not None else 0
+                        if second_proto == 0x0000:
+                            return 'Encapsulated Possible GRE keepalive packet'
+                        if first_proto == 0x86DD:
+                            return 'Encapsulated IPv6'
+                        if first_proto == 0x0800:
+                            return 'Encapsulated IP'
+                    except Exception:
+                        pass
+                return 'Generic Routing Encapsulation'
+            if protocol == 'TELNET':
+                tcp = self._effective_tcp_layer(packet)
+                sport = int(getattr(tcp, 'sport', 0) or 0) if tcp is not None else 0
+                dport = int(getattr(tcp, 'dport', 0) or 0) if tcp is not None else 0
+                telnet_info = metadata.get('telnet') if isinstance(metadata.get('telnet'), dict) else self._telnet_payload_info(self._payload_bytes(packet), sport, dport)
+                if not isinstance(telnet_info, dict):
+                    return 'Telnet'
+                text = str(telnet_info.get('info', '') or '').strip()
+                return text or 'Telnet'
+            if protocol == 'OCSP':
+                kind = str(metadata.get('http_kind', '') or '') or self._http_payload_kind(self._payload_bytes(packet))
+                return 'Request' if kind == 'request' else 'Response'
+            if protocol == 'IPP':
+                return self._ipp_info_text(packet, metadata)
+            if protocol == 'LPD':
+                return self._lpd_info_text(packet, metadata)
+            if protocol == 'FTP':
+                ftp_info = metadata.get('ftp') if isinstance(metadata.get('ftp'), dict) else None
+                if not isinstance(ftp_info, dict):
+                    tcp = self._effective_tcp_layer(packet)
+                    sport = int(getattr(tcp, 'sport', 0) or 0) if tcp is not None else 0
+                    dport = int(getattr(tcp, 'dport', 0) or 0) if tcp is not None else 0
+                    ftp_info = self._ftp_payload_info(self._payload_bytes(packet), sport, dport)
+                if isinstance(ftp_info, dict):
+                    if str(ftp_info.get('kind', '')) == 'response':
+                        code = int(ftp_info.get('code', 0) or 0)
+                        arg = str(ftp_info.get('arg', '') or '')
+                        return f'Response: {code} {arg}'.strip()
+                    command = str(ftp_info.get('command', '') or '')
+                    arg = str(ftp_info.get('arg', '') or '')
+                    return f'Request: {command} {arg}'.strip()
+                return 'File Transfer Protocol'
+            if protocol == 'FTP-DATA':
+                payload_len = len(self._payload_bytes(packet))
+                ftp_data = metadata.get('ftp_data') if isinstance(metadata.get('ftp_data'), dict) else {}
+                setup_method = str(ftp_data.get('setup_method', '') or '')
+                command = str(ftp_data.get('command', '') or '')
+                method_part = f' ({setup_method})' if setup_method else ''
+                command_part = f' ({command})' if command else ''
+                return f'FTP Data: {payload_len} bytes{method_part}{command_part}'.strip()
+            if protocol == 'BFD Control':
+                effective_ip = self._effective_ip_layer(packet)
+                udp = self._effective_udp_layer(packet, effective_ip)
+                payload = bytes(getattr(udp, 'payload', b'')) if udp is not None else b''
+                bfd_info = metadata.get('bfd') if isinstance(metadata.get('bfd'), dict) else self._bfd_control_payload_info(payload)
+                if isinstance(bfd_info, dict):
+                    diag = int(bfd_info.get('diag', 0) or 0)
+                    state = int(bfd_info.get('state', 0) or 0)
+                    flags = int(bfd_info.get('flags', 0) or 0)
+                    diag_text = {
+                        0: 'No Diagnostic',
+                        1: 'Control Detection Time Expired',
+                        2: 'Echo Function Failed',
+                        3: 'Neighbor Signaled Session Down',
+                        4: 'Forwarding Plane Reset',
+                        5: 'Path Down',
+                        6: 'Concatenated Path Down',
+                        7: 'Administratively Down',
+                        8: 'Reverse Concatenated Path Down',
+                    }.get(diag, f'Unknown ({diag})')
+                    state_text = {
+                        0: 'AdminDown',
+                        1: 'Down',
+                        2: 'Init',
+                        3: 'Up',
+                    }.get(state, f'Unknown ({state})')
+                    return f'Diag: {diag_text}, State: {state_text}, Flags: 0x{flags:02x}'
+                return 'BFD Control message'
+            if protocol == 'BFD Echo':
+                return 'Originator specific content'
+            if protocol == 'ISIS CSNP':
+                isis_info = metadata.get('isis') if isinstance(metadata.get('isis'), dict) else self._isis_payload_info(packet)
+                if not isinstance(isis_info, dict):
+                    return 'ISIS CSNP'
+                source = str(isis_info.get('source_id', '') or '')
+                circuit = int(isis_info.get('source_id_circuit', 0) or 0)
+                start_lsp = str(isis_info.get('start_lsp_id', '') or '')
+                end_lsp = str(isis_info.get('end_lsp_id', '') or '')
+                return f'L2 CSNP, Source-ID: {source}.{circuit:02x}, Start LSP-ID: {start_lsp}, End LSP-ID: {end_lsp}'
+            if protocol == 'ISIS HELLO':
+                isis_info = metadata.get('isis') if isinstance(metadata.get('isis'), dict) else self._isis_payload_info(packet)
+                if not isinstance(isis_info, dict):
+                    return 'ISIS HELLO'
+                level = str(isis_info.get('level', 'L1') or 'L1')
+                system_id = str(isis_info.get('system_id', '') or '')
+                return f'{level} HELLO, System-ID: {system_id}'
             if protocol == 'DHCPv6':
                 return self._dhcpv6_info_text(packet) or 'DHCPv6'
             if protocol == 'DHCP':
@@ -6880,6 +8015,8 @@ class PacketParser:
                     dup_frame = int(metadata.get('tcp_duplicate_ack_frame_number', 0) or 0)
                     dup_count = int(metadata.get('tcp_duplicate_ack_count', 1) or 1)
                     prefix = f'[TCP Dup ACK {dup_frame}#{dup_count}] '
+                elif bool(metadata.get('tcp_is_window_full', False)):
+                    prefix = '[TCP Window Full] '
                 elif bool(metadata.get('tcp_is_window_update', False)):
                     prefix = '[TCP Window Update] '
                 elif bool(metadata.get('tcp_is_keep_alive_ack', False)):
@@ -6904,7 +8041,7 @@ class PacketParser:
                 reassembled_pdu_frame = metadata.get('tcp_reassembled_pdu_in_frame', None)
                 if reassembled_pdu_frame is not None:
                     parts.append(f'[TCP PDU reassembled in {int(reassembled_pdu_frame)}]')
-                parts.extend(self._tcp_info_options(tcp))
+                parts.extend(self._tcp_info_options(tcp, metadata))
                 return ' '.join(parts)
             if protocol == 'UDP':
                 udp = self._effective_udp_layer(packet)

@@ -9,7 +9,7 @@ from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment, in6_chksum
-from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP
+from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP, GRE
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 from scapy.layers.tls.record import TLSApplicationData
@@ -465,6 +465,16 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         _frame_section(record)
     )
 
+    has_fpp = bool(
+        metadata.get('frame_has_fpp', False)
+        or bool(getattr(packet, 'fpp_preamble', b''))
+        or packet.haslayer('MPacketPreamble')
+    )
+    if has_fpp:
+        fpp_section, fpp_header_len = _fpp_section(packet, offset)
+        sections.append(fpp_section)
+        offset += int(fpp_header_len)
+
     if packet.haslayer(Dot3):
         padding_hex, padding_len, padding_offset, fcs_hex, fcs_offset = _infer_padding(packet, record)
 
@@ -659,6 +669,43 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += ip_len
 
+        if packet.haslayer(GRE):
+            raw_packet = bytes(packet)
+            first_gre = None
+            second_gre = None
+            try:
+                first_gre = packet.getlayer(GRE, 1)
+            except Exception:
+                first_gre = None
+            try:
+                second_gre = packet.getlayer(GRE, 2)
+            except Exception:
+                second_gre = None
+
+            first_gre_len = _gre_header_length(raw_packet, offset)
+            if first_gre is not None and first_gre_len > 0:
+                sections.append(_gre_section(raw_packet, offset))
+                first_proto = int(getattr(first_gre, 'proto', 0) or 0)
+                offset += first_gre_len
+
+                if first_proto == 0x0800:
+                    try:
+                        inner_ip = packet.getlayer(IP, 2)
+                    except Exception:
+                        inner_ip = None
+                    if inner_ip is not None:
+                        inner_ip_len = int(getattr(inner_ip, 'ihl', 5) or 5) * 4
+                        sections.append(_ip_section(inner_ip, offset, ip_stream_index, record=record))
+                        offset += inner_ip_len
+
+                if second_gre is not None:
+                    second_gre_len = _gre_header_length(raw_packet, offset)
+                    if second_gre_len > 0:
+                        second_proto = int(getattr(second_gre, 'proto', 0) or 0)
+                        suffix = 'Possible GRE keepalive packet' if second_proto == 0 else ''
+                        sections.append(_gre_section(raw_packet, offset, suffix))
+                        offset += second_gre_len
+
     if packet.haslayer(IPv6):
 
         ipv6_section = _ipv6_section(
@@ -780,14 +827,55 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'LDP' and tcp_payload:
             sections.append(_ldp_section(tcp_payload, offset))
             payload_handled = True
-        elif getattr(record, 'protocol', '') in {'HTTP', 'HTTP/XML'} and tcp_payload:
-            sections.append(_http_section(tcp_payload, offset, record))
+        elif getattr(record, 'protocol', '') == 'FTP' and tcp_payload:
+            sections.append(_ftp_section(tcp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'FTP-DATA' and tcp_payload:
+            sections.append(_ftp_data_section(tcp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') in {'HTTP', 'HTTP/XML', 'OCSP', 'IPP'} and tcp_payload:
+            protocol_name = str(getattr(record, 'protocol', '') or '')
+            http_kind = str(metadata.get('http_kind', '') or '').strip()
+            http_header_len = metadata.get('http_header_len', None)
+            http_incomplete = bool(metadata.get('http_incomplete', False))
+            first_line = tcp_payload.split(b'\r\n', 1)[0].upper() if tcp_payload else b''
+            looks_http = (
+                first_line.startswith(b'HTTP/')
+                or first_line.startswith(b'GET ')
+                or first_line.startswith(b'POST ')
+                or first_line.startswith(b'PUT ')
+                or first_line.startswith(b'DELETE ')
+                or first_line.startswith(b'HEAD ')
+                or first_line.startswith(b'OPTIONS ')
+                or first_line.startswith(b'PATCH ')
+            )
+
+            emit_http = True
+            if protocol_name in {'OCSP', 'IPP'}:
+                # For OCSP/IPP, avoid rendering a misleading HTTP block when this frame
+                # only carries mid-stream payload and no parseable HTTP header.
+                if not looks_http and (not http_kind or (http_incomplete and http_header_len in {None, 0})):
+                    emit_http = False
+
+            if emit_http:
+                preliminary = _http_preliminary_section(record, offset)
+                if preliminary is not None:
+                    sections.append(preliminary)
+                sections.append(_http_section(tcp_payload, offset, record))
             if bool(metadata.get('http_has_line_based_text', False)):
                 sections.append(_http_line_based_text_section(record, offset))
             if getattr(record, 'protocol', '') == 'HTTP/XML':
                 xml_section = _xml_body_section(record, offset)
                 if xml_section is not None:
                     sections.append(xml_section)
+            elif getattr(record, 'protocol', '') == 'OCSP':
+                ocsp_section = _ocsp_section(record, offset)
+                if ocsp_section is not None:
+                    sections.append(ocsp_section)
+            elif getattr(record, 'protocol', '') == 'IPP':
+                ipp_section = _ipp_section(record, offset)
+                if ipp_section is not None:
+                    sections.append(ipp_section)
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'RIPng' and tcp_payload == b'':
             udp_payload = bytes(getattr(effective_udp_layer, 'payload', b'')) if effective_udp_layer is not None else b''
@@ -808,14 +896,14 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'WHOIS':
             whois_payload = tcp_payload
             whois_uses_reassembled = False
-            if not whois_payload:
-                reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
-                if reassembled_hex:
-                    try:
-                        whois_payload = bytes.fromhex(reassembled_hex)
-                        whois_uses_reassembled = True
-                    except Exception:
-                        whois_payload = b''
+            reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+            if reassembled_hex:
+                try:
+                    whois_payload = bytes.fromhex(reassembled_hex)
+                    whois_uses_reassembled = True
+                except Exception:
+                    whois_payload = tcp_payload
+                    whois_uses_reassembled = False
             if not whois_payload:
                 query_value = str(metadata.get('whois_query_value', '') or '')
                 if query_value:
@@ -827,6 +915,12 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                     _tag_byte_source(whois_section, TCP_REASSEMBLED_BYTE_SOURCE)
                 sections.append(whois_section)
                 payload_handled = True
+        elif getattr(record, 'protocol', '') == 'TELNET' and tcp_payload:
+            sections.append(_telnet_section(tcp_payload, offset))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'LPD' and tcp_payload:
+            sections.append(_lpd_section(tcp_payload, offset, record))
+            payload_handled = True
         elif getattr(record, 'protocol', '') == 'SSHv2' and tcp_payload:
             sections.append(_ssh_section(tcp_payload, offset, record))
             payload_handled = True
@@ -897,6 +991,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             snmp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_snmp_section(snmp_payload, offset, record))
             payload_handled = True
+        elif getattr(record, 'protocol', '') == 'CFLOW':
+            cflow_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_cflow_section(cflow_payload, offset))
+            payload_handled = True
         elif getattr(record, 'protocol', '') in {'SIP', 'SIP/SDP'}:
             sip_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_sip_section(sip_payload, offset, record))
@@ -908,6 +1006,14 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'ISAKMP':
             isakmp_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_isakmp_section(isakmp_payload, offset))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'BFD Control':
+            bfd_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_bfd_control_section(bfd_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'BFD Echo':
+            bfd_echo_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_bfd_echo_section(bfd_echo_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'HSRPv2':
             hsrp_payload = _udp_payload_bytes(packet, udp_layer)
@@ -989,6 +1095,13 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_vtp_section(vtp_payload, offset))
             payload_handled = True
 
+    if getattr(record, 'protocol', '') in {'ISIS CSNP', 'ISIS HELLO'}:
+        isis_payload = bytes(packet[LLC].payload) if packet.haslayer(LLC) else b''
+        if isis_payload:
+            isis_sections = _isis_sections(isis_payload, offset, record)
+            sections.extend(isis_sections)
+            payload_handled = True
+
     if packet.haslayer(DNS) and not is_first_fragment:
 
         dns_layer = packet[DNS]
@@ -1060,7 +1173,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
     )
 
     if (
-        getattr(record, 'protocol', '') != 'HTTP'
+        getattr(record, 'protocol', '') not in {'HTTP', 'HTTP/XML', 'OCSP', 'IPP'}
         and not suppress_http_fallback
         and packet.haslayer(HTTPRequest)
     ):
@@ -1079,7 +1192,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         offset += len(http_layer)
 
     if (
-        getattr(record, 'protocol', '') != 'HTTP'
+        getattr(record, 'protocol', '') not in {'HTTP', 'HTTP/XML', 'OCSP', 'IPP'}
         and not suppress_http_fallback
         and packet.haslayer(HTTPResponse)
     ):
@@ -1225,6 +1338,12 @@ def _frame_section(record) -> Dict[str, Any]:
             protocol = 'CAPWAP-Data'
 
     layers = getattr(record, 'layers', [])
+    has_fpp = bool(
+        metadata.get('frame_has_fpp', False)
+        or bool(getattr(getattr(record, 'raw', None), 'fpp_preamble', b''))
+        or (getattr(record, 'raw', None).haslayer('MPacketPreamble') if getattr(record, 'raw', None) is not None else False)
+    )
+    frame_linktype = int(metadata.get('frame_linktype', 1) or 1)
 
     # ---- PROTOCOL STACK ----
 
@@ -1269,6 +1388,8 @@ def _frame_section(record) -> Dict[str, Any]:
 
         else:
             protocol_stack.append(lname)
+
+    has_gre = 'gre' in protocol_stack
 
     if (
         'eth' in protocol_stack
@@ -1352,6 +1473,16 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ipv6:ipv6.hopopts:icmpv6' if has_hopopts else 'eth:ethertype:ipv6:icmpv6'
     elif protocol == 'HTTP':
         protocol_string = 'eth:ethertype:ip:tcp:http:data-text-lines' if bool(metadata.get('http_has_line_based_text', False)) else 'eth:ethertype:ip:tcp:http'
+    elif protocol == 'FTP':
+        protocol_string = 'eth:ethertype:ipv6:tcp:ftp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:ftp'
+    elif protocol == 'FTP-DATA':
+        base = 'eth:ethertype:ipv6:tcp:ftp-data' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:ftp-data'
+        protocol_string = f'{base}:data-text-lines'
+    elif protocol == 'OCSP':
+        protocol_string = 'eth:ethertype:ipv6:tcp:http:ocsp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:http:ocsp'
+    elif protocol == 'IPP':
+        base = 'eth:ethertype:ipv6:tcp:http:ipp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:http:ipp'
+        protocol_string = f'{base}:data' if bool(metadata.get('http_is_chunked', False)) else base
     elif protocol == 'IMAP':
         if eth_type == 0x8100:
             protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:imap' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:imap'
@@ -1362,6 +1493,22 @@ def _frame_section(record) -> Dict[str, Any]:
             protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:whois' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:whois'
         else:
             protocol_string = 'eth:ethertype:ipv6:tcp:whois' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:whois'
+    elif protocol == 'TELNET':
+        protocol_string = 'eth:ethertype:ip:gre:ipv6:tcp:telnet' if has_gre else ('eth:ethertype:ipv6:tcp:telnet' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:telnet')
+    elif protocol == 'LPD':
+        protocol_string = 'eth:ethertype:ip:tcp:lpd'
+    elif protocol == 'GRE':
+        protocol_string = 'eth:ethertype:ip:gre:ip:gre'
+    elif protocol == 'CFLOW':
+        protocol_string = 'eth:ethertype:ipv6:udp:cflow' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:udp:cflow'
+    elif protocol == 'BFD Control':
+        protocol_string = 'eth:ethertype:ipv6:udp:bfd' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:udp:bfd'
+    elif protocol == 'BFD Echo':
+        protocol_string = 'eth:ethertype:ipv6:udp:bfd_echo' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:udp:bfd_echo'
+    elif protocol == 'ISIS CSNP':
+        protocol_string = 'eth:llc:osi:isis:isis.csnp'
+    elif protocol == 'ISIS HELLO':
+        protocol_string = 'eth:llc:osi:isis:isis.hello'
     elif protocol == 'SMTP':
         transport_prefix = 'eth:ethertype:vlan:ethertype:ipv6:tcp' if eth_type == 0x8100 and bool(metadata.get('is_ipv6', False)) else (
             'eth:ethertype:vlan:ethertype:ip:tcp' if eth_type == 0x8100 else (
@@ -1410,6 +1557,9 @@ def _frame_section(record) -> Dict[str, Any]:
     else:
         protocol_string = ':'.join(protocol_stack)
 
+    if has_fpp and protocol_string and not protocol_string.startswith('fpp:'):
+        protocol_string = f'fpp:{protocol_string}'
+
     coloring_name = protocol
     coloring_string = protocol.lower()
     include_coloring = True
@@ -1422,9 +1572,15 @@ def _frame_section(record) -> Dict[str, Any]:
     ):
         coloring_name = 'HTTP'
         coloring_string = 'http || tcp.port == 80 || http2'
-    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP', 'WHOIS'}:
+    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP', 'WHOIS', 'TELNET', 'LPD'}:
         coloring_name = 'TCP'
         coloring_string = 'tcp'
+    elif protocol in {'HTTP', 'OCSP', 'IPP'} and (
+        int(getattr(record, 'sport', 0) or 0) in {80, 3128, 8080, 631}
+        or int(getattr(record, 'dport', 0) or 0) in {80, 3128, 8080, 631}
+    ):
+        coloring_name = 'HTTP'
+        coloring_string = 'http || tcp.port == 80 || http2'
     elif protocol == 'LDP':
         if metadata.get('tcp_stream_index', None) is not None and int(metadata.get('tcp_stream_index', -1)) >= 0:
             coloring_name = 'TCP'
@@ -1441,9 +1597,12 @@ def _frame_section(record) -> Dict[str, Any]:
     elif protocol in {'OSPF', 'CDP', 'BGP', 'HSRPv2', 'EIGRP'}:
         coloring_name = 'Routing'
         coloring_string = 'hsrp || eigrp || ospf || bgp || cdp || vrrp || carp || gvrp || igmp || ismp'
-    elif protocol in {'RIPng', 'RIPv2', 'Syslog', 'NTP', 'SNMP', 'SIP', 'SIP/SDP', 'RTP'}:
+    elif protocol in {'RIPng', 'RIPv2', 'Syslog', 'NTP', 'SNMP', 'SIP', 'SIP/SDP', 'RTP', 'CFLOW'}:
         coloring_name = 'UDP'
         coloring_string = 'udp'
+    elif protocol == 'GRE':
+        coloring_name = 'Routing'
+        coloring_string = 'gre'
     elif protocol in {'STP', 'LLDP', 'UDLD', 'LACP', 'VTP', 'DTP', '0x6002'}:
         coloring_name = 'Broadcast'
         coloring_string = 'eth[0] & 1'
@@ -1459,6 +1618,10 @@ def _frame_section(record) -> Dict[str, Any]:
         coloring_string = 'tcp.analysis.flags && !tcp.analysis.window_update && !tcp.analysis.keep_alive && !tcp.analysis.keep_alive_ack'
     elif protocol in {'LOOP', 'L2TPv3', 'L2TPV3'}:
         include_coloring = False
+
+    encapsulation_title = 'Encapsulation type: Ethernet (1)'
+    if has_fpp or frame_linktype in {44, 198, 274}:
+        encapsulation_title = 'Encapsulation type: IEEE 802.3br mPackets (198)'
 
     children = [
 
@@ -1485,7 +1648,7 @@ def _frame_section(record) -> Dict[str, Any]:
 
         {
             'title':
-                'Encapsulation type: Ethernet (1)'
+                encapsulation_title
         },
 
         {
@@ -5530,6 +5693,61 @@ def _http_status_description(code: str) -> str:
     }.get(str(code), '')
 
 
+def _http_preliminary_section(record, offset: int) -> Dict[str, Any] | None:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    prelim_payload = bytes(metadata.get('http_preliminary_payload', b'') or b'')
+    prelim_len = int(metadata.get('http_preliminary_length', 0) or 0)
+    if not prelim_payload or prelim_len <= 0:
+        return None
+    use_offsets = not bool(metadata.get('http_is_reassembled', False))
+    byte_source = PACKET_BYTE_SOURCE if use_offsets else TCP_REASSEMBLED_BYTE_SOURCE
+    lines = _http_payload_lines(prelim_payload)
+    children: List[Dict[str, Any]] = []
+
+    def _map(rel: int, length: int) -> Dict[str, Any]:
+        return _byte_mapping(offset, int(rel), int(max(1, length)), byte_source)
+
+    if lines:
+        first_text, first_offset, first_length, first_raw = lines[0]
+        first_line = first_raw.decode(errors='ignore')
+        parts = first_line.split(' ', 2) if first_line.startswith('HTTP/') else []
+        response_children: List[Dict[str, Any]] = []
+        if len(parts) >= 2:
+            version = parts[0]
+            status_code = parts[1]
+            reason = parts[2] if len(parts) > 2 else ''
+            response_children.append({'title': f'Response Version: {version}', **_map(first_offset, len(version))})
+            response_children.append({'title': f'Status Code: {status_code}', **_map(first_offset + len(version) + 1, len(status_code))})
+            description = _http_status_description(status_code)
+            if description:
+                response_children.append({'title': f'[Status Code Description: {description}]'})
+            if reason:
+                response_children.append({'title': f'Response Phrase: {reason}', **_map(first_offset + len(version) + 1 + len(status_code) + 1, len(reason))})
+        children.append({'title': first_text, **_map(first_offset, first_length), 'children': response_children})
+        for line_text, line_offset, line_length, line_raw in lines[1:]:
+            title = line_text if line_raw != b'' else '\\r\\n'
+            children.append({'title': title, **_map(line_offset, line_length)})
+
+    request_frame = metadata.get('http_request_frame', None)
+    if request_frame is not None:
+        children.append({'title': f'[Request in frame: {int(request_frame)}]'})
+    time_since_request = metadata.get('http_time_since_request_ms', None)
+    if time_since_request is not None:
+        children.append({'title': f'[Time since request: {float(time_since_request):.6f} milliseconds]'})
+    request_uri = str(metadata.get('http_request_uri', '') or '').strip()
+    if request_uri:
+        children.append({'title': f'[Request URI: {request_uri}]'})
+    full_request_uri = metadata.get('http_full_request_uri', '')
+    if full_request_uri:
+        children.append({'title': f'[Full request URI: {full_request_uri}]'})
+
+    return {
+        'title': 'Hypertext Transfer Protocol',
+        **_map(0, prelim_len),
+        'children': children,
+    }
+
+
 def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     metadata = getattr(record, 'metadata', {}) if record else {}
     http_payload = metadata.get('http_reassembled_payload', payload)
@@ -5538,6 +5756,10 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     use_offsets = not bool(metadata.get('http_is_reassembled', False))
     byte_source = PACKET_BYTE_SOURCE if use_offsets else TCP_REASSEMBLED_BYTE_SOURCE
     header_length = int(metadata.get('http_header_len', 0) or 0)
+    payload_offset = int(metadata.get('http_payload_offset', 0) or 0)
+
+    def _map(rel: int, length: int) -> Dict[str, Any]:
+        return _byte_mapping(offset, payload_offset + int(rel), int(max(1, length)), byte_source)
 
     if lines:
         first_text, first_offset, first_length, first_raw = lines[0]
@@ -5552,11 +5774,11 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 response_children = [
                     {
                         'title': f'Response Version: {version}',
-                        **_byte_mapping(offset, first_offset, len(version), byte_source),
+                        **_map(first_offset, len(version)),
                     },
                     {
                         'title': f'Status Code: {status_code}',
-                        **_byte_mapping(offset, first_offset + len(version) + 1, len(status_code), byte_source),
+                        **_map(first_offset + len(version) + 1, len(status_code)),
                     },
                 ]
                 description = _http_status_description(status_code)
@@ -5565,16 +5787,11 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 if reason:
                     response_children.append({
                         'title': f'Response Phrase: {reason}',
-                        **_byte_mapping(
-                            offset,
-                            first_offset + len(version) + 1 + len(status_code) + 1,
-                            len(reason),
-                            byte_source,
-                        ),
+                        **_map(first_offset + len(version) + 1 + len(status_code) + 1, len(reason)),
                     })
             children.append({
                 'title': first_text,
-                **_byte_mapping(offset, first_offset, first_length, byte_source),
+                **_map(first_offset, first_length),
                 'children': response_children,
             })
         else:
@@ -5588,25 +5805,20 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 request_children = [
                     {
                         'title': f'Request Method: {method}',
-                        **_byte_mapping(offset, first_offset, method_len, byte_source),
+                        **_map(first_offset, method_len),
                     },
                     {
                         'title': f'Request URI: {uri}',
-                        **_byte_mapping(offset, first_offset + method_len + 1, uri_len, byte_source),
+                        **_map(first_offset + method_len + 1, uri_len),
                     },
                     {
                         'title': f'Request Version: {version}',
-                        **_byte_mapping(
-                            offset,
-                            first_offset + method_len + 1 + uri_len + 1,
-                            version_len,
-                            byte_source,
-                        ),
+                        **_map(first_offset + method_len + 1 + uri_len + 1, version_len),
                     },
                 ]
             children.append({
                 'title': first_text,
-                **_byte_mapping(offset, first_offset, first_length, byte_source),
+                **_map(first_offset, first_length),
                 'children': request_children,
             })
 
@@ -5614,7 +5826,7 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             title = line_text if line_raw != b'' else '\\r\\n'
             item = {
                 'title': title,
-                **_byte_mapping(offset, line_offset, line_length, byte_source),
+                **_map(line_offset, line_length),
             }
             if line_raw.lower().startswith(b'content-length:'):
                 try:
@@ -5624,7 +5836,7 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                         value_offset += 1
                     item['children'] = [{
                         'title': f'[Content length: {content_length}]',
-                        **_byte_mapping(offset, line_offset + value_offset, len(line_raw) - value_offset, byte_source),
+                        **_map(line_offset + value_offset, len(line_raw) - value_offset),
                     }]
                 except Exception:
                     pass
@@ -5653,16 +5865,80 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     content_length = metadata.get('http_content_length', None)
     if content_length is not None and int(content_length) > 0:
         body = bytes(metadata.get('http_body', b'') or b'')
-        body_offset = int(metadata.get('http_header_len', 0) or 0)
+        body_offset = int(metadata.get('http_header_len', 0) or 0) + payload_offset
         body_len = len(body) if body else int(content_length)
         children.append({
             'title': f'File Data: {int(content_length)} bytes',
             **_byte_mapping(offset, body_offset, body_len, byte_source),
         })
 
+    if bool(metadata.get('http_is_chunked', False)):
+        chunks = list(metadata.get('http_chunks', []) or [])
+        body_offset_rel = int(metadata.get('http_header_len', 0) or 0)
+        body_offset = body_offset_rel + payload_offset
+        chunk_children: List[Dict[str, Any]] = []
+        for chunk in chunks:
+            chunk_size = int(chunk.get('size', 0) or 0)
+            size_offset = int(chunk.get('size_offset', 0) or 0)
+            size_len = int(chunk.get('size_length', 0) or 0)
+            data_offset = int(chunk.get('data_offset', 0) or 0)
+            data_len = int(chunk.get('data_length', 0) or 0)
+            boundary_offset = int(chunk.get('boundary_offset', 0) or 0)
+            boundary_len = int(chunk.get('boundary_length', 2) or 2)
+
+            if chunk_size == 0:
+                chunk_children.append({
+                    'title': 'End of chunked encoding',
+                    **_byte_mapping(offset, body_offset + size_offset, max(1, size_len), byte_source),
+                    'children': [
+                        {
+                            'title': 'Chunk size: 0 octets',
+                            **_byte_mapping(offset, body_offset + size_offset, max(1, size_len), byte_source),
+                        }
+                    ],
+                })
+                continue
+
+            chunk_children.append({
+                'title': f'Data chunk ({chunk_size} octets)',
+                **_byte_mapping(offset, body_offset + size_offset, max(1, data_len + size_len + boundary_len), byte_source),
+                'children': [
+                    {
+                        'title': f'Chunk size: {chunk_size} octets',
+                        **_byte_mapping(offset, body_offset + size_offset, max(1, size_len), byte_source),
+                    },
+                    {
+                        'title': f'Chunk data […]: {http_payload[body_offset_rel + data_offset:body_offset_rel + data_offset + min(data_len, 120)].hex()}',
+                        **_byte_mapping(offset, body_offset + data_offset, max(1, data_len), byte_source),
+                    },
+                    {
+                        'title': 'Chunk boundary: 0d0a',
+                        **_byte_mapping(offset, body_offset + boundary_offset, max(1, boundary_len), byte_source),
+                    },
+                ],
+            })
+
+        children.append({
+            'title': 'HTTP chunked response',
+            **_byte_mapping(offset, body_offset, len(bytes(metadata.get('http_body', b'') or b'')), byte_source),
+            'children': chunk_children,
+        })
+
+        dechunked_len = int(metadata.get('http_dechunked_body_length', 0) or 0)
+        if dechunked_len > 0:
+            children.append({
+                'title': f'File Data: {dechunked_len} bytes',
+                **_byte_mapping(0, 0, dechunked_len, 'http_dechunked'),
+            })
+
+    title = 'Hypertext Transfer Protocol'
+    if bool(metadata.get('http_is_chunked', False)):
+        chunk_count = int(metadata.get('http_chunk_count', 0) or 0)
+        if chunk_count > 0:
+            title = f'Hypertext Transfer Protocol, has {chunk_count} chunks (including last chunk)'
     return {
-        'title': 'Hypertext Transfer Protocol',
-        **_byte_mapping(offset, 0, header_length or len(http_payload), byte_source),
+        'title': title,
+        **_byte_mapping(offset, payload_offset, header_length or len(http_payload), byte_source),
         'children': children,
     }
 
@@ -5672,7 +5948,7 @@ def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
     content_type = str(metadata.get('http_content_type', '') or '').strip() or 'text/plain'
     body = bytes(metadata.get('http_body', b'') or b'')
     byte_source = PACKET_BYTE_SOURCE if not bool(metadata.get('http_is_reassembled', False)) else TCP_REASSEMBLED_BYTE_SOURCE
-    body_offset = int(metadata.get('http_header_len', 0) or 0)
+    body_offset = int(metadata.get('http_header_len', 0) or 0) + int(metadata.get('http_payload_offset', 0) or 0)
     lines = []
     cursor = 0
     for raw_line in body.splitlines(keepends=True):
@@ -5688,6 +5964,1262 @@ def _http_line_based_text_section(record, offset: int) -> Dict[str, Any]:
         **_byte_mapping(offset, body_offset, len(body), byte_source),
         'children': lines,
     }
+
+
+def _asn1_read_tlv(data: bytes, cursor: int) -> tuple[int, int, int, int] | None:
+    if cursor + 2 > len(data):
+        return None
+    tag = int(data[cursor])
+    len_octet = int(data[cursor + 1])
+    if (len_octet & 0x80) == 0:
+        length = len_octet
+        header_len = 2
+    else:
+        count = int(len_octet & 0x7F)
+        if count <= 0 or cursor + 2 + count > len(data):
+            return None
+        length = int.from_bytes(data[cursor + 2:cursor + 2 + count], 'big')
+        header_len = 2 + count
+    value_start = cursor + header_len
+    value_end = value_start + length
+    if value_end > len(data):
+        return None
+    return tag, value_start, value_end, value_end
+
+
+def _asn1_oid_text(value_bytes: bytes) -> str:
+    if not value_bytes:
+        return ''
+    first = int(value_bytes[0])
+    arcs = [str(first // 40), str(first % 40)]
+    acc = 0
+    for b in value_bytes[1:]:
+        acc = (acc << 7) | int(b & 0x7F)
+        if (b & 0x80) == 0:
+            arcs.append(str(acc))
+            acc = 0
+    return '.'.join(arcs)
+
+
+def _ocsp_oid_name(oid: str) -> str:
+    mapping = {
+        '1.3.6.1.5.5.7.48.1.1': 'id-pkix-ocsp-basic',
+        '1.3.14.3.2.26': 'SHA-1',
+        '1.2.840.113549.1.1.11': 'sha256WithRSAEncryption',
+    }
+    name = mapping.get(str(oid), '')
+    return f'{oid} ({name})' if name else oid
+
+
+def _ocsp_oid_label(oid: str) -> str:
+    mapping = {
+        '1.3.6.1.5.5.7.48.1.1': 'id-pkix-ocsp-basic',
+        '1.3.14.3.2.26': 'SHA-1',
+        '1.2.840.113549.1.1.11': 'sha256WithRSAEncryption',
+        '2.5.4.6': 'id-at-countryName',
+        '2.5.4.10': 'id-at-organizationName',
+        '2.5.4.3': 'id-at-commonName',
+    }
+    return mapping.get(str(oid), str(oid))
+
+
+def _ocsp_format_time(raw: bytes) -> str:
+    try:
+        text = raw.decode(errors='ignore').strip()
+        if len(text) >= 15 and text.endswith('Z'):
+            dt = datetime.strptime(text[:15], '%Y%m%d%H%M%SZ').replace(tzinfo=timezone.utc).astimezone()
+            return dt.strftime('%b %d, %Y %H:%M:%S.%f %Z')
+    except Exception:
+        pass
+    return raw.decode(errors='ignore')
+
+
+def _ocsp_section(record, offset: int) -> Dict[str, Any] | None:
+    metadata = getattr(record, 'metadata', {}) or {}
+    body = bytes(metadata.get('http_body', b'') or b'')
+    if not body:
+        return None
+    byte_source = PACKET_BYTE_SOURCE if not bool(metadata.get('http_is_reassembled', False)) else TCP_REASSEMBLED_BYTE_SOURCE
+    body_offset = int(metadata.get('http_header_len', 0) or 0) + int(metadata.get('http_payload_offset', 0) or 0)
+
+    def _map(start: int, length: int) -> Dict[str, Any]:
+        return _byte_mapping(offset, body_offset + int(start), int(max(1, length)), byte_source)
+
+    def _map_tlv(tlv: tuple[int, int, int, int] | None, start_override: int | None = None) -> Dict[str, Any]:
+        if tlv is None:
+            return {}
+        start = int(start_override) if start_override is not None else int(tlv[1]) - 2
+        end = int(tlv[2])
+        return _map(start, max(1, end - start))
+
+    root = _asn1_read_tlv(body, 0)
+    if root is None or int(root[0]) != 0x30:
+        return {
+            'title': 'Online Certificate Status Protocol',
+            **_map(0, len(body)),
+            'children': [{'title': f'Data ({len(body)} bytes)', **_map(0, len(body))}],
+        }
+
+    children: List[Dict[str, Any]] = []
+    cursor = int(root[1])
+    root_end = int(root[2])
+    is_response = False
+
+    status_tlv = _asn1_read_tlv(body, cursor)
+    if status_tlv is not None and int(status_tlv[0]) == 0x0A:
+        is_response = True
+        status_val = int(body[int(status_tlv[1])]) if int(status_tlv[1]) < int(status_tlv[2]) else 0
+        status_text = 'successful (0)' if status_val == 0 else f'{status_val}'
+        children.append({'title': f'responseStatus: {status_text}', **_map(int(status_tlv[1]), int(status_tlv[2]) - int(status_tlv[1]))})
+        cursor = int(status_tlv[3])
+
+    if not is_response:
+        tbs = _asn1_read_tlv(body, cursor)
+        if tbs is not None and int(tbs[0]) == 0x30:
+            tbs_children: List[Dict[str, Any]] = []
+            tcur = int(tbs[1])
+            if tcur < int(tbs[2]) and int(body[tcur]) == 0xA0:
+                version = _asn1_read_tlv(body, tcur)
+                if version is not None:
+                    tbs_children.append({'title': 'version: v1 (0)', **_map_tlv(version, tcur)})
+                    tcur = int(version[3])
+            if tcur < int(tbs[2]) and int(body[tcur]) == 0xA1:
+                requestor = _asn1_read_tlv(body, tcur)
+                if requestor is not None:
+                    tbs_children.append({'title': 'requestorName', **_map_tlv(requestor, tcur)})
+                    tcur = int(requestor[3])
+            req_list = _asn1_read_tlv(body, tcur)
+            if req_list is not None and int(req_list[0]) == 0x30:
+                rcur = int(req_list[1])
+                req_count = 0
+                req_nodes: List[Dict[str, Any]] = []
+                while rcur < int(req_list[2]):
+                    req = _asn1_read_tlv(body, rcur)
+                    if req is None or int(req[0]) != 0x30:
+                        break
+                    req_count += 1
+                    req_children: List[Dict[str, Any]] = []
+                    cert = _asn1_read_tlv(body, int(req[1]))
+                    if cert is not None and int(cert[0]) == 0x30:
+                        cert_children: List[Dict[str, Any]] = []
+                        ccur = int(cert[1])
+                        hash_alg = _asn1_read_tlv(body, ccur)
+                        if hash_alg is not None and int(hash_alg[0]) == 0x30:
+                            alg_children: List[Dict[str, Any]] = []
+                            alg_oid = _asn1_read_tlv(body, int(hash_alg[1]))
+                            if alg_oid is not None and int(alg_oid[0]) == 0x06:
+                                oid_text = _asn1_oid_text(body[int(alg_oid[1]):int(alg_oid[2])])
+                                alg_children.append({'title': f'Algorithm Id: {_ocsp_oid_name(oid_text)}', **_map(int(alg_oid[1]), int(alg_oid[2]) - int(alg_oid[1]))})
+                                cert_children.append({
+                                    'title': f'hashAlgorithm ({_ocsp_oid_label(oid_text)})',
+                                    **_map_tlv(hash_alg, ccur),
+                                    'children': alg_children,
+                                })
+                            ccur = int(hash_alg[3])
+                        issuer_name = _asn1_read_tlv(body, ccur)
+                        if issuer_name is not None and int(issuer_name[0]) == 0x04:
+                            cert_children.append({'title': f'issuerNameHash: {body[int(issuer_name[1]):int(issuer_name[2])].hex()}', **_map(int(issuer_name[1]), int(issuer_name[2]) - int(issuer_name[1]))})
+                            ccur = int(issuer_name[3])
+                        issuer_key = _asn1_read_tlv(body, ccur)
+                        if issuer_key is not None and int(issuer_key[0]) == 0x04:
+                            cert_children.append({'title': f'issuerKeyHash: {body[int(issuer_key[1]):int(issuer_key[2])].hex()}', **_map(int(issuer_key[1]), int(issuer_key[2]) - int(issuer_key[1]))})
+                            ccur = int(issuer_key[3])
+                        serial = _asn1_read_tlv(body, ccur)
+                        if serial is not None and int(serial[0]) == 0x02:
+                            cert_children.append({'title': f'serialNumber: 0x{body[int(serial[1]):int(serial[2])].hex()}', **_map(int(serial[1]), int(serial[2]) - int(serial[1]))})
+                        req_children.append({'title': 'reqCert', **_map_tlv(cert, int(req[1])), 'children': cert_children})
+                    req_nodes.append({'title': 'Request', **_map_tlv(req, rcur), 'children': req_children})
+                    rcur = int(req[3])
+                tbs_children.append({'title': f'requestList: {req_count} item', **_map_tlv(req_list, tcur), 'children': req_nodes})
+            children.append({'title': 'tbsRequest', **_map(cursor, int(tbs[2]) - cursor), 'children': tbs_children})
+            cursor = int(tbs[3])
+
+    response_bytes_tlv = _asn1_read_tlv(body, cursor)
+    if is_response and response_bytes_tlv is not None and int(response_bytes_tlv[0]) == 0xA0:
+        rb_children: List[Dict[str, Any]] = []
+        rb_seq = _asn1_read_tlv(body, int(response_bytes_tlv[1]))
+        if rb_seq is not None and int(rb_seq[0]) == 0x30:
+            rb_cursor = int(rb_seq[1])
+            oid_tlv = _asn1_read_tlv(body, rb_cursor)
+            if oid_tlv is not None and int(oid_tlv[0]) == 0x06:
+                oid_text = _asn1_oid_text(body[int(oid_tlv[1]):int(oid_tlv[2])])
+                rb_children.append({'title': f'ResponseType Id: {_ocsp_oid_name(oid_text)}', **_map(int(oid_tlv[1]), int(oid_tlv[2]) - int(oid_tlv[1]))})
+                rb_cursor = int(oid_tlv[3])
+            octet_tlv = _asn1_read_tlv(body, rb_cursor)
+            if octet_tlv is not None and int(octet_tlv[0]) == 0x04:
+                basic_bytes = body[int(octet_tlv[1]):int(octet_tlv[2])]
+                basic_children: List[Dict[str, Any]] = []
+                basic_base = int(octet_tlv[1])
+
+                def _map_basic(rel_start: int, length: int) -> Dict[str, Any]:
+                    return _map(basic_base + int(rel_start), int(max(1, length)))
+
+                basic_tlv = _asn1_read_tlv(basic_bytes, 0)
+                if basic_tlv is not None and int(basic_tlv[0]) == 0x30:
+                    bcur = int(basic_tlv[1])
+                    tend = int(basic_tlv[2])
+                    tbs = _asn1_read_tlv(basic_bytes, bcur)
+                    if tbs is not None and int(tbs[0]) == 0x30:
+                        tbs_children: List[Dict[str, Any]] = []
+                        tcur = int(tbs[1])
+                        if tcur < int(tbs[2]) and int(basic_bytes[tcur]) in {0xA1, 0xA2}:
+                            responder = _asn1_read_tlv(basic_bytes, tcur)
+                            if responder is not None:
+                                responder_children: List[Dict[str, Any]] = []
+                                if int(responder[0]) == 0xA1:
+                                    name_tlv = _asn1_read_tlv(basic_bytes, int(responder[1]))
+                                    if name_tlv is not None and int(name_tlv[0]) == 0x30:
+                                        by_name_children: List[Dict[str, Any]] = []
+                                        rdn_children: List[Dict[str, Any]] = []
+                                        ncur = int(name_tlv[1])
+                                        rdn_count = 0
+                                        while ncur < int(name_tlv[2]):
+                                            rdn_set = _asn1_read_tlv(basic_bytes, ncur)
+                                            if rdn_set is None or int(rdn_set[0]) != 0x31:
+                                                break
+                                            rdn_count += 1
+                                            set_children: List[Dict[str, Any]] = []
+                                            acur = int(rdn_set[1])
+                                            item_count = 0
+                                            while acur < int(rdn_set[2]):
+                                                atv = _asn1_read_tlv(basic_bytes, acur)
+                                                if atv is None or int(atv[0]) != 0x30:
+                                                    break
+                                                item_count += 1
+                                                oid = _asn1_read_tlv(basic_bytes, int(atv[1]))
+                                                oid_text = ''
+                                                value_text = ''
+                                                atv_children: List[Dict[str, Any]] = []
+                                                if oid is not None and int(oid[0]) == 0x06:
+                                                    oid_text = _asn1_oid_text(basic_bytes[int(oid[1]):int(oid[2])])
+                                                    val_tlv = _asn1_read_tlv(basic_bytes, int(oid[3]))
+                                                    if val_tlv is not None:
+                                                        value_raw = basic_bytes[int(val_tlv[1]):int(val_tlv[2])]
+                                                        value_text = value_raw.decode(errors='ignore')
+                                                    atv_children.append({'title': f'Object Id: {_ocsp_oid_name(oid_text)}', **_map_basic(int(oid[1]), int(oid[2]) - int(oid[1]))})
+                                                    if value_text and val_tlv is not None:
+                                                        if oid_text == '2.5.4.6':
+                                                            atv_children.append({'title': f'CountryName: {value_text}', **_map_basic(int(val_tlv[1]), int(val_tlv[2]) - int(val_tlv[1]))})
+                                                        else:
+                                                            atv_children.append({
+                                                                'title': 'DirectoryString: printableString (1)',
+                                                                **_map_basic(int(val_tlv[1]) - 2, int(val_tlv[2]) - (int(val_tlv[1]) - 2)),
+                                                                'children': [
+                                                                    {'title': f'printableString: {value_text}', **_map_basic(int(val_tlv[1]), int(val_tlv[2]) - int(val_tlv[1]))}
+                                                                ],
+                                                            })
+                                                atv_title = f'RelativeDistinguishedName item ({_ocsp_oid_label(oid_text)}={value_text})' if oid_text else 'RelativeDistinguishedName item'
+                                                set_children.append({'title': atv_title, **_map_basic(acur, int(atv[2]) - acur), 'children': atv_children})
+                                                acur = int(atv[3])
+                                            set_title = f'RDNSequence item: {item_count} item'
+                                            if set_children:
+                                                first_title = str(set_children[0].get('title', ''))
+                                                if '(' in first_title:
+                                                    set_title = f'{set_title} ({first_title[first_title.find("(")+1:first_title.rfind(")")]})'
+                                            rdn_children.append({'title': set_title, **_map_basic(ncur, int(rdn_set[2]) - ncur), 'children': set_children})
+                                            ncur = int(rdn_set[3])
+                                        by_name_children.append({'title': f'rdnSequence: {rdn_count} items', **_map_basic(int(name_tlv[1]), int(name_tlv[2]) - int(name_tlv[1])), 'children': rdn_children})
+                                        responder_children.append({'title': 'byName: 0', **_map_basic(int(responder[1]), int(responder[2]) - int(responder[1])), 'children': by_name_children})
+                                tbs_children.append({'title': f'responderID: {"byName (1)" if int(responder[0]) == 0xA1 else "byKey (2)"}', **_map_basic(tcur, int(responder[2]) - tcur), 'children': responder_children})
+                                tcur = int(responder[3])
+                        produced = _asn1_read_tlv(basic_bytes, tcur)
+                        if produced is not None and int(produced[0]) == 0x18:
+                            produced_text = _ocsp_format_time(basic_bytes[int(produced[1]):int(produced[2])])
+                            tbs_children.append({'title': f'producedAt: {produced_text}', **_map_basic(int(produced[1]), int(produced[2]) - int(produced[1]))})
+                            tcur = int(produced[3])
+                        responses = _asn1_read_tlv(basic_bytes, tcur)
+                        if responses is not None and int(responses[0]) == 0x30:
+                            rcur = int(responses[1])
+                            response_count = 0
+                            response_nodes: List[Dict[str, Any]] = []
+                            while rcur < int(responses[2]):
+                                single = _asn1_read_tlv(basic_bytes, rcur)
+                                if single is None or int(single[0]) != 0x30:
+                                    break
+                                response_count += 1
+                                s_children: List[Dict[str, Any]] = []
+                                scur = int(single[1])
+                                cert_id = _asn1_read_tlv(basic_bytes, scur)
+                                if cert_id is not None and int(cert_id[0]) == 0x30:
+                                    cid_children: List[Dict[str, Any]] = []
+                                    ccur = int(cert_id[1])
+                                    hash_alg = _asn1_read_tlv(basic_bytes, ccur)
+                                    if hash_alg is not None and int(hash_alg[0]) == 0x30:
+                                        alg_oid = _asn1_read_tlv(basic_bytes, int(hash_alg[1]))
+                                        if alg_oid is not None and int(alg_oid[0]) == 0x06:
+                                            oid_text = _asn1_oid_text(basic_bytes[int(alg_oid[1]):int(alg_oid[2])])
+                                            cid_children.append({
+                                                'title': f'hashAlgorithm ({_ocsp_oid_label(oid_text)})',
+                                                **_map_basic(ccur, int(hash_alg[2]) - ccur),
+                                                'children': [{'title': f'Algorithm Id: {_ocsp_oid_name(oid_text)}', **_map_basic(int(alg_oid[1]), int(alg_oid[2]) - int(alg_oid[1]))}],
+                                            })
+                                        ccur = int(hash_alg[3])
+                                    for label in ['issuerNameHash', 'issuerKeyHash']:
+                                        octv = _asn1_read_tlv(basic_bytes, ccur)
+                                        if octv is not None and int(octv[0]) == 0x04:
+                                            cid_children.append({'title': f'{label}: {basic_bytes[int(octv[1]):int(octv[2])].hex()}', **_map_basic(int(octv[1]), int(octv[2]) - int(octv[1]))})
+                                            ccur = int(octv[3])
+                                    serial = _asn1_read_tlv(basic_bytes, ccur)
+                                    if serial is not None and int(serial[0]) == 0x02:
+                                        cid_children.append({'title': f'serialNumber: 0x{basic_bytes[int(serial[1]):int(serial[2])].hex()}', **_map_basic(int(serial[1]), int(serial[2]) - int(serial[1]))})
+                                        ccur = int(serial[3])
+                                    s_children.append({'title': 'certID', **_map_basic(scur, int(cert_id[2]) - scur), 'children': cid_children})
+                                    scur = int(cert_id[3])
+
+                                cert_status = _asn1_read_tlv(basic_bytes, scur)
+                                if cert_status is not None and int(cert_status[0]) in {0x80, 0x81, 0x82}:
+                                    status_name = {0x80: 'good (0)', 0x81: 'revoked (1)', 0x82: 'unknown (2)'}[int(cert_status[0])]
+                                    status_child_title = 'good' if int(cert_status[0]) == 0x80 else ''
+                                    if int(cert_status[0]) == 0x80:
+                                        status_node: Dict[str, Any] = {'title': f'certStatus: {status_name}'}
+                                        if status_child_title:
+                                            status_node['children'] = [{'title': status_child_title}]
+                                    else:
+                                        status_node = {'title': f'certStatus: {status_name}', **_map_basic(scur, int(cert_status[2]) - scur)}
+                                    s_children.append(status_node)
+                                    scur = int(cert_status[3])
+                                this_update = _asn1_read_tlv(basic_bytes, scur)
+                                if this_update is not None and int(this_update[0]) == 0x18:
+                                    s_children.append({'title': f'thisUpdate: {_ocsp_format_time(basic_bytes[int(this_update[1]):int(this_update[2])])}', **_map_basic(int(this_update[1]), int(this_update[2]) - int(this_update[1]))})
+                                    scur = int(this_update[3])
+                                next_update = _asn1_read_tlv(basic_bytes, scur)
+                                if next_update is not None and int(next_update[0]) == 0xA0:
+                                    inner = _asn1_read_tlv(basic_bytes, int(next_update[1]))
+                                    if inner is not None and int(inner[0]) == 0x18:
+                                        s_children.append({'title': f'nextUpdate: {_ocsp_format_time(basic_bytes[int(inner[1]):int(inner[2])])}', **_map_basic(int(inner[1]), int(inner[2]) - int(inner[1]))})
+                                response_nodes.append({'title': 'SingleResponse', **_map_basic(rcur, int(single[2]) - rcur), 'children': s_children})
+                                rcur = int(single[3])
+                            tbs_children.append({'title': f'responses: {response_count} item', **_map_basic(tcur, int(responses[2]) - tcur), 'children': response_nodes})
+                        basic_children.append({'title': 'tbsResponseData', **_map_basic(bcur, int(tbs[2]) - bcur), 'children': tbs_children})
+                        bcur = int(tbs[3])
+                    sig_alg = _asn1_read_tlv(basic_bytes, bcur)
+                    if sig_alg is not None and int(sig_alg[0]) == 0x30:
+                        sig_oid = _asn1_read_tlv(basic_bytes, int(sig_alg[1]))
+                        if sig_oid is not None and int(sig_oid[0]) == 0x06:
+                            oid_text = _asn1_oid_text(basic_bytes[int(sig_oid[1]):int(sig_oid[2])])
+                            basic_children.append({
+                                'title': f'signatureAlgorithm ({_ocsp_oid_label(oid_text)})',
+                                **_map_basic(bcur, int(sig_alg[2]) - bcur),
+                                'children': [{'title': f'Algorithm Id: {_ocsp_oid_name(oid_text)}', **_map_basic(int(sig_oid[1]), int(sig_oid[2]) - int(sig_oid[1]))}],
+                            })
+                        bcur = int(sig_alg[3])
+                    sig_bits = _asn1_read_tlv(basic_bytes, bcur)
+                    if sig_bits is not None and int(sig_bits[0]) == 0x03 and int(sig_bits[1]) < int(sig_bits[2]):
+                        bit_value = basic_bytes[int(sig_bits[1]):int(sig_bits[2])]
+                        padding = int(bit_value[0]) if bit_value else 0
+                        signature = bit_value[1:] if len(bit_value) > 1 else b''
+                        basic_children.append({'title': f'Padding: {padding}', **_map_basic(int(sig_bits[1]), 1)})
+                        basic_children.append({'title': f'signature […]: {signature[:120].hex()}', **_map_basic(int(sig_bits[1]) + 1, max(1, len(signature)))})
+
+                rb_children.append({'title': 'BasicOCSPResponse', **_map(int(octet_tlv[1]), int(octet_tlv[2]) - int(octet_tlv[1])), 'children': basic_children})
+
+        children.append({'title': 'responseBytes', **_map(cursor, int(response_bytes_tlv[2]) - cursor), 'children': rb_children})
+
+    if not children:
+        children.append({'title': f'Data ({len(body)} bytes)', **_map(0, len(body))})
+
+    root_map = _map(0, len(body))
+
+    return {
+        'title': 'Online Certificate Status Protocol',
+        **root_map,
+        'children': children,
+    }
+
+
+def _ipp_value_tag_name(tag: int) -> tuple[str, str]:
+    mapping = {
+        0x21: ('integer', 'integer'),
+        0x22: ('boolean', 'boolean'),
+        0x23: ('enum', 'enum'),
+        0x30: ('octetString-with-an-unspecified-format', 'octetString'),
+        0x33: ('rangeOfInteger', 'rangeOfInteger'),
+        0x34: ('collection', 'collection'),
+        0x37: ('endCollection', 'endCollection'),
+        0x41: ('textWithoutLanguage', 'textWithoutLanguage'),
+        0x42: ('nameWithoutLanguage', 'nameWithoutLanguage'),
+        0x44: ('keyword', 'keyword'),
+        0x45: ('uri', 'uri'),
+        0x47: ('charset', 'charset'),
+        0x48: ('naturalLanguage', 'naturalLanguage'),
+        0x49: ('mimeMediaType', 'mimeMediaType'),
+        0x4A: ('memberAttrName', 'memberAttrName'),
+    }
+    return mapping.get(int(tag), (f'tag 0x{int(tag):02x}', f'0x{int(tag):02x}'))
+
+
+def _ipp_group_name(tag: int) -> str:
+    return {
+        0x01: 'operation-attributes-tag',
+        0x02: 'job-attributes-tag',
+        0x04: 'printer-attributes-tag',
+        0x05: 'unsupported-attributes-tag',
+    }.get(int(tag), f'attributes-tag 0x{int(tag):02x}')
+
+
+def _ipp_enum_name(attr_name: str, value: int) -> str:
+    attr = str(attr_name or '')
+    if attr == 'operations-supported':
+        return {
+            2: 'Print-Job',
+            3: 'Print-URI',
+            4: 'Validate-Job',
+            5: 'Create-Job',
+            6: 'Send-Document',
+            7: 'Send-URI',
+            8: 'Cancel-Job',
+            9: 'Get-Job-Attributes',
+            10: 'Get-Jobs',
+            11: 'Get-Printer-Attributes',
+            60: 'Identify-Printer',
+        }.get(int(value), str(value))
+    if attr in {'print-quality', 'print-quality-supported'}:
+        return {
+            3: 'draft',
+            4: 'normal',
+            5: 'high',
+        }.get(int(value), str(value))
+    if attr == 'finishings-supported':
+        return {
+            3: 'none',
+        }.get(int(value), str(value))
+    return str(value)
+
+
+def _ipp_format_value(attr_name: str, value_tag: int, value_bytes: bytes) -> tuple[str, str]:
+    type_label, value_label = _ipp_value_tag_name(value_tag)
+    value = bytes(value_bytes or b'')
+
+    if value_tag == 0x22 and len(value) == 1:
+        bool_text = 'true' if int(value[0]) != 0 else 'false'
+        return bool_text, value_label
+
+    if value_tag == 0x21 and len(value) in {1, 2, 4}:
+        return str(int.from_bytes(value, 'big')), value_label
+
+    if value_tag == 0x23 and len(value) in {1, 2, 4}:
+        ivalue = int.from_bytes(value, 'big')
+        return _ipp_enum_name(attr_name, ivalue), value_label
+
+    if value_tag == 0x33 and len(value) >= 8:
+        lo = int.from_bytes(value[:4], 'big')
+        hi = int.from_bytes(value[4:8], 'big')
+        return f'{lo}-{hi}', value_label
+
+    if value_tag in {0x41, 0x42, 0x44, 0x45, 0x47, 0x48, 0x49, 0x4A}:
+        return value.decode(errors='ignore'), value_label
+
+    text = value.decode(errors='ignore') if value else ''
+    if not text and value:
+        text = value.hex()
+    return text, value_label
+
+
+def _ipp_section(record, offset: int) -> Dict[str, Any] | None:
+    metadata = getattr(record, 'metadata', {}) or {}
+    dechunked = bytes(metadata.get('http_dechunked_body', b'') or b'')
+    body = dechunked if dechunked else bytes(metadata.get('http_body', b'') or b'')
+    if len(body) < 8:
+        packet = getattr(record, 'raw', None)
+        tcp_payload = b''
+        try:
+            if packet is not None and packet.haslayer(TCP):
+                tcp_payload = bytes(getattr(packet[TCP], 'payload', b''))
+        except Exception:
+            tcp_payload = b''
+        if tcp_payload:
+            return {
+                'title': 'Internet Printing Protocol',
+                **_byte_mapping(offset, 0, len(tcp_payload), PACKET_BYTE_SOURCE),
+                'children': [
+                    {
+                        'title': f'Data ({len(tcp_payload)} bytes)',
+                        **_byte_mapping(offset, 0, len(tcp_payload), PACKET_BYTE_SOURCE),
+                        'children': [
+                            {
+                                'title': f'Data […]: {tcp_payload[:120].hex()}',
+                                **_byte_mapping(offset, 0, len(tcp_payload), PACKET_BYTE_SOURCE),
+                            },
+                            {'title': f'[Length: {len(tcp_payload)}]'},
+                        ],
+                    }
+                ],
+            }
+        return None
+
+    if dechunked:
+        byte_source = 'http_dechunked'
+        body_offset = 0
+    else:
+        byte_source = PACKET_BYTE_SOURCE if not bool(metadata.get('http_is_reassembled', False)) else TCP_REASSEMBLED_BYTE_SOURCE
+        body_offset = int(metadata.get('http_header_len', 0) or 0) + int(metadata.get('http_payload_offset', 0) or 0)
+
+    def _map(rel: int, length: int) -> Dict[str, Any]:
+        if byte_source == PACKET_BYTE_SOURCE:
+            return _byte_mapping(offset, body_offset + rel, length, byte_source)
+        return _byte_mapping(0, body_offset + rel, length, byte_source)
+
+    version_major = int(body[0])
+    version_minor = int(body[1])
+    op_status = int.from_bytes(body[2:4], 'big')
+    request_id = int.from_bytes(body[4:8], 'big')
+    is_request = bool(str(metadata.get('http_kind', '') or 'request') == 'request')
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'version: {version_major}.{version_minor}', **_map(0, 2)},
+    ]
+    if is_request:
+        op_name = {
+            0x0002: 'Print-Job',
+            0x0003: 'Print-URI',
+            0x0004: 'Validate-Job',
+            0x0005: 'Create-Job',
+            0x0006: 'Send-Document',
+            0x0007: 'Send-URI',
+            0x0008: 'Cancel-Job',
+            0x0009: 'Get-Job-Attributes',
+            0x000A: 'Get-Jobs',
+            0x000B: 'Get-Printer-Attributes',
+        }.get(op_status, f'0x{op_status:04x}')
+        children.append({'title': f'operation-id: {op_name} (0x{op_status:04x})', **_map(2, 2)})
+    else:
+        status_name = {
+            0x0000: 'Successful (successful-ok)',
+        }.get(op_status, f'0x{op_status:04x}')
+        children.append({'title': f'status-code: {status_name}', **_map(2, 2)})
+    children.append({'title': f'request-id: {request_id}', **_map(4, 4)})
+
+    response_frame = metadata.get('http_response_frame', None)
+    if is_request and response_frame is not None:
+        children.insert(0, {'title': f'[Response In: {int(response_frame)}]'})
+
+    request_frame = metadata.get('http_request_frame', None)
+    if not is_request and request_frame is not None:
+        children.insert(0, {'title': f'[Request In: {int(request_frame)}]'})
+
+    def _entry_at(pos: int) -> tuple[Dict[str, Any], int] | None:
+        if pos + 5 > len(body):
+            return None
+        value_tag = int(body[pos])
+        name_len = int.from_bytes(body[pos + 1:pos + 3], 'big')
+        name_start = pos + 3
+        name_end = name_start + name_len
+        if name_end + 2 > len(body):
+            return None
+        value_len = int.from_bytes(body[name_end:name_end + 2], 'big')
+        value_start = name_end + 2
+        value_end = value_start + value_len
+        if value_end > len(body):
+            return None
+        name = body[name_start:name_end].decode(errors='ignore') if name_len > 0 else ''
+        return ({
+            'start': pos,
+            'end': value_end,
+            'value_tag': value_tag,
+            'name': name,
+            'name_start': name_start,
+            'name_len': name_len,
+            'value_start': value_start,
+            'value_len': value_len,
+            'value_bytes': body[value_start:value_end],
+        }, value_end)
+
+    def _parse_collection(start_pos: int) -> tuple[List[Dict[str, Any]], int, str]:
+        nodes: List[Dict[str, Any]] = []
+        labels: List[str] = []
+        pos = int(start_pos)
+        current_member = ''
+        while pos < len(body):
+            entry_pair = _entry_at(pos)
+            if entry_pair is None:
+                break
+            entry, next_pos = entry_pair
+            tag = int(entry['value_tag'])
+            if tag == 0x37:
+                pos = next_pos
+                break
+            if tag == 0x4A:
+                current_member = str(entry['value_bytes'].decode(errors='ignore'))
+                labels.append(current_member)
+                nodes.append({'title': f'memberAttrName: {current_member}', **_map(int(entry['start']), max(1, int(entry['end']) - int(entry['start'])))})
+                pos = next_pos
+                continue
+
+            type_label, value_label = _ipp_value_tag_name(tag)
+            if tag == 0x34:
+                nested_children, nested_pos, nested_summary = _parse_collection(next_pos)
+                summary = f'{{{nested_summary}}}' if nested_summary else '{}'
+                nodes.append({'title': f'collection {summary}', **_map(int(entry['start']), max(1, nested_pos - int(entry['start']))), 'children': nested_children})
+                pos = nested_pos
+                continue
+
+            value_text, _ = _ipp_format_value(current_member, tag, bytes(entry['value_bytes']))
+            nodes.append({'title': f'{value_label} value: {value_text}', **_map(int(entry['start']), max(1, int(entry['end']) - int(entry['start'])))})
+            pos = next_pos
+
+        summary_parts: List[str] = []
+        idx = 0
+        while idx < len(nodes):
+            node_title = str(nodes[idx].get('title', ''))
+            if node_title.startswith('memberAttrName: '):
+                member = node_title.replace('memberAttrName: ', '', 1)
+                nested_summary = ''
+                if idx + 1 < len(nodes):
+                    next_title = str(nodes[idx + 1].get('title', ''))
+                    if next_title.startswith('collection {'):
+                        nested_summary = next_title.replace('collection ', '', 1)
+                summary_parts.append(f'{member}{nested_summary}')
+            idx += 1
+        return nodes, pos, ','.join(summary_parts)
+
+    cursor = 8
+    group_node: Dict[str, Any] | None = None
+    current_attr: Dict[str, Any] | None = None
+
+    def _finalize_group(end_cursor: int) -> None:
+        nonlocal group_node
+        if not isinstance(group_node, dict):
+            return
+        start_cursor = int(group_node.pop('_ipp_group_start', end_cursor) or end_cursor)
+        mapped = _map(start_cursor, max(1, int(end_cursor) - start_cursor))
+        if mapped:
+            group_node['offset'] = mapped.get('offset', group_node.get('offset'))
+            group_node['length'] = mapped.get('length', group_node.get('length'))
+            if 'byte_source' in mapped:
+                group_node['byte_source'] = mapped.get('byte_source')
+        group_node = None
+
+    def _finalize_attr() -> None:
+        nonlocal current_attr
+        if not isinstance(current_attr, dict):
+            return
+        node = current_attr.get('node')
+        if not isinstance(node, dict):
+            current_attr = None
+            return
+        name = str(current_attr.get('name', '') or '')
+        type_label = str(current_attr.get('type_label', '') or '')
+        values = list(current_attr.get('values', []) or [])
+        quoted_set_types = {'keyword', 'mimeMediaType', 'uri', 'charset', 'naturalLanguage', 'nameWithoutLanguage', 'textWithoutLanguage'}
+        if len(values) > 1:
+            if name == 'operations-supported':
+                node['title'] = f"{name} (1setOf {type_label}): {','.join(values)}"
+            elif type_label in {'enum'}:
+                node['title'] = f"{name} (1setOf {type_label}): {','.join(values)}"
+            elif type_label in quoted_set_types:
+                node['title'] = f"{name} (1setOf {type_label}): {','.join([repr(v) for v in values])}"
+            else:
+                node['title'] = f"{name} (1setOf {type_label}): {','.join(values)}"
+        elif len(values) == 1:
+            if type_label == 'boolean':
+                node['title'] = f"{name} ({type_label}): {values[0]}"
+            elif type_label in quoted_set_types:
+                node['title'] = f"{name} ({type_label}): '{values[0]}'"
+            else:
+                node['title'] = f"{name} ({type_label}): {values[0]}"
+        current_attr = None
+
+    while cursor < len(body):
+        tag = int(body[cursor])
+        if tag == 0x03:
+            _finalize_attr()
+            _finalize_group(cursor)
+            children.append({'title': 'end-of-attributes-tag', **_map(cursor, 1)})
+            cursor += 1
+            break
+        if tag in {0x01, 0x02, 0x04, 0x05}:
+            _finalize_attr()
+            _finalize_group(cursor)
+            group_node = {
+                'title': _ipp_group_name(tag),
+                **_map(cursor, 1),
+                '_ipp_group_start': int(cursor),
+                'children': [],
+            }
+            children.append(group_node)
+            cursor += 1
+            continue
+
+        entry_pair = _entry_at(cursor)
+        if entry_pair is None:
+            break
+        entry, next_cursor = entry_pair
+        value_tag = int(entry['value_tag'])
+        name = str(entry['name'])
+        type_label, value_label = _ipp_value_tag_name(value_tag)
+
+        if name:
+            _finalize_attr()
+            value_text, _ = _ipp_format_value(name, value_tag, bytes(entry['value_bytes']))
+            attr_node: Dict[str, Any] = {
+                'title': f"{name} ({type_label}): '{value_text}'" if type_label != 'boolean' else f"{name} ({type_label}): {value_text}",
+                **_map(int(entry['start']), max(1, int(entry['end']) - int(entry['start']))),
+                'children': [
+                    {'title': f'name: {name}', **_map(int(entry['name_start']), int(entry['name_len']))},
+                ],
+            }
+
+            if value_tag == 0x34:
+                coll_children, coll_pos, coll_summary = _parse_collection(next_cursor)
+                attr_node['children'].append({'title': f'collection {{{coll_summary}}}', **_map(int(entry['start']), max(1, coll_pos - int(entry['start']))), 'children': coll_children})
+                attr_node['title'] = f"{name} ({type_label}): {{{coll_summary}}}"
+                attr_node.update(_map(int(entry['start']), max(1, coll_pos - int(entry['start']))))
+                cursor = coll_pos
+                target = group_node if isinstance(group_node, dict) else None
+                if isinstance(target, dict):
+                    target.setdefault('children', []).append(attr_node)
+                else:
+                    children.append(attr_node)
+                continue
+
+            child_title = f'{value_label} value: {value_text}'
+            if type_label == 'enum':
+                raw_val = int.from_bytes(bytes(entry['value_bytes']) or b'\x00', 'big') if int(entry['value_len']) > 0 else 0
+                enum_name = _ipp_enum_name(name, raw_val)
+                if name == 'operations-supported':
+                    child_title = f'operations-supported: {enum_name} ({raw_val})'
+                elif name in {'print-quality', 'print-quality-supported'}:
+                    child_title = f'print-quality: {enum_name} ({raw_val})'
+                elif name == 'finishings-supported':
+                    child_title = f'finishings: {enum_name} ({raw_val})'
+                else:
+                    child_title = f'enum value: {raw_val}'
+            elif type_label == 'boolean':
+                child_title = f'boolean value: {str(value_text).lower() == "true"}'
+            attr_node['children'].append({'title': child_title, **_map(int(entry['value_start']), int(entry['value_len']))})
+
+            target = group_node if isinstance(group_node, dict) else None
+            if isinstance(target, dict):
+                target.setdefault('children', []).append(attr_node)
+            else:
+                children.append(attr_node)
+
+            current_attr = {
+                'name': name,
+                'type_label': type_label,
+                'values': [value_text],
+                'node': attr_node,
+            }
+            cursor = next_cursor
+            continue
+
+        if isinstance(current_attr, dict):
+            cname = str(current_attr.get('name', '') or '')
+            value_text, _ = _ipp_format_value(cname, value_tag, bytes(entry['value_bytes']))
+            current_attr.setdefault('values', []).append(value_text)
+            attr_node = current_attr.get('node')
+            if isinstance(attr_node, dict):
+                start = int(attr_node.get('offset', _map(int(entry['start']), 1).get('offset', 0)))
+                end_abs = _map(int(entry['end']), 1).get('offset', start + int(attr_node.get('length', 1)))
+                attr_node['length'] = max(1, int(end_abs) - start)
+
+                extra_title = f'{value_label} value: {value_text}'
+                if type_label == 'enum':
+                    raw_val = int.from_bytes(bytes(entry['value_bytes']) or b'\x00', 'big') if int(entry['value_len']) > 0 else 0
+                    enum_name = _ipp_enum_name(cname, raw_val)
+                    if cname == 'operations-supported':
+                        extra_title = f'operations-supported: {enum_name} ({raw_val})'
+                    elif cname in {'print-quality', 'print-quality-supported'}:
+                        extra_title = f'print-quality: {enum_name} ({raw_val})'
+                    elif cname == 'finishings-supported':
+                        extra_title = f'finishings: {enum_name} ({raw_val})'
+                elif type_label == 'boolean':
+                    extra_title = f'boolean value: {str(value_text).lower() == "true"}'
+                attr_node.setdefault('children', []).append({'title': extra_title, **_map(int(entry['value_start']), int(entry['value_len']))})
+
+            cursor = next_cursor
+            continue
+
+        cursor = next_cursor
+
+    _finalize_attr()
+    _finalize_group(cursor)
+
+    if cursor < len(body):
+        data_len = len(body) - cursor
+        children.append({
+            'title': f'Data ({data_len} bytes)',
+            **_map(cursor, data_len),
+            'children': [
+                {'title': f'Data […]: {body[cursor:cursor + 120].hex()}', **_map(cursor, data_len)},
+                {'title': f'[Length: {data_len}]'},
+            ],
+        })
+
+    return {
+        'title': 'Internet Printing Protocol',
+        **_map(0, len(body)),
+        'children': children,
+    }
+
+
+def _lpd_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    lpd_info = metadata.get('lpd') if isinstance(metadata, dict) else None
+    children: List[Dict[str, Any]] = []
+
+    summary = str((lpd_info or {}).get('summary', '') or '').strip() if isinstance(lpd_info, dict) else ''
+    if summary:
+        children.append({'title': summary, **_byte_mapping(offset, 0, len(payload))})
+
+    if isinstance(lpd_info, dict) and str(lpd_info.get('kind', '') or '') == 'response':
+        status = str(lpd_info.get('status', '') or '').strip()
+        if status:
+            children.append({'title': f'Response: {status}', **_byte_mapping(offset, 0, len(payload))})
+    elif isinstance(lpd_info, dict) and str(lpd_info.get('kind', '') or '') == 'command':
+        printer_options = str(lpd_info.get('printer_options', '') or '').strip()
+        if printer_options:
+            children.append({'title': f'Printer/options: {printer_options}', **_byte_mapping(offset, 1, max(0, len(payload) - 1))})
+    else:
+        if payload:
+            children.append({
+                'title': f'Data ({len(payload)} bytes)',
+                **_byte_mapping(offset, 0, len(payload)),
+                'children': [
+                    {'title': f'Data: {payload.hex()}', **_byte_mapping(offset, 0, len(payload))},
+                    {'title': f'[Length: {len(payload)}]'},
+                ],
+            })
+
+    if not children:
+        children.append({'title': f'Data ({len(payload)} bytes)', **_byte_mapping(offset, 0, len(payload))})
+
+    return {
+        'title': 'Line Printer Daemon Protocol',
+        **_byte_mapping(offset, 0, len(payload)),
+        'children': children,
+    }
+
+
+def _ftp_response_code_text(code: int) -> str:
+    return {
+        150: 'File status okay; about to open data connection',
+        200: 'Command okay',
+        220: 'Service ready for new user',
+        221: 'Service closing control connection',
+        226: 'Closing data connection',
+        227: 'Entering Passive Mode',
+        230: 'User logged in, proceed',
+        250: 'Requested file action okay, completed',
+        257: 'PATHNAME created',
+        331: 'User name okay, need password',
+    }.get(int(code), str(code))
+
+
+def _ftp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    ftp_info = metadata.get('ftp') if isinstance(metadata, dict) and isinstance(metadata.get('ftp'), dict) else None
+    line_raw = payload.split(b'\r\n', 1)[0] if payload else b''
+    line = line_raw.decode(errors='ignore')
+    line_len = len(line_raw) + (2 if payload.startswith(line_raw + b'\r\n') else 0)
+    if line_len <= 0:
+        line_len = len(payload)
+    children: List[Dict[str, Any]] = []
+
+    if line:
+        line_node: Dict[str, Any] = {
+            'title': f'{line}\\r\\n',
+            **_byte_mapping(offset, 0, max(1, line_len), PACKET_BYTE_SOURCE),
+            'children': [],
+        }
+        if isinstance(ftp_info, dict) and str(ftp_info.get('kind', '')) == 'response':
+            code = int(ftp_info.get('code', 0) or 0)
+            arg = str(ftp_info.get('arg', '') or '')
+            line_node['children'].append({
+                'title': f'Response code: {_ftp_response_code_text(code)} ({code})',
+                **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE),
+            })
+            if arg:
+                line_node['children'].append({
+                    'title': f'Response arg: {arg}',
+                    **_byte_mapping(offset, 4, max(1, len(line_raw) - 4), PACKET_BYTE_SOURCE),
+                })
+        else:
+            command = ''
+            arg = ''
+            if isinstance(ftp_info, dict):
+                command = str(ftp_info.get('command', '') or '')
+                arg = str(ftp_info.get('arg', '') or '')
+            else:
+                parts = line.split(' ', 1)
+                command = parts[0].upper() if parts else ''
+                arg = parts[1] if len(parts) > 1 else ''
+            if command:
+                line_node['children'].append({
+                    'title': f'Request command: {command}',
+                    **_byte_mapping(offset, 0, len(command), PACKET_BYTE_SOURCE),
+                })
+            if arg:
+                line_node['children'].append({
+                    'title': f'Request arg: {arg}',
+                    **_byte_mapping(offset, len(command) + 1, max(1, len(line_raw) - len(command) - 1), PACKET_BYTE_SOURCE),
+                })
+        children.append(line_node)
+    else:
+        children.append({
+            'title': f'Data ({len(payload)} bytes)',
+            **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+        })
+
+    cwd = str(metadata.get('ftp_cwd', '') or '')
+    children.append({'title': f'[Current working directory: {cwd}]'})
+
+    return {
+        'title': 'File Transfer Protocol (FTP)',
+        **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _ftp_data_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record else {}
+    ftp_data = metadata.get('ftp_data') if isinstance(metadata, dict) and isinstance(metadata.get('ftp_data'), dict) else {}
+    priority_value = priority & 0x7F
+    children: List[Dict[str, Any]] = [
+        {'title': f'FTP Data ({len(payload)} bytes data)', **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE)},
+    ]
+    setup_frame = int(ftp_data.get('setup_frame', 0) or 0)
+    if setup_frame > 0:
+        children.append({'title': f'[Setup frame: {setup_frame}]'})
+    setup_method = str(ftp_data.get('setup_method', '') or '')
+    if setup_method:
+        children.append({'title': f'[Setup method: {setup_method}]'})
+    command = str(ftp_data.get('command', '') or '')
+    if command:
+        children.append({'title': f'[Command: {command}]'})
+    command_frame = int(ftp_data.get('command_frame', 0) or 0)
+    if command_frame > 0:
+        children.append({'title': f'Command frame: {command_frame}'})
+    cwd = str(ftp_data.get('cwd', '') or '')
+    children.append({'title': f'[Current working directory: {cwd}]'})
+    if payload:
+        children.append(_smtp_line_based_text_section(payload, offset))
+    return {
+        'title': f'FTP Data ({len(payload)} bytes data)',
+        **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+        'children': children[1:],
+    }
+
+
+def _bfd_control_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    if len(raw) < 24:
+        return {
+            'title': 'BFD Control message',
+            **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+            'children': [{'title': f'Data ({len(raw)} bytes)', **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE)}],
+        }
+    version = (int(raw[0]) >> 5) & 0x07
+    diag = int(raw[0]) & 0x1F
+    state = (int(raw[1]) >> 6) & 0x03
+    flags_byte = int(raw[1])
+    flags = flags_byte & 0x3F
+    diag_bits = f'{diag:05b}'
+    detect_mult = int(raw[2])
+    msg_len = int(raw[3])
+    my_disc = int.from_bytes(raw[4:8], 'big')
+    your_disc = int.from_bytes(raw[8:12], 'big')
+    desired_tx = int.from_bytes(raw[12:16], 'big')
+    required_rx = int.from_bytes(raw[16:20], 'big')
+    required_echo = int.from_bytes(raw[20:24], 'big')
+    diag_text = {
+        0: 'No Diagnostic',
+        1: 'Control Detection Time Expired',
+        2: 'Echo Function Failed',
+        3: 'Neighbor Signaled Session Down',
+        4: 'Forwarding Plane Reset',
+        5: 'Path Down',
+        6: 'Concatenated Path Down',
+        7: 'Administratively Down',
+        8: 'Reverse Concatenated Path Down',
+    }.get(diag, f'Unknown ({diag})')
+    state_text = {
+        0: 'AdminDown',
+        1: 'Down',
+        2: 'Init',
+        3: 'Up',
+    }.get(state, f'Unknown ({state})')
+    detection_ms = int(round(detect_mult * (required_rx / 1000.0))) if required_rx > 0 else 0
+    children: List[Dict[str, Any]] = [
+        {'title': f'{version:03b}. .... = Protocol Version: {version}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'...{diag_bits[0]} {diag_bits[1:]} = Diagnostic Code: {diag_text} (0x{diag:02x})', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'{state:02b}.. .... = Session State: {state_text} (0x{state:x})', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+        {
+            'title': f'Message Flags: 0x{flags_byte:02x}',
+            **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'{"1" if (flags & 0x20) else "0"}... .. = Poll: {"Set" if (flags & 0x20) else "Not set"}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.{"1" if (flags & 0x10) else "0"}.. .. = Final: {"Set" if (flags & 0x10) else "Not set"}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'..{"1" if (flags & 0x08) else "0"}. .. = Control Plane Independent: {"Set" if (flags & 0x08) else "Not set"}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'...{"1" if (flags & 0x04) else "0"} .. = Authentication Present: {"Set" if (flags & 0x04) else "Not set"}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.... {"1" if (flags & 0x02) else "0"}. = Demand: {"Set" if (flags & 0x02) else "Not set"}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .{"1" if (flags & 0x01) else "0"} = Multipoint: {"Set" if (flags & 0x01) else "Not set"}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+            ],
+        },
+        {'title': f'Detect Time Multiplier: {detect_mult} (= {detection_ms} ms Detection time)', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'Message Length: {msg_len} bytes', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'My Discriminator: 0x{my_disc:08x}', **_byte_mapping(offset, 4, 4, PACKET_BYTE_SOURCE)},
+        {'title': f'Your Discriminator: 0x{your_disc:08x}', **_byte_mapping(offset, 8, 4, PACKET_BYTE_SOURCE)},
+        {'title': f'Desired Min TX Interval: {int(round(desired_tx / 1000.0))} ms ({desired_tx} us)', **_byte_mapping(offset, 12, 4, PACKET_BYTE_SOURCE)},
+        {'title': f'Required Min RX Interval: {int(round(required_rx / 1000.0))} ms ({required_rx} us)', **_byte_mapping(offset, 16, 4, PACKET_BYTE_SOURCE)},
+        {'title': f'Required Min Echo Interval:  {int(round(required_echo / 1000.0))} ms ({required_echo} us)', **_byte_mapping(offset, 20, 4, PACKET_BYTE_SOURCE)},
+    ]
+    return {
+        'title': 'BFD Control message',
+        **_byte_mapping(offset, 0, min(len(raw), max(24, msg_len)), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _bfd_echo_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    children: List[Dict[str, Any]] = [
+        {
+            'title': f'Echo: {raw.hex()}',
+            **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+        }
+    ]
+    return {
+        'title': 'BFD Echo message',
+        **_byte_mapping(offset, 0, len(raw), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _isis_system_id_text(data: bytes) -> str:
+    value = bytes(data or b'')
+    if len(value) < 6:
+        return ''
+    return f'{value[0]:02x}{value[1]:02x}.{value[2]:02x}{value[3]:02x}.{value[4]:02x}{value[5]:02x}'
+
+
+def _isis_lsp_id_text(data: bytes) -> str:
+    value = bytes(data or b'')
+    if len(value) < 8:
+        return ''
+    return f'{_isis_system_id_text(value[:6])}.{value[6]:02x}-{value[7]:02x}'
+
+
+def _isis_common_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    pdu_type = int(raw[4]) & 0x1F if len(raw) >= 5 else 0
+    pdu_name = {
+        15: 'L1 HELLO',
+        16: 'L2 HELLO',
+        17: 'P2P HELLO',
+        24: 'L1 CSNP',
+        25: 'L2 CSNP',
+    }.get(pdu_type, f'0x{pdu_type:02x}')
+    return {
+        'title': 'ISO 10589 ISIS InTRA Domain Routeing Information Exchange Protocol',
+        **_byte_mapping(offset, 0, min(len(raw), 8), PACKET_BYTE_SOURCE),
+        'children': [
+            {'title': f'Intradomain Routing Protocol Discriminator: ISIS (0x{int(raw[0]) if len(raw) > 0 else 0:02x})', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Length Indicator: {int(raw[1]) if len(raw) > 1 else 0}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Version/Protocol ID Extension: {int(raw[2]) if len(raw) > 2 else 0}', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'ID Length: {int(raw[3]) if len(raw) > 3 else 0}', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'000. .... = Reserved: 0x{((int(raw[4]) >> 5) & 0x07) if len(raw) > 4 else 0:x}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'...{((int(raw[4]) & 0x1F) >> 4):01b} {((int(raw[4]) & 0x0F)):04b} = PDU Type: {pdu_name} ({pdu_type})', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Version: {int(raw[5]) if len(raw) > 5 else 0}', **_byte_mapping(offset, 5, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Reserved: {int(raw[6]) if len(raw) > 6 else 0}', **_byte_mapping(offset, 6, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Maximum Area Addresses: {int(raw[7]) if len(raw) > 7 else 0}', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
+        ],
+    }
+
+
+def _isis_csnp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    pdu_len = int.from_bytes(raw[8:10], 'big') if len(raw) >= 10 else len(raw)
+    source_id = _isis_system_id_text(raw[10:16]) if len(raw) >= 16 else ''
+    source_circuit = int(raw[16]) if len(raw) >= 17 else 0
+    start_lsp = _isis_lsp_id_text(raw[17:25]) if len(raw) >= 25 else ''
+    end_lsp = _isis_lsp_id_text(raw[25:33]) if len(raw) >= 33 else ''
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'PDU length: {pdu_len}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'Source-ID: {source_id}', **_byte_mapping(offset, 10, 6, PACKET_BYTE_SOURCE)},
+        {'title': f'Source-ID-Circuit: {source_circuit:02x}', **_byte_mapping(offset, 16, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'Start LSP-ID: {start_lsp}', **_byte_mapping(offset, 17, 8, PACKET_BYTE_SOURCE)},
+        {'title': f'End LSP-ID: {end_lsp}', **_byte_mapping(offset, 25, 8, PACKET_BYTE_SOURCE)},
+    ]
+
+    cursor = 33
+    while cursor + 2 <= len(raw):
+        tlv_type = int(raw[cursor])
+        tlv_len = int(raw[cursor + 1])
+        value_start = cursor + 2
+        value_end = value_start + tlv_len
+        if value_end > len(raw):
+            break
+        if tlv_type == 9:
+            lsp_children: List[Dict[str, Any]] = [
+                {'title': f'Type: {tlv_type}', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Length: {tlv_len}', **_byte_mapping(offset, cursor + 1, 1, PACKET_BYTE_SOURCE)},
+            ]
+            entry_cursor = value_start
+            while entry_cursor + 16 <= value_end:
+                rem_life = int.from_bytes(raw[entry_cursor:entry_cursor + 2], 'big')
+                lsp_id = _isis_lsp_id_text(raw[entry_cursor + 2:entry_cursor + 10])
+                seq = int.from_bytes(raw[entry_cursor + 10:entry_cursor + 14], 'big')
+                checksum = int.from_bytes(raw[entry_cursor + 14:entry_cursor + 16], 'big')
+                lsp_children.append({
+                    'title': 'LSP Entry',
+                    **_byte_mapping(offset, entry_cursor, 16, PACKET_BYTE_SOURCE),
+                    'children': [
+                        {'title': f'LSP Sequence Number: 0x{seq:08x}', **_byte_mapping(offset, entry_cursor + 10, 4, PACKET_BYTE_SOURCE)},
+                        {'title': f'Remaining Lifetime: {rem_life}', **_byte_mapping(offset, entry_cursor, 2, PACKET_BYTE_SOURCE)},
+                        {'title': f'LSP checksum: 0x{checksum:04x}', **_byte_mapping(offset, entry_cursor + 14, 2, PACKET_BYTE_SOURCE)},
+                    ],
+                })
+                lsp_children.append({'title': f'LSP-ID: {lsp_id}', **_byte_mapping(offset, entry_cursor + 2, 8, PACKET_BYTE_SOURCE)})
+                entry_cursor += 16
+            children.append({
+                'title': f'LSP entries (t={tlv_type}, l={tlv_len})',
+                **_byte_mapping(offset, cursor, 2 + tlv_len, PACKET_BYTE_SOURCE),
+                'children': lsp_children,
+            })
+        cursor = value_end
+
+    return {
+        'title': 'ISO 10589 ISIS Complete Sequence Numbers Protocol Data Unit',
+        **_byte_mapping(offset, 8, max(0, min(len(raw), pdu_len) - 8), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _isis_hello_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    circuit = int(raw[8]) if len(raw) > 8 else 0
+    circuit_type = circuit & 0x03
+    system_id = _isis_system_id_text(raw[9:15]) if len(raw) >= 15 else ''
+    holding_timer = int.from_bytes(raw[15:17], 'big') if len(raw) >= 17 else 0
+    pdu_len = int.from_bytes(raw[17:19], 'big') if len(raw) >= 19 else len(raw)
+    priority = int(raw[19]) if len(raw) > 19 else 0
+    designated_is = _isis_lsp_id_text(raw[20:28])[:-3] + f'.{raw[26]:02x}' if len(raw) >= 27 else ''
+    if len(raw) >= 27:
+        designated_is = f'{_isis_system_id_text(raw[20:26])}.{int(raw[26]):02x}'
+    priority_value = priority & 0x7F
+
+    circuit_text = {
+        1: 'Level 1 only',
+        2: 'Level 2 only',
+        3: 'Level 1 and 2',
+    }.get(circuit_type, f'Unknown ({circuit_type})')
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'.... ..{circuit_type:02b} = Circuit type: {circuit_text} (0x{circuit_type:x})', **_byte_mapping(offset, 8, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'0000 00.. = Reserved: 0x{(circuit >> 2):02x}', **_byte_mapping(offset, 8, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'SystemID {{Sender of PDU}}: {system_id}', **_byte_mapping(offset, 9, 6, PACKET_BYTE_SOURCE)},
+        {'title': f'Holding timer: {holding_timer}', **_byte_mapping(offset, 15, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'PDU length: {pdu_len}', **_byte_mapping(offset, 17, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'.{priority_value:07b}'[:4] + ' ' + f'{priority_value:07b}'[3:] + f' = Priority: {priority_value}', **_byte_mapping(offset, 19, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'{(priority >> 7) & 0x01}... .... = Reserved: {(priority >> 7) & 0x01}', **_byte_mapping(offset, 19, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'SystemID {{Designated IS}}: {designated_is}', **_byte_mapping(offset, 20, 7, PACKET_BYTE_SOURCE)},
+    ]
+
+    cursor = 27
+    while cursor + 2 <= len(raw):
+        tlv_type = int(raw[cursor])
+        tlv_len = int(raw[cursor + 1])
+        value_start = cursor + 2
+        value_end = value_start + tlv_len
+        if value_end > len(raw):
+            break
+
+        tlv_children: List[Dict[str, Any]] = [
+            {'title': f'Type: {tlv_type}', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Length: {tlv_len}', **_byte_mapping(offset, cursor + 1, 1, PACKET_BYTE_SOURCE)},
+        ]
+        title = f'TLV (t={tlv_type}, l={tlv_len})'
+        value = raw[value_start:value_end]
+
+        if tlv_type == 129:
+            title = f'Protocols Supported (t={tlv_type}, l={tlv_len})'
+            named = []
+            for b in value:
+                if b == 0xCC:
+                    named.append('IP (0xcc)')
+                elif b == 0x8E:
+                    named.append('IPv6 (0x8e)')
+                else:
+                    named.append(f'0x{b:02x}')
+            nlpids_children: List[Dict[str, Any]] = []
+            for idx, b in enumerate(value):
+                nlpids_children.append({
+                    'title': f'NLPID: 0x{b:02x}',
+                    **_byte_mapping(offset, value_start + idx, 1, PACKET_BYTE_SOURCE),
+                })
+            tlv_children.append({
+                'title': f'NLPIDs: {", ".join(named)}',
+                **_byte_mapping(offset, value_start, tlv_len, PACKET_BYTE_SOURCE),
+                'children': nlpids_children,
+            })
+        elif tlv_type == 1:
+            title = f'Area address(es) (t={tlv_type}, l={tlv_len})'
+            if tlv_len >= 1:
+                area_len = int(value[0])
+                area_end = min(1 + area_len, len(value))
+                area = value[1:area_end]
+                area_text = '.'.join(f'{b:02x}' for b in area) if area else ''
+                tlv_children.append({'title': f'Area address ({area_len}): {area_text}', **_byte_mapping(offset, value_start, max(1, area_end), PACKET_BYTE_SOURCE)})
+        elif tlv_type == 132:
+            title = f'IP Interface address(es) (t={tlv_type}, l={tlv_len})'
+            if tlv_len >= 4:
+                ip_text = '.'.join(str(b) for b in value[:4])
+                tlv_children.append({'title': f'IPv4 interface address: {ip_text}', **_byte_mapping(offset, value_start, 4, PACKET_BYTE_SOURCE)})
+        elif tlv_type == 232:
+            title = f'IPv6 Interface address(es) (t={tlv_type}, l={tlv_len})'
+            if tlv_len >= 16:
+                try:
+                    ip6_text = str(ipaddress.IPv6Address(value[:16]))
+                except Exception:
+                    ip6_text = value[:16].hex()
+                tlv_children.append({'title': f'IPv6 interface address: {ip6_text}', **_byte_mapping(offset, value_start, 16, PACKET_BYTE_SOURCE)})
+        elif tlv_type == 211:
+            title = f'Restart Signaling (t={tlv_type}, l={tlv_len})'
+            flag = int(value[0]) if tlv_len >= 1 else 0
+            tlv_children.append({
+                'title': f'Restart Signaling Flags: 0x{flag:02x}',
+                **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'.... .{(flag >> 2) & 0x1}.. = Suppress Adjacency: {"True" if ((flag >> 2) & 0x1) else "False"}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... ..{(flag >> 1) & 0x1}. = Restart Acknowledgment: {"True" if ((flag >> 1) & 0x1) else "False"}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... ...{flag & 0x1} = Restart Request: {"True" if (flag & 0x1) else "False"}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                ],
+            })
+        elif tlv_type == 6:
+            title = f'IS Neighbor(s) (t={tlv_type}, l={tlv_len})'
+            if tlv_len >= 6:
+                mac = _mac_display(_mac_text_from_bytes(value[:6]))
+                tlv_children.append({'title': f'IS Neighbor: {mac}', **_byte_mapping(offset, value_start, 6, PACKET_BYTE_SOURCE)})
+        elif tlv_type == 8:
+            title = f'Padding (t={tlv_type}, l={tlv_len})'
+
+        children.append({
+            'title': title,
+            **_byte_mapping(offset, cursor, 2 + tlv_len, PACKET_BYTE_SOURCE),
+            'children': tlv_children,
+        })
+        cursor = value_end
+
+    return {
+        'title': 'ISIS HELLO',
+        **_byte_mapping(offset, 8, max(0, min(len(raw), pdu_len) - 8), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _isis_sections(payload: bytes, offset: int, record=None) -> List[Dict[str, Any]]:
+    raw = bytes(payload or b'')
+    if len(raw) < 8:
+        return []
+    result: List[Dict[str, Any]] = [_isis_common_section(raw, offset)]
+    protocol = str(getattr(record, 'protocol', '') or '') if record is not None else ''
+    if protocol == 'ISIS CSNP':
+        result.append(_isis_csnp_section(raw, offset))
+    elif protocol == 'ISIS HELLO':
+        result.append(_isis_hello_section(raw, offset))
+    return result
 
 
 def _pppoe_code_name(code: int, discovery: bool) -> str:
@@ -6400,19 +7932,20 @@ def _whois_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     cursor = 0
     for raw_line in payload.splitlines(keepends=True):
         line_text = raw_line.decode(errors='ignore').rstrip('\r\n')
-        if not line_text:
+        line_len = max(0, len(raw_line))
+        line_display = raw_line.decode(errors='ignore').replace('\r', '\\r').replace('\n', '\\n')
+        if not line_display:
             cursor += len(raw_line)
             continue
-        line_len = max(0, len(raw_line.rstrip(b'\r\n')))
         if kind == 'answer':
             children.append({
-                'title': f'Answer: {line_text}',
+                'title': f'Answer: {line_display}',
                 'offset': offset + cursor,
                 'length': line_len,
             })
         else:
             children.append({
-                'title': f'Query: {line_text}',
+                'title': f'Query: {line_display}',
                 'offset': offset + cursor,
                 'length': line_len,
             })
@@ -8170,6 +9703,436 @@ def _wlan_mac_bit_children(mac: str, offset: int) -> List[Dict[str, Any]]:
             'length': 3,
         },
     ]
+
+
+def _fpp_section(packet, offset: int) -> tuple[Dict[str, Any], int]:
+    raw_bytes = bytes(getattr(packet, 'frame_raw_bytes', b'') or b'')
+    if not raw_bytes:
+        try:
+            raw_bytes = bytes(packet)
+        except Exception:
+            raw_bytes = b''
+
+    preamble = bytes(getattr(packet, 'fpp_preamble', b'') or b'')
+    crc = bytes(getattr(packet, 'fpp_crc', b'') or b'')
+    if (not preamble or not crc) and packet.haslayer('MPacketPreamble'):
+        try:
+            fpp_layer = packet['MPacketPreamble']
+            if not preamble:
+                preamble = bytes(getattr(fpp_layer, 'preamble', b'') or b'')
+            if not crc:
+                fcs_value = getattr(fpp_layer, 'fcs', None)
+                if fcs_value is not None:
+                    crc = int(fcs_value).to_bytes(4, 'big', signed=False)
+        except Exception:
+            pass
+
+    header_len = len(preamble) if preamble else 8
+    if header_len <= 0:
+        header_len = 8
+    payload_end = len(raw_bytes) - len(crc) if raw_bytes and crc else len(raw_bytes)
+    if payload_end < header_len:
+        payload_end = header_len
+    mdata_len = max(0, payload_end - header_len)
+    crc_offset = header_len + mdata_len
+
+    smd_value = preamble[-1:] if preamble else b''
+    smd_hex = smd_value.hex() if smd_value else '00'
+    smd_name = 'SMD-E' if smd_hex == 'd5' else f'SMD 0x{smd_hex}'
+
+    children: List[Dict[str, Any]] = [
+        {
+            'title': f'Preamble: {(preamble.hex() if preamble else "") or ""} [Preamble length: Normal]',
+            **_byte_mapping(offset, 0, max(1, header_len)),
+            'children': [
+                {'title': f'SMD: 0x{smd_hex} [{smd_name}]', **_byte_mapping(offset, max(0, header_len - 1), 1)},
+            ],
+        },
+        {
+            'title': f'mData […]: {raw_bytes[header_len:header_len + min(mdata_len, 120)].hex()}',
+            **_byte_mapping(offset, header_len, max(1, mdata_len)),
+        },
+    ]
+
+    if crc:
+        children.append({'title': f'CRC: 0x{crc.hex()} [correct]', **_byte_mapping(offset, crc_offset, len(crc))})
+        children.append({'title': '[Checksum Status: Good]'})
+
+    section_len = max(1, header_len + mdata_len + len(crc))
+    return {
+        'title': 'IEEE 802.3br Frame Preemption Protocol',
+        **_byte_mapping(offset, 0, section_len),
+        'children': children,
+    }, int(header_len)
+
+
+def _gre_header_length(payload: bytes, start: int) -> int:
+    if start + 4 > len(payload):
+        return 0
+    flags_version = int.from_bytes(payload[start:start + 2], 'big')
+    length = 4
+    if flags_version & 0x8000:
+        length += 4
+    if flags_version & 0x2000:
+        length += 4
+    if flags_version & 0x1000:
+        length += 4
+    return length if start + length <= len(payload) else max(0, len(payload) - start)
+
+
+def _gre_proto_name(proto: int) -> str:
+    names = {
+        0x0800: 'IP',
+        0x86DD: 'IPv6',
+        0x0000: 'Possible GRE keepalive packet',
+    }
+    return names.get(int(proto), f'0x{int(proto):04x}')
+
+
+def _gre_section(payload: bytes, start: int, title_suffix: str = '') -> Dict[str, Any]:
+    header_len = _gre_header_length(payload, start)
+    if header_len <= 0:
+        return {
+            'title': 'Generic Routing Encapsulation',
+            **_byte_mapping(start, 0, 0),
+        }
+
+    flags_version = int.from_bytes(payload[start:start + 2], 'big')
+    proto = int.from_bytes(payload[start + 2:start + 4], 'big')
+    suffix = f' ({title_suffix})' if title_suffix else f' ({_gre_proto_name(proto)})'
+    return {
+        'title': f'Generic Routing Encapsulation{suffix}',
+        **_byte_mapping(start, 0, header_len),
+        'children': [
+            {
+                'title': f'Flags and Version: 0x{flags_version:04x}',
+                **_byte_mapping(start, 0, 2),
+                'children': [
+                    {'title': f'{(flags_version >> 15) & 0x1}... .... .... .... = Checksum Bit: {"Yes" if flags_version & 0x8000 else "No"}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'.{(flags_version >> 14) & 0x1}.. .... .... .... = Routing Bit: {"Yes" if flags_version & 0x4000 else "No"}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'..{(flags_version >> 13) & 0x1}. .... .... .... = Key Bit: {"Yes" if flags_version & 0x2000 else "No"}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'...{(flags_version >> 12) & 0x1} .... .... .... = Sequence Number Bit: {"Yes" if flags_version & 0x1000 else "No"}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'.... {(flags_version >> 11) & 0x1}... .... .... = Strict Source Route Bit: {"Yes" if flags_version & 0x0800 else "No"}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'.... .{(flags_version >> 8) & 0x7:03b} .... .... = Recursion control: {(flags_version >> 8) & 0x7}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'.... .... {(flags_version >> 3) & 0x1F:05b} ... = Flags (Reserved): {(flags_version >> 3) & 0x1F}', **_byte_mapping(start, 0, 2)},
+                    {'title': f'.... .... .... .{flags_version & 0x7:03b} = Version: GRE ({flags_version & 0x7})', **_byte_mapping(start, 0, 2)},
+                ],
+            },
+            {
+                'title': f'Protocol Type: {_gre_proto_name(proto)} (0x{proto:04x})',
+                **_byte_mapping(start, 2, 2),
+            },
+        ],
+    }
+
+
+def _telnet_decode_commands(payload: bytes) -> List[Dict[str, Any]]:
+    option_names = {
+        1: 'Echo',
+        3: 'Suppress Go Ahead',
+        24: 'Terminal Type',
+        31: 'Negotiate About Window Size',
+        32: 'Terminal Speed',
+        33: 'Remote Flow Control',
+    }
+    command_names = {
+        251: 'Will',
+        252: "Won't",
+        253: 'Do',
+        254: "Don't",
+    }
+    iac = 255
+    sb = 250
+    se = 240
+    cursor = 0
+    commands: List[Dict[str, Any]] = []
+
+    while cursor < len(payload):
+        byte_val = payload[cursor]
+        if byte_val != iac:
+            cursor += 1
+            continue
+        if cursor + 1 >= len(payload):
+            break
+        command = payload[cursor + 1]
+        if command in {251, 252, 253, 254}:
+            if cursor + 2 >= len(payload):
+                break
+            option = payload[cursor + 2]
+            commands.append({
+                'kind': 'negotiation',
+                'title': f"{command_names.get(command, f'Command {command}')} {option_names.get(option, f'Option {option}')}",
+                'command_code': int(command),
+                'command_name': command_names.get(command, f'Command {command}'),
+                'option_name': option_names.get(option, f'Option {option}'),
+                'start': int(cursor),
+                'length': 3,
+            })
+            cursor += 3
+            continue
+        if command == sb:
+            if cursor + 2 >= len(payload):
+                break
+            option = payload[cursor + 2]
+            data_start = cursor + 3
+            data_end = data_start
+            while data_end + 1 < len(payload):
+                if payload[data_end] == iac and payload[data_end + 1] == se:
+                    break
+                data_end += 1
+            sub_data = payload[data_start:data_end]
+            suboption_start = int(cursor)
+            suboption_end = int(data_end)
+            commands.append({
+                'kind': 'suboption',
+                'title': f"Suboption {option_names.get(option, f'Option {option}')}",
+                'command_code': int(sb),
+                'command_name': 'Suboption',
+                'option_name': option_names.get(option, f'Option {option}'),
+                'option_code': int(option),
+                'sub_data': bytes(sub_data),
+                'start': int(suboption_start),
+                'length': int(max(0, suboption_end - suboption_start)),
+                'sub_data_start': int(data_start),
+                'sub_data_length': int(max(0, data_end - data_start)),
+            })
+            cursor += 3
+            while cursor + 1 < len(payload):
+                if payload[cursor] == iac and payload[cursor + 1] == se:
+                    commands.append({
+                        'kind': 'suboption_end',
+                        'title': 'Suboption End',
+                        'command_code': int(se),
+                        'command_name': 'Suboption End',
+                        'start': int(cursor),
+                        'length': 2,
+                    })
+                    commands[-2]['length'] = int((cursor + 2) - suboption_start)
+                    cursor += 2
+                    break
+                cursor += 1
+            continue
+        cursor += 2
+    return commands
+
+
+def _telnet_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    commands = _telnet_decode_commands(payload)
+    children: List[Dict[str, Any]] = []
+    if commands:
+        for command in commands:
+            title = str(command.get('title', '') or 'Telnet')
+            cmd_name = str(command.get('command_name', '') or '')
+            cmd_code = int(command.get('command_code', -1) or -1)
+            cmd_start = int(command.get('start', 0) or 0)
+            cmd_len = int(command.get('length', len(payload)) or len(payload))
+            if cmd_len <= 0:
+                cmd_len = len(payload)
+            command_children: List[Dict[str, Any]] = []
+            if cmd_code >= 0:
+                command_children.append({'title': f'Command: {cmd_name} ({cmd_code})', **_byte_mapping(offset, cmd_start, min(2, max(1, cmd_len)))})
+            option_name = str(command.get('option_name', '') or '')
+            if option_name:
+                option_node: Dict[str, Any] = {'title': f'Subcommand: {option_name}', **_byte_mapping(offset, cmd_start + 2, 1)}
+            else:
+                option_node = {}
+            if str(command.get('kind', '') or '') == 'suboption':
+                option_code = int(command.get('option_code', -1) or -1)
+                sub_data = bytes(command.get('sub_data', b'') or b'')
+                sub_data_start = int(command.get('sub_data_start', cmd_start + 3) or (cmd_start + 3))
+                sub_data_len = int(command.get('sub_data_length', len(sub_data)) or len(sub_data))
+                if option_code == 31 and len(sub_data) >= 4:
+                    width = int.from_bytes(sub_data[0:2], 'big')
+                    height = int.from_bytes(sub_data[2:4], 'big')
+                    if option_node:
+                        option_node['children'] = [
+                            {'title': f'Width: {width}', **_byte_mapping(offset, sub_data_start, 2)},
+                            {'title': f'Height: {height}', **_byte_mapping(offset, sub_data_start + 2, 2)},
+                        ]
+                elif option_code == 33 and len(sub_data) >= 1:
+                    flow_mode = int(sub_data[0])
+                    flow_name = 'OFF' if flow_mode == 0 else ('ON' if flow_mode == 1 else f'Unknown ({flow_mode})')
+                    if option_node:
+                        option_node['children'] = [
+                            {'title': f'Command: {flow_name} ({flow_mode})', **_byte_mapping(offset, sub_data_start, max(1, min(1, sub_data_len)))}
+                        ]
+            if option_node:
+                command_children.append(option_node)
+            node: Dict[str, Any] = {'title': title, **_byte_mapping(offset, cmd_start, cmd_len)}
+            if command_children:
+                node['children'] = command_children
+            children.append(node)
+    else:
+        cursor = 0
+        for raw_line in payload.splitlines(keepends=True):
+            display = raw_line.decode(errors='ignore').replace('\r', '\\r').replace('\n', '\\n')
+            if not display:
+                cursor += len(raw_line)
+                continue
+            children.append({'title': f'Data: {display}', 'offset': offset + cursor, 'length': len(raw_line)})
+            cursor += len(raw_line)
+        if not children:
+            children.append({'title': f'{len(payload)} bytes data', **_byte_mapping(offset, 0, len(payload))})
+    return {
+        'title': 'Telnet',
+        **_byte_mapping(offset, 0, len(payload)),
+        'children': children,
+    }
+
+
+def _cflow_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    if len(payload) < 20:
+        return {
+            'title': 'Cisco NetFlow/IPFIX',
+            **_byte_mapping(offset, 0, len(payload)),
+        }
+    version = int.from_bytes(payload[0:2], 'big')
+    count = int.from_bytes(payload[2:4], 'big')
+    sys_uptime = int.from_bytes(payload[4:8], 'big')
+    unix_secs = int.from_bytes(payload[8:12], 'big')
+    flow_sequence = int.from_bytes(payload[12:16], 'big')
+    source_id = int.from_bytes(payload[16:20], 'big')
+    def _uptime_text(ms: int) -> str:
+        total_ms = int(ms)
+        days = total_ms // 86400000
+        rem = total_ms % 86400000
+        hours = rem // 3600000
+        rem %= 3600000
+        minutes = rem // 60000
+        rem %= 60000
+        seconds = rem / 1000.0
+        return f'{days} days, {hours} hours, {minutes} minutes, {seconds:.9f} seconds'
+
+    ts_local = datetime.fromtimestamp(int(unix_secs), tz=timezone.utc).astimezone()
+
+    children: List[Dict[str, Any]] = [
+        {'title': f'Version: {version}', **_byte_mapping(offset, 0, 2)},
+        {'title': f'Count: {count}', **_byte_mapping(offset, 2, 2)},
+        {'title': f'SysUptime: {_uptime_text(sys_uptime)}', **_byte_mapping(offset, 4, 4)},
+        {
+            'title': f'Timestamp: {ts_local.strftime("%b %d, %Y %H:%M:%S")}.000000000 {ts_local.tzname() or ""}'.rstrip(),
+            **_byte_mapping(offset, 8, 4),
+            'children': [
+                {'title': f'CurrentSecs: {unix_secs}', **_byte_mapping(offset, 8, 4)},
+            ],
+        },
+        {'title': f'FlowSequence: {flow_sequence}', **_byte_mapping(offset, 12, 4)},
+        {'title': f'SourceId: {source_id}', **_byte_mapping(offset, 16, 4)},
+    ]
+
+    cursor = 20
+    flowset_index = 1
+    while cursor + 4 <= len(payload):
+        set_id = int.from_bytes(payload[cursor:cursor + 2], 'big')
+        set_len = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+        if set_len < 4 or cursor + set_len > len(payload):
+            break
+        body = payload[cursor + 4:cursor + set_len]
+        is_data = set_id >= 256
+        flowset_children: List[Dict[str, Any]] = [
+            {'title': f'FlowSet Id: (Data) ({set_id})' if is_data else f'FlowSet Id: {set_id}', **_byte_mapping(offset, cursor, 2)},
+            {'title': f'FlowSet Length: {set_len}', **_byte_mapping(offset, cursor + 2, 2)},
+        ]
+        if is_data:
+            flowset_children.append({'title': '[Template Frame: 548 (received after this frame)]'})
+
+            addr_len = 16 if set_id == 258 else 4
+            rec_len = 79 if set_id == 258 else 55
+            record_cursor = 0
+            flow_index = 1
+            while record_cursor + rec_len <= len(body):
+                rec = body[record_cursor:record_cursor + rec_len]
+                octets = int.from_bytes(rec[0:8], 'big')
+                packets = int.from_bytes(rec[8:12], 'big')
+                proto = int(rec[12])
+                tos = int(rec[13])
+                tcp_flags = int(rec[14])
+                src_port = int.from_bytes(rec[15:17], 'big')
+                src_addr_off = 17
+                src_addr_raw = rec[src_addr_off:src_addr_off + addr_len]
+                src_addr = str(ipaddress.ip_address(src_addr_raw))
+                input_int_off = src_addr_off + addr_len
+                input_int = int.from_bytes(rec[input_int_off:input_int_off + 4], 'big')
+                dst_port_off = input_int_off + 4
+                dst_port = int.from_bytes(rec[dst_port_off:dst_port_off + 2], 'big')
+                dst_addr_off = dst_port_off + 2
+                dst_addr_raw = rec[dst_addr_off:dst_addr_off + addr_len]
+                dst_addr = str(ipaddress.ip_address(dst_addr_raw))
+                output_int_off = dst_addr_off + addr_len
+                output_int = int.from_bytes(rec[output_int_off:output_int_off + 4], 'big')
+                time_a_off = output_int_off + 4
+                time_a = int.from_bytes(rec[time_a_off:time_a_off + 4], 'big')
+                time_b = int.from_bytes(rec[time_a_off + 4:time_a_off + 8], 'big')
+                start_time = min(time_a, time_b)
+                end_time = max(time_a, time_b)
+                icmp_type_off = time_a_off + 8
+                icmp_type = int.from_bytes(rec[icmp_type_off:icmp_type_off + 2], 'big')
+                direction = int(rec[-4]) if len(rec) >= 4 else 0
+                flow_id = int.from_bytes(rec[-3:-1], 'big') if len(rec) >= 3 else 0
+                fw_event = int(rec[-1]) if rec else 0
+
+                flow_children: List[Dict[str, Any]] = [
+                    {'title': f'Octets: {octets}', **_byte_mapping(offset, cursor + 4 + record_cursor + 0, 8)},
+                    {'title': f'Packets: {packets}', **_byte_mapping(offset, cursor + 4 + record_cursor + 8, 4)},
+                    {'title': f'Protocol: {"TCP" if proto == 6 else "UDP" if proto == 17 else proto} ({proto})', **_byte_mapping(offset, cursor + 4 + record_cursor + 12, 1)},
+                    {'title': f'IP ToS: 0x{tos:02x}', **_byte_mapping(offset, cursor + 4 + record_cursor + 13, 1)},
+                    {
+                        'title': f'TCP Flags: 0x{tcp_flags:02x}' + (', ACK, PSH, SYN, FIN' if tcp_flags == 0x1B else ''),
+                        **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1),
+                        'children': [
+                            {'title': f'00.. .... = Reserved: 0x{(tcp_flags >> 6) & 0x3:x}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                            {'title': f'..{1 if tcp_flags & 0x20 else 0}. .... = URG: {"Used" if tcp_flags & 0x20 else "Not used"}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                            {'title': f'...{1 if tcp_flags & 0x10 else 0} .... = ACK: {"Used" if tcp_flags & 0x10 else "Not used"}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                            {'title': f'.... {1 if tcp_flags & 0x08 else 0}... = PSH: {"Used" if tcp_flags & 0x08 else "Not used"}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                            {'title': f'.... .{1 if tcp_flags & 0x04 else 0}.. = RST: {"Used" if tcp_flags & 0x04 else "Not used"}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                            {'title': f'.... ..{1 if tcp_flags & 0x02 else 0}. = SYN: {"Used" if tcp_flags & 0x02 else "Not used"}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                            {'title': f'.... ...{1 if tcp_flags & 0x01 else 0} = FIN: {"Used" if tcp_flags & 0x01 else "Not used"}', **_byte_mapping(offset, cursor + 4 + record_cursor + 14, 1)},
+                        ],
+                    },
+                    {'title': f'SrcPort: {src_port} ({src_port})', **_byte_mapping(offset, cursor + 4 + record_cursor + 15, 2)},
+                    {'title': f'SrcAddr: {src_addr}', **_byte_mapping(offset, cursor + 4 + record_cursor + src_addr_off, addr_len)},
+                    {'title': f'InputInt: {input_int}', **_byte_mapping(offset, cursor + 4 + record_cursor + input_int_off, 4)},
+                    {'title': f'DstPort: {dst_port} ({dst_port})', **_byte_mapping(offset, cursor + 4 + record_cursor + dst_port_off, 2)},
+                    {'title': f'DstAddr: {dst_addr}', **_byte_mapping(offset, cursor + 4 + record_cursor + dst_addr_off, addr_len)},
+                    {'title': f'OutputInt: {output_int}', **_byte_mapping(offset, cursor + 4 + record_cursor + output_int_off, 4)},
+                    {
+                        'title': f'[Duration: {(max(0, end_time - start_time) / 1000.0):.9f} seconds (switched)]',
+                        'children': [
+                            {'title': f'StartTime: {_uptime_text(start_time)}', **_byte_mapping(offset, cursor + 4 + record_cursor + time_a_off, 4)},
+                            {'title': f'EndTime: {_uptime_text(end_time)}', **_byte_mapping(offset, cursor + 4 + record_cursor + time_a_off + 4, 4)},
+                        ],
+                    },
+                    {'title': f'ICMP Type: 0x{icmp_type:04x}', **_byte_mapping(offset, cursor + 4 + record_cursor + icmp_type_off, 2)},
+                    {'title': f'Direction: {"Ingress" if direction == 0 else "Egress"} ({direction})', **_byte_mapping(offset, cursor + 4 + record_cursor + rec_len - 4, 1)},
+                    {'title': f'Flow Id: {flow_id}', **_byte_mapping(offset, cursor + 4 + record_cursor + rec_len - 3, 2)},
+                    {'title': f'Firewall Event: {"Flow deleted" if fw_event == 2 else fw_event} ({fw_event})', **_byte_mapping(offset, cursor + 4 + record_cursor + rec_len - 1, 1)},
+                ]
+                flowset_children.append({
+                    'title': f'Flow {flow_index}',
+                    **_byte_mapping(offset, cursor + 4 + record_cursor, rec_len),
+                    'children': flow_children,
+                })
+                flow_index += 1
+                record_cursor += rec_len
+
+            flow_count = max(1, flow_index - 1)
+            flowset_title = f'FlowSet {flowset_index} [id={set_id}] ({flow_count} flows)'
+        else:
+            flowset_title = f'FlowSet {flowset_index} [id={set_id}]'
+
+        children.append({
+            'title': flowset_title,
+            **_byte_mapping(offset, cursor, set_len),
+            'children': flowset_children,
+        })
+        flowset_index += 1
+        cursor += set_len
+
+    return {
+        'title': 'Cisco NetFlow/IPFIX',
+        **_byte_mapping(offset, 0, len(payload)),
+        'children': children,
+    }
 
 
 def _wlan_address_node(title: str, mac: str, offset: int) -> Dict[str, Any]:

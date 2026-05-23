@@ -14,6 +14,55 @@ from core.remote_capture import SSHRemoteCapture
 log = logging.getLogger('capture')
 
 
+def _decode_link_layer_packet(raw_bytes: bytes, linktype: int):
+    try:
+        linktype_int = int(linktype or 1)
+    except Exception:
+        linktype_int = 1
+
+    has_mpacket_preamble = isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) > 16 and bytes(raw_bytes[:8]) == (b'\x55' * 7 + b'\xD5')
+    if linktype_int == 1 and not has_mpacket_preamble:
+        packet = Ether(raw_bytes)
+        try:
+            packet.frame_raw_bytes = bytes(raw_bytes)
+            packet.frame_wire_len = int(len(raw_bytes))
+            packet.frame_linktype = int(linktype_int)
+        except Exception:
+            pass
+        return packet
+
+    # IEEE 802.3br mPackets: 8-byte preamble/SMD + Ethernet frame (+ optional CRC)
+    if (linktype_int in {44, 198, 274} or has_mpacket_preamble) and isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) > 8:
+        inner = bytes(raw_bytes[8:])
+        if len(inner) >= 4:
+            # Remove trailing FCS when present.
+            candidate = inner[:-4]
+        else:
+            candidate = inner
+        try:
+            packet = Ether(candidate)
+        except Exception:
+            packet = Raw(candidate)
+        try:
+            packet.fpp_preamble = bytes(raw_bytes[:8])
+            packet.fpp_crc = bytes(raw_bytes[-4:]) if len(raw_bytes) >= 12 else b''
+            packet.frame_raw_bytes = bytes(raw_bytes)
+            packet.frame_wire_len = int(len(raw_bytes))
+            packet.frame_linktype = int(linktype_int)
+        except Exception:
+            pass
+        return packet
+
+    packet = Raw(raw_bytes)
+    try:
+        packet.frame_raw_bytes = bytes(raw_bytes)
+        packet.frame_wire_len = int(len(raw_bytes))
+        packet.frame_linktype = int(linktype_int)
+    except Exception:
+        pass
+    return packet
+
+
 class _ChannelStream:
     """File-like wrapper over Paramiko channel for streaming PCAP bytes."""
 
@@ -152,10 +201,7 @@ class RemotePacketSniffer(QThread):
     def _decode_packet(self, packet_data):
         raw_bytes, metadata = packet_data
         linktype = getattr(metadata, 'linktype', getattr(self._reader, 'linktype', 1))
-        if int(linktype or 1) == 1:
-            packet = Ether(raw_bytes)
-        else:
-            packet = Raw(raw_bytes)
+        packet = _decode_link_layer_packet(raw_bytes, linktype)
         timestamp = self._packet_timestamp(metadata)
         if timestamp is not None:
             packet.time = timestamp
@@ -389,11 +435,7 @@ class PacketSniffer(QThread):
     def _decode_pipe_packet(self, packet_data):
         raw_bytes, metadata = packet_data
         linktype = getattr(metadata, 'linktype', getattr(self._reader, 'linktype', 1))
-
-        if int(linktype or 1) == 1:
-            packet = Ether(raw_bytes)
-        else:
-            packet = Raw(raw_bytes)
+        packet = _decode_link_layer_packet(raw_bytes, linktype)
 
         timestamp = self._packet_timestamp(metadata)
         if timestamp is not None:

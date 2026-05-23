@@ -5,6 +5,21 @@ from PySide6.QtWidgets import QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget
 from core.formatters import hex_dump
 
 
+def _record_packet_bytes(record) -> bytes:
+    if not record:
+        return b''
+    raw = getattr(record, 'raw', None)
+    if raw is None:
+        return b''
+    frame_raw = getattr(raw, 'frame_raw_bytes', None)
+    if isinstance(frame_raw, (bytes, bytearray)):
+        return bytes(frame_raw)
+    try:
+        return bytes(raw)
+    except Exception:
+        return b''
+
+
 class PacketHexView(QPlainTextEdit):
     BYTES_PER_LINE = 16
     OFFSET_WIDTH = 4
@@ -35,7 +50,7 @@ class PacketHexView(QPlainTextEdit):
         
 
     def show_packet(self, record):
-        self.show_bytes(bytes(record.raw) if record else b'')
+        self.show_bytes(_record_packet_bytes(record))
 
     def show_bytes(self, data):
         self._selected_ranges = []
@@ -280,6 +295,7 @@ class PacketBytesView(QWidget):
             'packet': PacketHexView(),
             'tcp_reassembled': PacketHexView(),
             'decoded_utf8': PacketHexView(),
+            'http_dechunked': PacketHexView(),
         }
         self._tab_sources = []
 
@@ -326,7 +342,8 @@ class PacketBytesView(QWidget):
 
     def show_packet(self, record):
         metadata = getattr(record, 'metadata', {}) if record else {}
-        packet_data = bytes(record.raw) if record else b''
+        protocol_name = str(getattr(record, 'protocol', '') or '')
+        packet_data = _record_packet_bytes(record)
         sources = [
             ('packet', f'Packet ({len(packet_data)} bytes)', packet_data),
         ]
@@ -358,9 +375,15 @@ class PacketBytesView(QWidget):
                 decoded_utf8 = http_body
             except Exception:
                 decoded_utf8 = b''
-        if decoded_utf8:
+        if decoded_utf8 and protocol_name != 'IPP':
             sources.append(
                 ('decoded_utf8', f'Decoded UTF-8 text ({len(decoded_utf8)} bytes)', decoded_utf8)
+            )
+
+        dechunked_body = bytes(metadata.get('http_dechunked_body', b'') or b'')
+        if dechunked_body:
+            sources.append(
+                ('http_dechunked', f'De-chunked entity body ({len(dechunked_body)} bytes)', dechunked_body)
             )
 
         self._reset_tabs(sources)
