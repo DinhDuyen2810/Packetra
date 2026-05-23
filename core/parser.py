@@ -280,6 +280,8 @@ class PacketParser:
         fragment_override = self._fragment_override_protocol(packet, metadata)
         if fragment_override:
             return fragment_override
+        if self._is_homeplug_av_packet(packet):
+            return 'HomePlug AV'
         if packet.haslayer(GRE):
             if tcp_layer is not None:
                 sport = int(getattr(tcp_layer, 'sport', 0) or 0)
@@ -369,6 +371,8 @@ class PacketParser:
             if int(getattr(tcp_layer, 'sport', 0) or 0) == 22 or int(getattr(tcp_layer, 'dport', 0) or 0) == 22:
                 if payload.startswith(b'SSH-') or len(payload) >= 6:
                     return 'SSHv2'
+            if self._is_rsh_packet(packet):
+                return 'RSH'
             imap_info = self._imap_payload_info(payload, sport, dport)
             if imap_info is not None:
                 metadata['imap'] = imap_info
@@ -425,6 +429,10 @@ class PacketParser:
             sport = int(getattr(udp_layer, 'sport', 0) or 0)
             dport = int(getattr(udp_layer, 'dport', 0) or 0)
             payload = bytes(getattr(udp_layer, 'payload', b''))
+            if self._is_hsrpv2_packet(packet):
+                return 'HSRPv2'
+            if self._is_hsrp_packet(packet):
+                return 'HSRP'
             if sport == 3222 or dport == 3222:
                 glbp_info = self._glbp_payload_info(payload)
                 if glbp_info is not None:
@@ -478,7 +486,7 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP'}:
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP', 'HSRP', 'HSRPv2'}:
             return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
@@ -502,6 +510,10 @@ class PacketParser:
             return self._ipp_info_text(packet, metadata)
         if protocol == 'LPD':
             return self._lpd_info_text(packet, metadata)
+        if protocol == 'RSH':
+            return self._rsh_info_text(packet)
+        if protocol == 'HomePlug AV':
+            return self._homeplug_info_text(packet)
         if protocol in {'FTP', 'FTP-DATA', 'BFD Control'}:
             return self._build_info(packet, protocol, metadata)
         if protocol == 'SSHv2':
@@ -1836,11 +1848,8 @@ class PacketParser:
             3: 'v3',
         }.get(int(version), f'v{int(version)}')
 
-    def _snmp_payload_info(self, packet) -> dict | None:
-        if not packet.haslayer(SNMP):
-            return None
+    def _snmp_payload_info_from_layer(self, snmp_layer) -> dict | None:
         try:
-            snmp_layer = packet[SNMP]
             pdu = getattr(snmp_layer, 'PDU', None)
             request_id = int(getattr(getattr(pdu, 'id', None), 'val', 0) or 0)
             error_status = int(getattr(getattr(pdu, 'error', None), 'val', 0) or 0)
@@ -1870,6 +1879,20 @@ class PacketParser:
             }
         except Exception:
             return None
+
+    def _snmp_payload_info_from_bytes(self, payload: bytes) -> dict | None:
+        if not payload:
+            return None
+        try:
+            snmp_layer = SNMP(payload)
+        except Exception:
+            return None
+        return self._snmp_payload_info_from_layer(snmp_layer)
+
+    def _snmp_payload_info(self, packet) -> dict | None:
+        if not packet.haslayer(SNMP):
+            return None
+        return self._snmp_payload_info_from_layer(packet[SNMP])
 
     def _imap_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
         if sport != 143 and dport != 143:
@@ -2614,6 +2637,42 @@ class PacketParser:
             pass
         return b''
 
+    def _homeplug_payload(self, packet) -> bytes:
+        try:
+            if not packet.haslayer(Ether):
+                return b''
+            raw = bytes(packet)
+            if len(raw) < 14:
+                return b''
+            ether_type = int(getattr(packet[Ether], 'type', 0) or 0)
+            if ether_type == 0x8100:
+                if len(raw) < 18:
+                    return b''
+                return raw[18:]
+            return raw[14:]
+        except Exception:
+            return b''
+
+    def _is_homeplug_av_packet(self, packet) -> bool:
+        ether_type = self._ether_type(packet)
+        return bool(ether_type == 0x88E1 or (ether_type == 0x8100 and self._inner_eth_type(packet) == 0x88E1))
+
+    def _homeplug_mmtype_name(self, mmtype: int) -> str:
+        return {
+            0xA068: 'OP_ATTR.REQ (Get Device Attributes Request)',
+            0xA000: 'GET_SW.REQ (Get Device/SW Version Request)',
+        }.get(int(mmtype), f'0x{int(mmtype) & 0xFFFF:04x}')
+
+    def _homeplug_info_text(self, packet) -> str:
+        payload = self._homeplug_payload(packet)
+        if len(payload) < 6:
+            return 'HomePlug AV'
+        mmtype = int.from_bytes(payload[1:3], 'little')
+        vendor = {
+            b'\x00\xb0\x52': 'Qualcomm Atheros',
+        }.get(bytes(payload[3:6]), payload[3:6].hex())
+        return f'{vendor}, {self._homeplug_mmtype_name(mmtype)}'
+
     def _is_hsrpv2_packet(self, packet) -> bool:
         try:
             udp_layer = self._effective_udp_layer(packet)
@@ -2630,6 +2689,25 @@ class PacketParser:
         except Exception:
             return False
 
+    def _is_hsrp_packet(self, packet) -> bool:
+        try:
+            udp_layer = self._effective_udp_layer(packet)
+            if udp_layer is None:
+                return False
+            sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            dport = int(getattr(udp_layer, 'dport', 0) or 0)
+            if sport != 1985 and dport != 1985:
+                return False
+            payload = self._hsrpv2_payload(packet)
+            if len(payload) < 16 or int(payload[0]) != 0:
+                return False
+            opcode = int(payload[1])
+            if opcode == 3:
+                return len(payload) >= 16 and int(payload[2]) == 0 and int(payload[3]) >= 1
+            return len(payload) >= 20 and opcode in {0, 1, 2}
+        except Exception:
+            return False
+
     def _hsrpv2_info_text(self, packet) -> str:
         payload = self._hsrpv2_payload(packet)
         if len(payload) >= 6 and int(payload[0]) == 2 and int(payload[1]) == 4:
@@ -2643,6 +2721,48 @@ class PacketParser:
         opcode_name = {0: 'Hello', 1: 'Coup', 2: 'Resign'}.get(opcode, f'Opcode {opcode}')
         state_name = {1: 'Initial', 2: 'Learn', 3: 'Listen', 4: 'Speak', 5: 'Standby', 6: 'Active'}.get(state, str(state))
         return f'{opcode_name} (state {state_name})'
+
+    def _hsrp_info_text(self, packet) -> str:
+        if self._is_hsrpv2_packet(packet):
+            return self._hsrpv2_info_text(packet)
+        payload = self._hsrpv2_payload(packet)
+        if len(payload) < 4:
+            return 'Cisco Hot Standby Router Protocol'
+        opcode = int(payload[1])
+        opcode_name = {0: 'Hello', 1: 'Coup', 2: 'Resign', 3: 'Advertise'}.get(opcode, f'Opcode {opcode}')
+        if opcode == 3:
+            state = int(payload[6]) if len(payload) >= 7 else 0
+            state_name = {0: 'Initial', 1: 'Learn', 2: 'Passive', 3: 'Active', 4: 'Speak', 8: 'Standby', 16: 'Active'}.get(state, str(state))
+            return f'{opcode_name} (state {state_name})'
+        state = int(payload[2]) if len(payload) >= 3 else 0
+        state_name = {0: 'Initial', 1: 'Learn', 2: 'Listen', 4: 'Speak', 8: 'Standby', 16: 'Active'}.get(state, str(state))
+        return f'{opcode_name} (state {state_name})'
+
+    def _is_rsh_packet(self, packet) -> bool:
+        try:
+            tcp_layer = self._effective_tcp_layer(packet)
+            if tcp_layer is None:
+                return False
+            sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+            dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+            if sport != 514 and dport != 514:
+                return False
+            payload = self._payload_bytes(packet)
+            return bool(payload)
+        except Exception:
+            return False
+
+    def _rsh_info_text(self, packet) -> str:
+        tcp_layer = self._effective_tcp_layer(packet)
+        if tcp_layer is None:
+            return 'Remote Shell'
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        if dport == 514:
+            return 'Client -> Server data'
+        if sport == 514:
+            return 'Server -> Client data'
+        return 'Remote Shell data'
 
     def _icmp_timestamp_info_text(self, packet) -> str:
         if not packet.haslayer(ICMP) or not packet.haslayer(IP):
@@ -2941,6 +3061,8 @@ class PacketParser:
                 return 'IPv6'
             return 'IP'
         if role == 'last':
+            if str(metadata.get('snmp_reassembled_data_hex', '') or ''):
+                return 'SNMP'
             if str(metadata.get('dns_reassembled_data_hex', '') or ''):
                 if bool(metadata.get('dns_is_mdns_transport', False)):
                     return 'MDNS'
@@ -3011,11 +3133,17 @@ class PacketParser:
                             udp_total = min(udp_total, len(reassembled))
                             udp_payload = reassembled[8:udp_total]
                             metadata['udp_reassembled_payload_hex'] = reassembled[:udp_total].hex()
-                            if len(udp_payload) >= 12:
+                            dns_src_port = int.from_bytes(reassembled[0:2], 'big') if len(reassembled) >= 2 else 0
+                            dns_dst_port = int.from_bytes(reassembled[2:4], 'big') if len(reassembled) >= 4 else 0
+                            is_dns_transport = bool(dns_src_port in {53, 5353} or dns_dst_port in {53, 5353})
+                            if is_dns_transport and len(udp_payload) >= 12:
                                 metadata['dns_reassembled_data_hex'] = udp_payload.hex()
-                                dns_dst_port = int.from_bytes(reassembled[2:4], 'big')
-                                dns_src_port = int.from_bytes(reassembled[0:2], 'big')
                                 metadata['dns_is_mdns_transport'] = bool(dns_src_port == 5353 or dns_dst_port == 5353)
+                            if dns_src_port in {161, 162} or dns_dst_port in {161, 162}:
+                                snmp_info = self._snmp_payload_info_from_bytes(udp_payload)
+                                if snmp_info is not None:
+                                    metadata['snmp'] = snmp_info
+                                    metadata['snmp_reassembled_data_hex'] = udp_payload.hex()
                         if proto == 17 and len(reassembled) >= 4:
                             try:
                                 src_port = int.from_bytes(reassembled[0:2], 'big')
@@ -3094,11 +3222,17 @@ class PacketParser:
                         udp_total = min(udp_total, len(reassembled))
                         udp_payload = reassembled[8:udp_total]
                         metadata['udp_reassembled_payload_hex'] = reassembled[:udp_total].hex()
-                        if len(udp_payload) >= 12:
+                        dns_src_port = int.from_bytes(reassembled[0:2], 'big') if len(reassembled) >= 2 else 0
+                        dns_dst_port = int.from_bytes(reassembled[2:4], 'big') if len(reassembled) >= 4 else 0
+                        is_dns_transport = bool(dns_src_port in {53, 5353} or dns_dst_port in {53, 5353})
+                        if is_dns_transport and len(udp_payload) >= 12:
                             metadata['dns_reassembled_data_hex'] = udp_payload.hex()
-                            dns_dst_port = int.from_bytes(reassembled[2:4], 'big')
-                            dns_src_port = int.from_bytes(reassembled[0:2], 'big')
                             metadata['dns_is_mdns_transport'] = bool(dns_src_port == 5353 or dns_dst_port == 5353)
+                        if dns_src_port in {161, 162} or dns_dst_port in {161, 162}:
+                            snmp_info = self._snmp_payload_info_from_bytes(udp_payload)
+                            if snmp_info is not None:
+                                metadata['snmp'] = snmp_info
+                                metadata['snmp_reassembled_data_hex'] = udp_payload.hex()
                     if next_header == 17 and len(reassembled) >= 4:
                         try:
                             src_port = int.from_bytes(reassembled[0:2], 'big')
@@ -4829,6 +4963,8 @@ class PacketParser:
             if ppp_protocol != 0x0021:
                 return 'PPP'
         eth_type = self._ether_type(packet)
+        if self._is_homeplug_av_packet(packet):
+            return 'HomePlug AV'
         effective_ip = self._effective_ip_layer(packet)
         effective_tcp = self._effective_tcp_layer(packet, effective_ip)
         effective_udp = self._effective_udp_layer(packet, effective_ip)
@@ -4891,6 +5027,8 @@ class PacketParser:
             return 'RIPng'
         if self._is_ripv2_packet(packet):
             return 'RIPv2'
+        if self._is_hsrp_packet(packet):
+            return 'HSRP'
         if self._is_hsrpv2_packet(packet):
             return 'HSRPv2'
         if self._is_stp_packet(packet):
@@ -5027,6 +5165,8 @@ class PacketParser:
                     ssh_payload = self._payload_bytes(packet)
                     if ssh_payload.startswith(b'SSH-') or len(ssh_payload) >= 6:
                         return 'SSHv2'
+            if self._is_rsh_packet(packet):
+                return 'RSH'
             if (
                 not bool(metadata.get('tcp_is_retransmission', False))
                 and (sport == 646 or dport == 646)
@@ -7614,6 +7754,8 @@ class PacketParser:
                     first_oid = str(varbinds[0].get('oid', '') or '')
                 pdu_name = str(snmp_info.get('pdu_name', '') or 'snmp')
                 return f'{pdu_name} {first_oid}'.strip()
+            if protocol == 'HomePlug AV':
+                return self._homeplug_info_text(packet)
             if protocol in {'SIP', 'SIP/SDP'}:
                 effective_ip = self._effective_ip_layer(packet)
                 udp = self._effective_udp_layer(packet, effective_ip)
@@ -7656,8 +7798,12 @@ class PacketParser:
                 return self._isakmp_info_text(packet)
             if protocol == 'LLDP':
                 return self._lldp_info_text(packet)
+            if protocol == 'HSRP':
+                return self._hsrp_info_text(packet)
             if protocol == 'HSRPv2':
                 return self._hsrpv2_info_text(packet)
+            if protocol == 'RSH':
+                return self._rsh_info_text(packet)
             if protocol == 'IMAP':
                 effective_ip = self._effective_ip_layer(packet)
                 tcp = self._effective_tcp_layer(packet, effective_ip)

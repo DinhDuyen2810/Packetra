@@ -371,6 +371,22 @@ def _ip_payload_bytes(packet, ip_layer=None):
 
     return b''
 
+def _homeplug_payload(packet) -> bytes:
+    try:
+        if not packet.haslayer(Ether):
+            return b''
+        raw = bytes(packet)
+        if len(raw) < 14:
+            return b''
+        eth_type = int(getattr(packet[Ether], 'type', 0) or 0)
+        if eth_type == 0x8100:
+            if len(raw) < 18:
+                return b''
+            return raw[18:]
+        return raw[14:]
+    except Exception:
+        return b''
+
 
 def _infer_padding(packet, record):
     frame_len = int(getattr(record, 'length', len(bytes(packet))) or len(bytes(packet)))
@@ -881,9 +897,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             udp_payload = bytes(getattr(effective_udp_layer, 'payload', b'')) if effective_udp_layer is not None else b''
             sections.append(_ripng_section(udp_payload, offset))
             payload_handled = True
-        elif getattr(record, 'protocol', '') == 'HSRPv2' and tcp_payload == b'':
+        elif getattr(record, 'protocol', '') in {'HSRP', 'HSRPv2'} and tcp_payload == b'':
             udp_payload = _udp_payload_bytes(packet, effective_udp_layer) if effective_udp_layer is not None else b''
-            sections.append(_hsrpv2_section(udp_payload, offset))
+            sections.append(_hsrp_section(udp_payload, offset))
             payload_handled = True
         elif getattr(record, 'protocol', '') in {'SMTP', 'SMTP/IMF'} and tcp_payload:
             sections.append(_smtp_section(tcp_payload, offset, record))
@@ -920,6 +936,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'LPD' and tcp_payload:
             sections.append(_lpd_section(tcp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'RSH' and tcp_payload:
+            sections.append(_rsh_section(tcp_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'SSHv2' and tcp_payload:
             sections.append(_ssh_section(tcp_payload, offset, record))
@@ -1019,9 +1038,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             bfd_echo_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_bfd_echo_section(bfd_echo_payload, offset, record))
             payload_handled = True
-        elif getattr(record, 'protocol', '') == 'HSRPv2':
+        elif getattr(record, 'protocol', '') in {'HSRP', 'HSRPv2'}:
             hsrp_payload = _udp_payload_bytes(packet, udp_layer)
-            sections.append(_hsrpv2_section(hsrp_payload, offset))
+            sections.append(_hsrp_section(hsrp_payload, offset))
             payload_handled = True
 
     if effective_ip_layer is not None and not parsed_mpls_inner_ip:
@@ -1110,6 +1129,13 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.extend(isis_sections)
             payload_handled = True
 
+    if getattr(record, 'protocol', '') == 'HomePlug AV':
+        homeplug_payload = _homeplug_payload(packet)
+        if homeplug_payload:
+            sections.append(_homeplug_av_section(homeplug_payload, offset))
+            payload_handled = True
+            raw_payload_consumed = True
+
     if packet.haslayer(DNS) and not is_first_fragment:
 
         dns_layer = packet[DNS]
@@ -1141,6 +1167,27 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 dns_section = _dns_section(dns_layer, 8, record)
                 _tag_byte_source(dns_section, TCP_REASSEMBLED_BYTE_SOURCE)
                 sections.append(dns_section)
+            payload_handled = True
+            raw_payload_consumed = True
+        except Exception:
+            pass
+    elif (
+        is_last_fragment
+        and getattr(record, 'protocol', '') == 'SNMP'
+        and str(metadata.get('udp_reassembled_payload_hex', '') or '')
+    ):
+        try:
+            udp_hex = str(metadata.get('udp_reassembled_payload_hex', '') or '')
+            udp_layer = UDP(bytes.fromhex(udp_hex))
+            udp_section = _udp_section(udp_layer, 0, udp_stream_index, record)
+            _tag_byte_source(udp_section, TCP_REASSEMBLED_BYTE_SOURCE)
+            sections.append(udp_section)
+
+            snmp_payload = bytes(getattr(udp_layer, 'payload', b''))
+            if snmp_payload:
+                snmp_section = _snmp_section(snmp_payload, 8, record)
+                _tag_byte_source(snmp_section, TCP_REASSEMBLED_BYTE_SOURCE)
+                sections.append(snmp_section)
             payload_handled = True
             raw_payload_consumed = True
         except Exception:
@@ -1452,6 +1499,10 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:llc:udld'
     elif protocol == 'LLDP':
         protocol_string = 'eth:ethertype:lldp'
+    elif protocol == 'HomePlug AV':
+        protocol_string = 'eth:ethertype:homeplug-av'
+    elif protocol == 'HSRP':
+        protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:udp:hsrp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:udp:hsrp'
     elif protocol == 'HSRPv2':
         protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:udp:hsrp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:udp:hsrp'
     elif protocol == 'GLBP':
@@ -1509,6 +1560,8 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:ethertype:ip:gre:ipv6:tcp:telnet' if has_gre else ('eth:ethertype:ipv6:tcp:telnet' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:telnet')
     elif protocol == 'LPD':
         protocol_string = 'eth:ethertype:ip:tcp:lpd'
+    elif protocol == 'RSH':
+        protocol_string = 'eth:ethertype:ipv6:tcp:rsh' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:rsh'
     elif protocol == 'GRE':
         protocol_string = 'eth:ethertype:ip:gre:ip:gre'
     elif protocol == 'CFLOW':
@@ -1584,7 +1637,7 @@ def _frame_section(record) -> Dict[str, Any]:
     ):
         coloring_name = 'HTTP'
         coloring_string = 'http || tcp.port == 80 || http2'
-    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP', 'WHOIS', 'TELNET', 'LPD'}:
+    elif protocol in {'SMTP', 'SMTP/IMF', 'IMAP', 'WHOIS', 'TELNET', 'LPD', 'RSH'}:
         coloring_name = 'TCP'
         coloring_string = 'tcp'
     elif protocol in {'HTTP', 'OCSP', 'IPP'} and (
@@ -1606,7 +1659,7 @@ def _frame_section(record) -> Dict[str, Any]:
     elif protocol == 'DHCPv6':
         coloring_name = 'UDP'
         coloring_string = 'udp'
-    elif protocol in {'OSPF', 'CDP', 'BGP', 'HSRPv2', 'EIGRP'}:
+    elif protocol in {'OSPF', 'CDP', 'BGP', 'HSRP', 'HSRPv2', 'EIGRP'}:
         coloring_name = 'Routing'
         coloring_string = 'hsrp || eigrp || ospf || bgp || cdp || vrrp || carp || gvrp || igmp || ismp'
     elif protocol in {'RIPng', 'RIPv2', 'Syslog', 'NTP', 'SNMP', 'SIP', 'SIP/SDP', 'RTP', 'CFLOW'}:
@@ -4213,6 +4266,85 @@ def _udld_section(payload: bytes, offset: int) -> Dict[str, Any]:
     }
 
 
+def _homeplug_mmtype_label(mmtype: int) -> str:
+    return {
+        0xA068: 'OP_ATTR.REQ (Get Device Attributes Request)',
+        0xA000: 'GET_SW.REQ (Get Device/SW Version Request)',
+    }.get(int(mmtype), f'0x{int(mmtype) & 0xFFFF:04x}')
+
+
+def _homeplug_av_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    children: List[Dict[str, Any]] = []
+    if len(payload) >= 3:
+        version = int(payload[0]) & 0x01
+        mmtype = int.from_bytes(payload[1:3], 'little')
+        lsb = mmtype & 0x3
+        msb = (mmtype >> 13) & 0x7
+        children.append({
+            'title': 'MAC Management Header',
+            **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'.... ...{version} = Version: 1.0 ({version})', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                {
+                    'title': f'Type: {_homeplug_mmtype_label(mmtype)} (0x{mmtype:04x})',
+                    **_byte_mapping(offset, 1, 2, PACKET_BYTE_SOURCE),
+                    'children': [
+                        {'title': f'.... ..{lsb:02b} = LSB: {"Request" if lsb == 0 else lsb} (0x{lsb:x})', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                        {'title': f'{msb:03b}. .... = MSB: {"Vendor Specific" if msb == 5 else msb} (0x{msb:x})', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+                    ],
+                },
+            ],
+        })
+    if len(payload) >= 6:
+        oui_bytes = bytes(payload[3:6])
+        oui_text = {b'\x00\xb0\x52': 'Qualcomm Atheros'}.get(oui_bytes, oui_bytes.hex())
+        children.append({
+            'title': 'Vendor MME',
+            **_byte_mapping(offset, 3, 3, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'OUI: {oui_text} (0x{oui_bytes.hex()})', **_byte_mapping(offset, 3, 3, PACKET_BYTE_SOURCE)},
+            ],
+        })
+    if len(payload) >= 11 and int.from_bytes(payload[1:3], 'little') == 0xA068:
+        cookie = int.from_bytes(payload[6:10], 'little')
+        report_type = int(payload[10])
+        report_name = 'Binary' if report_type == 0 else str(report_type)
+        children.append({
+            'title': 'Get Device Attributes Request',
+            **_byte_mapping(offset, 6, 5, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'Cookie: {cookie}', **_byte_mapping(offset, 6, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Report Type: {report_name} (0x{report_type:02x})', **_byte_mapping(offset, 10, 1, PACKET_BYTE_SOURCE)},
+            ],
+        })
+    return {
+        'title': 'HomePlug AV protocol',
+        **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _rsh_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    direction = 'Data'
+    packet = getattr(record, 'raw', None) if record is not None else None
+    if packet is not None:
+        tcp_layer = _effective_tcp_layer(packet)
+        if tcp_layer is not None:
+            sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+            dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+            if dport == 514:
+                direction = 'Client -> Server Data'
+            elif sport == 514:
+                direction = 'Server -> Client Data'
+    return {
+        'title': 'Remote Shell',
+        **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+        'children': [
+            {'title': f'{direction}: {payload.hex()}', **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE)},
+        ],
+    }
+
+
 def _hsrpv2_section(payload: bytes, offset: int) -> Dict[str, Any]:
     children = []
     if len(payload) >= 6 and int(payload[0]) == 2 and int(payload[1]) == 4:
@@ -4220,13 +4352,12 @@ def _hsrpv2_section(payload: bytes, offset: int) -> Dict[str, Any]:
         passive_groups = int.from_bytes(payload[4:6], 'big')
         children.append({
             'title': 'Interface State TLV: Type=2 Len=4',
-            'offset': offset,
-            'length': 6,
+            **_byte_mapping(offset, 0, 6, PACKET_BYTE_SOURCE),
             'children': [
-                {'title': 'Type: Interface State (2)', 'offset': offset, 'length': 1},
-                {'title': 'Length: 4', 'offset': offset + 1, 'length': 1},
-                {'title': f'Active Groups: {active_groups}', 'offset': offset + 2, 'length': 2},
-                {'title': f'Passive Groups: {passive_groups}', 'offset': offset + 4, 'length': 2},
+                {'title': 'Type: Interface State (2)', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                {'title': 'Length: 4', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Active Groups: {active_groups}', **_byte_mapping(offset, 2, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Passive Groups: {passive_groups}', **_byte_mapping(offset, 4, 2, PACKET_BYTE_SOURCE)},
             ],
         })
     if len(payload) >= 42:
@@ -4252,20 +4383,19 @@ def _hsrpv2_section(payload: bytes, offset: int) -> Dict[str, Any]:
             vip_title = f'Virtual IPv6 Address: {str(ipaddress.IPv6Address(payload[26:42])) if len(payload) >= 42 else ""}'
         children.append({
             'title': f'Group State TLV: Type={tlv_type} Len={tlv_len}',
-            'offset': offset,
-            'length': 42,
+            **_byte_mapping(offset, 0, min(42, len(payload)), PACKET_BYTE_SOURCE),
             'children': [
-                {'title': f'Type: {tlv_type}', 'offset': offset, 'length': 1},
-                {'title': f'Length: {tlv_len}', 'offset': offset + 1, 'length': 1},
-                {'title': f'Version: {version}', 'offset': offset + 2, 'length': 1},
-                {'title': f'Op Code: {"Hello" if opcode == 0 else opcode} ({opcode})', 'offset': offset + 3, 'length': 1},
-                {'title': f'State: {state_name} ({state})', 'offset': offset + 4, 'length': 1},
-                {'title': f'IP Ver.: {"IPv4" if ip_version == 4 else "IPv6"} ({ip_version})', 'offset': offset + 5, 'length': 1},
-                {'title': f'Group: {group}', 'offset': offset + 6, 'length': 2},
-                {'title': f'Identifier: {_mac_display(identifier)}', 'offset': offset + 8, 'length': 6},
-                {'title': f'Priority: {priority}', 'offset': offset + 14, 'length': 4},
-                {'title': f'Hellotime: Default ({hellotime})', 'offset': offset + 18, 'length': 4},
-                {'title': f'Holdtime: Default ({holdtime})', 'offset': offset + 22, 'length': 4},
+                {'title': f'Type: {tlv_type}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Length: {tlv_len}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Version: {version}', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Op Code: {"Hello" if opcode == 0 else opcode} ({opcode})', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'State: {state_name} ({state})', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'IP Ver.: {"IPv4" if ip_version == 4 else "IPv6"} ({ip_version})', **_byte_mapping(offset, 5, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Group: {group}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Identifier: {_mac_display(identifier)}', **_byte_mapping(offset, 8, 6, PACKET_BYTE_SOURCE)},
+                {'title': f'Priority: {priority}', **_byte_mapping(offset, 14, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Hellotime: Default ({hellotime})', **_byte_mapping(offset, 18, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Holdtime: Default ({holdtime})', **_byte_mapping(offset, 22, 4, PACKET_BYTE_SOURCE)},
                 {'title': vip_title, 'offset': vip_offset, 'length': vip_length},
             ],
         })
@@ -4275,25 +4405,69 @@ def _hsrpv2_section(payload: bytes, offset: int) -> Dict[str, Any]:
         sender_ip = '.'.join(str(int(b)) for b in payload[48:52])
         children.append({
             'title': f'MD5 Authentication TLV: Type={auth_type} Len={auth_len}',
-            'offset': offset + 42,
-            'length': 30,
+            **_byte_mapping(offset, 42, min(30, len(payload) - 42), PACKET_BYTE_SOURCE),
             'children': [
-                {'title': f'Type: {auth_type}', 'offset': offset + 42, 'length': 1},
-                {'title': f'Length: {auth_len}', 'offset': offset + 43, 'length': 1},
-                {'title': 'MD5 Algorithm: MD5 (1)', 'offset': offset + 44, 'length': 1},
-                {'title': 'Padding: 0x00', 'offset': offset + 45, 'length': 1},
-                {'title': f"MD5 Flags: {int.from_bytes(payload[46:48], 'big') if len(payload) >= 48 else 0}", 'offset': offset + 46, 'length': 2},
-                {'title': f"Sender's IP Address: {sender_ip}", 'offset': offset + 48, 'length': 4},
-                {'title': f"MD5 Key ID: {int.from_bytes(payload[52:56], 'big') if len(payload) >= 56 else 0}", 'offset': offset + 52, 'length': 4},
-                {'title': f"MD5 Authentication Data: {payload[56:72].hex()}", 'offset': offset + 56, 'length': min(16, max(0, len(payload) - 56))},
+                {'title': f'Type: {auth_type}', **_byte_mapping(offset, 42, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Length: {auth_len}', **_byte_mapping(offset, 43, 1, PACKET_BYTE_SOURCE)},
+                {'title': 'MD5 Algorithm: MD5 (1)', **_byte_mapping(offset, 44, 1, PACKET_BYTE_SOURCE)},
+                {'title': 'Padding: 0x00', **_byte_mapping(offset, 45, 1, PACKET_BYTE_SOURCE)},
+                {'title': f"MD5 Flags: {int.from_bytes(payload[46:48], 'big') if len(payload) >= 48 else 0}", **_byte_mapping(offset, 46, 2, PACKET_BYTE_SOURCE)},
+                {'title': f"Sender's IP Address: {sender_ip}", **_byte_mapping(offset, 48, 4, PACKET_BYTE_SOURCE)},
+                {'title': f"MD5 Key ID: {int.from_bytes(payload[52:56], 'big') if len(payload) >= 56 else 0}", **_byte_mapping(offset, 52, 4, PACKET_BYTE_SOURCE)},
+                {'title': f"MD5 Authentication Data: {payload[56:72].hex()}", **_byte_mapping(offset, 56, min(16, max(0, len(payload) - 56)), PACKET_BYTE_SOURCE)},
             ],
         })
     return {
         'title': 'Cisco Hot Standby Router Protocol',
-        'offset': offset,
-        'length': len(payload),
+        **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
         'children': children,
     }
+
+
+def _hsrp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    if len(payload) >= 1 and int(payload[0]) == 0:
+        opcode = int(payload[1]) if len(payload) >= 2 else 0
+        if opcode == 3 and len(payload) >= 16:
+            state = int(payload[6])
+            state_name = {0: 'Initial', 1: 'Learn', 2: 'Passive', 3: 'Active', 4: 'Speak', 8: 'Standby', 16: 'Active'}.get(state, str(state))
+            adv_type = int(payload[3])
+            adv_len = int(payload[5])
+            return {
+                'title': 'Cisco Hot Standby Router Protocol',
+                **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'Version: {int(payload[0])}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Op Code: Advertise ({opcode})', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv type: HSRP interface state ({adv_type})', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv length: {adv_len}', **_byte_mapping(offset, 5, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv state: {state_name} ({state})', **_byte_mapping(offset, 6, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv reserved1: {int(payload[7])}', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv active groups: {int.from_bytes(payload[8:10], "big")}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv passive groups: {int.from_bytes(payload[10:12], "big")}', **_byte_mapping(offset, 10, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'Adv reserved2: {int.from_bytes(payload[12:16], "big")}', **_byte_mapping(offset, 12, 4, PACKET_BYTE_SOURCE)},
+                ],
+            }
+        if len(payload) >= 20:
+            opcode_name = {0: 'Hello', 1: 'Coup', 2: 'Resign'}.get(opcode, str(opcode))
+            state = int(payload[2])
+            state_name = {0: 'Initial', 1: 'Learn', 2: 'Listen', 4: 'Speak', 8: 'Standby', 16: 'Active'}.get(state, str(state))
+            return {
+                'title': 'Cisco Hot Standby Router Protocol',
+                **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'Version: {int(payload[0])}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Op Code: {opcode_name} ({opcode})', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'State: {state_name} ({state})', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Hellotime: Default ({int(payload[3])})', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Holdtime: Default ({int(payload[4])})', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Priority: {int(payload[5])}', **_byte_mapping(offset, 5, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Group: {int(payload[6])}', **_byte_mapping(offset, 6, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Reserved: {int(payload[7])}', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Authentication Data: Default ({bytes(payload[8:16]).decode(errors="ignore").rstrip(chr(0))})', **_byte_mapping(offset, 8, 8, PACKET_BYTE_SOURCE)},
+                    {'title': f'Virtual IP Address: {_ipv4_text(payload[16:20])}', **_byte_mapping(offset, 16, 4, PACKET_BYTE_SOURCE)},
+                ],
+            }
+    return _hsrpv2_section(payload, offset)
 
 def _ip_section(layer, offset: int, stream_index: int, record=None) -> Dict[str, Any]:
 
@@ -7917,8 +8091,11 @@ def _snmp_pdu_name(code: int) -> str:
         1: 'get-next-request',
         2: 'get-response',
         3: 'set-request',
+        4: 'trap',
         5: 'get-bulk-request',
         6: 'inform-request',
+        7: 'snmpV2-trap',
+        8: 'report',
     }.get(int(code), 'snmp')
 
 
