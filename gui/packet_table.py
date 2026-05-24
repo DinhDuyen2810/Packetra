@@ -94,6 +94,31 @@ class PacketTable(QTableWidget):
         self._paint_row(row, record.protocol)
         return row
 
+    def append_records(self, records):
+        records = list(records or [])
+        if not records:
+            return
+        start = self.rowCount()
+        self.setRowCount(start + len(records))
+        for rel, record in enumerate(records):
+            row = start + rel
+            values = [
+                str(record.number),
+                f'{record.relative_time:.9f}',
+                record.src,
+                record.dst,
+                record.protocol,
+                str(record.length),
+                record.info,
+            ]
+            for col, value in enumerate(values):
+                item = self.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.setItem(row, col, item)
+                item.setText(value)
+            self._paint_row(row, record.protocol)
+
     def replace_records(self, records):
         records = list(records or [])
         self.setRowCount(len(records))

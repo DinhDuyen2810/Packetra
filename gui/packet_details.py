@@ -134,7 +134,14 @@ class PacketDetailsTree(QTreeWidget):
             self.detail_field_selected.emit('', 0)
             return
 
-        for node in packet_summary_tree(record.raw, record):
+        metadata = getattr(record, 'metadata', {}) if record else {}
+        cached_tree = metadata.get('_detail_tree_cache', None) if isinstance(metadata, dict) else None
+        if not isinstance(cached_tree, list):
+            cached_tree = packet_summary_tree(record.raw, record)
+            if isinstance(metadata, dict):
+                metadata['_detail_tree_cache'] = cached_tree
+
+        for node in cached_tree:
             self._add_node(self.invisibleRootItem(), node)
 
         self._restore_expand_state()

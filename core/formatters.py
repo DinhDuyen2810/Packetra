@@ -33,6 +33,7 @@ RADIUS_EAP_REASSEMBLED_BYTE_SOURCE = 'radius_eap_reassembled'
 RADIUS_EAP_TLS_REASSEMBLED_BYTE_SOURCE = 'radius_eap_tls_reassembled'
 
 _TSHARK_PDML_CACHE: Dict[tuple[str, int], ET.Element | None] = {}
+_TSHARK_PDML_CAPTURE_CACHE: Dict[str, Dict[int, ET.Element]] = {}
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -154,6 +155,19 @@ def _pdml_node_to_tree(elem: ET.Element) -> Dict[str, Any] | None:
         showname = show if show else name
     if not showname:
         return None
+    lowered_show = showname.lower()
+    if (
+        '(resolved)' in lowered_show
+        or lowered_show.startswith('source or destination ')
+        or lowered_show.startswith('address oui')
+        or lowered_show.startswith('source oui')
+        or lowered_show.startswith('destination oui')
+        or 'this field makes the filter match on' in lowered_show
+    ):
+        return None
+    is_hidden = str(elem.attrib.get('hide', '') or '').lower() == 'yes'
+    if is_hidden and not (showname.startswith('[') and showname.endswith(']')):
+        showname = f'[{showname}]'
 
     node: Dict[str, Any] = {'title': showname}
     pos_text = elem.attrib.get('pos', None)
@@ -171,11 +185,6 @@ def _pdml_node_to_tree(elem: ET.Element) -> Dict[str, Any] | None:
     for child in list(elem):
         if child.tag != 'field':
             continue
-        child_showname = str(child.attrib.get('showname', '') or '').strip()
-        if str(child.attrib.get('hide', '') or '').lower() == 'yes':
-            # Keep generated bracket-style lines such as [Response in: ...].
-            if not (child_showname.startswith('[') and child_showname.endswith(']')):
-                continue
         child_node = _pdml_node_to_tree(child)
         if child_node is not None:
             children.append(child_node)
@@ -185,7 +194,8 @@ def _pdml_node_to_tree(elem: ET.Element) -> Dict[str, Any] | None:
 
 
 def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
-    key = (os.path.normpath(capture_path), int(frame_number))
+    norm_capture = os.path.normpath(capture_path)
+    key = (norm_capture, int(frame_number))
     if key in _TSHARK_PDML_CACHE:
         return _TSHARK_PDML_CACHE[key]
 
@@ -194,10 +204,64 @@ def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
         _TSHARK_PDML_CACHE[key] = None
         return None
 
+    if norm_capture not in _TSHARK_PDML_CAPTURE_CACHE:
+        by_frame: Dict[int, ET.Element] = {}
+        try:
+            proc_all = subprocess.run(
+                [
+                    tshark,
+                    '-2',
+                    '-r',
+                    capture_path,
+                    '-n',
+                    '-T',
+                    'pdml',
+                ],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='ignore',
+                check=True,
+                timeout=120,
+            )
+            root_all = ET.fromstring(proc_all.stdout)
+            for pkt_elem in root_all.findall('packet'):
+                frame_no = 0
+                for proto in list(pkt_elem):
+                    if proto.tag != 'proto':
+                        continue
+                    if str(proto.attrib.get('name', '') or '').lower() not in {'geninfo', 'frame'}:
+                        continue
+                    for field in list(proto):
+                        if field.tag != 'field':
+                            continue
+                        fname = str(field.attrib.get('name', '') or '').strip().lower()
+                        if fname in {'num', 'frame.number'}:
+                            show = str(field.attrib.get('show', '') or '').strip()
+                            try:
+                                frame_no = int(show)
+                                break
+                            except Exception:
+                                continue
+                    if frame_no > 0:
+                        break
+                if frame_no > 0:
+                    by_frame[frame_no] = pkt_elem
+            _TSHARK_PDML_CAPTURE_CACHE[norm_capture] = by_frame
+        except Exception:
+            _TSHARK_PDML_CAPTURE_CACHE[norm_capture] = {}
+
+    capture_cached = _TSHARK_PDML_CAPTURE_CACHE.get(norm_capture, {})
+    if capture_cached:
+        pkt_cached = capture_cached.get(int(frame_number), None)
+        _TSHARK_PDML_CACHE[key] = pkt_cached
+        return pkt_cached
+
     try:
         proc = subprocess.run(
             [
                 tshark,
+                '-2',
                 '-r',
                 capture_path,
                 '-Y',
@@ -349,6 +413,55 @@ def _tshark_protocol_tree(record: Any, proto_names: List[str]) -> Dict[str, Any]
     if root_len > 0:
         _normalize_tree_byte_ranges(root_tree, root_off, root_len, PACKET_BYTE_SOURCE)
     return root_tree
+
+
+def _normalize_tshark_titles(node: Dict[str, Any], parent_title: str = '') -> None:
+    title = str(node.get('title', '') or '').strip()
+    bare = title.strip('[]')
+    parent_bare = str(parent_title or '').strip('[]')
+    should_bracket = parent_bare.startswith('Expert Info (')
+    if not should_bracket and re.match(
+        r'^(Response (in|to|In|To):|Time from request:|Time:|Preauth Hash:|Expert Info \(|Group:|Severity level:|Used keymap=)',
+        bare,
+    ):
+        should_bracket = True
+    if should_bracket and not title.startswith('['):
+        node['title'] = f'[{bare}]'
+    for child in node.get('children', []) or []:
+        if isinstance(child, dict):
+            _normalize_tshark_titles(child, str(node.get('title', '') or ''))
+
+
+def _tshark_full_packet_tree(record: Any) -> List[Dict[str, Any]] | None:
+    if record is None:
+        return None
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    capture_path = str(metadata.get('capture_file_path', '') or '')
+    frame_number = int(getattr(record, 'number', 0) or 0)
+    if not capture_path or frame_number <= 0:
+        return None
+
+    pkt = _get_packet_pdml(capture_path, frame_number)
+    if pkt is None:
+        return None
+
+    nodes: List[Dict[str, Any]] = []
+    for proto in list(pkt):
+        if not isinstance(proto.tag, str) or proto.tag != 'proto':
+            continue
+        name = str(proto.attrib.get('name', '') or '').lower()
+        if name in {'geninfo'}:
+            continue
+        tree = _pdml_node_to_tree(proto)
+        if tree is None:
+            continue
+        _normalize_tshark_titles(tree)
+        root_off = int(tree.get('offset', 0) or 0)
+        root_len = int(tree.get('length', 0) or 0)
+        if root_len > 0:
+            _normalize_tree_byte_ranges(tree, root_off, root_len, PACKET_BYTE_SOURCE)
+        nodes.append(tree)
+    return nodes or None
 
 
 def _ip_reassembly_section(metadata: dict, version: int) -> Dict[str, Any] | None:
@@ -685,6 +798,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
     raw_payload_consumed = False
 
     metadata = getattr(record, 'metadata', {}) or {}
+    if bool(metadata.get('force_tshark_detail', False)):
+        tshark_sections = _tshark_full_packet_tree(record)
+        if tshark_sections:
+            return tshark_sections
     effective_ip_layer = _effective_ip_layer(packet)
     effective_tcp_layer = _effective_tcp_layer(packet, effective_ip_layer)
     effective_udp_layer = _effective_udp_layer(packet, effective_ip_layer)
@@ -12743,6 +12860,22 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
                 pass
         if cldap_payload:
             _realign_value_nodes_to_ascii(tshark_tree, cldap_payload)
+
+            def _drop_parent_ranges(node: Dict[str, Any]) -> None:
+                if not isinstance(node, dict):
+                    return
+                children = node.get('children', []) or []
+                if children:
+                    node.pop('offset', None)
+                    node.pop('length', None)
+                for child in children:
+                    if isinstance(child, dict):
+                        _drop_parent_ranges(child)
+
+            # Wireshark CLDAP parent spans may cover broader bytes than displayed values.
+            # Rebuild parent mapping strictly from mapped children for accurate highlight bounds.
+            _drop_parent_ranges(tshark_tree)
+            _normalize_tree_byte_ranges(tshark_tree, offset, len(cldap_payload), PACKET_BYTE_SOURCE)
 
         metadata = getattr(record, 'metadata', {}) if record else {}
         capture_path = str(metadata.get('capture_file_path', '') or '')

@@ -219,6 +219,7 @@ class CaptureView(QWidget):
         self._last_find_signature = None
         self._last_find_offset = None
         self._last_find_detail_index = None
+        self._selected_record_index = -1
         self._filter_history = self._load_filter_history()
         self.capture_comments = ''
         self.capture_metadata = None  # pcapng metadata (interfaces, file comment, packet comments)
@@ -238,6 +239,14 @@ class CaptureView(QWidget):
 
     def _settings(self):
         return QSettings('Packetra', 'Packetra')
+
+    def _configure_parser_capture_context(self, parser: PacketParser, capture_path: str, use_wireshark_baseline: bool = True):
+        if parser is None:
+            return
+        try:
+            parser.set_capture_file_path(capture_path or '', use_wireshark_baseline=use_wireshark_baseline)
+        except Exception:
+            pass
 
     def _load_filter_history(self):
         try:
@@ -933,10 +942,13 @@ class CaptureView(QWidget):
         self._stop_refine_thread()
         self.records.clear()
         self.visible_indices.clear()
+        self._selected_record_index = -1
         self.table.setRowCount(0)
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
+        self._configure_parser_capture_context(self.parser, '')
+        self._configure_parser_capture_context(self.parser, '')
         self.capture_comments = ''
         self.capture_metadata = None
         self._captured_bytes = 0
@@ -977,6 +989,7 @@ class CaptureView(QWidget):
 
         def worker():
             parser = PacketParser()
+            self._configure_parser_capture_context(parser, str(self.loaded_file_path or ''), use_wireshark_baseline=True)
             parsed_by_frame = {}
             for idx, fast_record in enumerate(snapshot):
                 if stop_event.is_set():
@@ -1019,6 +1032,7 @@ class CaptureView(QWidget):
 
     def _drain_refine_queue(self):
         processed = 0
+        visible_row_by_index = {rec_idx: row for row, rec_idx in enumerate(self.visible_indices)}
         while processed < 300:
             try:
                 idx, full_record = self._refine_queue.get_nowait()
@@ -1032,12 +1046,13 @@ class CaptureView(QWidget):
             applied = self._apply_capture_metadata_to_record(full_record, int(full_record.number))
             self.records[idx] = applied
             # Update row only if currently visible.
-            try:
-                row = self.visible_indices.index(idx)
-            except ValueError:
-                row = -1
+            row = visible_row_by_index.get(idx, -1)
             if row >= 0:
                 self._update_table_row_from_record(row, applied)
+            if idx == self._selected_record_index:
+                # Selected packet should refresh as soon as full parse is available.
+                self.details_tree.show_packet(applied)
+                self.hex_view.show_packet(applied)
             processed += 1
 
     def _rollover_live_output_if_needed(self):
@@ -1068,6 +1083,8 @@ class CaptureView(QWidget):
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
+        self._configure_parser_capture_context(self.parser, '')
+        self._configure_parser_capture_context(self.parser, '')
         self.capture_metadata = None
         self._captured_bytes = 0
         self._last_live_status_count = 0
@@ -1188,26 +1205,8 @@ class CaptureView(QWidget):
         if row < 0 or row >= len(self.visible_indices):
             return
         record_index = self.visible_indices[row]
+        self._selected_record_index = record_index
         record = self.records[record_index]
-        if bool(record.metadata.get('fast_preview', False)):
-            full_record = self.parser.parse(record.raw, int(record.number), record.iface)
-            full_record = self._apply_capture_metadata_to_record(full_record, int(record.number))
-            self.records[record_index] = full_record
-            record = full_record
-            values = [
-                str(record.number),
-                f'{record.relative_time:.9f}',
-                record.src,
-                record.dst,
-                record.protocol,
-                str(record.length),
-                record.info,
-            ]
-            for col, value in enumerate(values):
-                item = self.table.item(row, col)
-                if item is not None:
-                    item.setText(value)
-            self.table._paint_row(row, record.protocol)
         self.details_tree.show_packet(record)
         self.hex_view.show_packet(record)
         self.detail_status_changed.emit('', 0)
@@ -1332,6 +1331,7 @@ class CaptureView(QWidget):
         try:
             self.clear_packets(reset_file_path=False)
             self.loaded_file_path = filename
+            self._configure_parser_capture_context(self.parser, filename, use_wireshark_baseline=True)
             self.capture_metadata = load_capture_metadata(filename)
             display_expr = self.display_filter_input.text().strip()
             no_filter = (display_expr == '')
@@ -1355,8 +1355,7 @@ class CaptureView(QWidget):
                 if loaded % batch_size == 0:
                     if batch_new_visible:
                         self.table.setUpdatesEnabled(False)
-                        for visible_record in batch_new_visible:
-                            self.table.append_record(visible_record)
+                        self.table.append_records(batch_new_visible)
                         self.table.setUpdatesEnabled(True)
                         batch_new_visible.clear()
                     self._update_status(f'Loaded {loaded} packets...')
@@ -1364,8 +1363,7 @@ class CaptureView(QWidget):
 
             if batch_new_visible:
                 self.table.setUpdatesEnabled(False)
-                for visible_record in batch_new_visible:
-                    self.table.append_record(visible_record)
+                self.table.append_records(batch_new_visible)
                 self.table.setUpdatesEnabled(True)
                 batch_new_visible.clear()
 
@@ -1373,7 +1371,9 @@ class CaptureView(QWidget):
             if not no_filter:
                 self.apply_display_filter()
             if self.visible_indices:
-                self.goto_first_packet()
+                self.table.selectRow(0)
+                self.table.setCurrentCell(0, 0)
+                self.table.setFocus()
             self._start_refine_thread()
             self._remember_recent_file(self.loaded_file_path)
             self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')

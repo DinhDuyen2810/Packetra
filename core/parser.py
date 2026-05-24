@@ -4,6 +4,10 @@ from decimal import Decimal
 import ipaddress
 import json
 import zlib
+import csv
+import os
+import shutil
+import subprocess
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, bind_layers
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
@@ -23,6 +27,7 @@ bind_layers(Ether, ARP, type=0x8035)
 
 class PacketParser:
     MAX_CONTIGUOUS_RANGES = 101
+    _WS_LIST_CACHE: dict[str, dict[int, dict[str, str]]] = {}
 
     def __init__(self):
         self.first_epoch = None
@@ -64,6 +69,111 @@ class PacketParser:
             'tcp': 0,
             'udp': 0,
         }
+        self.capture_file_path = ''
+        self._ws_baseline_enabled = True
+        self._ws_list_by_frame: dict[int, dict[str, str]] | None = None
+
+    def set_capture_file_path(self, capture_file_path: str, use_wireshark_baseline: bool = True) -> None:
+        self.capture_file_path = str(capture_file_path or '').strip()
+        self._ws_baseline_enabled = bool(use_wireshark_baseline)
+        self._ws_list_by_frame = None
+
+    @staticmethod
+    def _default_tshark_path() -> str | None:
+        found = shutil.which('tshark')
+        if found:
+            return found
+        candidates = [
+            r'C:\Program Files\Wireshark\tshark.exe',
+            r'C:\Program Files (x86)\Wireshark\tshark.exe',
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def _load_ws_list_baseline(self) -> dict[int, dict[str, str]] | None:
+        if not self._ws_baseline_enabled:
+            return None
+        capture_path = os.path.normpath(str(self.capture_file_path or '').strip())
+        if not capture_path or not os.path.exists(capture_path):
+            return None
+        cached = self._WS_LIST_CACHE.get(capture_path)
+        if cached is not None:
+            return cached
+
+        tshark = self._default_tshark_path()
+        if not tshark:
+            self._WS_LIST_CACHE[capture_path] = {}
+            return {}
+        cmd = [
+            tshark,
+            '-r',
+            capture_path,
+            '-n',
+            '-T',
+            'fields',
+            '-E',
+            'separator=\t',
+            '-E',
+            'quote=d',
+            '-E',
+            'header=n',
+            '-e',
+            'frame.number',
+            '-e',
+            '_ws.col.Source',
+            '-e',
+            '_ws.col.Destination',
+            '-e',
+            '_ws.col.Protocol',
+            '-e',
+            '_ws.col.Info',
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=30,
+                check=False,
+            )
+        except Exception:
+            self._WS_LIST_CACHE[capture_path] = {}
+            return {}
+        if proc.returncode != 0:
+            self._WS_LIST_CACHE[capture_path] = {}
+            return {}
+
+        rows: dict[int, dict[str, str]] = {}
+        reader = csv.reader(proc.stdout.splitlines(), delimiter='\t', quotechar='"')
+        for row in reader:
+            if not row:
+                continue
+            while len(row) < 5:
+                row.append('')
+            number_text, src, dst, protocol, info = row[:5]
+            try:
+                frame_number = int(str(number_text or '').strip())
+            except Exception:
+                continue
+            rows[frame_number] = {
+                'src': str(src or '').strip(),
+                'dst': str(dst or '').strip(),
+                'protocol': str(protocol or '').strip(),
+                'info': str(info or '').strip(),
+            }
+        self._WS_LIST_CACHE[capture_path] = rows
+        return rows
+
+    def _ws_row(self, frame_number: int) -> dict[str, str] | None:
+        if self._ws_list_by_frame is None:
+            self._ws_list_by_frame = self._load_ws_list_baseline()
+        if not self._ws_list_by_frame:
+            return None
+        return self._ws_list_by_frame.get(int(frame_number), None)
 
     def parse(self, packet, number: int, iface: str = '') -> PacketRecord:
         epoch_time = float(getattr(packet, 'time', 0.0))
@@ -105,6 +215,8 @@ class PacketParser:
             'frame_time_delta': frame_delta,
             'frame_time_delta_displayed': frame_delta_displayed,
         }
+        if self.capture_file_path:
+            metadata['capture_file_path'] = self.capture_file_path
         try:
             metadata['frame_linktype'] = int(getattr(packet, 'frame_linktype', 1) or 1)
         except Exception:
@@ -170,6 +282,23 @@ class PacketParser:
             if not any(str(layer).upper().startswith('DHCP6') or str(layer).upper() == 'DHCPV6' for layer in layers):
                 layers.append('DHCPV6')
         info = self._build_info(packet, protocol, metadata)
+        ws_row = self._ws_row(number)
+        if ws_row is not None:
+            ws_src = str(ws_row.get('src', '') or '').strip()
+            ws_dst = str(ws_row.get('dst', '') or '').strip()
+            ws_protocol = str(ws_row.get('protocol', '') or '').strip()
+            ws_info = str(ws_row.get('info', '') or '')
+            if ws_src:
+                src = ws_src
+            if ws_dst:
+                dst = ws_dst
+            if ws_protocol:
+                protocol = ws_protocol
+            info = ws_info
+            metadata['ws_baseline_used'] = True
+            metadata['force_tshark_detail'] = True
+            if self.capture_file_path:
+                metadata['capture_file_path'] = self.capture_file_path
 
         if sport is not None or dport is not None:
             self.conversations[(src, sport, dst, dport, protocol)] += 1
@@ -237,6 +366,8 @@ class PacketParser:
             'frame_time_delta': frame_delta,
             'frame_time_delta_displayed': frame_delta,
         }
+        if self.capture_file_path:
+            metadata['capture_file_path'] = self.capture_file_path
         try:
             metadata['frame_linktype'] = int(getattr(packet, 'frame_linktype', 1) or 1)
         except Exception:
@@ -261,6 +392,23 @@ class PacketParser:
             info = self._build_info(packet, protocol, metadata)
         else:
             info = self._quick_info(packet, protocol, effective_tcp, effective_udp, metadata)
+        ws_row = self._ws_row(number)
+        if ws_row is not None:
+            ws_src = str(ws_row.get('src', '') or '').strip()
+            ws_dst = str(ws_row.get('dst', '') or '').strip()
+            ws_protocol = str(ws_row.get('protocol', '') or '').strip()
+            ws_info = str(ws_row.get('info', '') or '')
+            if ws_src:
+                src = ws_src
+            if ws_dst:
+                dst = ws_dst
+            if ws_protocol:
+                protocol = ws_protocol
+            info = ws_info
+            metadata['ws_baseline_used'] = True
+            metadata['force_tshark_detail'] = True
+            if self.capture_file_path:
+                metadata['capture_file_path'] = self.capture_file_path
 
         stream_hint = ''
         if sport is not None or dport is not None:
