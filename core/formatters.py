@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import codecs
 from datetime import datetime, timedelta, timezone
 import ipaddress
 import json
 import os
 import re
+import shutil
+import subprocess
 from typing import Any, Dict, List
+import xml.etree.ElementTree as ET
 
 
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, CookedLinux
@@ -27,6 +31,8 @@ DECODED_UTF8_BYTE_SOURCE = 'decoded_utf8'
 ZABBIX_UNCOMPRESSED_BYTE_SOURCE = 'zabbix_uncompressed'
 RADIUS_EAP_REASSEMBLED_BYTE_SOURCE = 'radius_eap_reassembled'
 RADIUS_EAP_TLS_REASSEMBLED_BYTE_SOURCE = 'radius_eap_tls_reassembled'
+
+_TSHARK_PDML_CACHE: Dict[tuple[str, int], ET.Element | None] = {}
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -126,6 +132,223 @@ def _tag_byte_source(node: Dict[str, Any], byte_source: str) -> None:
     for child in node.get('children', []) or []:
         if isinstance(child, dict):
             _tag_byte_source(child, byte_source)
+
+
+def _get_tshark_executable() -> str | None:
+    preferred = [
+        r'C:\Program Files\Wireshark\tshark.exe',
+        r'C:\Program Files (x86)\Wireshark\tshark.exe',
+    ]
+    for path in preferred:
+        if os.path.exists(path):
+            return path
+    on_path = shutil.which('tshark')
+    return on_path
+
+
+def _pdml_node_to_tree(elem: ET.Element) -> Dict[str, Any] | None:
+    showname = str(elem.attrib.get('showname', '') or '').strip()
+    if not showname:
+        show = str(elem.attrib.get('show', '') or '').strip()
+        name = str(elem.attrib.get('name', '') or '').strip()
+        showname = show if show else name
+    if not showname:
+        return None
+
+    node: Dict[str, Any] = {'title': showname}
+    pos_text = elem.attrib.get('pos', None)
+    size_text = elem.attrib.get('size', None)
+    try:
+        if pos_text is not None and size_text is not None:
+            pos = int(str(pos_text), 10)
+            size = int(str(size_text), 10)
+            if size > 0:
+                node.update(_byte_mapping(0, pos, size, PACKET_BYTE_SOURCE))
+    except Exception:
+        pass
+
+    children: List[Dict[str, Any]] = []
+    for child in list(elem):
+        if child.tag != 'field':
+            continue
+        child_showname = str(child.attrib.get('showname', '') or '').strip()
+        if str(child.attrib.get('hide', '') or '').lower() == 'yes':
+            # Keep generated bracket-style lines such as [Response in: ...].
+            if not (child_showname.startswith('[') and child_showname.endswith(']')):
+                continue
+        child_node = _pdml_node_to_tree(child)
+        if child_node is not None:
+            children.append(child_node)
+    if children:
+        node['children'] = children
+    return node
+
+
+def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
+    key = (os.path.normpath(capture_path), int(frame_number))
+    if key in _TSHARK_PDML_CACHE:
+        return _TSHARK_PDML_CACHE[key]
+
+    tshark = _get_tshark_executable()
+    if not tshark or not os.path.exists(capture_path):
+        _TSHARK_PDML_CACHE[key] = None
+        return None
+
+    try:
+        proc = subprocess.run(
+            [
+                tshark,
+                '-r',
+                capture_path,
+                '-Y',
+                f'frame.number=={int(frame_number)}',
+                '-T',
+                'pdml',
+            ],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            check=True,
+            timeout=12,
+        )
+        root = ET.fromstring(proc.stdout)
+        pkt = root.find('packet')
+    except Exception:
+        pkt = None
+
+    _TSHARK_PDML_CACHE[key] = pkt
+    return pkt
+
+
+def _tshark_protocol_tree(record: Any, proto_names: List[str]) -> Dict[str, Any] | None:
+    if record is None:
+        return None
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    capture_path = str(metadata.get('capture_file_path', '') or '')
+    frame_number = int(getattr(record, 'number', 0) or 0)
+    if not capture_path or frame_number <= 0:
+        return None
+
+    pkt = _get_packet_pdml(capture_path, frame_number)
+    if pkt is None:
+        return None
+
+    if not proto_names:
+        return None
+
+    all_protos = []
+    for proto in pkt.iter('proto'):
+        proto_name = str(proto.attrib.get('name', '') or '').lower()
+        all_protos.append((proto_name, proto))
+
+    primary = str(proto_names[0]).lower()
+    root_tree: Dict[str, Any] | None = None
+    for proto_name, proto_elem in all_protos:
+        if proto_name != primary:
+            continue
+        root_tree = _pdml_node_to_tree(proto_elem)
+        if root_tree is not None:
+            break
+    if root_tree is None:
+        return None
+
+    extras: List[Dict[str, Any]] = []
+    extra_names = set(str(name).lower() for name in proto_names[1:])
+    if extra_names:
+        for proto_name, proto_elem in all_protos:
+            if proto_name in extra_names:
+                extra_tree = _pdml_node_to_tree(proto_elem)
+                if extra_tree is not None:
+                    extras.append(extra_tree)
+
+    def _normalize_titles(node: Dict[str, Any], parent_title: str = '') -> None:
+        title = str(node.get('title', '') or '').strip()
+        bare = title.strip('[]')
+        parent_bare = str(parent_title or '').strip('[]')
+        should_bracket = parent_bare.startswith('Expert Info (')
+        if not should_bracket and re.match(
+            r'^(Response (in|to|In|To):|Time from request:|Time:|Preauth Hash:|Expert Info \(|Group:|Severity level:|Used keymap=)',
+            bare,
+        ):
+            should_bracket = True
+        if should_bracket:
+            if not title.startswith('['):
+                title = f'[{bare}]'
+        node['title'] = title
+        for child in node.get('children', []) or []:
+            if isinstance(child, dict):
+                _normalize_titles(child, title)
+
+    if extras:
+        if primary == 'smb2':
+            targets: List[Dict[str, Any]] = []
+
+            def _find_security_blob_nodes(node: Dict[str, Any]) -> None:
+                title = str(node.get('title', '') or '')
+                if title.startswith('Security Blob'):
+                    targets.append(node)
+                for child in node.get('children', []) or []:
+                    if isinstance(child, dict):
+                        _find_security_blob_nodes(child)
+
+            _find_security_blob_nodes(root_tree)
+            extra_by_title: Dict[str, Dict[str, Any]] = {}
+            for item in extras:
+                t = str(item.get('title', '') or '').lower()
+                if t.startswith('gss-api'):
+                    extra_by_title['gss-api'] = item
+                elif t.startswith('simple protected negotiation'):
+                    extra_by_title['spnego'] = item
+                elif t.startswith('ntlm secure service provider'):
+                    extra_by_title['ntlmssp'] = item
+
+            gss_node = extra_by_title.get('gss-api', None)
+            spnego_node = extra_by_title.get('spnego', None)
+            ntlm_node = extra_by_title.get('ntlmssp', None)
+
+            if gss_node is not None and spnego_node is not None:
+                gss_node.setdefault('children', []).append(spnego_node)
+                if ntlm_node is not None:
+                    neg_token_target = None
+
+                    def _find_neg_token(node: Dict[str, Any]) -> None:
+                        nonlocal neg_token_target
+                        if neg_token_target is not None:
+                            return
+                        node_title = str(node.get('title', '') or '')
+                        if node_title.startswith('negTokenTarg') or node_title.startswith('negTokenInit'):
+                            neg_token_target = node
+                            return
+                        for child in node.get('children', []) or []:
+                            if isinstance(child, dict):
+                                _find_neg_token(child)
+
+                    _find_neg_token(spnego_node)
+                    if neg_token_target is not None:
+                        neg_token_target.setdefault('children', []).append(ntlm_node)
+                    else:
+                        spnego_node.setdefault('children', []).append(ntlm_node)
+
+            attached_root = gss_node or spnego_node or ntlm_node
+            if attached_root is not None:
+                if targets:
+                    targets[0].setdefault('children', []).append(attached_root)
+                else:
+                    root_tree.setdefault('children', []).append(attached_root)
+            elif targets:
+                targets[0].setdefault('children', []).extend(extras)
+            else:
+                root_tree.setdefault('children', []).extend(extras)
+        else:
+            root_tree.setdefault('children', []).extend(extras)
+
+    _normalize_titles(root_tree)
+    root_off = int(root_tree.get('offset', 0) or 0)
+    root_len = int(root_tree.get('length', 0) or 0)
+    if root_len > 0:
+        _normalize_tree_byte_ranges(root_tree, root_off, root_len, PACKET_BYTE_SOURCE)
+    return root_tree
 
 
 def _ip_reassembly_section(metadata: dict, version: int) -> Dict[str, Any] | None:
@@ -11612,6 +11835,9 @@ def _render_scalar_value(value: Any) -> str:
 def _best_effort_field_bytes(value: Any) -> bytes:
     if value is None:
         return b''
+    if isinstance(value, str):
+        raw_text = value.encode('utf-8', errors='ignore')
+        return raw_text if raw_text else b''
     try:
         raw = bytes(value)
         if isinstance(raw, (bytes, bytearray)) and raw:
@@ -11762,6 +11988,8 @@ def _scapy_packet_nodes(
                     display_value = 'True'
         if not display_value:
             display_value = _render_scalar_value(value)
+        if '<MISSING>' in str(display_value):
+            continue
         value_bytes = _best_effort_field_bytes(value)
         value_pos, value_len = _find_bytes(value_bytes)
         value_node: Dict[str, Any] = {'title': f'{field_name}: {display_value}'}
@@ -11771,47 +11999,120 @@ def _scapy_packet_nodes(
     return node
 
 
-def _load_expected_tree_from_packet_doc(packet_number: int, root_titles: set[str]) -> List[Dict[str, Any]] | None:
-    try:
-        base_dir = os.path.dirname(os.path.dirname(__file__))
-        doc_path = os.path.join(base_dir, 'docs', f'_pkt_{int(packet_number)}.txt')
-        if not os.path.exists(doc_path):
-            return None
-        with open(doc_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.read().splitlines()
-    except Exception:
-        return None
-    if not lines:
-        return None
+def _fill_tree_byte_ranges_from_payload(node: Dict[str, Any], payload: bytes, offset: int = 0, byte_source: str = PACKET_BYTE_SOURCE) -> Dict[str, Any]:
+    if not isinstance(node, dict):
+        return node
 
-    start_idx = -1
-    for idx, line in enumerate(lines):
-        if line.strip() in root_titles:
-            start_idx = idx
-            break
-    if start_idx < 0:
-        return None
+    children = node.get('children', [])
+    if isinstance(children, list) and children:
+        child_ranges: List[tuple[int, int]] = []
+        for child in children:
+            if isinstance(child, dict):
+                _fill_tree_byte_ranges_from_payload(child, payload, offset, byte_source)
+                child_offset = child.get('offset', None)
+                child_length = child.get('length', None)
+                if isinstance(child_offset, int) and isinstance(child_length, int) and child_length > 0:
+                    child_ranges.append((child_offset, child_offset + child_length))
+        if ('offset' not in node or 'length' not in node) and child_ranges:
+            start = min(r[0] for r in child_ranges)
+            end = max(r[1] for r in child_ranges)
+            node.update(_byte_mapping(offset, start, max(1, end - start), byte_source))
+        return node
 
-    roots: List[Dict[str, Any]] = []
-    stack: List[tuple[int, Dict[str, Any]]] = []
-    for raw in lines[start_idx:]:
-        if not raw.strip():
+    if 'offset' in node and 'length' in node:
+        return node
+
+    title = str(node.get('title', '') or '')
+    candidate = ''
+    if ':' in title:
+        candidate = title.split(':', 1)[1].strip()
+    if candidate:
+        candidate = candidate.strip('"')
+        candidate = candidate.strip("'")
+        if candidate not in {'<MISSING>', '<ROOT>'}:
+            needle = candidate.encode('utf-8', errors='ignore')
+            if not needle and '\\x' in candidate:
+                try:
+                    needle_text = codecs.decode(candidate, 'unicode_escape')
+                    needle = needle_text.encode('latin-1', errors='ignore')
+                except Exception:
+                    needle = b''
+            elif '\\x' in candidate:
+                try:
+                    needle_text = codecs.decode(candidate, 'unicode_escape')
+                    needle = needle_text.encode('latin-1', errors='ignore') or needle
+                except Exception:
+                    pass
+            if needle:
+                pos = payload.find(needle)
+                if pos >= 0:
+                    node.update(_byte_mapping(offset, pos, len(needle), byte_source))
+    return node
+
+
+def _normalize_tree_byte_ranges(node: Dict[str, Any], root_start: int, root_len: int, byte_source: str) -> Dict[str, Any]:
+    if not isinstance(node, dict):
+        return node
+
+    root_end = int(root_start + max(0, int(root_len or 0)))
+
+    def _walk(cur: Dict[str, Any]) -> tuple[int, int] | None:
+        children = cur.get('children', [])
+        child_spans: List[tuple[int, int]] = []
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    span = _walk(child)
+                    if span is not None:
+                        child_spans.append(span)
+
+        c_off = cur.get('offset', None)
+        c_len = cur.get('length', None)
+        own_span: tuple[int, int] | None = None
+        if isinstance(c_off, int) and isinstance(c_len, int) and c_len >= 0:
+            s = int(c_off)
+            e = int(c_off + c_len)
+            if s < root_start or e > root_end:
+                cur.pop('offset', None)
+                cur.pop('length', None)
+            else:
+                own_span = (s, e)
+
+        if own_span is None and child_spans:
+            s = min(span[0] for span in child_spans)
+            e = max(span[1] for span in child_spans)
+            if s < root_start:
+                s = root_start
+            if e > root_end:
+                e = root_end
+            if e > s:
+                cur.update(_byte_mapping(0, s, e - s, byte_source))
+                own_span = (s, e)
+
+        return own_span
+
+    _walk(node)
+    node.update(_byte_mapping(0, root_start, max(0, int(root_len or 0)), byte_source))
+    return node
+
+
+def _prune_missing_value_nodes(node: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(node, dict):
+        return node
+    children = node.get('children', [])
+    if not isinstance(children, list):
+        return node
+    kept: List[Dict[str, Any]] = []
+    for child in children:
+        if not isinstance(child, dict):
             continue
-        indent = len(raw) - len(raw.lstrip(' '))
-        level = max(0, indent // 4)
-        title = raw.strip()
-        node: Dict[str, Any] = {'title': title}
-        while stack and stack[-1][0] >= level:
-            stack.pop()
-        if stack:
-            parent = stack[-1][1]
-            parent.setdefault('children', [])
-            parent['children'].append(node)
-        else:
-            roots.append(node)
-        stack.append((level, node))
-
-    return roots if roots else None
+        title = str(child.get('title', '') or '')
+        if '<MISSING>' in title:
+            continue
+        _prune_missing_value_nodes(child)
+        kept.append(child)
+    node['children'] = kept
+    return node
 
 
 def _smb1_section(packet, offset: int, record=None) -> Dict[str, Any]:
@@ -11906,6 +12207,87 @@ def _smb1_section(packet, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
+    tshark_tree = _tshark_protocol_tree(record, ['smb2', 'gss-api', 'spnego', 'ntlmssp'])
+    if tshark_tree is not None:
+        metadata = getattr(record, 'metadata', {}) if record else {}
+        capture_path = str(metadata.get('capture_file_path', '') or '')
+        frame_number = int(getattr(record, 'number', 0) or 0)
+
+        def _find_smb2_header(node: Dict[str, Any]) -> Dict[str, Any] | None:
+            if str(node.get('title', '') or '').startswith('SMB2 Header'):
+                return node
+            for child in node.get('children', []) or []:
+                if isinstance(child, dict):
+                    found = _find_smb2_header(child)
+                    if found is not None:
+                        return found
+            return None
+
+        header_node = _find_smb2_header(tshark_tree)
+        if header_node is not None:
+            header_children = header_node.setdefault('children', [])
+
+            def _has_title(prefix: str) -> bool:
+                for item in header_children:
+                    if isinstance(item, dict):
+                        title = str(item.get('title', '') or '')
+                        if title.startswith(prefix):
+                            return True
+                return False
+
+            response_frame = metadata.get('tcp_response_frame', None)
+            request_frame = metadata.get('tcp_request_frame', None)
+            response_time_ms = metadata.get('tcp_time_since_request_ms', None)
+
+            if response_frame is None and response_time_ms is None and capture_path and frame_number > 0:
+                root_title = str(tshark_tree.get('title', '') or '')
+                msg_match = re.search(r'MessageId\s+(\d+)', root_title)
+                is_request = 'Request' in root_title and 'Response' not in root_title
+                if is_request and msg_match is not None:
+                    try:
+                        msg_id = int(msg_match.group(1))
+                        tshark = _get_tshark_executable()
+                        if tshark is not None:
+                            proc = subprocess.run(
+                                [
+                                    tshark,
+                                    '-r',
+                                    capture_path,
+                                    '-Y',
+                                    f'frame.number>{frame_number} && smb2.msg_id=={msg_id} && smb2.flags.response==True',
+                                    '-T',
+                                    'fields',
+                                    '-e',
+                                    'frame.number',
+                                    '-e',
+                                    'frame.time_delta',
+                                ],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='ignore',
+                                check=False,
+                                timeout=8,
+                            )
+                            line = str(proc.stdout or '').strip()
+                            if line:
+                                parts = line.split('\t')
+                                if parts and parts[0].strip():
+                                    response_frame = int(parts[0].strip())
+                                if len(parts) > 1 and parts[1].strip():
+                                    response_time_ms = float(parts[1].strip()) * 1000.0
+                    except Exception:
+                        pass
+
+            if response_frame is not None and not _has_title('[Response in:'):
+                header_children.append({'title': f'[Response in: {int(response_frame)}]'})
+            if request_frame is not None and not _has_title('[Response to:'):
+                header_children.append({'title': f'[Response to: {int(request_frame)}]'})
+            if response_time_ms is not None and not _has_title('[Time to response:'):
+                header_children.append({'title': f'[Time to response: {float(response_time_ms) * 1000.0:.3f} microseconds]'})
+
+        return tshark_tree
+
     tcp_payload = _tcp_payload_bytes(packet, packet[TCP] if packet.haslayer(TCP) else None)
     data = tcp_payload[4:] if len(tcp_payload) >= 4 else b''
     if not data:
@@ -12155,31 +12537,89 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
             'children': body_children,
         })
 
-    return {
+    root = {
         'title': title,
         **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE),
         'children': children,
     }
+    return _normalize_tree_byte_ranges(root, offset, len(data), PACKET_BYTE_SOURCE)
 
 
 def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
-    def _apply_expected_krb_mapping(node: Dict[str, Any]) -> Dict[str, Any]:
-        children = node.get('children', [])
-        if not isinstance(children, list) or not children:
-            return node
-        record_len = 0
-        rec_title = str(children[0].get('title', '') or '')
-        if rec_title.startswith('Record Mark: ') and ' bytes' in rec_title:
+    tshark_tree = _tshark_protocol_tree(record, ['kerberos', 'fake-field-wrapper'])
+    if tshark_tree is not None:
+        # Kerberos dissector offsets here are relative to reassembled TCP payload.
+        # Force mapping to the Reassembled bytes tab and hide helper wrapper nodes.
+        _tag_byte_source(tshark_tree, TCP_REASSEMBLED_BYTE_SOURCE)
+        if isinstance(tshark_tree.get('children', None), list):
+            tshark_tree['children'] = [
+                child
+                for child in tshark_tree.get('children', []) or []
+                if not (
+                    isinstance(child, dict)
+                    and str(child.get('title', '') or '').startswith('fake-field-wrapper')
+                )
+            ]
+
+        metadata = getattr(record, 'metadata', {}) if record else {}
+        capture_path = str(metadata.get('capture_file_path', '') or '')
+        frame_number = int(getattr(record, 'number', 0) or 0)
+        has_response_in = any(
+            isinstance(child, dict) and str(child.get('title', '') or '').startswith('[Response in:')
+            for child in (tshark_tree.get('children', []) or [])
+        )
+        if not has_response_in and capture_path and frame_number > 0:
             try:
-                record_len = int(rec_title.split('Record Mark: ', 1)[1].split(' bytes', 1)[0].strip())
+                tshark = _get_tshark_executable()
+                if tshark is not None:
+                    stream_proc = subprocess.run(
+                        [
+                            tshark,
+                            '-r',
+                            capture_path,
+                            '-Y',
+                            f'frame.number=={frame_number}',
+                            '-T',
+                            'fields',
+                            '-e',
+                            'tcp.stream',
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore',
+                        check=False,
+                        timeout=8,
+                    )
+                    stream_text = str(stream_proc.stdout or '').strip()
+                    if stream_text:
+                        stream_id = int(stream_text.splitlines()[0].strip())
+                        rsp_proc = subprocess.run(
+                            [
+                                tshark,
+                                '-r',
+                                capture_path,
+                                '-Y',
+                                f'frame.number>{frame_number} && tcp.stream=={stream_id} && kerberos',
+                                '-T',
+                                'fields',
+                                '-e',
+                                'frame.number',
+                            ],
+                            capture_output=True,
+                            text=True,
+                            encoding='utf-8',
+                            errors='ignore',
+                            check=False,
+                            timeout=8,
+                        )
+                        rsp_text = str(rsp_proc.stdout or '').strip()
+                        if rsp_text:
+                            rsp_frame = int(rsp_text.splitlines()[0].strip())
+                            tshark_tree.setdefault('children', []).append({'title': f'[Response in: {rsp_frame}]'})
             except Exception:
-                record_len = 0
-        if record_len > 0:
-            node.update(_byte_mapping(0, 0, record_len + 4, TCP_REASSEMBLED_BYTE_SOURCE))
-            children[0].update(_byte_mapping(0, 0, 4, TCP_REASSEMBLED_BYTE_SOURCE))
-            if len(children) > 1 and isinstance(children[1], dict):
-                children[1].update(_byte_mapping(0, 4, record_len, TCP_REASSEMBLED_BYTE_SOURCE))
-        return node
+                pass
+        return tshark_tree
 
     tcp_layer = packet[TCP] if packet.haslayer(TCP) else None
     metadata = getattr(record, 'metadata', {}) if record else {}
@@ -12200,18 +12640,11 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
             payload = candidate
             byte_source = TCP_REASSEMBLED_BYTE_SOURCE
             base_offset = 0
-    packet_number = int(getattr(record, 'number', 0) or 0) if record is not None else 0
+
     if len(payload) < 4:
-        expected_nodes = _load_expected_tree_from_packet_doc(packet_number, {'Kerberos'})
-        if expected_nodes:
-            return _apply_expected_krb_mapping(expected_nodes[0])
         return {'title': 'Kerberos', **_byte_mapping(base_offset, 0, max(1, len(payload)), byte_source), 'children': []}
 
     rec_len = int.from_bytes(payload[0:4], 'big') & 0x7FFFFFFF
-    if rec_len <= 0 or rec_len > (len(payload) - 4):
-        expected_nodes = _load_expected_tree_from_packet_doc(packet_number, {'Kerberos'})
-        if expected_nodes:
-            return _apply_expected_krb_mapping(expected_nodes[0])
     root = None
     if packet.haslayer('Kerberos'):
         try:
@@ -12261,24 +12694,132 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
             'title': msg_name,
             **_byte_mapping(base_offset, 4, max(1, len(payload) - 4), byte_source),
         })
-    return {
+    root = {
         'title': 'Kerberos',
         **_byte_mapping(base_offset, 0, len(payload), byte_source),
         'children': children,
     }
+    _prune_missing_value_nodes(root)
+    return _normalize_tree_byte_ranges(root, base_offset, len(payload), byte_source)
 
 
 def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str, Any]:
-    packet_number = int(getattr(record, 'number', 0) or 0) if record is not None else 0
-    if packet_number in {4247, 4248}:
-        expected_nodes = _load_expected_tree_from_packet_doc(
-            packet_number,
-            {'Connectionless Lightweight Directory Access Protocol'},
-        )
-        if expected_nodes:
-            root = expected_nodes[0]
-            root.update(_byte_mapping(offset, 0, len(bytes(payload or b'')), PACKET_BYTE_SOURCE))
-            return root
+    tshark_tree = _tshark_protocol_tree(record, ['cldap'])
+    if tshark_tree is not None:
+        def _realign_value_nodes_to_ascii(node: Dict[str, Any], src_payload: bytes) -> None:
+            if not isinstance(node, dict):
+                return
+            title = str(node.get('title', '') or '')
+            if ':' in title:
+                candidate = title.split(':', 1)[1].strip().strip('"').strip("'")
+                if candidate and candidate not in {'<ROOT>', '<MISSING>'} and not candidate.startswith('0x'):
+                    matched = False
+                    for enc in ('utf-8', 'latin-1'):
+                        try:
+                            needle = candidate.encode(enc, errors='ignore')
+                        except Exception:
+                            needle = b''
+                        if not needle:
+                            continue
+                        pos = src_payload.find(needle)
+                        if pos >= 0:
+                            node.update(_byte_mapping(offset, pos, len(needle), PACKET_BYTE_SOURCE))
+                            matched = True
+                            break
+                    if not matched:
+                        node.pop('offset', None)
+                        node.pop('length', None)
+            for child in node.get('children', []) or []:
+                if isinstance(child, dict):
+                    _realign_value_nodes_to_ascii(child, src_payload)
+
+        cldap_payload = bytes(payload or b'')
+        if packet is not None and packet.haslayer(UDP):
+            try:
+                udp_payload = bytes(getattr(packet[UDP], 'payload', b'') or b'')
+                if udp_payload:
+                    cldap_payload = udp_payload
+            except Exception:
+                pass
+        if cldap_payload:
+            _realign_value_nodes_to_ascii(tshark_tree, cldap_payload)
+
+        metadata = getattr(record, 'metadata', {}) if record else {}
+        capture_path = str(metadata.get('capture_file_path', '') or '')
+        frame_number = int(getattr(record, 'number', 0) or 0)
+
+        req_node = None
+        for child in tshark_tree.get('children', []) or []:
+            if isinstance(child, dict) and str(child.get('title', '') or '').startswith('LDAPMessage searchRequest'):
+                req_node = child
+                break
+
+        if req_node is not None and capture_path and frame_number > 0:
+            req_children = req_node.setdefault('children', [])
+            has_response_in = any(
+                isinstance(item, dict) and str(item.get('title', '') or '').startswith('[Response In:')
+                for item in req_children
+            )
+            if not has_response_in:
+                msg_id = None
+                for item in req_children:
+                    if not isinstance(item, dict):
+                        continue
+                    title = str(item.get('title', '') or '')
+                    match = re.match(r'messageID:\s*(\d+)', title)
+                    if match is not None:
+                        msg_id = int(match.group(1))
+                        break
+
+                if msg_id is not None and packet is not None and packet.haslayer(UDP):
+                    try:
+                        src_ip = dst_ip = ''
+                        if packet.haslayer(IP):
+                            src_ip = str(packet[IP].src)
+                            dst_ip = str(packet[IP].dst)
+                        elif packet.haslayer(IPv6):
+                            src_ip = str(packet[IPv6].src)
+                            dst_ip = str(packet[IPv6].dst)
+                        sport = int(packet[UDP].sport)
+                        dport = int(packet[UDP].dport)
+
+                        proto_filter = (
+                            f'frame.number>{frame_number} && ldap.messageID=={msg_id} '
+                            f'&& udp.srcport=={dport} && udp.dstport=={sport}'
+                        )
+                        if src_ip and dst_ip and packet.haslayer(IP):
+                            proto_filter += f' && ip.src=={dst_ip} && ip.dst=={src_ip}'
+                        elif src_ip and dst_ip and packet.haslayer(IPv6):
+                            proto_filter += f' && ipv6.src=={dst_ip} && ipv6.dst=={src_ip}'
+
+                        tshark = _get_tshark_executable()
+                        if tshark is not None:
+                            proc = subprocess.run(
+                                [
+                                    tshark,
+                                    '-r',
+                                    capture_path,
+                                    '-Y',
+                                    proto_filter,
+                                    '-T',
+                                    'fields',
+                                    '-e',
+                                    'frame.number',
+                                ],
+                                capture_output=True,
+                                text=True,
+                                encoding='utf-8',
+                                errors='ignore',
+                                check=False,
+                                timeout=8,
+                            )
+                            rsp = str(proc.stdout or '').strip()
+                            if rsp:
+                                req_children.append({'title': f'[Response In: {int(rsp.splitlines()[0].strip())}]'})
+                    except Exception:
+                        pass
+        return tshark_tree
+
     data = bytes(payload or b'')
     parse_data = data
     if packet is not None and packet.haslayer(UDP):
@@ -12330,16 +12871,15 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
                 proto_base = None
                 if proto_pos >= 0 and proto_bytes:
                     proto_base = int(offset + proto_pos)
-                message_children.append(
-                    _scapy_packet_nodes(
-                        proto,
-                        title='searchRequest' if proto_name == 'LDAP_SearchRequest' else 'searchResEntry',
-                        max_depth=9,
-                        base_offset=proto_base,
-                        byte_source=PACKET_BYTE_SOURCE,
-                        source_bytes=proto_bytes if proto_bytes else None,
-                    )
+                proto_tree = _scapy_packet_nodes(
+                    proto,
+                    title='searchRequest' if proto_name == 'LDAP_SearchRequest' else 'searchResEntry',
+                    max_depth=9,
+                    base_offset=proto_base,
+                    byte_source=PACKET_BYTE_SOURCE,
+                    source_bytes=proto_bytes if proto_bytes else None,
                 )
+                message_children.append(proto_tree)
             children.append({
                 'title': top_title,
                 **_byte_mapping(offset, 0, len(parse_data), PACKET_BYTE_SOURCE),
@@ -12347,11 +12887,13 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
             })
         except Exception:
             pass
-    return {
+    root = {
         'title': 'Connectionless Lightweight Directory Access Protocol',
         **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE),
         'children': children,
     }
+    _fill_tree_byte_ranges_from_payload(root, parse_data, offset, PACKET_BYTE_SOURCE)
+    return _normalize_tree_byte_ranges(root, offset, len(data), PACKET_BYTE_SOURCE)
 
 
 def _smtp_response_description(code: str) -> str:

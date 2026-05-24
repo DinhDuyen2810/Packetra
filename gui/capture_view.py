@@ -484,7 +484,14 @@ class CaptureView(QWidget):
         return f'{root}{infix}{ext}'
 
     def _apply_capture_metadata_to_record(self, record, packet_number: int):
-        if record is None or self.capture_metadata is None:
+        if record is None:
+            return record
+
+        file_path = str(self.loaded_file_path or '').strip()
+        if file_path:
+            record.metadata['capture_file_path'] = file_path
+
+        if self.capture_metadata is None:
             return record
 
         packet_number = int(packet_number)
