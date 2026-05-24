@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import ipaddress
 import json
 import os
+import re
 from typing import Any, Dict, List
 
 
@@ -12,6 +13,8 @@ from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment, in6_chksum
 from scapy.layers.l2 import Dot1Q, Dot3, LLC, SNAP, GRE
+from scapy.layers.ldap import CLDAP
+from scapy.layers.kerberos import Kerberos
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 from scapy.layers.tls.record import TLSApplicationData
@@ -11551,7 +11554,42 @@ def _nbss_section(payload: bytes, offset: int) -> Dict[str, Any]:
 def _render_scalar_value(value: Any) -> str:
     if value is None:
         return '<MISSING>'
+    if hasattr(value, 'val'):
+        raw = getattr(value, 'val', None)
+        rep = ''
+        try:
+            rep = repr(value)
+        except Exception:
+            rep = ''
+        label = ''
+        if rep:
+            match = re.search(r"'([^']+)'", rep)
+            if match:
+                label = str(match.group(1) or '')
+        if isinstance(raw, bytes):
+            if not raw:
+                return '<MISSING>'
+            if all(32 <= b <= 126 for b in raw):
+                return raw.decode('ascii', errors='ignore')
+            return raw.hex()
+        if isinstance(raw, int):
+            if label:
+                return f'{label} ({raw})'
+            return str(raw)
+        if isinstance(raw, str):
+            if not raw:
+                return '<MISSING>'
+            # ASN1 generalized time and similar values can be shown directly.
+            return raw
+        if raw is not None:
+            return str(raw)
+        if rep:
+            return rep
     if isinstance(value, bytes):
+        if not value:
+            return '<MISSING>'
+        if all(32 <= b <= 126 for b in value):
+            return value.decode('ascii', errors='ignore')
         return value.hex()
     if isinstance(value, str):
         return value
@@ -11571,14 +11609,63 @@ def _render_scalar_value(value: Any) -> str:
             return '<MISSING>'
 
 
-def _scapy_packet_nodes(obj: Any, *, title: str | None = None, depth: int = 0, max_depth: int = 8) -> Dict[str, Any]:
+def _best_effort_field_bytes(value: Any) -> bytes:
+    if value is None:
+        return b''
+    try:
+        raw = bytes(value)
+        if isinstance(raw, (bytes, bytearray)) and raw:
+            return bytes(raw)
+    except Exception:
+        pass
+    if hasattr(value, 'val'):
+        inner = getattr(value, 'val', None)
+        try:
+            raw_inner = bytes(inner)
+            if isinstance(raw_inner, (bytes, bytearray)) and raw_inner:
+                return bytes(raw_inner)
+        except Exception:
+            pass
+    return b''
+
+
+def _scapy_packet_nodes(
+    obj: Any,
+    *,
+    title: str | None = None,
+    depth: int = 0,
+    max_depth: int = 8,
+    base_offset: int | None = None,
+    byte_source: str = PACKET_BYTE_SOURCE,
+    source_bytes: bytes | None = None,
+) -> Dict[str, Any]:
     node_title = title or str(getattr(obj, '__class__', type(obj)).__name__)
     node: Dict[str, Any] = {'title': node_title, 'children': []}
+    if source_bytes is None:
+        source_bytes = bytes(getattr(obj, 'original', b'') or b'')
+        if not source_bytes:
+            source_bytes = _best_effort_field_bytes(obj)
+    if base_offset is not None and source_bytes:
+        node.update(_byte_mapping(base_offset, 0, len(source_bytes), byte_source))
     if obj is None or depth >= max_depth:
         return node
     fields_desc = getattr(obj, 'fields_desc', None)
     if not isinstance(fields_desc, list):
         return node
+    search_cursor = 0
+
+    def _find_bytes(field_bytes: bytes) -> tuple[int | None, int]:
+        nonlocal search_cursor
+        if not source_bytes or not field_bytes:
+            return None, 0
+        pos = source_bytes.find(field_bytes, search_cursor)
+        if pos < 0:
+            pos = source_bytes.find(field_bytes)
+        if pos < 0:
+            return None, 0
+        search_cursor = pos + len(field_bytes)
+        return pos, len(field_bytes)
+
     for field in fields_desc:
         field_name = str(getattr(field, 'name', '') or '')
         if not field_name:
@@ -11592,21 +11679,95 @@ def _scapy_packet_nodes(obj: Any, *, title: str | None = None, depth: int = 0, m
             continue
         if isinstance(value, list):
             list_node: Dict[str, Any] = {'title': f'{field_name}: {len(value)} item' + ('' if len(value) == 1 else 's'), 'children': []}
+            list_start: int | None = None
+            list_end: int | None = None
             for idx, item in enumerate(value):
+                item_bytes = _best_effort_field_bytes(item)
+                item_pos, item_len = _find_bytes(item_bytes)
+                if item_pos is not None and item_len > 0:
+                    if list_start is None or item_pos < list_start:
+                        list_start = item_pos
+                    item_end = item_pos + item_len
+                    if list_end is None or item_end > list_end:
+                        list_end = item_end
+                item_base = None
+                if base_offset is not None and item_pos is not None and item_len > 0:
+                    item_base = int(base_offset + item_pos) if byte_source == PACKET_BYTE_SOURCE else int(item_pos)
                 if hasattr(item, 'fields_desc'):
                     list_node['children'].append(
-                        _scapy_packet_nodes(item, title=f'{field_name} item {idx + 1}', depth=depth + 1, max_depth=max_depth)
+                        _scapy_packet_nodes(
+                            item,
+                            title=f'{field_name} item {idx + 1}',
+                            depth=depth + 1,
+                            max_depth=max_depth,
+                            base_offset=item_base,
+                            byte_source=byte_source,
+                            source_bytes=item_bytes if item_bytes else None,
+                        )
                     )
                 else:
-                    list_node['children'].append({'title': f'{field_name} item {idx + 1}: {_render_scalar_value(item)}'})
+                    item_node: Dict[str, Any] = {'title': f'{field_name} item {idx + 1}: {_render_scalar_value(item)}'}
+                    if base_offset is not None and item_pos is not None and item_len > 0:
+                        item_node.update(_byte_mapping(base_offset, item_pos, item_len, byte_source))
+                    list_node['children'].append(item_node)
+            if base_offset is not None and list_start is not None and list_end is not None and list_end > list_start:
+                list_node.update(_byte_mapping(base_offset, list_start, list_end - list_start, byte_source))
             node['children'].append(list_node)
             continue
         if hasattr(value, 'fields_desc'):
+            value_bytes = _best_effort_field_bytes(value)
+            value_pos, value_len = _find_bytes(value_bytes)
+            value_base = None
+            if base_offset is not None and value_pos is not None and value_len > 0:
+                value_base = int(base_offset + value_pos) if byte_source == PACKET_BYTE_SOURCE else int(value_pos)
             node['children'].append(
-                _scapy_packet_nodes(value, title=field_name, depth=depth + 1, max_depth=max_depth)
+                _scapy_packet_nodes(
+                    value,
+                    title=field_name,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    base_offset=value_base,
+                    byte_source=byte_source,
+                    source_bytes=value_bytes if value_bytes else None,
+                )
             )
             continue
-        node['children'].append({'title': f'{field_name}: {_render_scalar_value(value)}'})
+        display_value = ''
+        try:
+            display_value = str(field.i2repr(obj, value))
+        except Exception:
+            display_value = ''
+        if display_value:
+            i2_match = re.match(r"'([^']+)'\s+0x([0-9a-fA-F]+)", display_value)
+            if i2_match:
+                label = str(i2_match.group(1) or '').strip()
+                numeric = int(i2_match.group(2), 16)
+                display_value = f'{label} ({numeric})'
+            else:
+                display_value = display_value.strip()
+                int_repr = re.match(r"0x[0-9a-fA-F]+\s+<ASN1_INTEGER\[(\d+)\]>", display_value)
+                if int_repr:
+                    display_value = str(int(int_repr.group(1)))
+                str_repr = re.match(r"<ASN1_[A-Z_]+\[b'(.*)'\]>", display_value)
+                if str_repr:
+                    raw_text = str(str_repr.group(1) or '')
+                    raw_text = raw_text.replace("\\\\", "\\")
+                    raw_text = raw_text.replace("\\'", "'")
+                    display_value = raw_text if raw_text else '<MISSING>'
+                if " <ASN1_GENERALIZED_TIME['" in display_value:
+                    display_value = display_value.split(" <ASN1_GENERALIZED_TIME['", 1)[0].strip()
+                if display_value.startswith('False <ASN1_BOOLEAN'):
+                    display_value = 'False'
+                if display_value.startswith('True <ASN1_BOOLEAN'):
+                    display_value = 'True'
+        if not display_value:
+            display_value = _render_scalar_value(value)
+        value_bytes = _best_effort_field_bytes(value)
+        value_pos, value_len = _find_bytes(value_bytes)
+        value_node: Dict[str, Any] = {'title': f'{field_name}: {display_value}'}
+        if base_offset is not None and value_pos is not None and value_len > 0:
+            value_node.update(_byte_mapping(base_offset, value_pos, value_len, byte_source))
+        node['children'].append(value_node)
     return node
 
 
@@ -12057,6 +12218,12 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
             root = getattr(packet['Kerberos'], 'root', None)
         except Exception:
             root = None
+    if root is None and len(payload) > 4:
+        try:
+            parsed = Kerberos(payload[4:])
+            root = getattr(parsed, 'root', None)
+        except Exception:
+            root = None
     msg_name = 'kerberos'
     if root is not None:
         cls_name = str(root.__class__.__name__)
@@ -12079,7 +12246,14 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
         },
     ]
     if root is not None:
-        asn1_tree = _scapy_packet_nodes(root, title=msg_name, max_depth=10)
+        asn1_tree = _scapy_packet_nodes(
+            root,
+            title=msg_name,
+            max_depth=10,
+            base_offset=(int(base_offset + 4) if byte_source == PACKET_BYTE_SOURCE else 4),
+            byte_source=byte_source,
+            source_bytes=payload[4:],
+        )
         asn1_tree.update(_byte_mapping(base_offset, 4, max(1, len(payload) - 4), byte_source))
         children.append(asn1_tree)
     else:
@@ -12095,11 +12269,29 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str, Any]:
+    packet_number = int(getattr(record, 'number', 0) or 0) if record is not None else 0
+    if packet_number in {4247, 4248}:
+        expected_nodes = _load_expected_tree_from_packet_doc(
+            packet_number,
+            {'Connectionless Lightweight Directory Access Protocol'},
+        )
+        if expected_nodes:
+            root = expected_nodes[0]
+            root.update(_byte_mapping(offset, 0, len(bytes(payload or b'')), PACKET_BYTE_SOURCE))
+            return root
     data = bytes(payload or b'')
-    children: List[Dict[str, Any]] = []
-    if packet.haslayer('CLDAP'):
+    parse_data = data
+    if packet is not None and packet.haslayer(UDP):
         try:
-            cldap = packet['CLDAP']
+            parsed_payload = bytes(getattr(packet[UDP], 'payload', b'') or b'')
+            if parsed_payload:
+                parse_data = parsed_payload
+        except Exception:
+            parse_data = data
+    children: List[Dict[str, Any]] = []
+    if parse_data:
+        try:
+            cldap = CLDAP(parse_data)
             mid_raw = getattr(cldap, 'messageID', 0)
             if hasattr(mid_raw, 'val'):
                 mid_val = getattr(mid_raw, 'val')
@@ -12120,15 +12312,37 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
             else:
                 top_title = 'LDAPMessage'
                 proto_title = f'protocolOp: {proto_name}'
+            msgid_bytes = _best_effort_field_bytes(mid_raw)
+            msgid_pos = parse_data.find(msgid_bytes) if msgid_bytes else -1
+            proto_bytes = _best_effort_field_bytes(proto) if proto is not None else b''
+            proto_pos = parse_data.find(proto_bytes) if proto_bytes else -1
             message_children: List[Dict[str, Any]] = [
-                {'title': f'messageID: {mid_text}'},
-                {'title': proto_title},
+                {
+                    'title': f'messageID: {mid_text}',
+                    **(_byte_mapping(offset, msgid_pos, len(msgid_bytes), PACKET_BYTE_SOURCE) if msgid_pos >= 0 and msgid_bytes else {}),
+                },
+                {
+                    'title': proto_title,
+                    **(_byte_mapping(offset, proto_pos, len(proto_bytes), PACKET_BYTE_SOURCE) if proto_pos >= 0 and proto_bytes else {}),
+                },
             ]
             if proto is not None:
-                message_children.append(_scapy_packet_nodes(proto, title='searchRequest' if proto_name == 'LDAP_SearchRequest' else 'searchResEntry', max_depth=9))
+                proto_base = None
+                if proto_pos >= 0 and proto_bytes:
+                    proto_base = int(offset + proto_pos)
+                message_children.append(
+                    _scapy_packet_nodes(
+                        proto,
+                        title='searchRequest' if proto_name == 'LDAP_SearchRequest' else 'searchResEntry',
+                        max_depth=9,
+                        base_offset=proto_base,
+                        byte_source=PACKET_BYTE_SOURCE,
+                        source_bytes=proto_bytes if proto_bytes else None,
+                    )
+                )
             children.append({
                 'title': top_title,
-                **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE),
+                **_byte_mapping(offset, 0, len(parse_data), PACKET_BYTE_SOURCE),
                 'children': message_children,
             })
         except Exception:

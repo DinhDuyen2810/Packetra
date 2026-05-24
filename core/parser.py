@@ -131,6 +131,7 @@ class PacketParser:
         self._update_http_stream_metadata(packet, metadata, epoch_time)
         self._update_smtp_stream_metadata(packet, metadata, epoch_time)
         self._update_ssh_stream_metadata(packet, metadata, epoch_time)
+        self._update_kerberos_stream_metadata(packet, metadata, epoch_time)
         self._update_whois_stream_metadata(packet, metadata, epoch_time)
         self._update_capwap_metadata(packet, metadata)
         self._update_tftp_metadata(packet, metadata)
@@ -248,6 +249,7 @@ class PacketParser:
         self._populate_stream_indices(packet, metadata)
         self._update_ip_fragment_metadata(packet, metadata, int(number))
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
+        self._update_kerberos_stream_metadata(packet, metadata, epoch_time)
         self._update_ftp_metadata(packet, metadata)
 
         protocol = self._quick_guess_protocol(packet, effective_tcp, effective_udp, metadata)
@@ -7851,6 +7853,99 @@ class PacketParser:
                 segment_record.protocol = 'TCP'
                 segment_record.info = self._build_info(segment_record.raw, 'TCP', segment_record.metadata)
 
+    def _update_kerberos_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        src = str(effective_ip.src)
+        dst = str(effective_ip.dst)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        if sport != 88 and dport != 88:
+            return
+
+        payload = self._payload_bytes(packet)
+        if not payload:
+            return
+
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+
+        frame_number = int(metadata.get('frame_number', 0) or 0)
+        dir_key = (src, sport, dst, dport)
+        pending_by_dir = state.setdefault('kerberos_pending_by_dir', {})
+        if not isinstance(pending_by_dir, dict):
+            pending_by_dir = {}
+            state['kerberos_pending_by_dir'] = pending_by_dir
+
+        pending = pending_by_dir.get(dir_key) if isinstance(pending_by_dir.get(dir_key), dict) else None
+        segment = {
+            'frame_number': frame_number,
+            'payload_start': 0,
+            'payload_length': int(len(payload)),
+            'tcp_start_offset_in_payload': 0,
+        }
+
+        if pending is None:
+            if len(payload) < 4:
+                return
+            record_mark = int.from_bytes(payload[0:4], 'big') & 0x7FFFFFFF
+            total_len = 4 + record_mark
+            # Kerberos TCP record mark must be sane and larger than current segment to require reassembly.
+            if record_mark <= 0 or total_len <= len(payload) or total_len > 262144:
+                return
+            pending_by_dir[dir_key] = {
+                'expected_total_len': int(total_len),
+                'payload': bytes(payload),
+                'segments': [segment],
+                'start_epoch': float(epoch_time),
+            }
+            return
+
+        candidate = bytes(pending.get('payload', b'') or b'') + bytes(payload)
+        expected_total_len = int(pending.get('expected_total_len', 0) or 0)
+        segments = list(pending.get('segments', []) or [])
+        segment_start = len(bytes(pending.get('payload', b'') or b''))
+        segment['payload_start'] = int(segment_start)
+        segment['payload_length'] = int(max(0, min(len(payload), max(0, expected_total_len - segment_start))))
+        segments.append(segment)
+
+        if expected_total_len <= 0:
+            pending_by_dir.pop(dir_key, None)
+            return
+        if len(candidate) < expected_total_len:
+            pending_by_dir[dir_key] = {
+                'expected_total_len': expected_total_len,
+                'payload': candidate,
+                'segments': segments,
+                'start_epoch': float(pending.get('start_epoch', epoch_time) if isinstance(pending, dict) else epoch_time),
+            }
+            return
+
+        full_payload = candidate[:expected_total_len]
+        pending_by_dir.pop(dir_key, None)
+
+        metadata['tcp_reassembled_segments'] = segments
+        metadata['tcp_reassembled_length'] = int(expected_total_len)
+        metadata['tcp_reassembled_data_hex'] = bytes(full_payload).hex()
+
+        for segment_entry in segments[:-1]:
+            seg_frame = int(segment_entry.get('frame_number', 0) or 0)
+            seg_record = self._find_stream_record(state, seg_frame)
+            if seg_record is None:
+                continue
+            seg_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
+            seg_record.metadata['tcp_segment_data_length'] = int(segment_entry.get('payload_length', 0) or 0)
+            seg_record.metadata['tcp_segment_data_offset'] = int(segment_entry.get('tcp_start_offset_in_payload', 0) or 0)
+            seg_record.protocol = 'TCP'
+            seg_record.info = self._build_info(seg_record.raw, 'TCP', seg_record.metadata)
+
     def _update_whois_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
         effective_ip = self._effective_ip_layer(packet)
         if effective_ip is None and packet.haslayer(IPv6):
@@ -8920,6 +9015,23 @@ class PacketParser:
                     }
                     if cls_name in name_map:
                         return name_map[cls_name]
+                reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+                if reassembled_hex:
+                    try:
+                        kdata = bytes.fromhex(reassembled_hex)
+                    except Exception:
+                        kdata = b''
+                    if len(kdata) >= 5:
+                        app_tag = int(kdata[4]) & 0x1F
+                        tag_map = {
+                            10: 'AS-REQ',
+                            11: 'AS-REP',
+                            12: 'TGS-REQ',
+                            13: 'TGS-REP',
+                            30: 'KRB Error',
+                        }
+                        if app_tag in tag_map:
+                            return tag_map[app_tag]
                 return 'Kerberos'
             if protocol == 'CLDAP':
                 if packet.haslayer('CLDAP'):
