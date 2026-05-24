@@ -350,7 +350,8 @@ def write_markdown(
 ) -> None:
     lines: List[str] = []
     total_case = sum(len(items) for items in protocol_cases.values())
-    lines.append("# Split 00008 — Mismatch Catalog")
+    pcap_label = os.path.splitext(os.path.basename(pcap))[0]
+    lines.append(f"# {pcap_label} — Mismatch Catalog")
     lines.append("")
     lines.append(f"- PCAP: `{pcap}`")
     lines.append(f"- Scanned packets: `{max_packet}`")

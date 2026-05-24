@@ -34,6 +34,7 @@ RADIUS_EAP_TLS_REASSEMBLED_BYTE_SOURCE = 'radius_eap_tls_reassembled'
 
 _TSHARK_PDML_CACHE: Dict[tuple[str, int], ET.Element | None] = {}
 _TSHARK_PDML_CAPTURE_CACHE: Dict[str, Dict[int, ET.Element]] = {}
+_TSHARK_VERBOSE_CACHE: Dict[str, Dict[int, List[str]]] = {}
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -210,7 +211,6 @@ def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
             proc_all = subprocess.run(
                 [
                     tshark,
-                    '-2',
                     '-r',
                     capture_path,
                     '-n',
@@ -261,7 +261,6 @@ def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
         proc = subprocess.run(
             [
                 tshark,
-                '-2',
                 '-r',
                 capture_path,
                 '-Y',
@@ -283,6 +282,162 @@ def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
 
     _TSHARK_PDML_CACHE[key] = pkt
     return pkt
+
+
+def _get_capture_verbose_lines(capture_path: str) -> Dict[int, List[str]]:
+    norm_capture = os.path.normpath(capture_path)
+    if norm_capture in _TSHARK_VERBOSE_CACHE:
+        return _TSHARK_VERBOSE_CACHE[norm_capture]
+
+    tshark = _get_tshark_executable()
+    if not tshark or not os.path.exists(capture_path):
+        _TSHARK_VERBOSE_CACHE[norm_capture] = {}
+        return {}
+
+    frame_re = re.compile(r'^Frame\s+(\d+):')
+    by_frame: Dict[int, List[str]] = {}
+    try:
+        proc = subprocess.run(
+            [
+                tshark,
+                '-r',
+                capture_path,
+                '-n',
+                '-V',
+            ],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            check=True,
+            timeout=180,
+        )
+        current_no = 0
+        current_lines: List[str] = []
+        for line in proc.stdout.splitlines():
+            m = frame_re.match(line)
+            if m:
+                if current_no > 0:
+                    by_frame[current_no] = list(current_lines)
+                current_no = int(m.group(1))
+                current_lines = [line]
+                continue
+            if current_no > 0:
+                current_lines.append(line)
+        if current_no > 0:
+            by_frame[current_no] = list(current_lines)
+    except Exception:
+        by_frame = {}
+
+    _TSHARK_VERBOSE_CACHE[norm_capture] = by_frame
+    return by_frame
+
+
+def _titles_to_tree(lines: List[str]) -> List[Dict[str, Any]]:
+    roots: List[Dict[str, Any]] = []
+    stack: List[tuple[int, Dict[str, Any]]] = []
+    for raw in lines:
+        if not str(raw).strip():
+            continue
+        indent = len(raw) - len(raw.lstrip(' '))
+        title = raw.strip()
+        node: Dict[str, Any] = {'title': title}
+
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        if not stack:
+            roots.append(node)
+        else:
+            parent = stack[-1][1]
+            parent.setdefault('children', []).append(node)
+        stack.append((indent, node))
+    return roots
+
+
+def _normalize_title_for_match(title: str) -> str:
+    text = str(title or '').strip()
+    if text.startswith('[') and text.endswith(']'):
+        text = text[1:-1].strip()
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
+
+
+def _flatten_mapped_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+
+    def walk(node: Dict[str, Any]) -> None:
+        if 'offset' in node and 'length' in node:
+            try:
+                length = int(node.get('length', 0) or 0)
+                if length > 0:
+                    out.append({
+                        'title': str(node.get('title', '') or ''),
+                        'offset': int(node.get('offset', 0) or 0),
+                        'length': length,
+                        'byte_source': str(node.get('byte_source', PACKET_BYTE_SOURCE) or PACKET_BYTE_SOURCE),
+                    })
+            except Exception:
+                pass
+        for child in node.get('children', []) or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    for root in nodes:
+        if isinstance(root, dict):
+            walk(root)
+    return out
+
+
+def _apply_mapping_by_title(text_tree: List[Dict[str, Any]], mapped_nodes: List[Dict[str, Any]]) -> None:
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for item in mapped_nodes:
+        key = _normalize_title_for_match(str(item.get('title', '') or ''))
+        if not key:
+            continue
+        buckets.setdefault(key, []).append(item)
+
+    def walk(node: Dict[str, Any]) -> None:
+        key = _normalize_title_for_match(str(node.get('title', '') or ''))
+        queue = buckets.get(key, [])
+        if queue:
+            mapped = queue.pop(0)
+            node['offset'] = int(mapped['offset'])
+            node['length'] = int(mapped['length'])
+            source = str(mapped.get('byte_source', PACKET_BYTE_SOURCE) or PACKET_BYTE_SOURCE)
+            if source != PACKET_BYTE_SOURCE:
+                node['byte_source'] = source
+        for child in node.get('children', []) or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    for root in text_tree:
+        if isinstance(root, dict):
+            walk(root)
+
+
+def _tshark_text_packet_tree(record: Any) -> List[Dict[str, Any]] | None:
+    if record is None:
+        return None
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    capture_path = str(metadata.get('capture_file_path', '') or '')
+    frame_number = int(getattr(record, 'number', 0) or 0)
+    if not capture_path or frame_number <= 0:
+        return None
+
+    verbose_by_frame = _get_capture_verbose_lines(capture_path)
+    lines = list(verbose_by_frame.get(frame_number, []) or [])
+    if not lines:
+        return None
+
+    text_tree = _titles_to_tree(lines)
+    if not text_tree:
+        return None
+
+    pdml_tree = _tshark_full_packet_tree(record)
+    if pdml_tree:
+        mapped_nodes = _flatten_mapped_nodes(pdml_tree)
+        _apply_mapping_by_title(text_tree, mapped_nodes)
+    return text_tree
 
 
 def _tshark_protocol_tree(record: Any, proto_names: List[str]) -> Dict[str, Any] | None:
@@ -799,6 +954,9 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
     metadata = getattr(record, 'metadata', {}) or {}
     if bool(metadata.get('force_tshark_detail', False)):
+        tshark_sections = _tshark_text_packet_tree(record)
+        if tshark_sections:
+            return tshark_sections
         tshark_sections = _tshark_full_packet_tree(record)
         if tshark_sections:
             return tshark_sections
