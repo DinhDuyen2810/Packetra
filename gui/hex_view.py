@@ -294,6 +294,8 @@ class PacketBytesView(QWidget):
         self._views = {
             'packet': PacketHexView(),
             'tcp_reassembled': PacketHexView(),
+            'radius_eap_reassembled': PacketHexView(),
+            'radius_eap_tls_reassembled': PacketHexView(),
             'decoded_utf8': PacketHexView(),
             'http_dechunked': PacketHexView(),
             'zabbix_uncompressed': PacketHexView(),
@@ -368,6 +370,29 @@ class PacketBytesView(QWidget):
             sources.append(
                 ('tcp_reassembled', f'Reassembled ({len(reassembled_data)} bytes)', reassembled_data)
             )
+
+        eap_reassembled_hex = str(metadata.get('radius_eap_reassembled_hex', '') or '')
+        if eap_reassembled_hex:
+            try:
+                eap_reassembled = bytes.fromhex(eap_reassembled_hex)
+            except ValueError:
+                eap_reassembled = b''
+            if eap_reassembled:
+                sources.append(
+                    ('radius_eap_reassembled', f'Reassembled EAP ({len(eap_reassembled)} bytes)', eap_reassembled)
+                )
+
+        eap_tls_reassembled_hex = str(metadata.get('radius_eap_tls_reassembled_hex', '') or '')
+        if eap_tls_reassembled_hex:
+            try:
+                eap_tls_reassembled = bytes.fromhex(eap_tls_reassembled_hex)
+            except ValueError:
+                eap_tls_reassembled = b''
+            if eap_tls_reassembled:
+                sources.append(
+                    ('radius_eap_tls_reassembled', f'Reassembled EAP-TLS ({len(eap_tls_reassembled)} bytes)', eap_tls_reassembled)
+                )
+
         decoded_utf8 = b''
         http_body = bytes(metadata.get('http_body', b'') or b'')
         if http_body:

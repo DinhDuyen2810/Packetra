@@ -6,7 +6,7 @@ import select
 from urllib.parse import unquote
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtCore import QSettings
-from scapy.all import Ether, Raw, sniff
+from scapy.all import Ether, Raw, CookedLinux, sniff
 from scapy.utils import RawPcapNgReader, RawPcapReader
 
 from core.remote_capture import SSHRemoteCapture
@@ -23,6 +23,17 @@ def _decode_link_layer_packet(raw_bytes: bytes, linktype: int):
     has_mpacket_preamble = isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) > 16 and bytes(raw_bytes[:8]) == (b'\x55' * 7 + b'\xD5')
     if linktype_int == 1 and not has_mpacket_preamble:
         packet = Ether(raw_bytes)
+        try:
+            packet.frame_raw_bytes = bytes(raw_bytes)
+            packet.frame_wire_len = int(len(raw_bytes))
+            packet.frame_linktype = int(linktype_int)
+        except Exception:
+            pass
+        return packet
+
+    # Linux cooked capture v1 (DLT_LINUX_SLL / 113)
+    if linktype_int == 113 and isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) >= 16:
+        packet = CookedLinux(bytes(raw_bytes))
         try:
             packet.frame_raw_bytes = bytes(raw_bytes)
             packet.frame_wire_len = int(len(raw_bytes))
