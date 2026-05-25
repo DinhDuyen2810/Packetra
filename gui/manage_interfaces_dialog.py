@@ -16,7 +16,7 @@ from PySide6.QtGui import QIcon
 class ManageInterfacesDialog(QDialog):
     """Manage Interfaces dialog - Local Interfaces, Pipes, Remote Interfaces"""
 
-    PIPE_HELP_TEXT = """Tham khao: Windows Named Pipe publisher cho Packetra/Wireshark
+    PIPE_HELP_TEXT = """Tham khao: Windows Named Pipe publisher cho Packetra
 
 import time
 import struct
@@ -100,7 +100,6 @@ sniff(
     REMOTE_AGENT_TEMPLATE = r'''import argparse
 import logging
 import re
-import subprocess
 import sys
 
 
@@ -109,14 +108,7 @@ def _ensure_scapy():
         from scapy.all import sniff, get_if_list, raw, Ether, IP, UDP, Raw
         return sniff, get_if_list, raw, Ether, IP, UDP, Raw
     except ModuleNotFoundError:
-        py = sys.executable
-        try:
-            subprocess.check_call([py, '-m', 'pip', 'install', 'scapy'])
-        except Exception as exc:
-            raise RuntimeError(f'Cannot install scapy with interpreter {py}: {exc}') from exc
-
-        from scapy.all import sniff, get_if_list, raw, Ether, IP, UDP, Raw
-        return sniff, get_if_list, raw, Ether, IP, UDP, Raw
+        raise RuntimeError('Scapy is not installed on remote host. Please install scapy before running the agent.')
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
 
@@ -1035,12 +1027,6 @@ if (-not (Test-Path $pythonResolved)) {{
 }}
 
 Write-Host "Using Python: $pythonResolved"
-
-Write-Host "Installing Python dependency: scapy"
-& "$pythonResolved" -m pip install --upgrade scapy
-if ($LASTEXITCODE -ne 0) {{
-    throw "Failed to install scapy. Check internet/proxy and Python pip setup on remote host."
-}}
 
 $cmdWrapper = "`"$pythonResolved`" `"$agentTarget`" %*"
 $cmdFile = Join-Path $InstallDir "RemoteCaptureAgent.cmd"

@@ -69,6 +69,7 @@ class PacketParser:
         self.dcerpc_stream_contexts = {}
         self.dcerpc_call_opnums = {}
         self.dcerpc_stream_protocols = {}
+        self.ws_col_info_cache = {}
 
     def set_capture_file_path(self, capture_file_path: str) -> None:
         self.capture_file_path = str(capture_file_path or '').strip()
@@ -1609,7 +1610,7 @@ class PacketParser:
         return self._tcp_seq_cmp(a, b) > 0
 
     def _track_tcp_contiguity(self, seq: int, nextseq: int, contig_state: dict):
-        """Track contiguous TCP data ranges similar to Wireshark logic."""
+        """Track contiguous TCP data ranges with internal stream logic."""
         if self._tcp_seq_cmp(nextseq, seq) <= 0:
             return
 
@@ -1845,7 +1846,7 @@ class PacketParser:
         state['last_epoch'] = epoch_time
 
 
-        # --- Wireshark-style contiguous streams logic ---
+        # --- Contiguous streams logic ---
         if proto == 'TCP':
             seq = int(getattr(layer, 'seq', 0) or 0)
             payload_len = self._tcp_payload_length(packet, layer, effective_ip)
@@ -1935,7 +1936,7 @@ class PacketParser:
             else:
                 metadata['tcp_window_scaling_disabled'] = True
 
-        # ---- SEQ/ACK analysis (Wireshark-like conditions) ----
+        # ---- SEQ/ACK analysis ----
         dir_packets = state['packets_by_dir'].setdefault(dir_key, [])
         rev_packets = state['packets_by_dir'].setdefault(rev_key, [])
 
@@ -6501,45 +6502,107 @@ class PacketParser:
         d3 = int.from_bytes(b[6:8], 'little')
         return f'{d1:08x}-{d2:04x}-{d3:04x}-{b[8]:02x}{b[9]:02x}-{b[10]:02x}{b[11]:02x}{b[12]:02x}{b[13]:02x}{b[14]:02x}{b[15]:02x}'
 
+    def _dcerpc_interface_name(self, uuid_text: str) -> str:
+        mapping = {
+            'e1af8308-5d1f-11c9-91a4-08002b14a0fa': 'EPMv4',
+            'e3514235-4b06-11d1-ab04-00c04fc2dcd2': 'DRSUAPI',
+            '12345778-1234-abcd-ef00-01234567cffb': 'RPC_NETLOGON',
+            '12345678-1234-abcd-ef00-01234567cffb': 'RPC_NETLOGON',
+            '12345778-1234-abcd-ef00-0123456789ab': 'LSARPC',
+        }
+        return mapping.get(str(uuid_text or '').lower(), str(uuid_text or ''))
+
+    def _dcerpc_transfer_syntax_name(self, uuid_text: str) -> str:
+        mapping = {
+            '8a885d04-1ceb-11c9-9fe8-08002b104860': '32bit NDR',
+            '71710533-beba-4937-8319-b5dbef9ccc36': '64bit NDR',
+        }
+        return mapping.get(str(uuid_text or '').lower(), str(uuid_text or ''))
+
+    def _tcp_event_prefix(self, metadata: dict | None) -> str:
+        md = metadata if isinstance(metadata, dict) else {}
+        if bool(md.get('tcp_port_numbers_reused', False)):
+            return '[TCP Port numbers reused] '
+        if bool(md.get('tcp_is_duplicate_ack', False)):
+            dup_frame = int(md.get('tcp_duplicate_ack_frame_number', 0) or 0)
+            dup_count = int(md.get('tcp_duplicate_ack_count', 1) or 1)
+            return f'[TCP Dup ACK {dup_frame}#{dup_count}] '
+        if bool(md.get('tcp_is_window_full', False)):
+            return '[TCP Window Full] '
+        if bool(md.get('tcp_is_window_update', False)):
+            return '[TCP Window Update] '
+        if bool(md.get('tcp_is_keep_alive_ack', False)):
+            return '[TCP Keep-Alive ACK] '
+        if bool(md.get('tcp_is_keep_alive', False)):
+            return '[TCP Keep-Alive] '
+        if bool(md.get('tcp_is_acked_unseen_segment', False)):
+            return '[TCP ACKed unseen segment] '
+        if bool(md.get('tcp_is_spurious_retransmission', False)):
+            return '[TCP Spurious Retransmission] '
+        if bool(md.get('tcp_is_out_of_order', False)):
+            return '[TCP Out-Of-Order] '
+        if bool(md.get('tcp_is_retransmission', False)):
+            return '[TCP Retransmission] '
+        if bool(md.get('tcp_previous_segment_not_captured', False)):
+            return '[TCP Previous segment not captured] '
+        return ''
+
     def _dtls_payload_info(self, payload: bytes) -> dict | None:
         if not isinstance(payload, (bytes, bytearray)) or len(payload) < 13:
             return None
-        content_type = int(payload[0])
-        version = int.from_bytes(payload[1:3], 'big')
-        if content_type not in {20, 21, 22, 23}:
+        off = 0
+        protocol = 'DTLS'
+        labels: list[str] = []
+        parsed_any = False
+        while off + 13 <= len(payload):
+            content_type = int(payload[off])
+            version = int.from_bytes(payload[off + 1:off + 3], 'big')
+            if content_type not in {20, 21, 22, 23} or version not in {0xFEFF, 0xFEFD}:
+                break
+            record_len = int.from_bytes(payload[off + 11:off + 13], 'big')
+            if record_len < 0 or off + 13 + record_len > len(payload):
+                break
+            parsed_any = True
+            protocol = 'DTLSv1.2' if version == 0xFEFD else 'DTLS'
+            record_body = payload[off + 13:off + 13 + record_len]
+            if content_type == 20:
+                labels.append('Change Cipher Spec')
+            elif content_type == 21:
+                labels.append('Encrypted Alert')
+            elif content_type == 23:
+                labels.append('Application Data')
+            elif content_type == 22 and record_body:
+                hs_off = 0
+                while hs_off + 12 <= len(record_body):
+                    hs_type = int(record_body[hs_off])
+                    hs_len = int.from_bytes(record_body[hs_off + 1:hs_off + 4], 'big')
+                    hs_name = {
+                        1: 'Client Hello',
+                        2: 'Server Hello',
+                        11: 'Certificate',
+                        12: 'Server Key Exchange',
+                        13: 'Certificate Request',
+                        14: 'Server Hello Done',
+                        15: 'Certificate Verify',
+                        16: 'Client Key Exchange',
+                        20: 'Encrypted Handshake Message',
+                        0: 'Encrypted Handshake Message',
+                    }.get(hs_type, f'Handshake ({hs_type})')
+                    labels.append(hs_name)
+                    hs_off += 12 + max(0, hs_len)
+                    if hs_off > len(record_body):
+                        break
+            off += 13 + record_len
+
+        if not parsed_any:
             return None
-        if version not in {0xFEFF, 0xFEFD}:
-            return None
-        record_len = int.from_bytes(payload[11:13], 'big')
-        if record_len <= 0 or 13 + record_len > len(payload):
-            return None
-        info = {
-            'content_type': content_type,
-            'version': version,
-            'record_length': record_len,
-            'protocol': 'DTLSv1.2' if version == 0xFEFD else 'DTLS',
-            'info_text': 'Datagram Transport Layer Security',
-        }
-        if content_type == 22 and record_len >= 12:
-            hs = payload[13:13 + record_len]
-            hs_type = int(hs[0])
-            hs_name = {
-                1: 'Client Hello',
-                2: 'Server Hello',
-                11: 'Certificate',
-                12: 'Server Key Exchange',
-                13: 'Certificate Request',
-                14: 'Server Hello Done',
-                15: 'Certificate Verify',
-                16: 'Client Key Exchange',
-                20: 'Finished',
-            }.get(hs_type, f'Handshake ({hs_type})')
-            info['handshake_type'] = hs_type
-            info['handshake_name'] = hs_name
-            info['info_text'] = hs_name
-            if hs_type == 1:
-                info['protocol'] = 'DTLS'
-        return info
+        # Keep stable ordering but remove immediate duplicates.
+        compact: list[str] = []
+        for label in labels:
+            if not compact or compact[-1] != label:
+                compact.append(label)
+        info_text = ', '.join(compact) if compact else 'Datagram Transport Layer Security'
+        return {'protocol': protocol, 'info_text': info_text}
 
     def _dcerpc_payload_info(self, payload: bytes, metadata: dict | None = None, allow_segment_fragment: bool = False) -> dict | None:
         if not isinstance(payload, (bytes, bytearray)) or len(payload) < 16:
@@ -6598,6 +6661,7 @@ class PacketParser:
             info['num_ctx_items'] = num_ctx_items
             cursor = 28
             contexts = {}
+            context_items = []
             for _ in range(num_ctx_items):
                 if cursor + 24 > pdu_len_for_parse:
                     break
@@ -6605,22 +6669,69 @@ class PacketParser:
                 num_transfer = int(data[cursor + 2])
                 abs_uuid = self._uuid_from_dcerpc_bytes(data[cursor + 4:cursor + 20])
                 contexts[int(cid)] = abs_uuid
-                cursor += 24 + (20 * num_transfer)
+                iface_ver = int.from_bytes(data[cursor + 20:cursor + 22], byteorder)
+                iface_minor = int.from_bytes(data[cursor + 22:cursor + 24], byteorder)
+                transfer_cursor = cursor + 24
+                transfer_names = []
+                for _t in range(num_transfer):
+                    if transfer_cursor + 20 > pdu_len_for_parse:
+                        break
+                    ts_uuid = self._uuid_from_dcerpc_bytes(data[transfer_cursor:transfer_cursor + 16])
+                    transfer_names.append(self._dcerpc_transfer_syntax_name(ts_uuid))
+                    transfer_cursor += 20
+                context_items.append({
+                    'context_id': int(cid),
+                    'interface_uuid': abs_uuid,
+                    'interface_name': self._dcerpc_interface_name(abs_uuid),
+                    'interface_version': int(iface_ver),
+                    'interface_minor': int(iface_minor),
+                    'transfer_syntaxes': transfer_names,
+                })
+                cursor = transfer_cursor
                 if cursor > pdu_len_for_parse:
                     break
             info['contexts'] = contexts
+            info['context_items'] = context_items
             stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
             if stream_index >= 0 and contexts:
                 self.dcerpc_stream_contexts[stream_index] = contexts
 
+        if ptype in {12, 15} and pdu_len_for_parse >= 24:
+            cursor = 24
+            if cursor + 2 <= pdu_len_for_parse:
+                sec_addr_len = int.from_bytes(data[cursor:cursor + 2], byteorder)
+                cursor += 2 + max(0, sec_addr_len)
+                while (cursor % 4) and cursor < pdu_len_for_parse:
+                    cursor += 1
+                if cursor + 4 <= pdu_len_for_parse:
+                    res_count = int(data[cursor])
+                    cursor += 4
+                    result_map = {0: 'Acceptance', 1: 'User rejection', 2: 'Provider rejection', 3: 'Negotiate ACK'}
+                    results = []
+                    for _ in range(res_count):
+                        if cursor + 24 > pdu_len_for_parse:
+                            break
+                        result_code = int.from_bytes(data[cursor:cursor + 2], byteorder)
+                        ts_uuid = self._uuid_from_dcerpc_bytes(data[cursor + 4:cursor + 20])
+                        results.append({
+                            'result': result_map.get(result_code, str(result_code)),
+                            'transfer_syntax': self._dcerpc_transfer_syntax_name(ts_uuid),
+                        })
+                        cursor += 24
+                    info['bind_results'] = results
+
         stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
         drsuapi_uuid = 'e3514235-4b06-11d1-ab04-00c04fc2dcd2'
+        epm_uuid = 'e1af8308-5d1f-11c9-91a4-08002b14a0fa'
         bound_contexts = self.dcerpc_stream_contexts.get(stream_index, {}) if stream_index >= 0 else {}
         bound_uuid = str(bound_contexts.get(int(context_id), '') or '').lower() if context_id is not None else ''
         direct_contexts = info.get('contexts', {}) if isinstance(info.get('contexts', {}), dict) else {}
         has_drsuapi_bind = any(str(v).lower() == drsuapi_uuid for v in direct_contexts.values())
+        has_epm_bind = any(str(v).lower() == epm_uuid for v in direct_contexts.values())
         if ptype in {0, 2, 3} and ((bound_uuid == drsuapi_uuid) or has_drsuapi_bind):
             info['protocol'] = 'DRSUAPI'
+        elif ptype in {0, 2, 3} and ((bound_uuid == epm_uuid) or has_epm_bind):
+            info['protocol'] = 'EPM'
         stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
         if stream_index >= 0:
             self.dcerpc_stream_protocols[stream_index] = str(info.get('protocol', 'DCERPC') or 'DCERPC')
@@ -6649,6 +6760,151 @@ class PacketParser:
             result['embedded_offset'] = int(off)
             return result
         return None
+
+    def _epm_map_pairs_from_stub(self, packet, metadata: dict | None = None) -> list[tuple[str, str]]:
+        tcp_payload = self._payload_bytes(packet)
+        dcerpc = metadata.get('dcerpc') if isinstance(metadata, dict) and isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(tcp_payload, metadata)
+        if not isinstance(dcerpc, dict):
+            return []
+        ptype = int(dcerpc.get('ptype', -1) or -1)
+        opnum = int(dcerpc.get('opnum', -1) or -1)
+        if opnum != 3 or ptype not in {0, 2}:
+            return []
+        if len(tcp_payload) < 24:
+            return []
+        byteorder = str(dcerpc.get('byteorder', 'little') or 'little')
+        frag_len = int(dcerpc.get('frag_len', len(tcp_payload)) or len(tcp_payload))
+        end = min(max(24, frag_len), len(tcp_payload))
+        stub = tcp_payload[24:end]
+        if not stub:
+            return []
+
+        def _uuid_wire(uuid_text: str) -> bytes:
+            parts = str(uuid_text).lower().split('-')
+            if len(parts) != 5:
+                return b''
+            try:
+                d1 = int(parts[0], 16).to_bytes(4, 'little')
+                d2 = int(parts[1], 16).to_bytes(2, 'little')
+                d3 = int(parts[2], 16).to_bytes(2, 'little')
+                d4 = bytes.fromhex(parts[3] + parts[4])
+                return d1 + d2 + d3 + d4
+            except Exception:
+                return b''
+
+        iface_uuids = {
+            'DRSUAPI': 'e3514235-4b06-11d1-ab04-00c04fc2dcd2',
+            'RPC_NETLOGON': '12345778-1234-abcd-ef00-01234567cffb',
+            'EPMv4': 'e1af8308-5d1f-11c9-91a4-08002b14a0fa',
+            'LSARPC': '12345778-1234-abcd-ef00-0123456789ab',
+        }
+        syntax_uuids = {
+            '32bit NDR': '8a885d04-1ceb-11c9-9fe8-08002b104860',
+            '64bit NDR': '71710533-beba-4937-8319-b5dbef9ccc36',
+            'Bind Time Feature Negotiation': '6cb71c2c-9812-4540-0300-000000000000',
+        }
+        iface_wires = {name: _uuid_wire(u) for name, u in iface_uuids.items()}
+        syntax_wires = {name: _uuid_wire(u) for name, u in syntax_uuids.items()}
+
+        pairs: list[tuple[str, str]] = []
+        iface_hits: list[str] = []
+        for i in range(0, max(0, len(stub) - 40)):
+            iface_name = None
+            for name, wire in iface_wires.items():
+                if wire and stub[i:i + 16] == wire:
+                    iface_name = name
+                    iface_hits.append(name)
+                    break
+            if iface_name is None:
+                continue
+            for j in range(i + 16, min(len(stub) - 15, i + 128)):
+                syntax_name = None
+                for sname, swire in syntax_wires.items():
+                    if swire and stub[j:j + 16] == swire:
+                        syntax_name = sname
+                        break
+                if syntax_name is not None:
+                    pairs.append((iface_name, syntax_name))
+                    break
+        if not pairs and iface_hits:
+            # Fallback when EPM tower bytes are partial: keep interface inferred from payload.
+            return [(iface_hits[0], '32bit NDR')]
+        return pairs
+
+    def _epm_infer_map_labels(self, packet, metadata: dict | None = None) -> list[tuple[str, str]]:
+        tcp_payload = self._payload_bytes(packet)
+        dcerpc = metadata.get('dcerpc') if isinstance(metadata, dict) and isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(tcp_payload, metadata)
+        if not isinstance(dcerpc, dict):
+            return []
+        ptype = int(dcerpc.get('ptype', -1) or -1)
+        opnum = int(dcerpc.get('opnum', -1) or -1)
+        if ptype not in {0, 2}:
+            return []
+        if ptype == 0 and opnum != 3:
+            return []
+        if len(tcp_payload) < 24:
+            return []
+        frag_len = int(dcerpc.get('frag_len', len(tcp_payload)) or len(tcp_payload))
+        stub = tcp_payload[24:min(len(tcp_payload), max(24, frag_len))]
+        if not stub:
+            return []
+
+        def _uuid_wire(uuid_text: str) -> bytes:
+            parts = str(uuid_text).lower().split('-')
+            if len(parts) != 5:
+                return b''
+            return (
+                int(parts[0], 16).to_bytes(4, 'little')
+                + int(parts[1], 16).to_bytes(2, 'little')
+                + int(parts[2], 16).to_bytes(2, 'little')
+                + bytes.fromhex(parts[3] + parts[4])
+            )
+
+        iface_candidates = [
+            ('DRSUAPI', _uuid_wire('e3514235-4b06-11d1-ab04-00c04fc2dcd2')),
+            ('RPC_NETLOGON', _uuid_wire('12345778-1234-abcd-ef00-01234567cffb')),
+            ('RPC_NETLOGON', _uuid_wire('12345678-1234-abcd-ef00-01234567cffb')),
+            ('LSARPC', _uuid_wire('12345778-1234-abcd-ef00-0123456789ab')),
+            ('EPMv4', _uuid_wire('e1af8308-5d1f-11c9-91a4-08002b14a0fa')),
+        ]
+        syntax_candidates = [
+            ('32bit NDR', _uuid_wire('8a885d04-1ceb-11c9-9fe8-08002b104860')),
+            ('64bit NDR', _uuid_wire('71710533-beba-4937-8319-b5dbef9ccc36')),
+        ]
+
+        iface_name = ''
+        iface_wire = b''
+        first_pos = len(stub) + 1
+        for name, wire in iface_candidates:
+            if not wire:
+                continue
+            pos = stub.find(wire)
+            if pos >= 0 and pos < first_pos:
+                first_pos = pos
+                iface_name = name
+                iface_wire = wire
+        if not iface_name:
+            return []
+
+        syntax_name = '32bit NDR'
+        syntax_pos = len(stub) + 1
+        for name, wire in syntax_candidates:
+            if not wire:
+                continue
+            pos = stub.find(wire)
+            if pos >= 0 and pos < syntax_pos:
+                syntax_pos = pos
+                syntax_name = name
+
+        repeat_count = 1
+        if ptype == 2 and iface_wire:
+            repeat_count = max(1, int(stub.count(iface_wire)))
+            # Some responses encode count but not full repeated UUID bytes.
+            if repeat_count == 1 and len(stub) >= 20:
+                guessed = int.from_bytes(stub[16:20], str(dcerpc.get('byteorder', 'little') or 'little'))
+                if 1 <= guessed <= 16:
+                    repeat_count = guessed
+        return [(iface_name, syntax_name)] * repeat_count
 
     def _tls_client_hello_sni(self, packet) -> str:
         payload = self._payload_bytes(packet)
@@ -9412,26 +9668,63 @@ class PacketParser:
             if protocol == 'DCERPC':
                 dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
                 if isinstance(dcerpc, dict):
+                    prefix = self._tcp_event_prefix(metadata)
                     ptype_raw = dcerpc.get('ptype', -1)
                     ptype = int(ptype_raw) if ptype_raw is not None else -1
                     call_raw = dcerpc.get('call_id', 0)
                     call_id = int(call_raw) if call_raw is not None else 0
                     frag_raw = dcerpc.get('frag_len', 0)
                     frag_len = int(frag_raw) if frag_raw is not None else 0
+                    context_items = list(dcerpc.get('context_items', []) or [])
+                    bind_results = list(dcerpc.get('bind_results', []) or [])
                     if ptype == 11:
-                        return f'Bind: call_id: {call_id}, Fragment: Single, {int(dcerpc.get("num_ctx_items", 0) or 0)} context items'
+                        suffix = ''
+                        if context_items:
+                            items = []
+                            for item in context_items:
+                                iname = str(item.get('interface_name', '') or '')
+                                iver = int(item.get('interface_version', 0) or 0)
+                                imin = int(item.get('interface_minor', 0) or 0)
+                                syntaxes = list(item.get('transfer_syntaxes', []) or [])
+                                sname = str(syntaxes[0] if syntaxes else '')
+                                if iname and sname:
+                                    items.append(f'{iname} V{iver}.{imin} ({sname})')
+                            if items:
+                                suffix = ': ' + ', '.join(items)
+                        return f'{prefix}Bind: call_id: {call_id}, Fragment: Single, {int(dcerpc.get("num_ctx_items", 0) or 0)} context items{suffix}'
                     if ptype == 12:
-                        return f'Bind_ack: call_id: {call_id}, Fragment: Single, max_xmit: 5840 max_recv: 5840'
+                        suffix = ''
+                        if bind_results:
+                            suffix = f', {len(bind_results)} results: ' + ', '.join(str(r.get('result', '')) for r in bind_results)
+                        return f'{prefix}Bind_ack: call_id: {call_id}, Fragment: Single, max_xmit: 5840 max_recv: 5840{suffix}'
                     if ptype == 14:
-                        return f'Alter_context: call_id: {call_id}, Fragment: Single, {int(dcerpc.get("num_ctx_items", 0) or 0)} context items'
+                        suffix = ''
+                        if context_items:
+                            items = []
+                            for item in context_items:
+                                iname = str(item.get('interface_name', '') or '')
+                                iver = int(item.get('interface_version', 0) or 0)
+                                imin = int(item.get('interface_minor', 0) or 0)
+                                syntaxes = list(item.get('transfer_syntaxes', []) or [])
+                                sname = str(syntaxes[0] if syntaxes else '')
+                                if iname and sname:
+                                    items.append(f'{iname} V{iver}.{imin} ({sname})')
+                            if items:
+                                suffix = ': ' + ', '.join(items)
+                        return f'{prefix}Alter_context: call_id: {call_id}, Fragment: Single, {int(dcerpc.get("num_ctx_items", 0) or 0)} context items{suffix}'
                     if ptype == 15:
-                        return f'Alter_context_resp: call_id: {call_id}, Fragment: Single, max_xmit: 5840 max_recv: 5840'
+                        suffix = ''
+                        if bind_results:
+                            suffix = f', {len(bind_results)} results: ' + ', '.join(str(r.get('result', '')) for r in bind_results)
+                        return f'{prefix}Alter_context_resp: call_id: {call_id}, Fragment: Single, max_xmit: 5840 max_recv: 5840{suffix}'
                     if ptype == 0:
                         op_raw = dcerpc.get('opnum', 0)
                         opnum = int(op_raw) if op_raw is not None else 0
-                        return f'Request: call_id: {call_id}, Fragment: Single, opnum: {opnum}, stub data: {max(0, frag_len - 24)} bytes'
+                        return f'{prefix}Request: call_id: {call_id}, Fragment: Single, opnum: {opnum}, stub data: {max(0, frag_len - 24)} bytes'
                     if ptype == 2:
-                        return f'Response: call_id: {call_id}, Fragment: Single'
+                        ctx = dcerpc.get('context_id', None)
+                        ctx_part = f', Ctx: {int(ctx)}' if ctx is not None else ''
+                        return f'{prefix}Response: call_id: {call_id}, Fragment: Single{ctx_part}'
                 return 'Distributed Computing Environment / Remote Procedure Call'
             if protocol == 'DRSUAPI':
                 dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
@@ -9443,11 +9736,71 @@ class PacketParser:
                 else:
                     ptype = -1
                     opnum = -1
+                prefix = self._tcp_event_prefix(metadata)
                 if ptype == 0:
-                    return 'DsBind request' if opnum == 0 else ('DsUnbind request' if opnum == 1 else f'DRSUAPI request (opnum {opnum})')
+                    return f'{prefix}' + ('DsBind request' if opnum == 0 else ('DsUnbind request' if opnum == 1 else f'DRSUAPI request (opnum {opnum})'))
                 if ptype == 2:
-                    return 'DsBind response' if opnum in {-1, 0} else ('DsUnbind response' if opnum == 1 else 'DRSUAPI response')
+                    return f'{prefix}' + ('DsBind response' if opnum in {-1, 0} else ('DsUnbind response' if opnum == 1 else 'DRSUAPI response'))
                 return 'Active Directory Replication'
+            if protocol == 'EPM':
+                dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
+                if isinstance(dcerpc, dict):
+                    prefix = self._tcp_event_prefix(metadata)
+                    ptype_raw = dcerpc.get('ptype', -1)
+                    opnum_raw = dcerpc.get('opnum', -1)
+                    ptype = int(ptype_raw) if ptype_raw is not None else -1
+                    opnum = int(opnum_raw) if opnum_raw is not None else -1
+                    pairs = self._epm_infer_map_labels(packet, metadata)
+                    if not pairs:
+                        payload = self._payload_bytes(packet)
+                        frag_len = int(dcerpc.get('frag_len', len(payload)) or len(payload))
+                        stub = payload[24:min(len(payload), max(24, frag_len))]
+                        def _uw(u: str) -> bytes:
+                            parts = str(u).split('-')
+                            return (
+                                int(parts[0], 16).to_bytes(4, 'little')
+                                + int(parts[1], 16).to_bytes(2, 'little')
+                                + int(parts[2], 16).to_bytes(2, 'little')
+                                + bytes.fromhex(parts[3] + parts[4])
+                            )
+                        drsuapi_wire = _uw('e3514235-4b06-11d1-ab04-00c04fc2dcd2')
+                        netlogon_wire = _uw('12345678-1234-abcd-ef00-01234567cffb')
+                        if stub.find(drsuapi_wire) >= 0:
+                            pairs = [('DRSUAPI', '32bit NDR')]
+                        elif stub.find(netlogon_wire) >= 0:
+                            rep = max(1, int(stub.count(netlogon_wire)))
+                            pairs = [('RPC_NETLOGON', '32bit NDR')] * rep
+                    stream_index = int(metadata.get('tcp_stream_index', -1) or -1)
+                    context_raw = dcerpc.get('context_id', -1)
+                    context_id = int(context_raw) if context_raw is not None else -1
+                    if ptype == 0 and opnum == 3:
+                        if pairs:
+                            iface, syntax = pairs[0]
+                            return f'{prefix}Map request, {iface}, {syntax}'
+                        iface = ''
+                        if stream_index >= 0 and context_id >= 0:
+                            ctx_uuid = str(self.dcerpc_stream_contexts.get(stream_index, {}).get(context_id, '') or '')
+                            iface = self._dcerpc_interface_name(ctx_uuid)
+                        if iface:
+                            return f'{prefix}Map request, {iface}, 32bit NDR'
+                        return f'{prefix}Map request'
+                    if ptype == 2 and opnum == 3:
+                        payload = self._payload_bytes(packet)
+                        byteorder = str(dcerpc.get('byteorder', 'little') or 'little')
+                        frag_len = int(dcerpc.get('frag_len', len(payload)) or len(payload))
+                        stub = payload[24:min(len(payload), max(24, frag_len))]
+                        repeat_count = 0
+                        if len(stub) >= 24:
+                            try:
+                                repeat_count = int.from_bytes(stub[16:20], byteorder)
+                            except Exception:
+                                repeat_count = 0
+                        if repeat_count > 1 and len(pairs) == 1:
+                            pairs = pairs * repeat_count
+                        if pairs:
+                            return f'{prefix}Map response, ' + ', '.join(f'{iface}, {syntax}' for iface, syntax in pairs)
+                        return f'{prefix}Map response'
+                return 'Endpoint Mapper'
             if protocol in {'DTLS', 'DTLSv1.2'}:
                 udp = self._effective_udp_layer(packet)
                 payload = bytes(getattr(udp, 'payload', b'')) if udp is not None else b''

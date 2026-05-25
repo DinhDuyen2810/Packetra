@@ -1,19 +1,19 @@
 # Packetra - Network Packet Analyzer
 
-**Packetra** là một ứng dụng phân tích gói tin mạng (Network Packet Sniffer) mạnh mẽ, tương tự Wireshark, được xây dựng bằng Python, Scapy, và PySide6.
+**Packetra** là một ứng dụng phân tích gói tin mạng (Network Packet Sniffer) mạnh mẽ, tương tự Packetra, được xây dựng bằng Python, Scapy, và PySide6.
 
 ## 🚀 Tính Năng
 
 ### ✅ Hoạt động tốt:
 - ✓ Bắt gói tin real-time từ bất kỳ interface nào
 - ✓ Hỗ trợ 20+ protocols: TCP, UDP, DNS, ARP, ICMP, TLS, QUIC, HTTP, DHCP, IPv6, v.v
-- ✓ Display Filter giống Wireshark (với logic AND/OR/NOT)
+- ✓ Display Filter giống Packetra (với logic AND/OR/NOT)
 - ✓ Xem chi tiết mỗi packet (hex dump, layer details)
 - ✓ Real-time traffic monitoring cho từng interface
 - ✓ Lưu/tải file PCAP
 - ✓ Color coding theo protocol
 - ✓ Conversation tracking
-- ✓ Menubar & Toolbar hoàn chỉnh giống Wireshark
+- ✓ Menubar & Toolbar hoàn chỉnh giống Packetra
 - ✓ Capture filters & Display filters
 - ✓ Windows Npcap integration
 
@@ -371,7 +371,7 @@ DATN-Packetra/
 ✓ Real-time traffic monitoring
 ✓ Protocol color coding
 ✓ Conversation tracking
-✓ Complete Wireshark-like menu/toolbar
+✓ Complete Packetra-like menu/toolbar
 ✓ Keyboard shortcuts
 ✓ Cross-platform (Windows, macOS, Linux)
 
@@ -522,7 +522,7 @@ MIT License
 - **Shared Statusbar** - Hiển thị trạng thái thống nhất
 
 #### 🖥️ Complete Menubar Implementation
-Tất cả các menu hoạt động như Wireshark:
+Tất cả các menu hoạt động như Packetra:
 - **File Menu**: Open, Save, Save As, Export, Print, Exit
 - **Edit Menu**: Undo, Redo, Cut, Copy, Paste, Find, Preferences
 - **View Menu**: Zoom In/Out, Fullscreen

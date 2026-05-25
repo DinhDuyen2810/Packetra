@@ -977,7 +977,7 @@ class CaptureOptionsDialog(QDialog):
             main_window._on_interface_preferences_changed()
     
     def _build_output_tab(self):
-        """Build Output tab (Wireshark-style)"""
+        """Build Output tab"""
         from PySide6.QtWidgets import QGroupBox, QFileDialog
         layout = QVBoxLayout(self.output_tab)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -1299,7 +1299,7 @@ class CaptureOptionsDialog(QDialog):
         return self.options_state.copy()
     
     def _build_options_tab(self):
-        """Build Options tab (Wireshark-style)"""
+        """Build Options tab"""
         from PySide6.QtWidgets import QFileDialog
         layout = QVBoxLayout(self.options_tab)
         layout.setContentsMargins(8, 8, 8, 8)

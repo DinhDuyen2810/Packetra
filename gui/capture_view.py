@@ -693,7 +693,7 @@ class CaptureView(QWidget):
         filter_widget.setLayout(filter_row)
         root_layout.addWidget(filter_widget)
 
-        # Find row (Wireshark-like), hidden by default.
+        # Find row (similar behavior), hidden by default.
         find_root = QVBoxLayout()
         find_root.setContentsMargins(8, 0, 8, 4)
         find_root.setSpacing(4)
@@ -2194,7 +2194,7 @@ class CaptureView(QWidget):
             ext = os.path.splitext(self.loaded_file_path.lower())[1].lstrip('.')
         if not ext:
             ext = 'pcap'
-        format_text = f'Wireshark/... - {ext}'
+        format_text = f'Capture format - {ext}'
 
         elapsed_seconds = 0.0
         if first_epoch is not None and last_epoch is not None:

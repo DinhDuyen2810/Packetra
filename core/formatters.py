@@ -6,10 +6,7 @@ import ipaddress
 import json
 import os
 import re
-import shutil
-import subprocess
 from typing import Any, Dict, List
-import xml.etree.ElementTree as ET
 
 
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, CookedLinux
@@ -32,10 +29,6 @@ ZABBIX_UNCOMPRESSED_BYTE_SOURCE = 'zabbix_uncompressed'
 RADIUS_EAP_REASSEMBLED_BYTE_SOURCE = 'radius_eap_reassembled'
 RADIUS_EAP_TLS_REASSEMBLED_BYTE_SOURCE = 'radius_eap_tls_reassembled'
 
-# Legacy tshark caches (kept for compatibility, currently disabled in runtime path).
-_TSHARK_PDML_CACHE: Dict[tuple[str, int], ET.Element | None] = {}
-_TSHARK_PDML_CAPTURE_CACHE: Dict[str, Dict[int, ET.Element]] = {}
-_TSHARK_VERBOSE_CACHE: Dict[str, Dict[int, List[str]]] = {}
 
 # MAC Vendor lookup (simplified, add more as needed)
 MAC_VENDORS = {
@@ -73,11 +66,13 @@ MAC_VENDORS = {
     '1c:69:7a': 'EliteGroupCo',
 }
 
+
 def get_mac_vendor(mac: str) -> str:
     if not mac or len(mac) < 8:
         return ''
     prefix = mac.lower()[:8]
     return MAC_VENDORS.get(prefix, '')
+
 
 def hex_dump(packet) -> str:
     raw = bytes(packet)
@@ -135,493 +130,6 @@ def _tag_byte_source(node: Dict[str, Any], byte_source: str) -> None:
     for child in node.get('children', []) or []:
         if isinstance(child, dict):
             _tag_byte_source(child, byte_source)
-
-
-def _get_tshark_executable() -> str | None:
-    env_path = str(os.environ.get('PACKETRA_TSHARK_PATH', '') or '').strip()
-    if env_path and os.path.isfile(env_path):
-        return env_path
-
-    which_path = shutil.which('tshark')
-    if which_path:
-        return which_path
-
-    win_default = r'C:\Program Files\Wireshark\tshark.exe'
-    if os.path.isfile(win_default):
-        return win_default
-    return None
-
-
-def _pdml_node_to_tree(elem: ET.Element) -> Dict[str, Any] | None:
-    showname = str(elem.attrib.get('showname', '') or '').strip()
-    if not showname:
-        show = str(elem.attrib.get('show', '') or '').strip()
-        name = str(elem.attrib.get('name', '') or '').strip()
-        showname = show if show else name
-    if not showname:
-        return None
-    lowered_show = showname.lower()
-    if (
-        '(resolved)' in lowered_show
-        or lowered_show.startswith('source or destination ')
-        or lowered_show.startswith('address oui')
-        or lowered_show.startswith('source oui')
-        or lowered_show.startswith('destination oui')
-        or 'this field makes the filter match on' in lowered_show
-    ):
-        return None
-    is_hidden = str(elem.attrib.get('hide', '') or '').lower() == 'yes'
-    if is_hidden and not (showname.startswith('[') and showname.endswith(']')):
-        showname = f'[{showname}]'
-
-    node: Dict[str, Any] = {'title': showname}
-    pos_text = elem.attrib.get('pos', None)
-    size_text = elem.attrib.get('size', None)
-    try:
-        if pos_text is not None and size_text is not None:
-            pos = int(str(pos_text), 10)
-            size = int(str(size_text), 10)
-            if size > 0:
-                node.update(_byte_mapping(0, pos, size, PACKET_BYTE_SOURCE))
-    except Exception:
-        pass
-
-    children: List[Dict[str, Any]] = []
-    for child in list(elem):
-        if child.tag != 'field':
-            continue
-        child_node = _pdml_node_to_tree(child)
-        if child_node is not None:
-            children.append(child_node)
-    if children:
-        node['children'] = children
-    return node
-
-
-def _get_packet_pdml(capture_path: str, frame_number: int) -> ET.Element | None:
-    cap = str(capture_path or '').strip()
-    frame = int(frame_number or 0)
-    if not cap or frame <= 0:
-        return None
-
-    cache_key = (cap, frame)
-    if cache_key in _TSHARK_PDML_CACHE:
-        return _TSHARK_PDML_CACHE[cache_key]
-
-    tshark = _get_tshark_executable()
-    if not tshark:
-        _TSHARK_PDML_CACHE[cache_key] = None
-        return None
-
-    try:
-        proc = subprocess.run(
-            [
-                tshark,
-                '-r',
-                cap,
-                '-Y',
-                f'frame.number == {frame}',
-                '-T',
-                'pdml',
-            ],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            check=False,
-        )
-    except Exception:
-        _TSHARK_PDML_CACHE[cache_key] = None
-        return None
-
-    if int(proc.returncode) != 0:
-        _TSHARK_PDML_CACHE[cache_key] = None
-        return None
-
-    payload = str(proc.stdout or '').strip()
-    if not payload:
-        _TSHARK_PDML_CACHE[cache_key] = None
-        return None
-
-    try:
-        root = ET.fromstring(payload)
-    except Exception:
-        _TSHARK_PDML_CACHE[cache_key] = None
-        return None
-
-    pkt: ET.Element | None = None
-    for child in list(root):
-        if child.tag == 'packet':
-            pkt = child
-            break
-
-    _TSHARK_PDML_CACHE[cache_key] = pkt
-    return pkt
-
-
-def _get_capture_verbose_lines(capture_path: str) -> Dict[int, List[str]]:
-    _ = capture_path
-    return {}
-
-
-def _titles_to_tree(lines: List[str]) -> List[Dict[str, Any]]:
-    roots: List[Dict[str, Any]] = []
-    # Stack item: (nominal_level_from_indent, rendered_depth, node)
-    stack: List[tuple[int, int, Dict[str, Any]]] = []
-    for raw in lines:
-        if not str(raw).strip():
-            continue
-        indent = len(raw) - len(raw.lstrip(' '))
-        level = max(0, indent // 4)
-
-        while stack and stack[-1][0] >= level:
-            stack.pop()
-
-        if not stack:
-            rendered_depth = 0
-        else:
-            rendered_depth = int(stack[-1][1]) + 1
-
-        # Preserve original visual indentation from tshark -V exactly.
-        # Some payload lines can "jump" indent levels; tree depth may be
-        # shallower than nominal indent in those cases.
-        extra_prefix = max(0, indent - (rendered_depth * 4))
-        title = (' ' * extra_prefix) + raw.strip()
-        node: Dict[str, Any] = {'title': title}
-
-        if rendered_depth == 0:
-            roots.append(node)
-        else:
-            parent = stack[-1][2]
-            parent.setdefault('children', []).append(node)
-        stack.append((level, rendered_depth, node))
-    return roots
-
-
-def _normalize_title_for_match(title: str) -> str:
-    text = str(title or '').strip()
-    if text.startswith('[') and text.endswith(']'):
-        text = text[1:-1].strip()
-    text = re.sub(r'\s+', ' ', text)
-    return text.lower()
-
-
-def _flatten_mapped_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-
-    def walk(node: Dict[str, Any]) -> None:
-        if 'offset' in node and 'length' in node:
-            try:
-                length = int(node.get('length', 0) or 0)
-                if length > 0:
-                    out.append({
-                        'title': str(node.get('title', '') or ''),
-                        'offset': int(node.get('offset', 0) or 0),
-                        'length': length,
-                        'byte_source': str(node.get('byte_source', PACKET_BYTE_SOURCE) or PACKET_BYTE_SOURCE),
-                    })
-            except Exception:
-                pass
-        for child in node.get('children', []) or []:
-            if isinstance(child, dict):
-                walk(child)
-
-    for root in nodes:
-        if isinstance(root, dict):
-            walk(root)
-    return out
-
-
-def _apply_mapping_by_title(text_tree: List[Dict[str, Any]], mapped_nodes: List[Dict[str, Any]]) -> None:
-    buckets: Dict[str, List[Dict[str, Any]]] = {}
-    for item in mapped_nodes:
-        key = _normalize_title_for_match(str(item.get('title', '') or ''))
-        if not key:
-            continue
-        buckets.setdefault(key, []).append(item)
-
-    def walk(node: Dict[str, Any]) -> None:
-        key = _normalize_title_for_match(str(node.get('title', '') or ''))
-        queue = buckets.get(key, [])
-        if queue:
-            mapped = queue.pop(0)
-            node['offset'] = int(mapped['offset'])
-            node['length'] = int(mapped['length'])
-            source = str(mapped.get('byte_source', PACKET_BYTE_SOURCE) or PACKET_BYTE_SOURCE)
-            if source != PACKET_BYTE_SOURCE:
-                node['byte_source'] = source
-        for child in node.get('children', []) or []:
-            if isinstance(child, dict):
-                walk(child)
-
-    for root in text_tree:
-        if isinstance(root, dict):
-            walk(root)
-
-
-def _tshark_text_packet_tree(record: Any) -> List[Dict[str, Any]] | None:
-    if record is None:
-        return None
-    metadata = getattr(record, 'metadata', {}) if record is not None else {}
-    capture_path = str(metadata.get('capture_file_path', '') or '')
-    frame_number = int(getattr(record, 'number', 0) or 0)
-    if not capture_path or frame_number <= 0:
-        return None
-
-    verbose_by_frame = _get_capture_verbose_lines(capture_path)
-    lines = list(verbose_by_frame.get(frame_number, []) or [])
-    if not lines:
-        return None
-
-    text_tree = _titles_to_tree(lines)
-    if not text_tree:
-        return None
-
-    pdml_tree = _tshark_full_packet_tree(record)
-    if pdml_tree:
-        mapped_nodes = _flatten_mapped_nodes(pdml_tree)
-        _apply_mapping_by_title(text_tree, mapped_nodes)
-    return text_tree
-
-
-def _tshark_protocol_tree(record: Any, proto_names: List[str]) -> Dict[str, Any] | None:
-    if record is None:
-        return None
-    metadata = getattr(record, 'metadata', {}) if record is not None else {}
-    capture_path = str(metadata.get('capture_file_path', '') or '')
-    frame_number = int(getattr(record, 'number', 0) or 0)
-    if not capture_path or frame_number <= 0:
-        return None
-
-    pkt = _get_packet_pdml(capture_path, frame_number)
-    if pkt is None:
-        return None
-
-    if not proto_names:
-        return None
-
-    all_protos = []
-    for proto in pkt.iter('proto'):
-        proto_name = str(proto.attrib.get('name', '') or '').lower()
-        all_protos.append((proto_name, proto))
-
-    primary = str(proto_names[0]).lower()
-    root_tree: Dict[str, Any] | None = None
-    for proto_name, proto_elem in all_protos:
-        if proto_name != primary:
-            continue
-        root_tree = _pdml_node_to_tree(proto_elem)
-        if root_tree is not None:
-            break
-    if root_tree is None:
-        return None
-
-    extras: List[Dict[str, Any]] = []
-    extra_names = set(str(name).lower() for name in proto_names[1:])
-    if extra_names:
-        for proto_name, proto_elem in all_protos:
-            if proto_name in extra_names:
-                extra_tree = _pdml_node_to_tree(proto_elem)
-                if extra_tree is not None:
-                    extras.append(extra_tree)
-
-    def _normalize_titles(node: Dict[str, Any], parent_title: str = '') -> None:
-        title = str(node.get('title', '') or '').strip()
-        bare = title.strip('[]')
-        parent_bare = str(parent_title or '').strip('[]')
-        should_bracket = parent_bare.startswith('Expert Info (')
-        if not should_bracket and re.match(
-            r'^(Response (in|to|In|To):|Time from request:|Time:|Preauth Hash:|Expert Info \(|Group:|Severity level:|Used keymap=)',
-            bare,
-        ):
-            should_bracket = True
-        if should_bracket:
-            if not title.startswith('['):
-                title = f'[{bare}]'
-        node['title'] = title
-        for child in node.get('children', []) or []:
-            if isinstance(child, dict):
-                _normalize_titles(child, title)
-
-    if extras:
-        if primary == 'smb2':
-            targets: List[Dict[str, Any]] = []
-
-            def _find_security_blob_nodes(node: Dict[str, Any]) -> None:
-                title = str(node.get('title', '') or '')
-                if title.startswith('Security Blob'):
-                    targets.append(node)
-                for child in node.get('children', []) or []:
-                    if isinstance(child, dict):
-                        _find_security_blob_nodes(child)
-
-            _find_security_blob_nodes(root_tree)
-            extra_by_title: Dict[str, Dict[str, Any]] = {}
-            for item in extras:
-                t = str(item.get('title', '') or '').lower()
-                if t.startswith('gss-api'):
-                    extra_by_title['gss-api'] = item
-                elif t.startswith('simple protected negotiation'):
-                    extra_by_title['spnego'] = item
-                elif t.startswith('ntlm secure service provider'):
-                    extra_by_title['ntlmssp'] = item
-
-            gss_node = extra_by_title.get('gss-api', None)
-            spnego_node = extra_by_title.get('spnego', None)
-            ntlm_node = extra_by_title.get('ntlmssp', None)
-
-            if gss_node is not None and spnego_node is not None:
-                gss_node.setdefault('children', []).append(spnego_node)
-                if ntlm_node is not None:
-                    neg_token_target = None
-
-                    def _find_neg_token(node: Dict[str, Any]) -> None:
-                        nonlocal neg_token_target
-                        if neg_token_target is not None:
-                            return
-                        node_title = str(node.get('title', '') or '')
-                        if node_title.startswith('negTokenTarg') or node_title.startswith('negTokenInit'):
-                            neg_token_target = node
-                            return
-                        for child in node.get('children', []) or []:
-                            if isinstance(child, dict):
-                                _find_neg_token(child)
-
-                    _find_neg_token(spnego_node)
-                    if neg_token_target is not None:
-                        neg_token_target.setdefault('children', []).append(ntlm_node)
-                    else:
-                        spnego_node.setdefault('children', []).append(ntlm_node)
-
-            attached_root = gss_node or spnego_node or ntlm_node
-            if attached_root is not None:
-                if targets:
-                    targets[0].setdefault('children', []).append(attached_root)
-                else:
-                    root_tree.setdefault('children', []).append(attached_root)
-            elif targets:
-                targets[0].setdefault('children', []).extend(extras)
-            else:
-                root_tree.setdefault('children', []).extend(extras)
-        elif primary == 'dcerpc':
-            extra_by_title: Dict[str, Dict[str, Any]] = {}
-            for item in extras:
-                t = str(item.get('title', '') or '').lower()
-                if t.startswith('gss-api'):
-                    extra_by_title['gss-api'] = item
-                elif t.startswith('simple protected negotiation'):
-                    extra_by_title['spnego'] = item
-                elif t.startswith('kerberos'):
-                    extra_by_title['kerberos'] = item
-
-            gss_node = extra_by_title.get('gss-api', None)
-            spnego_node = extra_by_title.get('spnego', None)
-            kerberos_node = extra_by_title.get('kerberos', None)
-
-            if gss_node is not None and spnego_node is not None:
-                gss_node.setdefault('children', []).append(spnego_node)
-
-            if kerberos_node is not None:
-                attach_target = spnego_node if spnego_node is not None else gss_node
-                if attach_target is not None:
-                    attached = False
-
-                    def _attach_kerberos_to_blob(node: Dict[str, Any]) -> bool:
-                        title = str(node.get('title', '') or '')
-                        if title.startswith('krb5_blob'):
-                            node.setdefault('children', []).append(kerberos_node)
-                            return True
-                        for child in node.get('children', []) or []:
-                            if isinstance(child, dict) and _attach_kerberos_to_blob(child):
-                                return True
-                        return False
-
-                    attached = _attach_kerberos_to_blob(attach_target)
-                    if not attached:
-                        attach_target.setdefault('children', []).append(kerberos_node)
-
-            attached_root = gss_node or spnego_node or kerberos_node
-            if attached_root is None:
-                for item in extras:
-                    root_tree.setdefault('children', []).append(item)
-            else:
-                auth_info_target: Dict[str, Any] | None = None
-
-                def _find_auth_info(node: Dict[str, Any]) -> None:
-                    nonlocal auth_info_target
-                    if auth_info_target is not None:
-                        return
-                    title = str(node.get('title', '') or '')
-                    if title.startswith('Auth Info:'):
-                        auth_info_target = node
-                        return
-                    for child in node.get('children', []) or []:
-                        if isinstance(child, dict):
-                            _find_auth_info(child)
-
-                _find_auth_info(root_tree)
-                if auth_info_target is not None:
-                    auth_info_target.setdefault('children', []).append(attached_root)
-                else:
-                    root_tree.setdefault('children', []).append(attached_root)
-        else:
-            root_tree.setdefault('children', []).extend(extras)
-
-    _normalize_titles(root_tree)
-    root_off = int(root_tree.get('offset', 0) or 0)
-    root_len = int(root_tree.get('length', 0) or 0)
-    if root_len > 0:
-        _normalize_tree_byte_ranges(root_tree, root_off, root_len, PACKET_BYTE_SOURCE)
-    return root_tree
-
-
-def _normalize_tshark_titles(node: Dict[str, Any], parent_title: str = '') -> None:
-    title = str(node.get('title', '') or '').strip()
-    bare = title.strip('[]')
-    parent_bare = str(parent_title or '').strip('[]')
-    should_bracket = parent_bare.startswith('Expert Info (')
-    if not should_bracket and re.match(
-        r'^(Response (in|to|In|To):|Time from request:|Time:|Preauth Hash:|Expert Info \(|Group:|Severity level:|Used keymap=)',
-        bare,
-    ):
-        should_bracket = True
-    if should_bracket and not title.startswith('['):
-        node['title'] = f'[{bare}]'
-    for child in node.get('children', []) or []:
-        if isinstance(child, dict):
-            _normalize_tshark_titles(child, str(node.get('title', '') or ''))
-
-
-def _tshark_full_packet_tree(record: Any) -> List[Dict[str, Any]] | None:
-    if record is None:
-        return None
-    metadata = getattr(record, 'metadata', {}) if record is not None else {}
-    capture_path = str(metadata.get('capture_file_path', '') or '')
-    frame_number = int(getattr(record, 'number', 0) or 0)
-    if not capture_path or frame_number <= 0:
-        return None
-
-    pkt = _get_packet_pdml(capture_path, frame_number)
-    if pkt is None:
-        return None
-
-    nodes: List[Dict[str, Any]] = []
-    for proto in list(pkt):
-        if not isinstance(proto.tag, str) or proto.tag != 'proto':
-            continue
-        name = str(proto.attrib.get('name', '') or '').lower()
-        if name in {'geninfo'}:
-            continue
-        tree = _pdml_node_to_tree(proto)
-        if tree is None:
-            continue
-        _normalize_tshark_titles(tree)
-        root_off = int(tree.get('offset', 0) or 0)
-        root_len = int(tree.get('length', 0) or 0)
-        if root_len > 0:
-            _normalize_tree_byte_ranges(tree, root_off, root_len, PACKET_BYTE_SOURCE)
-        nodes.append(tree)
-    return nodes or None
 
 
 def _ip_reassembly_section(metadata: dict, version: int) -> Dict[str, Any] | None:
@@ -1443,7 +951,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'KRB5' and tcp_payload:
             sections.append(_krb5_section(packet, offset, record))
             payload_handled = True
-        elif getattr(record, 'protocol', '') in {'DCERPC', 'DRSUAPI'} and tcp_payload:
+        elif getattr(record, 'protocol', '') in {'DCERPC', 'DRSUAPI', 'EPM'} and tcp_payload:
             sections.append(_dcerpc_section(tcp_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') in {'SMB', 'SMB2'} and tcp_payload:
@@ -11999,7 +11507,7 @@ def _pop_imf_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]
             unknown_count += 1
             k, v = line.split(':', 1)
             children.append({
-                'title': f'Unknown-Extension: {line} (Contact Wireshark developers if you want this supported.)',
+                'title': f'Unknown-Extension: {line} (Unsupported extension.)',
                 **_byte_mapping(offset, int(node['offset']), int(node['length']), PACKET_BYTE_SOURCE),
                 'children': [
                     {
@@ -12498,87 +12006,6 @@ def _smb1_section(packet, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
-    tshark_tree = _tshark_protocol_tree(record, ['smb2', 'gss-api', 'spnego', 'ntlmssp'])
-    if tshark_tree is not None:
-        metadata = getattr(record, 'metadata', {}) if record else {}
-        capture_path = str(metadata.get('capture_file_path', '') or '')
-        frame_number = int(getattr(record, 'number', 0) or 0)
-
-        def _find_smb2_header(node: Dict[str, Any]) -> Dict[str, Any] | None:
-            if str(node.get('title', '') or '').startswith('SMB2 Header'):
-                return node
-            for child in node.get('children', []) or []:
-                if isinstance(child, dict):
-                    found = _find_smb2_header(child)
-                    if found is not None:
-                        return found
-            return None
-
-        header_node = _find_smb2_header(tshark_tree)
-        if header_node is not None:
-            header_children = header_node.setdefault('children', [])
-
-            def _has_title(prefix: str) -> bool:
-                for item in header_children:
-                    if isinstance(item, dict):
-                        title = str(item.get('title', '') or '')
-                        if title.startswith(prefix):
-                            return True
-                return False
-
-            response_frame = metadata.get('tcp_response_frame', None)
-            request_frame = metadata.get('tcp_request_frame', None)
-            response_time_ms = metadata.get('tcp_time_since_request_ms', None)
-
-            if response_frame is None and response_time_ms is None and capture_path and frame_number > 0:
-                root_title = str(tshark_tree.get('title', '') or '')
-                msg_match = re.search(r'MessageId\s+(\d+)', root_title)
-                is_request = 'Request' in root_title and 'Response' not in root_title
-                if is_request and msg_match is not None:
-                    try:
-                        msg_id = int(msg_match.group(1))
-                        tshark = _get_tshark_executable()
-                        if tshark is not None:
-                            proc = subprocess.run(
-                                [
-                                    tshark,
-                                    '-r',
-                                    capture_path,
-                                    '-Y',
-                                    f'frame.number>{frame_number} && smb2.msg_id=={msg_id} && smb2.flags.response==True',
-                                    '-T',
-                                    'fields',
-                                    '-e',
-                                    'frame.number',
-                                    '-e',
-                                    'frame.time_delta',
-                                ],
-                                capture_output=True,
-                                text=True,
-                                encoding='utf-8',
-                                errors='ignore',
-                                check=False,
-                                timeout=8,
-                            )
-                            line = str(proc.stdout or '').strip()
-                            if line:
-                                parts = line.split('\t')
-                                if parts and parts[0].strip():
-                                    response_frame = int(parts[0].strip())
-                                if len(parts) > 1 and parts[1].strip():
-                                    response_time_ms = float(parts[1].strip()) * 1000.0
-                    except Exception:
-                        pass
-
-            if response_frame is not None and not _has_title('[Response in:'):
-                header_children.append({'title': f'[Response in: {int(response_frame)}]'})
-            if request_frame is not None and not _has_title('[Response to:'):
-                header_children.append({'title': f'[Response to: {int(request_frame)}]'})
-            if response_time_ms is not None and not _has_title('[Time to response:'):
-                header_children.append({'title': f'[Time to response: {float(response_time_ms) * 1000.0:.3f} microseconds]'})
-
-        return tshark_tree
-
     tcp_payload = _tcp_payload_bytes(packet, packet[TCP] if packet.haslayer(TCP) else None)
     data = tcp_payload[4:] if len(tcp_payload) >= 4 else b''
     if not data:
@@ -12807,7 +12234,7 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
                         ti_len = int.from_bytes(blob[ntlm_pos + 40:ntlm_pos + 42], 'little')
                         ti_off = int.from_bytes(blob[ntlm_pos + 44:ntlm_pos + 48], 'little')
                         ntlm_children.extend([
-                            {'title': f'Target Name: AD2024', **_byte_mapping(offset, blob_start + ntlm_pos + target_off, max(1, target_len), PACKET_BYTE_SOURCE)},
+                            {'title': f'Target Name: {blob[ntlm_pos + target_off:ntlm_pos + target_off + target_len].decode("utf-16-le", errors="replace") if (target_len > 0 and ntlm_pos + target_off + target_len <= len(blob)) else ""}', **_byte_mapping(offset, blob_start + ntlm_pos + target_off, max(1, target_len), PACKET_BYTE_SOURCE)},
                             {'title': f'Length: {target_len}', **_byte_mapping(offset, blob_start + ntlm_pos + 12, 2, PACKET_BYTE_SOURCE)},
                             {'title': f'Offset: {target_off}', **_byte_mapping(offset, blob_start + ntlm_pos + 16, 4, PACKET_BYTE_SOURCE)},
                             {'title': f'Negotiate Flags: 0x{flags_val:08x}', **_byte_mapping(offset, blob_start + ntlm_pos + 20, 4, PACKET_BYTE_SOURCE)},
@@ -12837,81 +12264,6 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
-    tshark_tree = _tshark_protocol_tree(record, ['kerberos', 'fake-field-wrapper'])
-    if tshark_tree is not None:
-        # Kerberos dissector offsets here are relative to reassembled TCP payload.
-        # Force mapping to the Reassembled bytes tab and hide helper wrapper nodes.
-        _tag_byte_source(tshark_tree, TCP_REASSEMBLED_BYTE_SOURCE)
-        if isinstance(tshark_tree.get('children', None), list):
-            tshark_tree['children'] = [
-                child
-                for child in tshark_tree.get('children', []) or []
-                if not (
-                    isinstance(child, dict)
-                    and str(child.get('title', '') or '').startswith('fake-field-wrapper')
-                )
-            ]
-
-        metadata = getattr(record, 'metadata', {}) if record else {}
-        capture_path = str(metadata.get('capture_file_path', '') or '')
-        frame_number = int(getattr(record, 'number', 0) or 0)
-        has_response_in = any(
-            isinstance(child, dict) and str(child.get('title', '') or '').startswith('[Response in:')
-            for child in (tshark_tree.get('children', []) or [])
-        )
-        if not has_response_in and capture_path and frame_number > 0:
-            try:
-                tshark = _get_tshark_executable()
-                if tshark is not None:
-                    stream_proc = subprocess.run(
-                        [
-                            tshark,
-                            '-r',
-                            capture_path,
-                            '-Y',
-                            f'frame.number=={frame_number}',
-                            '-T',
-                            'fields',
-                            '-e',
-                            'tcp.stream',
-                        ],
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='ignore',
-                        check=False,
-                        timeout=8,
-                    )
-                    stream_text = str(stream_proc.stdout or '').strip()
-                    if stream_text:
-                        stream_id = int(stream_text.splitlines()[0].strip())
-                        rsp_proc = subprocess.run(
-                            [
-                                tshark,
-                                '-r',
-                                capture_path,
-                                '-Y',
-                                f'frame.number>{frame_number} && tcp.stream=={stream_id} && kerberos',
-                                '-T',
-                                'fields',
-                                '-e',
-                                'frame.number',
-                            ],
-                            capture_output=True,
-                            text=True,
-                            encoding='utf-8',
-                            errors='ignore',
-                            check=False,
-                            timeout=8,
-                        )
-                        rsp_text = str(rsp_proc.stdout or '').strip()
-                        if rsp_text:
-                            rsp_frame = int(rsp_text.splitlines()[0].strip())
-                            tshark_tree.setdefault('children', []).append({'title': f'[Response in: {rsp_frame}]'})
-            except Exception:
-                pass
-        return tshark_tree
-
     tcp_layer = packet[TCP] if packet.haslayer(TCP) else None
     metadata = getattr(record, 'metadata', {}) if record else {}
     payload = _tcp_payload_bytes(packet, tcp_layer) if tcp_layer is not None else b''
@@ -12995,138 +12347,6 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str, Any]:
-    tshark_tree = _tshark_protocol_tree(record, ['cldap'])
-    if tshark_tree is not None:
-        def _realign_value_nodes_to_ascii(node: Dict[str, Any], src_payload: bytes) -> None:
-            if not isinstance(node, dict):
-                return
-            title = str(node.get('title', '') or '')
-            if ':' in title:
-                candidate = title.split(':', 1)[1].strip().strip('"').strip("'")
-                if candidate and candidate not in {'<ROOT>', '<MISSING>'} and not candidate.startswith('0x'):
-                    matched = False
-                    for enc in ('utf-8', 'latin-1'):
-                        try:
-                            needle = candidate.encode(enc, errors='ignore')
-                        except Exception:
-                            needle = b''
-                        if not needle:
-                            continue
-                        pos = src_payload.find(needle)
-                        if pos >= 0:
-                            node.update(_byte_mapping(offset, pos, len(needle), PACKET_BYTE_SOURCE))
-                            matched = True
-                            break
-                    if not matched:
-                        node.pop('offset', None)
-                        node.pop('length', None)
-            for child in node.get('children', []) or []:
-                if isinstance(child, dict):
-                    _realign_value_nodes_to_ascii(child, src_payload)
-
-        cldap_payload = bytes(payload or b'')
-        if packet is not None and packet.haslayer(UDP):
-            try:
-                udp_payload = bytes(getattr(packet[UDP], 'payload', b'') or b'')
-                if udp_payload:
-                    cldap_payload = udp_payload
-            except Exception:
-                pass
-        if cldap_payload:
-            _realign_value_nodes_to_ascii(tshark_tree, cldap_payload)
-
-            def _drop_parent_ranges(node: Dict[str, Any]) -> None:
-                if not isinstance(node, dict):
-                    return
-                children = node.get('children', []) or []
-                if children:
-                    node.pop('offset', None)
-                    node.pop('length', None)
-                for child in children:
-                    if isinstance(child, dict):
-                        _drop_parent_ranges(child)
-
-            # Wireshark CLDAP parent spans may cover broader bytes than displayed values.
-            # Rebuild parent mapping strictly from mapped children for accurate highlight bounds.
-            _drop_parent_ranges(tshark_tree)
-            _normalize_tree_byte_ranges(tshark_tree, offset, len(cldap_payload), PACKET_BYTE_SOURCE)
-
-        metadata = getattr(record, 'metadata', {}) if record else {}
-        capture_path = str(metadata.get('capture_file_path', '') or '')
-        frame_number = int(getattr(record, 'number', 0) or 0)
-
-        req_node = None
-        for child in tshark_tree.get('children', []) or []:
-            if isinstance(child, dict) and str(child.get('title', '') or '').startswith('LDAPMessage searchRequest'):
-                req_node = child
-                break
-
-        if req_node is not None and capture_path and frame_number > 0:
-            req_children = req_node.setdefault('children', [])
-            has_response_in = any(
-                isinstance(item, dict) and str(item.get('title', '') or '').startswith('[Response In:')
-                for item in req_children
-            )
-            if not has_response_in:
-                msg_id = None
-                for item in req_children:
-                    if not isinstance(item, dict):
-                        continue
-                    title = str(item.get('title', '') or '')
-                    match = re.match(r'messageID:\s*(\d+)', title)
-                    if match is not None:
-                        msg_id = int(match.group(1))
-                        break
-
-                if msg_id is not None and packet is not None and packet.haslayer(UDP):
-                    try:
-                        src_ip = dst_ip = ''
-                        if packet.haslayer(IP):
-                            src_ip = str(packet[IP].src)
-                            dst_ip = str(packet[IP].dst)
-                        elif packet.haslayer(IPv6):
-                            src_ip = str(packet[IPv6].src)
-                            dst_ip = str(packet[IPv6].dst)
-                        sport = int(packet[UDP].sport)
-                        dport = int(packet[UDP].dport)
-
-                        proto_filter = (
-                            f'frame.number>{frame_number} && ldap.messageID=={msg_id} '
-                            f'&& udp.srcport=={dport} && udp.dstport=={sport}'
-                        )
-                        if src_ip and dst_ip and packet.haslayer(IP):
-                            proto_filter += f' && ip.src=={dst_ip} && ip.dst=={src_ip}'
-                        elif src_ip and dst_ip and packet.haslayer(IPv6):
-                            proto_filter += f' && ipv6.src=={dst_ip} && ipv6.dst=={src_ip}'
-
-                        tshark = _get_tshark_executable()
-                        if tshark is not None:
-                            proc = subprocess.run(
-                                [
-                                    tshark,
-                                    '-r',
-                                    capture_path,
-                                    '-Y',
-                                    proto_filter,
-                                    '-T',
-                                    'fields',
-                                    '-e',
-                                    'frame.number',
-                                ],
-                                capture_output=True,
-                                text=True,
-                                encoding='utf-8',
-                                errors='ignore',
-                                check=False,
-                                timeout=8,
-                            )
-                            rsp = str(proc.stdout or '').strip()
-                            if rsp:
-                                req_children.append({'title': f'[Response In: {int(rsp.splitlines()[0].strip())}]'})
-                    except Exception:
-                        pass
-        return tshark_tree
-
     data = bytes(payload or b'')
     parse_data = data
     if packet is not None and packet.haslayer(UDP):
@@ -16500,7 +15720,7 @@ def _tls_section(packet, offset: int, stream_index: int) -> Dict[str, Any]:
     return result
 
 def _parse_x509_cert_tree(cert_bytes: bytes, abs_offset: int) -> dict:
-    """Parse DER-encoded X.509 certificate into a Wireshark-style detail tree node."""
+    """Parse DER-encoded X.509 certificate into a detailed tree node."""
     hex_prefix = cert_bytes.hex()
 
     # ─── Minimal DER walker ───────────────────────────────────────────────────
@@ -17322,12 +16542,6 @@ def _dcerpc_uuid_from_bytes(raw: bytes) -> str:
 
 def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     metadata = getattr(record, 'metadata', {}) if record is not None else {}
-    if record is not None:
-        tshark_tree = _tshark_protocol_tree(record, ['dcerpc', 'spnego-krb5', 'spnego', 'gss-api', 'kerberos'])
-        if tshark_tree is not None:
-            if bool(str((metadata or {}).get('tcp_reassembled_data_hex', '') or '')):
-                _tag_byte_source(tshark_tree, TCP_REASSEMBLED_BYTE_SOURCE)
-            return tshark_tree
     uses_reassembled = False
     if isinstance(metadata, dict):
         reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
@@ -17695,11 +16909,6 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _dtls_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
-    if record is not None:
-        tshark_tree = _tshark_protocol_tree(record, ['dtls'])
-        if tshark_tree is not None:
-            return tshark_tree
-
     if len(payload) < 13:
         return _bytes_data_section(payload, offset)
 
