@@ -10800,6 +10800,53 @@ class PacketParser:
                     return 'NAT-keepalive'
                 return 'UDP Encapsulation of IPsec Packets'
             if protocol == 'SSL':
+                payload = self._payload_bytes(packet)
+                tls_summaries = self._tls_record_summaries(packet)
+                if tls_summaries:
+                    first = tls_summaries[0] if tls_summaries else {}
+                    first_len = int(first.get('record_len', 0) or 0)
+                    # Likely segmented TLS record (header says larger than current TCP payload).
+                    if len(payload) > 0 and first_len > 0 and (first_len + 5) > len(payload):
+                        text = f'TLS segment data ({len(payload)} bytes)'
+                        if bool(metadata.get('tcp_previous_segment_not_captured', False)):
+                            return f'[TCP Previous segment not captured] , {text}'
+                        return text
+
+                    info_parts: list[str] = []
+                    sni_name = self._tls_client_hello_sni(packet)
+                    for summary in tls_summaries:
+                        content_type = int(summary.get('content_type', 0) or 0)
+                        if content_type == 22:
+                            names = list(summary.get('handshake_names', []))
+                            if names:
+                                for name in names:
+                                    label = str(name)
+                                    if label == 'Client Hello' and sni_name:
+                                        label = f'Client Hello (SNI={sni_name})'
+                                    info_parts.append(label)
+                            else:
+                                info_parts.append('Encrypted Handshake Message')
+                        elif content_type == 20:
+                            info_parts.append('Change Cipher Spec')
+                        elif content_type == 21:
+                            record_len = int(summary.get('record_len', 0) or 0)
+                            info_parts.append('Encrypted Alert' if record_len > 2 else 'Alert')
+                        elif content_type == 23:
+                            names = list(summary.get('handshake_names', []))
+                            if names:
+                                info_parts.extend(str(name) for name in names)
+                            else:
+                                info_parts.append('Application Data')
+                        else:
+                            info_parts.append('Transport Layer Security')
+
+                    deduped: list[str] = []
+                    for part in info_parts:
+                        if not deduped or deduped[-1] != part:
+                            deduped.append(part)
+                    if deduped:
+                        return ', '.join(deduped)
+
                 if bool(metadata.get('tcp_previous_segment_not_captured', False)):
                     return '[TCP Previous segment not captured] , Continuation Data'
                 return 'Continuation Data'

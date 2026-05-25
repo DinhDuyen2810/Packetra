@@ -1,6 +1,17 @@
-from PySide6.QtWidgets import QApplication, QMessageBox
 import logging
+import os
 import sys
+
+# Reduce noisy Qt font-db warnings before Qt is imported.
+qt_rules = os.environ.get('QT_LOGGING_RULES', '').strip()
+extra_qt_rules = 'qt.text.font.db=false'
+if qt_rules:
+    if extra_qt_rules not in qt_rules:
+        os.environ['QT_LOGGING_RULES'] = f'{qt_rules};{extra_qt_rules}'
+else:
+    os.environ['QT_LOGGING_RULES'] = extra_qt_rules
+
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from gui.application import ApplicationWindow
 from utils.system_check import is_npcap_installed, install_npcap
@@ -11,6 +22,9 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 log = logging.getLogger('main')
+# Scapy TLS key-log parser can emit unknown cipher-suite warnings that are
+# irrelevant for UI startup; keep runtime logs at ERROR to avoid console noise.
+logging.getLogger('scapy.runtime').setLevel(logging.ERROR)
 
 
 def ensure_npcap():
