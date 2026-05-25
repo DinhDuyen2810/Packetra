@@ -198,6 +198,7 @@ class CaptureView(QWidget):
         self.options_settings = {}  # Options tab settings from Capture Options dialog
 
         self.parser = PacketParser()
+        self._configure_parser_capture_context(self.parser, '')
         self.display_filter = DisplayFilter()
         self.records = []
         self.visible_indices = []
@@ -240,11 +241,11 @@ class CaptureView(QWidget):
     def _settings(self):
         return QSettings('Packetra', 'Packetra')
 
-    def _configure_parser_capture_context(self, parser: PacketParser, capture_path: str, use_wireshark_baseline: bool = True):
+    def _configure_parser_capture_context(self, parser: PacketParser, capture_path: str):
         if parser is None:
             return
         try:
-            parser.set_capture_file_path(capture_path or '', use_wireshark_baseline=use_wireshark_baseline)
+            parser.set_capture_file_path(capture_path or '')
         except Exception:
             pass
 
@@ -302,6 +303,7 @@ class CaptureView(QWidget):
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
+        self._configure_parser_capture_context(self.parser, '')
         self.capture_comments = ''
         self.capture_metadata = None
         self.loaded_file_path = None
@@ -948,7 +950,6 @@ class CaptureView(QWidget):
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
         self._configure_parser_capture_context(self.parser, '')
-        self._configure_parser_capture_context(self.parser, '')
         self.capture_comments = ''
         self.capture_metadata = None
         self._captured_bytes = 0
@@ -989,7 +990,7 @@ class CaptureView(QWidget):
 
         def worker():
             parser = PacketParser()
-            self._configure_parser_capture_context(parser, str(self.loaded_file_path or ''), use_wireshark_baseline=True)
+            self._configure_parser_capture_context(parser, str(self.loaded_file_path or ''))
             parsed_by_frame = {}
             for idx, fast_record in enumerate(snapshot):
                 if stop_event.is_set():
@@ -1083,7 +1084,6 @@ class CaptureView(QWidget):
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
         self.parser = PacketParser()
-        self._configure_parser_capture_context(self.parser, '')
         self._configure_parser_capture_context(self.parser, '')
         self.capture_metadata = None
         self._captured_bytes = 0
@@ -1331,7 +1331,7 @@ class CaptureView(QWidget):
         try:
             self.clear_packets(reset_file_path=False)
             self.loaded_file_path = filename
-            self._configure_parser_capture_context(self.parser, filename, use_wireshark_baseline=True)
+            self._configure_parser_capture_context(self.parser, filename)
             self.capture_metadata = load_capture_metadata(filename)
             display_expr = self.display_filter_input.text().strip()
             no_filter = (display_expr == '')

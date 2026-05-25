@@ -4,10 +4,7 @@ from decimal import Decimal
 import ipaddress
 import json
 import zlib
-import csv
-import os
-import shutil
-import subprocess
+from typing import Any
 from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, bind_layers
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
@@ -27,7 +24,6 @@ bind_layers(Ether, ARP, type=0x8035)
 
 class PacketParser:
     MAX_CONTIGUOUS_RANGES = 101
-    _WS_LIST_CACHE: dict[str, dict[int, dict[str, str]]] = {}
 
     def __init__(self):
         self.first_epoch = None
@@ -70,110 +66,12 @@ class PacketParser:
             'udp': 0,
         }
         self.capture_file_path = ''
-        self._ws_baseline_enabled = True
-        self._ws_list_by_frame: dict[int, dict[str, str]] | None = None
+        self.dcerpc_stream_contexts = {}
+        self.dcerpc_call_opnums = {}
+        self.dcerpc_stream_protocols = {}
 
-    def set_capture_file_path(self, capture_file_path: str, use_wireshark_baseline: bool = True) -> None:
+    def set_capture_file_path(self, capture_file_path: str) -> None:
         self.capture_file_path = str(capture_file_path or '').strip()
-        self._ws_baseline_enabled = bool(use_wireshark_baseline)
-        self._ws_list_by_frame = None
-
-    @staticmethod
-    def _default_tshark_path() -> str | None:
-        found = shutil.which('tshark')
-        if found:
-            return found
-        candidates = [
-            r'C:\Program Files\Wireshark\tshark.exe',
-            r'C:\Program Files (x86)\Wireshark\tshark.exe',
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                return path
-        return None
-
-    def _load_ws_list_baseline(self) -> dict[int, dict[str, str]] | None:
-        if not self._ws_baseline_enabled:
-            return None
-        capture_path = os.path.normpath(str(self.capture_file_path or '').strip())
-        if not capture_path or not os.path.exists(capture_path):
-            return None
-        cached = self._WS_LIST_CACHE.get(capture_path)
-        if cached is not None:
-            return cached
-
-        tshark = self._default_tshark_path()
-        if not tshark:
-            self._WS_LIST_CACHE[capture_path] = {}
-            return {}
-        cmd = [
-            tshark,
-            '-r',
-            capture_path,
-            '-n',
-            '-T',
-            'fields',
-            '-E',
-            'separator=\t',
-            '-E',
-            'quote=d',
-            '-E',
-            'header=n',
-            '-e',
-            'frame.number',
-            '-e',
-            '_ws.col.Source',
-            '-e',
-            '_ws.col.Destination',
-            '-e',
-            '_ws.col.Protocol',
-            '-e',
-            '_ws.col.Info',
-        ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=30,
-                check=False,
-            )
-        except Exception:
-            self._WS_LIST_CACHE[capture_path] = {}
-            return {}
-        if proc.returncode != 0:
-            self._WS_LIST_CACHE[capture_path] = {}
-            return {}
-
-        rows: dict[int, dict[str, str]] = {}
-        reader = csv.reader(proc.stdout.splitlines(), delimiter='\t', quotechar='"')
-        for row in reader:
-            if not row:
-                continue
-            while len(row) < 5:
-                row.append('')
-            number_text, src, dst, protocol, info = row[:5]
-            try:
-                frame_number = int(str(number_text or '').strip())
-            except Exception:
-                continue
-            rows[frame_number] = {
-                'src': str(src or '').strip(),
-                'dst': str(dst or '').strip(),
-                'protocol': str(protocol or '').strip(),
-                'info': str(info or '').strip(),
-            }
-        self._WS_LIST_CACHE[capture_path] = rows
-        return rows
-
-    def _ws_row(self, frame_number: int) -> dict[str, str] | None:
-        if self._ws_list_by_frame is None:
-            self._ws_list_by_frame = self._load_ws_list_baseline()
-        if not self._ws_list_by_frame:
-            return None
-        return self._ws_list_by_frame.get(int(frame_number), None)
 
     def parse(self, packet, number: int, iface: str = '') -> PacketRecord:
         epoch_time = float(getattr(packet, 'time', 0.0))
@@ -239,6 +137,7 @@ class PacketParser:
         self._update_ip_fragment_metadata(packet, metadata, int(number))
 
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
+        self._update_dcerpc_stream_metadata(packet, metadata, epoch_time)
         self._update_tls_stream_metadata(packet, metadata, int(number))
         self._update_http_stream_metadata(packet, metadata, epoch_time)
         self._update_smtp_stream_metadata(packet, metadata, epoch_time)
@@ -282,23 +181,6 @@ class PacketParser:
             if not any(str(layer).upper().startswith('DHCP6') or str(layer).upper() == 'DHCPV6' for layer in layers):
                 layers.append('DHCPV6')
         info = self._build_info(packet, protocol, metadata)
-        ws_row = self._ws_row(number)
-        if ws_row is not None:
-            ws_src = str(ws_row.get('src', '') or '').strip()
-            ws_dst = str(ws_row.get('dst', '') or '').strip()
-            ws_protocol = str(ws_row.get('protocol', '') or '').strip()
-            ws_info = str(ws_row.get('info', '') or '')
-            if ws_src:
-                src = ws_src
-            if ws_dst:
-                dst = ws_dst
-            if ws_protocol:
-                protocol = ws_protocol
-            info = ws_info
-            metadata['ws_baseline_used'] = True
-            metadata['force_tshark_detail'] = True
-            if self.capture_file_path:
-                metadata['capture_file_path'] = self.capture_file_path
 
         if sport is not None or dport is not None:
             self.conversations[(src, sport, dst, dport, protocol)] += 1
@@ -380,6 +262,7 @@ class PacketParser:
         self._populate_stream_indices(packet, metadata)
         self._update_ip_fragment_metadata(packet, metadata, int(number))
         self._update_transport_stream_metadata(packet, metadata, epoch_time)
+        self._update_dcerpc_stream_metadata(packet, metadata, epoch_time)
         self._update_kerberos_stream_metadata(packet, metadata, epoch_time)
         self._update_ftp_metadata(packet, metadata)
 
@@ -392,29 +275,12 @@ class PacketParser:
             info = self._build_info(packet, protocol, metadata)
         else:
             info = self._quick_info(packet, protocol, effective_tcp, effective_udp, metadata)
-        ws_row = self._ws_row(number)
-        if ws_row is not None:
-            ws_src = str(ws_row.get('src', '') or '').strip()
-            ws_dst = str(ws_row.get('dst', '') or '').strip()
-            ws_protocol = str(ws_row.get('protocol', '') or '').strip()
-            ws_info = str(ws_row.get('info', '') or '')
-            if ws_src:
-                src = ws_src
-            if ws_dst:
-                dst = ws_dst
-            if ws_protocol:
-                protocol = ws_protocol
-            info = ws_info
-            metadata['ws_baseline_used'] = True
-            metadata['force_tshark_detail'] = True
-            if self.capture_file_path:
-                metadata['capture_file_path'] = self.capture_file_path
 
         stream_hint = ''
         if sport is not None or dport is not None:
             stream_hint = f'{src}:{sport or "-"} -> {dst}:{dport or "-"}'
 
-        return PacketRecord(
+        record = PacketRecord(
             number=number,
             epoch_time=epoch_time,
             relative_time=relative_time,
@@ -431,6 +297,8 @@ class PacketParser:
             raw=packet,
             iface=iface,
         )
+        self._track_transport_record(record)
+        return record
 
     def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
@@ -509,8 +377,20 @@ class PacketParser:
         if packet.haslayer('CLDAP'):
             return 'CLDAP'
         if packet.haslayer('SMB2_Header'):
+            if tcp_layer is not None:
+                embedded = self._dcerpc_embedded_payload_info(self._payload_bytes(packet), metadata)
+                if embedded is not None:
+                    metadata['dcerpc'] = embedded
+                    metadata['dcerpc_embedded_offset'] = int(embedded.get('embedded_offset', 0) or 0)
+                    return str(embedded.get('protocol', 'DCERPC'))
             return 'SMB2'
         if packet.haslayer('SMB_Header'):
+            if tcp_layer is not None:
+                embedded = self._dcerpc_embedded_payload_info(self._payload_bytes(packet), metadata)
+                if embedded is not None:
+                    metadata['dcerpc'] = embedded
+                    metadata['dcerpc_embedded_offset'] = int(embedded.get('embedded_offset', 0) or 0)
+                    return str(embedded.get('protocol', 'DCERPC'))
             return 'SMB'
         if packet.haslayer(DNS):
             qname = self._dns_qname(packet)
@@ -527,6 +407,24 @@ class PacketParser:
             payload = self._payload_bytes(packet)
             sport = int(getattr(tcp_layer, 'sport', 0) or 0)
             dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+            if bool(metadata.get('dcerpc_pending_reassembly', False)):
+                return 'TCP'
+            pre_dcerpc = metadata.get('dcerpc', None)
+            if isinstance(pre_dcerpc, dict):
+                return str(pre_dcerpc.get('protocol', 'DCERPC'))
+            dcerpc_info = self._dcerpc_payload_info(payload, metadata)
+            if dcerpc_info is not None:
+                metadata['dcerpc'] = dcerpc_info
+                return str(dcerpc_info.get('protocol', 'DCERPC'))
+            if packet.haslayer('SMB2_Header') or packet.haslayer('SMB_Header'):
+                embedded = self._dcerpc_embedded_payload_info(payload, metadata)
+                if embedded is not None:
+                    metadata['dcerpc'] = embedded
+                    metadata['dcerpc_embedded_offset'] = int(embedded.get('embedded_offset', 0) or 0)
+                    return str(embedded.get('protocol', 'DCERPC'))
+            stream_index = int(metadata.get('tcp_stream_index', -1) or -1)
+            if stream_index >= 0 and stream_index in self.dcerpc_stream_protocols and len(payload) > 0:
+                return str(self.dcerpc_stream_protocols.get(stream_index, 'DCERPC'))
             pop_imf = self._pop_imf_fragment_info(payload, sport, dport)
             if pop_imf is not None:
                 metadata['pop_imf'] = pop_imf
@@ -645,6 +543,10 @@ class PacketParser:
             sport = int(getattr(udp_layer, 'sport', 0) or 0)
             dport = int(getattr(udp_layer, 'dport', 0) or 0)
             payload = bytes(getattr(udp_layer, 'payload', b''))
+            dtls_info = self._dtls_payload_info(payload)
+            if dtls_info is not None:
+                metadata['dtls'] = dtls_info
+                return str(dtls_info.get('protocol', 'DTLS'))
             if (sport == 389 or dport == 389) and packet.haslayer('CLDAP'):
                 return 'CLDAP'
             if (sport == 88 or dport == 88) and packet.haslayer('Kerberos'):
@@ -753,7 +655,7 @@ class PacketParser:
 
     def _quick_info(self, packet, protocol: str, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IPMB', 'RMCP+', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP', 'HSRP', 'HSRPv2', 'Zabbix', 'ECHO', 'DISCARD', 'DAYTIME', 'Chargen', 'TIME', 'TACACS+', 'RADIUS', 'WOL', 'LLMNR', 'NBNS', 'PCP v2', 'UDP/XML', 'POP', 'POP/IMF', 'KRB5', 'CLDAP', 'SMB', 'SMB2', 'SMTP'}:
+        if protocol in {'PPPoED', 'PPP LCP', 'PPP IPCP', 'PPP IPV6CP', 'PPP', 'EIGRP', 'SNMP', 'IPMB', 'RMCP+', 'IMAP', 'SIP', 'SIP/SDP', 'RTP', 'WHOIS', 'TELNET', 'CFLOW', 'GRE', 'BFD Echo', 'ISIS CSNP', 'ISIS HELLO', 'GLBP', 'VRRP', 'HSRP', 'HSRPv2', 'Zabbix', 'ECHO', 'DISCARD', 'DAYTIME', 'Chargen', 'TIME', 'TACACS+', 'RADIUS', 'WOL', 'LLMNR', 'NBNS', 'PCP v2', 'UDP/XML', 'POP', 'POP/IMF', 'KRB5', 'CLDAP', 'SMB', 'SMB2', 'SMTP', 'DCERPC', 'DRSUAPI', 'DTLS', 'DTLSv1.2'}:
             return self._build_info(packet, protocol, metadata)
         if protocol in {'IPv4', 'IPv6', 'IP', 'IPV6'} and bool(metadata.get('ip_is_fragmented', False)):
             return self._ip_fragment_info_text(packet, metadata)
@@ -6143,8 +6045,20 @@ class PacketParser:
         if packet.haslayer('CLDAP'):
             return 'CLDAP'
         if packet.haslayer('SMB2_Header'):
+            if effective_tcp is not None:
+                embedded = self._dcerpc_embedded_payload_info(self._payload_bytes(packet), metadata)
+                if embedded is not None:
+                    metadata['dcerpc'] = embedded
+                    metadata['dcerpc_embedded_offset'] = int(embedded.get('embedded_offset', 0) or 0)
+                    return str(embedded.get('protocol', 'DCERPC'))
             return 'SMB2'
         if packet.haslayer('SMB_Header'):
+            if effective_tcp is not None:
+                embedded = self._dcerpc_embedded_payload_info(self._payload_bytes(packet), metadata)
+                if embedded is not None:
+                    metadata['dcerpc'] = embedded
+                    metadata['dcerpc_embedded_offset'] = int(embedded.get('embedded_offset', 0) or 0)
+                    return str(embedded.get('protocol', 'DCERPC'))
             return 'SMB'
         if eth_type == 0x0842:
             wol_payload = bytes(getattr(packet[Ether], 'payload', b'')) if packet.haslayer(Ether) else b''
@@ -6164,6 +6078,10 @@ class PacketParser:
             sport = int(getattr(effective_udp, 'sport', 0) or 0)
             dport = int(getattr(effective_udp, 'dport', 0) or 0)
             udp_payload = bytes(getattr(effective_udp, 'payload', b''))
+            dtls_info = self._dtls_payload_info(udp_payload)
+            if dtls_info is not None:
+                metadata['dtls'] = dtls_info
+                return str(dtls_info.get('protocol', 'DTLS'))
             if (sport == 389 or dport == 389) and packet.haslayer('CLDAP'):
                 return 'CLDAP'
             if (sport == 88 or dport == 88) and packet.haslayer('Kerberos'):
@@ -6268,6 +6186,24 @@ class PacketParser:
             sport = int(getattr(effective_tcp, 'sport', 0) or 0)
             dport = int(getattr(effective_tcp, 'dport', 0) or 0)
             tcp_payload = self._payload_bytes(packet)
+            if bool(metadata.get('dcerpc_pending_reassembly', False)):
+                return 'TCP'
+            pre_dcerpc = metadata.get('dcerpc', None)
+            if isinstance(pre_dcerpc, dict):
+                return str(pre_dcerpc.get('protocol', 'DCERPC'))
+            dcerpc_info = self._dcerpc_payload_info(tcp_payload, metadata)
+            if dcerpc_info is not None:
+                metadata['dcerpc'] = dcerpc_info
+                return str(dcerpc_info.get('protocol', 'DCERPC'))
+            if packet.haslayer('SMB2_Header') or packet.haslayer('SMB_Header'):
+                embedded = self._dcerpc_embedded_payload_info(tcp_payload, metadata)
+                if embedded is not None:
+                    metadata['dcerpc'] = embedded
+                    metadata['dcerpc_embedded_offset'] = int(embedded.get('embedded_offset', 0) or 0)
+                    return str(embedded.get('protocol', 'DCERPC'))
+            stream_index = int(metadata.get('tcp_stream_index', -1) or -1)
+            if stream_index >= 0 and stream_index in self.dcerpc_stream_protocols and len(tcp_payload) > 0:
+                return str(self.dcerpc_stream_protocols.get(stream_index, 'DCERPC'))
             pop_imf = self._pop_imf_fragment_info(tcp_payload, sport, dport)
             if pop_imf is not None:
                 metadata['pop_imf'] = pop_imf
@@ -6555,6 +6491,164 @@ class PacketParser:
             16: 'Client Key Exchange',
             20: 'Finished',
         }.get(int(handshake_type or -1), f'Handshake ({int(handshake_type or 0)})')
+
+    def _uuid_from_dcerpc_bytes(self, value: bytes) -> str:
+        if not isinstance(value, (bytes, bytearray)) or len(value) < 16:
+            return ''
+        b = bytes(value[:16])
+        d1 = int.from_bytes(b[0:4], 'little')
+        d2 = int.from_bytes(b[4:6], 'little')
+        d3 = int.from_bytes(b[6:8], 'little')
+        return f'{d1:08x}-{d2:04x}-{d3:04x}-{b[8]:02x}{b[9]:02x}-{b[10]:02x}{b[11]:02x}{b[12]:02x}{b[13]:02x}{b[14]:02x}{b[15]:02x}'
+
+    def _dtls_payload_info(self, payload: bytes) -> dict | None:
+        if not isinstance(payload, (bytes, bytearray)) or len(payload) < 13:
+            return None
+        content_type = int(payload[0])
+        version = int.from_bytes(payload[1:3], 'big')
+        if content_type not in {20, 21, 22, 23}:
+            return None
+        if version not in {0xFEFF, 0xFEFD}:
+            return None
+        record_len = int.from_bytes(payload[11:13], 'big')
+        if record_len <= 0 or 13 + record_len > len(payload):
+            return None
+        info = {
+            'content_type': content_type,
+            'version': version,
+            'record_length': record_len,
+            'protocol': 'DTLSv1.2' if version == 0xFEFD else 'DTLS',
+            'info_text': 'Datagram Transport Layer Security',
+        }
+        if content_type == 22 and record_len >= 12:
+            hs = payload[13:13 + record_len]
+            hs_type = int(hs[0])
+            hs_name = {
+                1: 'Client Hello',
+                2: 'Server Hello',
+                11: 'Certificate',
+                12: 'Server Key Exchange',
+                13: 'Certificate Request',
+                14: 'Server Hello Done',
+                15: 'Certificate Verify',
+                16: 'Client Key Exchange',
+                20: 'Finished',
+            }.get(hs_type, f'Handshake ({hs_type})')
+            info['handshake_type'] = hs_type
+            info['handshake_name'] = hs_name
+            info['info_text'] = hs_name
+            if hs_type == 1:
+                info['protocol'] = 'DTLS'
+        return info
+
+    def _dcerpc_payload_info(self, payload: bytes, metadata: dict | None = None, allow_segment_fragment: bool = False) -> dict | None:
+        if not isinstance(payload, (bytes, bytearray)) or len(payload) < 16:
+            return None
+        data = bytes(payload)
+        if int(data[0]) != 5:
+            return None
+        ptype = int(data[2])
+        if ptype not in {0, 2, 3, 11, 12, 13, 14, 15}:
+            return None
+        drep0 = int(data[4])
+        byteorder = 'little' if (drep0 & 0x10) else 'big'
+        frag_len = int.from_bytes(data[8:10], byteorder)
+        auth_len = int.from_bytes(data[10:12], byteorder)
+        call_id = int.from_bytes(data[12:16], byteorder)
+        if frag_len < 16:
+            return None
+        pdu_len_for_parse = min(frag_len, len(data))
+
+        is_segment_fragment = bool(frag_len > len(data))
+        if is_segment_fragment and not bool(allow_segment_fragment):
+            return None
+
+        info: dict[str, Any] = {
+            'version': int(data[0]),
+            'minor': int(data[1]),
+            'ptype': ptype,
+            'pfc_flags': int(data[3]),
+            'frag_len': frag_len,
+            'auth_len': auth_len,
+            'call_id': call_id,
+            'byteorder': byteorder,
+            'protocol': 'DCERPC',
+            'is_segment_fragment': is_segment_fragment,
+        }
+
+        opnum = None
+        context_id = None
+        if ptype in {0, 2} and pdu_len_for_parse >= 24:
+            context_id = int.from_bytes(data[20:22], byteorder)
+            info['context_id'] = context_id
+            if ptype == 0:
+                opnum = int.from_bytes(data[22:24], byteorder)
+                info['opnum'] = opnum
+                stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
+                if stream_index >= 0:
+                    self.dcerpc_call_opnums[(stream_index, call_id)] = opnum
+            else:
+                info['cancel_count'] = int(data[22])
+                stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
+                if stream_index >= 0 and (stream_index, call_id) in self.dcerpc_call_opnums:
+                    info['opnum'] = int(self.dcerpc_call_opnums[(stream_index, call_id)])
+
+        if ptype in {11, 14} and pdu_len_for_parse >= 28:
+            num_ctx_items = int(data[24])
+            info['num_ctx_items'] = num_ctx_items
+            cursor = 28
+            contexts = {}
+            for _ in range(num_ctx_items):
+                if cursor + 24 > pdu_len_for_parse:
+                    break
+                cid = int.from_bytes(data[cursor:cursor + 2], byteorder)
+                num_transfer = int(data[cursor + 2])
+                abs_uuid = self._uuid_from_dcerpc_bytes(data[cursor + 4:cursor + 20])
+                contexts[int(cid)] = abs_uuid
+                cursor += 24 + (20 * num_transfer)
+                if cursor > pdu_len_for_parse:
+                    break
+            info['contexts'] = contexts
+            stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
+            if stream_index >= 0 and contexts:
+                self.dcerpc_stream_contexts[stream_index] = contexts
+
+        stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
+        drsuapi_uuid = 'e3514235-4b06-11d1-ab04-00c04fc2dcd2'
+        bound_contexts = self.dcerpc_stream_contexts.get(stream_index, {}) if stream_index >= 0 else {}
+        bound_uuid = str(bound_contexts.get(int(context_id), '') or '').lower() if context_id is not None else ''
+        direct_contexts = info.get('contexts', {}) if isinstance(info.get('contexts', {}), dict) else {}
+        has_drsuapi_bind = any(str(v).lower() == drsuapi_uuid for v in direct_contexts.values())
+        if ptype in {0, 2, 3} and ((bound_uuid == drsuapi_uuid) or has_drsuapi_bind):
+            info['protocol'] = 'DRSUAPI'
+        stream_index = int((metadata or {}).get('tcp_stream_index', -1) or -1)
+        if stream_index >= 0:
+            self.dcerpc_stream_protocols[stream_index] = str(info.get('protocol', 'DCERPC') or 'DCERPC')
+        return info
+
+    def _dcerpc_embedded_payload_info(self, payload: bytes, metadata: dict | None = None) -> dict | None:
+        if not isinstance(payload, (bytes, bytearray)) or len(payload) < 32:
+            return None
+        data = bytes(payload)
+        max_scan = min(256, max(0, len(data) - 16))
+        for off in range(0, max_scan):
+            if off == 0:
+                continue
+            if int(data[off]) != 5 or int(data[off + 1]) != 0:
+                continue
+            ptype = int(data[off + 2])
+            if ptype not in {0, 2, 3, 11, 12, 13, 14, 15}:
+                continue
+            drep0 = int(data[off + 4])
+            if (drep0 & 0xF0) not in {0x00, 0x10}:
+                continue
+            parsed = self._dcerpc_payload_info(data[off:], metadata)
+            if parsed is None:
+                continue
+            result = dict(parsed)
+            result['embedded_offset'] = int(off)
+            return result
+        return None
 
     def _tls_client_hello_sni(self, packet) -> str:
         payload = self._payload_bytes(packet)
@@ -7434,6 +7528,115 @@ class PacketParser:
             if int(getattr(stream_record, 'number', 0) or 0) == int(frame_number):
                 return stream_record
         return None
+
+    def _update_dcerpc_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+
+        payload = self._payload_bytes(packet)
+        if not payload:
+            return
+
+        src = str(effective_ip.src)
+        dst = str(effective_ip.dst)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+
+        frame_number = int(metadata.get('frame_number', 0) or 0)
+        dir_key = (src, sport, dst, dport)
+        pending_by_dir = state.setdefault('dcerpc_pending_by_dir', {})
+        if not isinstance(pending_by_dir, dict):
+            pending_by_dir = {}
+            state['dcerpc_pending_by_dir'] = pending_by_dir
+        pending = pending_by_dir.get(dir_key) if isinstance(pending_by_dir.get(dir_key), dict) else None
+
+        segment = {
+            'frame_number': frame_number,
+            'payload_start': 0,
+            'payload_length': int(len(payload)),
+            'tcp_start_offset_in_payload': 0,
+        }
+
+        if pending is None:
+            if len(payload) < 16 or int(payload[0]) != 5 or int(payload[1]) != 0:
+                return
+            ptype = int(payload[2])
+            if ptype not in {0, 2, 3, 11, 12, 13, 14, 15}:
+                return
+            drep0 = int(payload[4])
+            byteorder = 'little' if (drep0 & 0x10) else 'big'
+            frag_len = int.from_bytes(payload[8:10], byteorder)
+            if frag_len <= 16 or frag_len > 262144:
+                return
+            if frag_len <= len(payload):
+                return
+            pending_by_dir[dir_key] = {
+                'expected_total_len': int(frag_len),
+                'payload': bytes(payload),
+                'segments': [segment],
+                'start_epoch': float(epoch_time),
+            }
+            metadata['dcerpc_pending_reassembly'] = True
+            metadata['tcp_segment_data_length'] = int(len(payload))
+            metadata['tcp_segment_data_offset'] = 0
+            return
+
+        expected_total_len = int(pending.get('expected_total_len', 0) or 0)
+        if expected_total_len <= 0 or expected_total_len > 262144:
+            pending_by_dir.pop(dir_key, None)
+            return
+
+        existing = bytes(pending.get('payload', b'') or b'')
+        segment_start = len(existing)
+        candidate = existing + bytes(payload)
+        segments = list(pending.get('segments', []) or [])
+        segment['payload_start'] = int(segment_start)
+        segment['payload_length'] = int(max(0, min(len(payload), max(0, expected_total_len - segment_start))))
+        segments.append(segment)
+
+        if len(candidate) < expected_total_len:
+            pending_by_dir[dir_key] = {
+                'expected_total_len': expected_total_len,
+                'payload': candidate,
+                'segments': segments,
+                'start_epoch': float(pending.get('start_epoch', epoch_time) if isinstance(pending, dict) else epoch_time),
+            }
+            metadata['dcerpc_pending_reassembly'] = True
+            metadata['tcp_segment_data_length'] = int(segment.get('payload_length', len(payload)) or len(payload))
+            metadata['tcp_segment_data_offset'] = int(segment.get('tcp_start_offset_in_payload', 0) or 0)
+            return
+
+        full_payload = candidate[:expected_total_len]
+        pending_by_dir.pop(dir_key, None)
+
+        metadata['tcp_reassembled_segments'] = segments
+        metadata['tcp_reassembled_length'] = int(expected_total_len)
+        metadata['tcp_reassembled_data_hex'] = bytes(full_payload).hex()
+        metadata['tcp_segment_data_length'] = int(segments[-1].get('payload_length', 0) or 0) if segments else int(len(payload))
+        metadata['tcp_segment_data_offset'] = int(segments[-1].get('tcp_start_offset_in_payload', 0) or 0) if segments else 0
+
+        parsed = self._dcerpc_payload_info(full_payload, metadata, allow_segment_fragment=True)
+        if parsed is not None:
+            metadata['dcerpc'] = parsed
+
+        for segment_entry in segments[:-1]:
+            seg_frame = int(segment_entry.get('frame_number', 0) or 0)
+            seg_record = self._find_stream_record(state, seg_frame)
+            if seg_record is None:
+                continue
+            seg_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
+            seg_record.metadata['tcp_segment_data_length'] = int(segment_entry.get('payload_length', 0) or 0)
+            seg_record.metadata['tcp_segment_data_offset'] = int(segment_entry.get('tcp_start_offset_in_payload', 0) or 0)
+            seg_record.protocol = 'TCP'
+            seg_record.info = self._build_info(seg_record.raw, 'TCP', seg_record.metadata)
 
     def _update_tls_stream_metadata(self, packet, metadata: dict, frame_number: int) -> None:
         """Buffer incomplete TLS records across TCP segments and reassemble."""
@@ -9206,6 +9409,52 @@ class PacketParser:
                 if packet.haslayer('SMB2_Session_Setup_Request'):
                     return 'Session Setup Request, NTLMSSP_NEGOTIATE'
                 return 'Session message; SMB2'
+            if protocol == 'DCERPC':
+                dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
+                if isinstance(dcerpc, dict):
+                    ptype_raw = dcerpc.get('ptype', -1)
+                    ptype = int(ptype_raw) if ptype_raw is not None else -1
+                    call_raw = dcerpc.get('call_id', 0)
+                    call_id = int(call_raw) if call_raw is not None else 0
+                    frag_raw = dcerpc.get('frag_len', 0)
+                    frag_len = int(frag_raw) if frag_raw is not None else 0
+                    if ptype == 11:
+                        return f'Bind: call_id: {call_id}, Fragment: Single, {int(dcerpc.get("num_ctx_items", 0) or 0)} context items'
+                    if ptype == 12:
+                        return f'Bind_ack: call_id: {call_id}, Fragment: Single, max_xmit: 5840 max_recv: 5840'
+                    if ptype == 14:
+                        return f'Alter_context: call_id: {call_id}, Fragment: Single, {int(dcerpc.get("num_ctx_items", 0) or 0)} context items'
+                    if ptype == 15:
+                        return f'Alter_context_resp: call_id: {call_id}, Fragment: Single, max_xmit: 5840 max_recv: 5840'
+                    if ptype == 0:
+                        op_raw = dcerpc.get('opnum', 0)
+                        opnum = int(op_raw) if op_raw is not None else 0
+                        return f'Request: call_id: {call_id}, Fragment: Single, opnum: {opnum}, stub data: {max(0, frag_len - 24)} bytes'
+                    if ptype == 2:
+                        return f'Response: call_id: {call_id}, Fragment: Single'
+                return 'Distributed Computing Environment / Remote Procedure Call'
+            if protocol == 'DRSUAPI':
+                dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
+                if isinstance(dcerpc, dict):
+                    ptype_raw = dcerpc.get('ptype', -1)
+                    op_raw = dcerpc.get('opnum', -1)
+                    ptype = int(ptype_raw) if ptype_raw is not None else -1
+                    opnum = int(op_raw) if op_raw is not None else -1
+                else:
+                    ptype = -1
+                    opnum = -1
+                if ptype == 0:
+                    return 'DsBind request' if opnum == 0 else ('DsUnbind request' if opnum == 1 else f'DRSUAPI request (opnum {opnum})')
+                if ptype == 2:
+                    return 'DsBind response' if opnum in {-1, 0} else ('DsUnbind response' if opnum == 1 else 'DRSUAPI response')
+                return 'Active Directory Replication'
+            if protocol in {'DTLS', 'DTLSv1.2'}:
+                udp = self._effective_udp_layer(packet)
+                payload = bytes(getattr(udp, 'payload', b'')) if udp is not None else b''
+                dtls = metadata.get('dtls') if isinstance(metadata.get('dtls'), dict) else self._dtls_payload_info(payload)
+                if isinstance(dtls, dict):
+                    return str(dtls.get('info_text', 'Datagram Transport Layer Security') or 'Datagram Transport Layer Security')
+                return 'Datagram Transport Layer Security'
             if protocol == 'WOL':
                 wol = metadata.get('wol') if isinstance(metadata.get('wol'), dict) else None
                 target = bytes(wol.get('target_mac', b'')) if isinstance(wol, dict) else b''
