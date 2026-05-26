@@ -1588,6 +1588,17 @@ class ApplicationWindow(QMainWindow):
         self.action_io_graph = QAction('&I/O Graph', self)
         statistics_menu.addAction(self.action_io_graph)
 
+        # Advanced Analysis menu
+        advanced_menu = menubar.addMenu('&Advanced Analysis')
+        self.action_advanced_dashboard = QAction('&Dashboard', self)
+        advanced_menu.addAction(self.action_advanced_dashboard)
+        self.action_advanced_demo_packet = QAction('&Demo Packet', self)
+        advanced_menu.addAction(self.action_advanced_demo_packet)
+        self.action_advanced_draw_topo = QAction('&Draw Topo', self)
+        advanced_menu.addAction(self.action_advanced_draw_topo)
+        self.action_advanced_ai_analyst = QAction('&AI Analyst', self)
+        advanced_menu.addAction(self.action_advanced_ai_analyst)
+
         # Help menu
         help_menu = menubar.addMenu('&Help')
         self.action_contents = QAction('&Contents', self)
@@ -1744,6 +1755,12 @@ class ApplicationWindow(QMainWindow):
         self.action_summary.triggered.connect(self._on_summary)
         self.action_conversations.triggered.connect(self._on_conversations)
 
+        # Advanced Analysis
+        self.action_advanced_dashboard.triggered.connect(lambda: self._on_advanced_analysis_action('Dashboard'))
+        self.action_advanced_demo_packet.triggered.connect(lambda: self._on_advanced_analysis_action('Demo Packet'))
+        self.action_advanced_draw_topo.triggered.connect(lambda: self._on_advanced_analysis_action('Draw Topo'))
+        self.action_advanced_ai_analyst.triggered.connect(lambda: self._on_advanced_analysis_action('AI Analyst'))
+
         # Help
         self.action_about.triggered.connect(self._on_about)
         self.action_about_qt.triggered.connect(self._on_about_qt)
@@ -1774,6 +1791,13 @@ class ApplicationWindow(QMainWindow):
         self.action_reset_layout_btn.triggered.connect(self._on_reset_layout)
         self.expert_btn.clicked.connect(self._on_open_expert_information)
         self.properties_btn.clicked.connect(self._on_open_capture_properties)
+
+    def _on_advanced_analysis_action(self, feature_name: str):
+        QMessageBox.information(
+            self,
+            'Advanced Analysis',
+            f'"{feature_name}" is available in Advanced Analysis and will be integrated with full workflow soon.',
+        )
 
     def show_interface_selector(self):
         """Hiển thị màn hình chọn interface"""
