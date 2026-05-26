@@ -2255,18 +2255,67 @@ class ApplicationWindow(QMainWindow):
         dialog.setWindowTitle('Expert Information')
         layout = QVBoxLayout(dialog)
 
-        table = QTableWidget(dialog)
-        table.setColumnCount(5)
-        table.setHorizontalHeaderLabels(['Severity', 'Group', 'Protocol', 'Packet', 'Summary'])
-        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        table.setRowCount(len(entries))
-        for row, item in enumerate(entries):
-            table.setItem(row, 0, QTableWidgetItem(str(item.get('severity', ''))))
-            table.setItem(row, 1, QTableWidgetItem(str(item.get('group', ''))))
-            table.setItem(row, 2, QTableWidgetItem(str(item.get('protocol', ''))))
-            table.setItem(row, 3, QTableWidgetItem(str(item.get('packet', ''))))
-            table.setItem(row, 4, QTableWidgetItem(str(item.get('summary', ''))))
-        layout.addWidget(table)
+        tree = QTreeWidget(dialog)
+        tree.setColumnCount(5)
+        tree.setHeaderLabels(['Severity', 'Summary', 'Group', 'Protocol', 'Count'])
+        tree.setRootIsDecorated(True)
+        tree.setAlternatingRowColors(True)
+        tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+
+        grouped = {}
+        for item in entries:
+            key = (
+                str(item.get('severity', '') or ''),
+                str(item.get('summary', '') or ''),
+                str(item.get('group', '') or ''),
+                str(item.get('protocol', '') or ''),
+            )
+            grouped.setdefault(key, []).append(item)
+
+        severity_order = {'Error': 0, 'Warning': 1, 'Warn': 1, 'Note': 2, 'Chat': 3}
+
+        def _group_sort_key(group_item):
+            (severity, summary, group, protocol), rows = group_item
+            return (
+                severity_order.get(str(severity), 99),
+                str(protocol),
+                str(group),
+                str(summary),
+                -len(rows),
+            )
+
+        for (severity, summary, group, protocol), rows in sorted(grouped.items(), key=_group_sort_key):
+            parent = QTreeWidgetItem(tree)
+            parent.setText(0, severity)
+            parent.setText(1, summary)
+            parent.setText(2, group)
+            parent.setText(3, protocol)
+            parent.setText(4, str(len(rows)))
+
+            for row_item in sorted(rows, key=lambda x: int(x.get('packet', 0) or 0)):
+                child = QTreeWidgetItem(parent)
+                child.setText(0, f"Frame {int(row_item.get('packet', 0) or 0)}")
+                child.setText(1, str(row_item.get('info', '') or ''))
+                child.setText(2, str(row_item.get('group', '') or ''))
+                child.setText(3, str(row_item.get('protocol', '') or ''))
+                child.setText(4, '')
+                child.setData(0, Qt.UserRole, int(row_item.get('packet', 0) or 0))
+
+        tree.collapseAll()
+
+        def _jump_to_packet(item, _column):
+            packet_number = item.data(0, Qt.UserRole)
+            if packet_number is None:
+                return
+            try:
+                self.capture_view.goto_packet_number(int(packet_number))
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+
+        tree.itemClicked.connect(_jump_to_packet)
+        layout.addWidget(tree)
 
         if not entries:
             layout.addWidget(QLabel('No expert items were generated for the current capture.'))

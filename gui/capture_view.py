@@ -6,6 +6,7 @@ import time
 import threading
 import queue
 from collections import Counter
+from scapy.all import TCP, ICMP, IP
 from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
@@ -2297,41 +2298,128 @@ class CaptureView(QWidget):
 
     def get_expert_information(self):
         entries = []
+
+        def _normalized_protocol(rec, summary: str, group: str, fallback: str) -> str:
+            summary_l = str(summary or '').lower()
+            group_l = str(group or '').lower()
+            raw = rec.raw
+
+            if 'icmp' in summary_l or 'no response seen' in summary_l:
+                return 'ICMP'
+            if 'dns' in summary_l:
+                return 'DNS'
+            if 'gtsm' in summary_l:
+                return 'LDP'
+            if 'syslog' in summary_l or 'rfc 5424' in summary_l or 'rfc 3164' in summary_l:
+                return 'Syslog'
+
+            if group_l == 'sequence':
+                try:
+                    if raw is not None and raw.haslayer(TCP):
+                        return 'TCP'
+                    if raw is not None and raw.haslayer(ICMP):
+                        return 'ICMP'
+                    if raw is not None and raw.haslayer(IP):
+                        return 'IPv4'
+                except Exception:
+                    pass
+
+            return str(fallback or '')
+
+        def _walk_nodes(node):
+            if isinstance(node, dict):
+                yield node
+                children = node.get('children', [])
+                if isinstance(children, list):
+                    for child in children:
+                        yield from _walk_nodes(child)
+
         for rec in self.records:
-            info_text = (rec.info or '').lower()
-            proto = (rec.protocol or '').upper()
-            severity = 'Note'
-            group = 'General'
-            summary = None
+            seen = set()
+            seen_summary = set()
+            protocol_text = str(rec.protocol or '')
+            info_text = str(rec.info or '')
 
-            if 'retransmission' in info_text:
-                severity = 'Warn'
-                group = 'TCP'
-                summary = 'Possible TCP retransmission'
-            elif 'out-of-order' in info_text or 'out of order' in info_text:
-                severity = 'Warn'
-                group = 'TCP'
-                summary = 'TCP out-of-order segment'
-            elif 'reset' in info_text or 'rst' in info_text:
-                severity = 'Warn'
-                group = 'TCP'
-                summary = 'Connection reset observed'
-            elif proto == 'ICMP':
-                severity = 'Note'
-                group = 'Network'
-                summary = 'ICMP diagnostic traffic'
-            elif proto == 'DNS' and ('fail' in info_text or 'error' in info_text):
-                severity = 'Warn'
-                group = 'Name Resolution'
-                summary = 'DNS response indicates failure'
+            # Prefer extracting expert information from the rendered details tree,
+            # so UI summary stays aligned with what users see in Packet Details.
+            try:
+                tree = packet_summary_tree(rec.raw, rec)
+            except Exception:
+                tree = None
 
-            if summary:
+            for node in _walk_nodes(tree):
+                title = str(node.get('title', '') or '')
+                match = re.match(r'^\[Expert Info \(([^/]+)/([^\)]+)\):\s*(.+)\]$', title)
+                if not match:
+                    continue
+
+                severity_raw = str(match.group(1) or '').strip()
+                group_raw = str(match.group(2) or '').strip()
+                summary_raw = str(match.group(3) or '').strip()
+                if not summary_raw:
+                    continue
+
+                severity_map = {
+                    'warn': 'Warning',
+                    'warning': 'Warning',
+                    'error': 'Error',
+                    'note': 'Note',
+                    'chat': 'Chat',
+                }
+                severity = severity_map.get(severity_raw.lower(), severity_raw)
+                protocol_value = _normalized_protocol(rec, summary_raw, group_raw, protocol_text)
+                key = (severity, summary_raw, group_raw, protocol_value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                seen_summary.add(summary_raw.strip().lower())
+
                 entries.append({
                     'packet': rec.number,
+                    'info': info_text,
                     'severity': severity,
-                    'group': group,
-                    'protocol': rec.protocol,
+                    'summary': summary_raw,
+                    'group': group_raw,
+                    'protocol': protocol_value,
+                })
+
+            # Add a few practical TCP sequence rules from metadata so expert list
+            # still shows expected items when formatter tree omits them.
+            md = rec.metadata if isinstance(rec.metadata, dict) else {}
+            tcp_layer = rec.raw[TCP] if rec.raw is not None and rec.raw.haslayer(TCP) else None
+            tcp_flags = int(getattr(tcp_layer, 'flags', 0) or 0) if tcp_layer is not None else 0
+
+            extra_rules = []
+            if md.get('tcp_is_window_update', False):
+                extra_rules.append(('Chat', 'TCP window update', 'Sequence'))
+            if md.get('tcp_is_retransmission', False):
+                extra_rules.append(('Note', 'This frame is a (suspected) retransmission', 'Sequence'))
+            if md.get('tcp_previous_segment_not_captured', False):
+                extra_rules.append(('Warning', 'Previous segment(s) not captured (common at capture start)', 'Sequence'))
+            if (tcp_flags & 0x12) == 0x12:
+                extra_rules.append(('Chat', 'Connection establish acknowledge (SYN+ACK)', 'Sequence'))
+            elif (tcp_flags & 0x12) == 0x02:
+                extra_rules.append(('Chat', 'Connection establish request (SYN)', 'Sequence'))
+            if (tcp_flags & 0x01) != 0:
+                extra_rules.append(('Chat', 'Connection finish (FIN)', 'Sequence'))
+
+            for severity, summary, group in extra_rules:
+                summary_key = str(summary or '').strip().lower()
+                if summary_key in seen_summary:
+                    continue
+                protocol_value = _normalized_protocol(rec, summary, group, protocol_text)
+                key = (severity, summary, group, protocol_value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                seen_summary.add(summary_key)
+                entries.append({
+                    'packet': rec.number,
+                    'info': info_text,
+                    'severity': severity,
                     'summary': summary,
+                    'group': group,
+                    'protocol': protocol_value,
                 })
 
         return entries
