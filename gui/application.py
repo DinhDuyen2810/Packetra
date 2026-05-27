@@ -1,5 +1,10 @@
 import logging
 import socket
+import json
+import math
+import pickle
+from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QSettings
 from PySide6.QtWidgets import (
@@ -12,6 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup
 )
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
+from scapy.all import IP, IPv6, TCP, UDP
 
 from gui.interface_selector_view import InterfaceSelectorView
 from gui.capture_view import CaptureView
@@ -1409,10 +1415,75 @@ class CaptureOptionsDialog(QDialog):
 
 
 class ApplicationWindow(QMainWindow):
+    AI_TRAFFIC_COLUMNS = [
+        'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Destination Port', 'Protocol', 'Timestamp',
+        'Flow Duration', 'Total Fwd Packets', 'Total Backward Packets', 'Total Length of Fwd Packets',
+        'Total Length of Bwd Packets', 'Fwd Packet Length Max', 'Fwd Packet Length Min', 'Fwd Packet Length Mean',
+        'Fwd Packet Length Std', 'Bwd Packet Length Max', 'Bwd Packet Length Min', 'Bwd Packet Length Mean',
+        'Bwd Packet Length Std', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean', 'Flow IAT Std',
+        'Flow IAT Max', 'Flow IAT Min', 'Fwd IAT Total', 'Fwd IAT Mean', 'Fwd IAT Std', 'Fwd IAT Max',
+        'Fwd IAT Min', 'Bwd IAT Total', 'Bwd IAT Mean', 'Bwd IAT Std', 'Bwd IAT Max', 'Bwd IAT Min',
+        'Fwd PSH Flags', 'Bwd PSH Flags', 'Fwd URG Flags', 'Bwd URG Flags', 'Fwd Header Length',
+        'Bwd Header Length', 'Fwd Packets/s', 'Bwd Packets/s', 'Min Packet Length', 'Max Packet Length',
+        'Packet Length Mean', 'Packet Length Std', 'Packet Length Variance', 'FIN Flag Count', 'SYN Flag Count',
+        'RST Flag Count', 'PSH Flag Count', 'ACK Flag Count', 'URG Flag Count', 'CWE Flag Count',
+        'ECE Flag Count', 'Down/Up Ratio', 'Average Packet Size', 'Avg Fwd Segment Size', 'Avg Bwd Segment Size',
+        'Fwd Header Length', 'Fwd Avg Bytes/Bulk', 'Fwd Avg Packets/Bulk', 'Fwd Avg Bulk Rate',
+        'Bwd Avg Bytes/Bulk', 'Bwd Avg Packets/Bulk', 'Bwd Avg Bulk Rate', 'Subflow Fwd Packets',
+        'Subflow Fwd Bytes', 'Subflow Bwd Packets', 'Subflow Bwd Bytes', 'Init_Win_bytes_forward',
+        'Init_Win_bytes_backward', 'act_data_pkt_fwd', 'min_seg_size_forward', 'Active Mean', 'Active Std',
+        'Active Max', 'Active Min', 'Idle Mean', 'Idle Std', 'Idle Max', 'Idle Min', 'Label'
+    ]
+
+    AI_DROP_FOR_ML = {'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Protocol', 'Timestamp'}
+    AI_DROP_FOR_INFERENCE = AI_DROP_FOR_ML | {'Label'}
+    AI_MODEL_DIR = Path(__file__).resolve().parents[1] / 'ai'
+    AI_MODEL_FILE = 'xgb_ids_model.json'
+    AI_LABEL_ENCODER_FILE = 'label_encoder.pkl'
+    AI_FEATURE_COLUMNS_FILE = 'feature_columns.json'
+    AI_FALLBACK_LABELS = [
+        'BENIGN',
+        'Bot',
+        'DDoS',
+        'DoS GoldenEye',
+        'DoS Hulk',
+        'DoS Slowhttptest',
+        'DoS slowloris',
+        'FTP-Patator',
+        'Heartbleed',
+        'Infiltration',
+        'PortScan',
+        'SSH-Patator',
+        'Web Attack - Brute Force',
+        'Web Attack - Sql Injection',
+        'Web Attack - XSS',
+    ]
+    AI_LABEL_DESCRIPTIONS = {
+        'BENIGN': 'Luu luong binh thuong, chua thay dau hieu tan cong ro rang trong cac flow da chon.',
+        'Bot': 'Co dau hieu bot/botnet: may nguon co the dang bi dieu khien tu xa hoac tu dong tao ket noi bat thuong.',
+        'DDoS': 'Co dau hieu tan cong DDoS: nhieu goi/flow tao tai lon ve dich trong thoi gian ngan.',
+        'DoS GoldenEye': 'Co mau DoS GoldenEye: tan cong HTTP lam can kiet tai nguyen dich vu web.',
+        'DoS Hulk': 'Co mau DoS Hulk: luu luong HTTP tan cong voi cuong do cao vao may chu web.',
+        'DoS Slowhttptest': 'Co mau DoS SlowHTTPTest: giu ket noi HTTP cham de lam can kiet tai nguyen server.',
+        'DoS slowloris': 'Co mau Slowloris: mo/giu nhieu ket noi HTTP chua hoan tat de lam treo web server.',
+        'FTP-Patator': 'Co dau hieu brute force FTP: nhieu thu nghiem dang nhap hoac flow FTP bat thuong.',
+        'Heartbleed': 'Co dau hieu Heartbleed/TLS heartbeat bat thuong, can kiem tra dich vu TLS lien quan.',
+        'Infiltration': 'Co dau hieu xam nhap/di chuyen du lieu bat thuong, nen kiem tra host nguon va dich.',
+        'PortScan': 'Co dau hieu quet cong: mot nguon truy van nhieu cong/dich vu de do tim be mat tan cong.',
+        'SSH-Patator': 'Co dau hieu brute force SSH: nhieu thu nghiem ket noi/dang nhap SSH.',
+        'Web Attack - Brute Force': 'Co dau hieu brute force tren ung dung web.',
+        'Web Attack - Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
+        'Web Attack - XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
+        'Web Attack � Brute Force': 'Co dau hieu brute force tren ung dung web.',
+        'Web Attack � Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
+        'Web Attack � XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Packetra - Network Packet Analyzer')
         self.resize(1700, 930)
+        self._ai_model_bundle = None
 
         # Trạng thái ứng dụng
         self.current_view = None
@@ -1793,11 +1864,512 @@ class ApplicationWindow(QMainWindow):
         self.properties_btn.clicked.connect(self._on_open_capture_properties)
 
     def _on_advanced_analysis_action(self, feature_name: str):
+        if str(feature_name) == 'AI Analyst':
+            self._open_ai_analyst_dialog()
+            return
+
         QMessageBox.information(
             self,
             'Advanced Analysis',
             f'"{feature_name}" is available in Advanced Analysis and will be integrated with full workflow soon.',
         )
+
+    def _parse_ai_packet_selector(self, selector: str, available_numbers: list[int]) -> list[int]:
+        text = str(selector or '').strip().lower()
+        available = sorted(set(int(v) for v in available_numbers))
+        available_set = set(available)
+        if not available:
+            return []
+
+        if text in {'all', '*'}:
+            return available
+
+        result = set()
+        tokens = [t.strip() for t in text.split(',') if t.strip()]
+        if not tokens:
+            raise ValueError('Hãy nhập gói tin (vd: 5,8,10-20) hoặc all.')
+
+        for token in tokens:
+            if '-' in token:
+                parts = [p.strip() for p in token.split('-', 1)]
+                if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                    raise ValueError(f'Khoảng không hợp lệ: {token}')
+                start = int(parts[0])
+                end = int(parts[1])
+                if start > end:
+                    start, end = end, start
+                for value in range(start, end + 1):
+                    if value in available_set:
+                        result.add(value)
+                continue
+
+            if not token.isdigit():
+                raise ValueError(f'Giá trị không hợp lệ: {token}')
+            value = int(token)
+            if value in available_set:
+                result.add(value)
+
+        selected = sorted(result)
+        if not selected:
+            raise ValueError('Không có gói nào khớp với lựa chọn hiện tại.')
+        return selected
+
+    def _protocol_number_from_record(self, record) -> int:
+        raw = getattr(record, 'raw', None)
+        if raw is None:
+            return 0
+        try:
+            if raw.haslayer(IP):
+                return int(getattr(raw[IP], 'proto', 0) or 0)
+            if raw.haslayer(IPv6):
+                return int(getattr(raw[IPv6], 'nh', 0) or 0)
+        except Exception:
+            return 0
+        return 0
+
+    def _calc_basic_stats(self, values: list[float]) -> tuple[float, float, float, float]:
+        if not values:
+            return 0.0, 0.0, 0.0, 0.0
+        n = float(len(values))
+        mean_v = float(sum(values) / n)
+        min_v = float(min(values))
+        max_v = float(max(values))
+        if len(values) <= 1:
+            return mean_v, 0.0, max_v, min_v
+        variance = sum((float(v) - mean_v) ** 2 for v in values) / n
+        std_v = variance ** 0.5
+        return mean_v, std_v, max_v, min_v
+
+    def _build_ai_traffic_rows(self, records: list) -> list[list]:
+        flows = {}
+
+        for record in records:
+            src = str(getattr(record, 'src', '') or '')
+            dst = str(getattr(record, 'dst', '') or '')
+            sport = int(getattr(record, 'sport', 0) or 0)
+            dport = int(getattr(record, 'dport', 0) or 0)
+            proto_num = self._protocol_number_from_record(record)
+            ts = float(getattr(record, 'epoch_time', 0.0) or 0.0)
+            length = int(getattr(record, 'length', 0) or 0)
+            raw = getattr(record, 'raw', None)
+
+            tcp_flags = 0
+            tcp_window = 0
+            payload_len = 0
+            header_len = 8
+            if raw is not None:
+                try:
+                    if raw.haslayer(TCP):
+                        tcp = raw[TCP]
+                        tcp_flags = int(getattr(tcp, 'flags', 0) or 0)
+                        tcp_window = int(getattr(tcp, 'window', 0) or 0)
+                        payload_len = int(len(bytes(getattr(tcp, 'payload', b'')) or b''))
+                        dataofs = int(getattr(tcp, 'dataofs', 5) or 5)
+                        header_len = max(20, dataofs * 4)
+                    elif raw.haslayer(UDP):
+                        udp = raw[UDP]
+                        payload_len = int(len(bytes(getattr(udp, 'payload', b'')) or b''))
+                        header_len = 8
+                except Exception:
+                    pass
+
+            key = (src, sport, dst, dport, proto_num)
+            if key not in flows:
+                flows[key] = {
+                    'src': src,
+                    'dst': dst,
+                    'sport': sport,
+                    'dport': dport,
+                    'proto': proto_num,
+                    'first_ts': ts,
+                    'last_ts': ts,
+                    'times': [],
+                    'lengths': [],
+                    'header_lengths': [],
+                    'payload_bytes': 0,
+                    'fin': 0,
+                    'syn': 0,
+                    'rst': 0,
+                    'psh': 0,
+                    'ack': 0,
+                    'urg': 0,
+                    'cwe': 0,
+                    'ece': 0,
+                    'init_win_fwd': tcp_window,
+                    'act_data_pkt_fwd': 0,
+                    'min_seg_size_forward': header_len,
+                }
+
+            flow = flows[key]
+            flow['first_ts'] = min(float(flow['first_ts']), ts)
+            flow['last_ts'] = max(float(flow['last_ts']), ts)
+            flow['times'].append(ts)
+            flow['lengths'].append(length)
+            flow['header_lengths'].append(header_len)
+            flow['payload_bytes'] += payload_len
+            flow['fin'] += 1 if (tcp_flags & 0x01) else 0
+            flow['syn'] += 1 if (tcp_flags & 0x02) else 0
+            flow['rst'] += 1 if (tcp_flags & 0x04) else 0
+            flow['psh'] += 1 if (tcp_flags & 0x08) else 0
+            flow['ack'] += 1 if (tcp_flags & 0x10) else 0
+            flow['urg'] += 1 if (tcp_flags & 0x20) else 0
+            flow['ece'] += 1 if (tcp_flags & 0x40) else 0
+            flow['cwe'] += 1 if (tcp_flags & 0x80) else 0
+            if payload_len > 0:
+                flow['act_data_pkt_fwd'] += 1
+            flow['min_seg_size_forward'] = min(int(flow['min_seg_size_forward']), header_len)
+
+        rows = []
+        for (_src, _sport, _dst, _dport, _proto), flow in sorted(flows.items(), key=lambda kv: kv[1]['first_ts']):
+            src = str(flow['src'])
+            dst = str(flow['dst'])
+            sport = int(flow['sport'])
+            dport = int(flow['dport'])
+            proto_num = int(flow['proto'])
+            flow_id = f'{src}-{dst}-{sport}-{dport}-{proto_num}'
+            first_ts = float(flow['first_ts'])
+            last_ts = float(flow['last_ts'])
+            duration_us = max(0, int(round((last_ts - first_ts) * 1_000_000.0)))
+            duration_sec = float(duration_us) / 1_000_000.0 if duration_us > 0 else 0.0
+
+            lengths = [float(v) for v in flow['lengths']]
+            header_lengths = [float(v) for v in flow['header_lengths']]
+            total_fwd_packets = int(len(lengths))
+            total_bwd_packets = 0
+            total_len_fwd = int(sum(lengths))
+            total_len_bwd = 0
+
+            fwd_mean, fwd_std, fwd_max, fwd_min = self._calc_basic_stats(lengths)
+            pkt_mean, pkt_std, pkt_max, pkt_min = self._calc_basic_stats(lengths)
+            fwd_hdr_mean, _, _, _ = self._calc_basic_stats(header_lengths)
+
+            times_sorted = sorted(float(v) for v in flow['times'])
+            iats = []
+            for idx in range(1, len(times_sorted)):
+                iats.append((times_sorted[idx] - times_sorted[idx - 1]) * 1_000_000.0)
+            iat_mean, iat_std, iat_max, iat_min = self._calc_basic_stats(iats)
+
+            flow_bytes_per_s = (total_len_fwd / duration_sec) if duration_sec > 0 else 0.0
+            flow_pkts_per_s = ((total_fwd_packets + total_bwd_packets) / duration_sec) if duration_sec > 0 else 0.0
+            fwd_pkts_per_s = (total_fwd_packets / duration_sec) if duration_sec > 0 else 0.0
+
+            avg_packet_size = ((total_len_fwd + total_len_bwd) / max(1, (total_fwd_packets + total_bwd_packets)))
+            down_up_ratio = (total_bwd_packets / max(1, total_fwd_packets))
+            pkt_var = float(pkt_std ** 2)
+
+            timestamp = datetime.fromtimestamp(first_ts).strftime('%d/%m/%Y %H:%M:%S')
+
+            row = [
+                flow_id, src, sport, dst, dport, proto_num, timestamp,
+                duration_us, total_fwd_packets, total_bwd_packets, total_len_fwd, total_len_bwd,
+                fwd_max, fwd_min, fwd_mean, fwd_std,
+                0, 0, 0, 0,
+                flow_bytes_per_s, flow_pkts_per_s, iat_mean, iat_std, iat_max, iat_min,
+                duration_us, iat_mean, iat_std, iat_max, iat_min,
+                0, 0, 0, 0, 0,
+                int(flow['psh'] > 0), 0, int(flow['urg'] > 0), 0,
+                int(round(fwd_hdr_mean)), 0,
+                fwd_pkts_per_s, 0,
+                pkt_min, pkt_max, pkt_mean, pkt_std, pkt_var,
+                int(flow['fin']), int(flow['syn']), int(flow['rst']), int(flow['psh']),
+                int(flow['ack']), int(flow['urg']), int(flow['cwe']), int(flow['ece']),
+                down_up_ratio, avg_packet_size, fwd_mean, 0,
+                int(round(fwd_hdr_mean)),
+                0, 0, 0, 0, 0, 0,
+                total_fwd_packets, total_len_fwd, 0, 0,
+                int(flow['init_win_fwd']), 0, int(flow['act_data_pkt_fwd']), int(flow['min_seg_size_forward']),
+                0, 0, 0, 0, 0, 0, 0, 0,
+                'BENIGN'
+            ]
+            rows.append(row)
+
+        return rows
+
+    def _traffic_to_ml(self, traffic_header: list[str], traffic_rows: list[list]) -> tuple[list[str], list[list]]:
+        keep_indices = [
+            idx for idx, col in enumerate(traffic_header)
+            if str(col).strip() not in self.AI_DROP_FOR_INFERENCE
+        ]
+        ml_header = [traffic_header[i] for i in keep_indices]
+        ml_rows = [[row[i] for i in keep_indices] for row in traffic_rows]
+        return ml_header, ml_rows
+
+    def _dedupe_ai_header(self, header: list[str]) -> list[str]:
+        counts = {}
+        result = []
+        for col in header:
+            name = str(col).strip()
+            seen = counts.get(name, 0)
+            counts[name] = seen + 1
+            result.append(name if seen == 0 else f'{name}.{seen}')
+        return result
+
+    def _load_ai_model_bundle(self):
+        if self._ai_model_bundle is not None:
+            return self._ai_model_bundle
+
+        try:
+            import numpy as np
+            import xgboost as xgb
+        except Exception as exc:
+            raise RuntimeError(
+                'Thieu thu vien AI inference. Hay cai dependencies trong requirements.txt '
+                '(numpy, xgboost, scikit-learn) roi chay lai.'
+            ) from exc
+
+        model_path = self.AI_MODEL_DIR / self.AI_MODEL_FILE
+        feature_path = self.AI_MODEL_DIR / self.AI_FEATURE_COLUMNS_FILE
+        encoder_path = self.AI_MODEL_DIR / self.AI_LABEL_ENCODER_FILE
+        missing = [str(p) for p in (model_path, feature_path, encoder_path) if not p.exists()]
+        if missing:
+            raise FileNotFoundError('Thieu file model AI: ' + ', '.join(missing))
+
+        with feature_path.open('r', encoding='utf-8') as f:
+            feature_columns = json.load(f)
+        if not isinstance(feature_columns, list) or not feature_columns:
+            raise ValueError('feature_columns.json khong hop le.')
+
+        labels = list(self.AI_FALLBACK_LABELS)
+        try:
+            with encoder_path.open('rb') as f:
+                encoder = pickle.load(f)
+            encoder_classes = getattr(encoder, 'classes_', None)
+            if encoder_classes is not None:
+                labels = [str(x) for x in list(encoder_classes)]
+        except Exception:
+            # Fallback keeps inference usable when sklearn is missing, but requirements include it.
+            pass
+
+        booster = xgb.Booster()
+        booster.load_model(str(model_path))
+        self._ai_model_bundle = {
+            'np': np,
+            'xgb': xgb,
+            'booster': booster,
+            'feature_columns': [str(c).strip() for c in feature_columns],
+            'labels': labels,
+        }
+        return self._ai_model_bundle
+
+    def _coerce_ai_number(self, value) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        if isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            text = str(value).strip()
+            if not text:
+                return 0.0
+            if text.lower() in {'inf', '+inf', 'infinity', '+infinity'}:
+                return 0.0
+            if text.lower() in {'-inf', '-infinity', 'nan', '+nan', '-nan'}:
+                return 0.0
+            try:
+                number = float(text.replace(',', ''))
+            except Exception:
+                return 0.0
+        if math.isnan(number) or math.isinf(number):
+            return 0.0
+        return number
+
+    def _prepare_ai_feature_matrix(self, ml_header: list[str], ml_rows: list[list], feature_columns: list[str]):
+        dedup_header = self._dedupe_ai_header(ml_header)
+        col_index = {name: idx for idx, name in enumerate(dedup_header)}
+        matrix = []
+        for row in ml_rows:
+            vector = []
+            for feature in feature_columns:
+                idx = col_index.get(feature)
+                vector.append(self._coerce_ai_number(row[idx]) if idx is not None and idx < len(row) else 0.0)
+            matrix.append(vector)
+        return matrix
+
+    def _predict_ai_labels(self, ml_header: list[str], ml_rows: list[list]) -> list[dict]:
+        if not ml_rows:
+            return []
+        bundle = self._load_ai_model_bundle()
+        matrix = self._prepare_ai_feature_matrix(ml_header, ml_rows, bundle['feature_columns'])
+        np = bundle['np']
+        xgb = bundle['xgb']
+        dmatrix = xgb.DMatrix(np.asarray(matrix, dtype=float), feature_names=bundle['feature_columns'])
+        raw_pred = bundle['booster'].predict(dmatrix)
+        labels = bundle['labels']
+
+        predictions = []
+        for pred in raw_pred:
+            arr = np.asarray(pred)
+            if arr.ndim == 0:
+                class_idx = int(round(float(arr)))
+                confidence = 1.0
+            else:
+                class_idx = int(arr.argmax())
+                confidence = float(arr[class_idx])
+            label = labels[class_idx] if 0 <= class_idx < len(labels) else str(class_idx)
+            predictions.append({
+                'label': label,
+                'confidence': confidence,
+                'class_index': class_idx,
+            })
+        return predictions
+
+    def _build_ai_analysis_text(self, traffic_header: list[str], traffic_rows: list[list], predictions: list[dict]) -> str:
+        index = {name: idx for idx, name in enumerate(traffic_header)}
+
+        def get(row, name, default=''):
+            idx = index.get(name)
+            if idx is None or idx >= len(row):
+                return default
+            return row[idx]
+
+        total = len(predictions)
+        counts = Counter(pred['label'] for pred in predictions)
+        attack_counts = Counter({label: count for label, count in counts.items() if label != 'BENIGN'})
+
+        lines = ['AI Analyst result', '']
+        lines.append(f'Total flows analyzed: {total}')
+        lines.append('Predicted labels:')
+        for label, count in counts.most_common():
+            percent = (count * 100.0 / total) if total else 0.0
+            lines.append(f'- {label}: {count} flow(s), {percent:.1f}%')
+
+        lines.append('')
+        if not attack_counts:
+            lines.append('Current situation: mostly BENIGN traffic.')
+            lines.append(self.AI_LABEL_DESCRIPTIONS.get('BENIGN', 'Traffic looks normal.'))
+        else:
+            lines.append('Current situation: suspicious or attack traffic detected.')
+            for label, count in attack_counts.most_common():
+                description = self.AI_LABEL_DESCRIPTIONS.get(label, 'Can kiem tra them flow lien quan.')
+                lines.append(f'- {label}: {description}')
+
+        grouped_sources = defaultdict(Counter)
+        grouped_targets = defaultdict(Counter)
+        for row, pred in zip(traffic_rows, predictions):
+            label = pred['label']
+            if label == 'BENIGN':
+                continue
+            grouped_sources[label][str(get(row, 'Source IP', '-'))] += 1
+            target = f"{get(row, 'Destination IP', '-')}: {get(row, 'Destination Port', '-')}"
+            grouped_targets[label][target] += 1
+
+        if attack_counts:
+            lines.append('')
+            lines.append('Traffic Labeling context:')
+            for label in attack_counts:
+                srcs = ', '.join(f'{src} ({cnt})' for src, cnt in grouped_sources[label].most_common(5))
+                dsts = ', '.join(f'{dst} ({cnt})' for dst, cnt in grouped_targets[label].most_common(5))
+                lines.append(f'- {label} sources: {srcs or "-"}')
+                lines.append(f'- {label} targets: {dsts or "-"}')
+
+            lines.append('')
+            lines.append('Top suspicious flows:')
+            suspicious = [
+                (row, pred) for row, pred in zip(traffic_rows, predictions)
+                if pred['label'] != 'BENIGN'
+            ]
+            suspicious.sort(key=lambda pair: pair[1].get('confidence', 0.0), reverse=True)
+            for row, pred in suspicious[:15]:
+                src = f"{get(row, 'Source IP', '-')}: {get(row, 'Source Port', '-')}"
+                dst = f"{get(row, 'Destination IP', '-')}: {get(row, 'Destination Port', '-')}"
+                proto = get(row, 'Protocol', '-')
+                duration = get(row, 'Flow Duration', '-')
+                packets = get(row, 'Total Fwd Packets', '-')
+                bytes_ = get(row, 'Total Length of Fwd Packets', '-')
+                lines.append(
+                    f"- {pred['label']} ({pred['confidence']:.2%}) | {src} -> {dst} | "
+                    f'proto={proto} | duration_us={duration} | fwd_pkts={packets} | fwd_bytes={bytes_}'
+                )
+
+        return '\n'.join(lines)
+
+    def _open_ai_analyst_dialog(self):
+        if not self.capture_view or not getattr(self.capture_view, 'records', None):
+            QMessageBox.information(self, 'AI Analyst', 'Khong co capture de phan tich.')
+            return
+
+        records = list(self.capture_view.records)
+        packet_numbers = sorted(int(r.number) for r in records)
+        record_by_number = {}
+        for rec in records:
+            record_by_number.setdefault(int(rec.number), rec)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('AI Analyst')
+        root = QVBoxLayout(dialog)
+
+        root.addWidget(QLabel('Nhap goi tin: 1 goi, nhieu goi cach nhau dau phay, khoang a-b, hoac all'))
+        packet_input = QLineEdit(dialog)
+        packet_input.setPlaceholderText('Vi du: 5,8,10-20 hoac all')
+        packet_input.setText('all')
+        root.addWidget(packet_input)
+
+        status = QTextEdit(dialog)
+        status.setReadOnly(True)
+        status.setMinimumHeight(280)
+        root.addWidget(status)
+
+        button_row = QHBoxLayout()
+        build_btn = QPushButton('Phan tich bang model', dialog)
+        close_btn = QPushButton('Dong', dialog)
+        button_row.addWidget(build_btn)
+        button_row.addStretch()
+        button_row.addWidget(close_btn)
+        root.addLayout(button_row)
+
+        state = {
+            'traffic_header': None,
+            'traffic_rows': None,
+            'ml_header': None,
+            'ml_rows': None,
+            'predictions': None,
+        }
+
+        def _build():
+            try:
+                selected_numbers = self._parse_ai_packet_selector(packet_input.text(), packet_numbers)
+                selected_records = [record_by_number[n] for n in selected_numbers if n in record_by_number]
+                if not selected_records:
+                    raise ValueError('Khong chon duoc goi hop le.')
+
+                traffic_header = list(self.AI_TRAFFIC_COLUMNS)
+                traffic_rows = self._build_ai_traffic_rows(selected_records)
+                if any(len(row) != len(traffic_header) for row in traffic_rows):
+                    raise ValueError('Loi schema: so cot TrafficLabelling khong khop header.')
+
+                ml_header, ml_rows = self._traffic_to_ml(traffic_header, traffic_rows)
+                if any(len(row) != len(ml_header) for row in ml_rows):
+                    raise ValueError('Loi schema: so cot inference feature khong khop header.')
+                if any(str(col).strip().lower() == 'label' for col in ml_header):
+                    raise ValueError('Loi schema: cot Label van con trong feature inference.')
+
+                predictions = self._predict_ai_labels(ml_header, ml_rows)
+                analysis_text = self._build_ai_analysis_text(traffic_header, traffic_rows, predictions)
+
+                state['traffic_header'] = traffic_header
+                state['traffic_rows'] = traffic_rows
+                state['ml_header'] = ml_header
+                state['ml_rows'] = ml_rows
+                state['predictions'] = predictions
+
+                status.setPlainText(
+                    f"Da phan tich xong bang model AI Analyst\n"
+                    f"- So goi chon: {len(selected_records)}\n"
+                    f"- TrafficLabelling rows: {len(traffic_rows)} | cols: {len(traffic_header)}\n"
+                    f"- Inference feature rows: {len(ml_rows)} | cols: {len(ml_header)} | Label removed\n\n"
+                    f"{analysis_text}"
+                )
+            except Exception as exc:
+                status.setPlainText(f'Loi AI Analyst: {exc}')
+
+        build_btn.clicked.connect(_build)
+        close_btn.clicked.connect(dialog.accept)
+        packet_input.returnPressed.connect(_build)
+
+        dialog.resize(980, 680)
+        self._fit_widget_90(dialog)
+        dialog.exec()
 
     def show_interface_selector(self):
         """Hiển thị màn hình chọn interface"""
