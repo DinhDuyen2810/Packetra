@@ -3,6 +3,8 @@ import socket
 import json
 import math
 import pickle
+import csv
+import os
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +24,14 @@ from scapy.all import IP, IPv6, TCP, UDP
 from gui.interface_selector_view import InterfaceSelectorView
 from gui.capture_view import CaptureView
 from gui.manage_interfaces_dialog import ManageInterfacesDialog
+from core.flow_engine import (
+    analyze_flows,
+    export_packets_to_csv,
+    export_pcap_to_csv,
+    PacketraModelAdapter,
+    FlowFeatureExtractor,
+)
+from core.flow_engine.cic_reference import extract_cic_rows_from_packets
 from utils.pcap_io import normalize_capture_extension
 
 log = logging.getLogger('application')
@@ -61,7 +71,7 @@ class InterfaceTreeWidget(QTreeWidget):
 
 
 class CaptureOptionsDialog(QDialog):
-    """Capture Options dialog với 3 tabs: Input, Output, Options"""
+    """Capture Options dialog vá»›i 3 tabs: Input, Output, Options"""
     
     def __init__(self, parent, capture_view):
         super().__init__(parent)
@@ -596,7 +606,7 @@ class CaptureOptionsDialog(QDialog):
             iface_item = QTreeWidgetItem()
             is_pipe = str(iface_name).startswith('\\\\.\\pipe\\')
             ips = [] if is_pipe else self._get_interface_ips(iface_name)
-            # Column 0: Interface display name (friendly hoặc comment:friendly)
+            # Column 0: Interface display name (friendly hoáº·c comment:friendly)
             friendly_name = iface_pref.get('friendly_name', interfaces.get(iface_name, iface_name))
             comment = iface_pref.get('comment', '')
             show_with_comment = iface_pref.get('show_with_comment', False)
@@ -770,7 +780,7 @@ class CaptureOptionsDialog(QDialog):
         """Start capture using selected interface and current Output/Options settings"""
         if not self._validate_output_settings() or not self._validate_options_settings():
             return
-        # Validate capture filter syntax (nếu có)
+        # Validate capture filter syntax (náº¿u cĂ³)
         capture_filter = item.data(6, Qt.UserRole)
         iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
         is_valid_filter, filter_error = self._validate_capture_filter_expression(capture_filter, iface_name=iface_name)
@@ -800,7 +810,7 @@ class CaptureOptionsDialog(QDialog):
             'buffer_mb': buffer_mb,
             'capture_filter': capture_filter,
         }
-        # Thêm thông tin pipes và remote interfaces từ settings nếu có
+        # ThĂªm thĂ´ng tin pipes vĂ  remote interfaces tá»« settings náº¿u cĂ³
         from PySide6.QtCore import QSettings
         import json
         settings = QSettings('Packetra', 'Packetra')
@@ -851,14 +861,14 @@ class CaptureOptionsDialog(QDialog):
             self._update_start_button_state()
             self._start_capture_with_item(item)
 
-        # Column 2 (Link-layer Header) - Inline combo edit, chỉ cho phép các giá trị hợp lệ tùy loại interface
+        # Column 2 (Link-layer Header) - Inline combo edit, chá»‰ cho phĂ©p cĂ¡c giĂ¡ trá»‹ há»£p lá»‡ tĂ¹y loáº¡i interface
         elif column == 2:
             iface_name = item.data(0, Qt.UserRole) or item.text(0)
-            # Lấy loại interface từ network_utils (nếu có)
+            # Láº¥y loáº¡i interface tá»« network_utils (náº¿u cĂ³)
             from utils.network_utils import get_interface_details
             details = get_interface_details().get(iface_name, {})
             iface_type = details.get('type', '').lower()
-            # Mapping loại interface sang các header hợp lệ
+            # Mapping loáº¡i interface sang cĂ¡c header há»£p lá»‡
             if 'ethernet' in iface_type:
                 options = ['Ethernet', 'DOCSIS']
             elif 'wifi' in iface_type or '802.11' in iface_type:
@@ -874,7 +884,7 @@ class CaptureOptionsDialog(QDialog):
             elif 'raw' in iface_type:
                 options = ['Raw IP']
             else:
-                # Nếu không xác định, cho phép tất cả
+                # Náº¿u khĂ´ng xĂ¡c Ä‘á»‹nh, cho phĂ©p táº¥t cáº£
                 options = ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC',
                            'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback']
             self._edit_inline_combobox(item, column, options)
@@ -1474,9 +1484,9 @@ class ApplicationWindow(QMainWindow):
         'Web Attack - Brute Force': 'Co dau hieu brute force tren ung dung web.',
         'Web Attack - Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
         'Web Attack - XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
-        'Web Attack � Brute Force': 'Co dau hieu brute force tren ung dung web.',
-        'Web Attack � Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
-        'Web Attack � XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
+        'Web Attack ï¿½ Brute Force': 'Co dau hieu brute force tren ung dung web.',
+        'Web Attack ï¿½ Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
+        'Web Attack ï¿½ XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
     }
 
     def __init__(self):
@@ -1485,7 +1495,7 @@ class ApplicationWindow(QMainWindow):
         self.resize(1700, 930)
         self._ai_model_bundle = None
 
-        # Trạng thái ứng dụng
+        # Tráº¡ng thĂ¡i á»©ng dá»¥ng
         self.current_view = None
         self.capture_view = None
         self.iface_selector_view = None
@@ -1504,7 +1514,7 @@ class ApplicationWindow(QMainWindow):
         self.show_interface_selector()
 
     def _build_ui(self):
-        """Xây dựng giao diện chính"""
+        """XĂ¢y dá»±ng giao diá»‡n chĂ­nh"""
         # Central widget
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -1551,14 +1561,17 @@ class ApplicationWindow(QMainWindow):
         self.setCentralWidget(central)
 
     def _build_menubar(self):
-        """Xây dựng menu bar"""
+        """Xay dung menu bar theo nhom tab feature."""
         menubar = self.menuBar()
+        menubar.clear()
 
         # File menu
         file_menu = menubar.addMenu('&File')
         self.action_open = QAction('&Open...', self)
         self.action_open.setShortcut(QKeySequence.Open)
         file_menu.addAction(self.action_open)
+        self.action_merge = QAction('&Merge...', self)
+        file_menu.addAction(self.action_merge)
         file_menu.addSeparator()
         self.action_save = QAction('&Save...', self)
         self.action_save.setShortcut(QKeySequence.Save)
@@ -1566,123 +1579,258 @@ class ApplicationWindow(QMainWindow):
         self.action_save_as = QAction('Save &As...', self)
         self.action_save_as.setShortcut(QKeySequence.SaveAs)
         file_menu.addAction(self.action_save_as)
+        self.action_separate = QAction('S&eparate', self)
+        file_menu.addAction(self.action_separate)
         file_menu.addSeparator()
-        self.action_export = QAction('&Export As...', self)
+        self.action_export = QAction('&Export Specified Packets...', self)
         file_menu.addAction(self.action_export)
         file_menu.addSeparator()
         self.action_print = QAction('&Print...', self)
         self.action_print.setShortcut(QKeySequence.Print)
         file_menu.addAction(self.action_print)
         file_menu.addSeparator()
-        self.action_exit = QAction('E&xit', self)
+        self.action_exit = QAction('&Quit', self)
         self.action_exit.setShortcut(QKeySequence.Quit)
         file_menu.addAction(self.action_exit)
 
+        # Hidden non-spec file actions (keep backend, remove from menu)
+        self.action_export_flow_csv = QAction('Export &Flow CSV (Current Capture)', self)
+        self.action_export_selected_flow_csv = QAction('Export Selected Packets to &Flow CSV', self)
+
         # Edit menu
         edit_menu = menubar.addMenu('&Edit')
-        self.action_undo = QAction('&Undo', self)
-        self.action_undo.setShortcut(QKeySequence.Undo)
-        edit_menu.addAction(self.action_undo)
-        self.action_redo = QAction('&Redo', self)
-        self.action_redo.setShortcut(QKeySequence.Redo)
-        edit_menu.addAction(self.action_redo)
-        edit_menu.addSeparator()
-        self.action_cut = QAction('Cu&t', self)
-        self.action_cut.setShortcut(QKeySequence.Cut)
-        edit_menu.addAction(self.action_cut)
         self.action_copy = QAction('&Copy', self)
         self.action_copy.setShortcut(QKeySequence.Copy)
         edit_menu.addAction(self.action_copy)
-        self.action_paste = QAction('&Paste', self)
-        self.action_paste.setShortcut(QKeySequence.Paste)
-        edit_menu.addAction(self.action_paste)
         edit_menu.addSeparator()
-        self.action_find = QAction('&Find...', self)
+        self.action_find = QAction('Find &Packet...', self)
         self.action_find.setShortcut(QKeySequence.Find)
         edit_menu.addAction(self.action_find)
         self.action_find_next = QAction('Find &Next', self)
         self.action_find_next.setShortcut(QKeySequence.FindNext)
         edit_menu.addAction(self.action_find_next)
+        self.action_find_previous = QAction('Find &Previous', self)
+        self.action_find_previous.setShortcut(QKeySequence.FindPrevious)
+        edit_menu.addAction(self.action_find_previous)
         edit_menu.addSeparator()
-        self.action_preferences = QAction('&Preferences', self)
+        self.action_mark_unmark_selected = QAction('Mark/Unmark &Selected', self)
+        edit_menu.addAction(self.action_mark_unmark_selected)
+        self.action_mark_unmark_all_displayed = QAction('Mark/Unmark &All Displayed Packets', self)
+        edit_menu.addAction(self.action_mark_unmark_all_displayed)
+        self.action_next_mark = QAction('&Next Mark', self)
+        edit_menu.addAction(self.action_next_mark)
+        self.action_previous_mark = QAction('&Previous Mark', self)
+        edit_menu.addAction(self.action_previous_mark)
+        edit_menu.addSeparator()
+        self.action_ignore_unignore_selected = QAction('Ignore/Unignore S&elected', self)
+        edit_menu.addAction(self.action_ignore_unignore_selected)
+        self.action_ignore_unignore_all_displayed = QAction('Ignore/Unignore A&ll Displayed', self)
+        edit_menu.addAction(self.action_ignore_unignore_all_displayed)
+        edit_menu.addSeparator()
+        self.action_packet_comment = QAction('Packet &Comment...', self)
+        edit_menu.addAction(self.action_packet_comment)
+        self.action_delete_all_packet_comments = QAction('&Delete All Packet Comments', self)
+        edit_menu.addAction(self.action_delete_all_packet_comments)
+        edit_menu.addSeparator()
+        self.action_preferences = QAction('&Preferences...', self)
         edit_menu.addAction(self.action_preferences)
+
+        # Hidden non-spec edit actions (keep object compatibility)
+        self.action_undo = QAction('&Undo', self)
+        self.action_redo = QAction('&Redo', self)
+        self.action_cut = QAction('Cu&t', self)
+        self.action_paste = QAction('&Paste', self)
 
         # View menu
         view_menu = menubar.addMenu('&View')
+        self.action_view_main_toolbar = QAction('&Main Toolbar', self)
+        self.action_view_main_toolbar.setCheckable(True)
+        self.action_view_main_toolbar.setChecked(True)
+        view_menu.addAction(self.action_view_main_toolbar)
+        self.action_view_filter_toolbar = QAction('&Filter Toolbar', self)
+        self.action_view_filter_toolbar.setCheckable(True)
+        self.action_view_filter_toolbar.setChecked(True)
+        view_menu.addAction(self.action_view_filter_toolbar)
+        self.action_view_statusbar = QAction('&Statusbar', self)
+        self.action_view_statusbar.setCheckable(True)
+        self.action_view_statusbar.setChecked(True)
+        view_menu.addAction(self.action_view_statusbar)
+        view_menu.addSeparator()
+        self.action_view_packet_list = QAction('Packet &List', self)
+        self.action_view_packet_list.setCheckable(True)
+        self.action_view_packet_list.setChecked(True)
+        view_menu.addAction(self.action_view_packet_list)
+        self.action_view_packet_details = QAction('Packet &Details', self)
+        self.action_view_packet_details.setCheckable(True)
+        self.action_view_packet_details.setChecked(True)
+        view_menu.addAction(self.action_view_packet_details)
+        self.action_view_packet_bytes = QAction('Packet &Bytes', self)
+        self.action_view_packet_bytes.setCheckable(True)
+        self.action_view_packet_bytes.setChecked(True)
+        view_menu.addAction(self.action_view_packet_bytes)
+        self.action_view_packet_diagram = QAction('Packet &Diagram', self)
+        self.action_view_packet_diagram.setCheckable(True)
+        self.action_view_packet_diagram.setChecked(True)
+        view_menu.addAction(self.action_view_packet_diagram)
+        view_menu.addSeparator()
         self.action_zoom_in = QAction('Zoom &In', self)
         self.action_zoom_in.setShortcut(QKeySequence.ZoomIn)
         view_menu.addAction(self.action_zoom_in)
         self.action_zoom_out = QAction('Zoom &Out', self)
         self.action_zoom_out.setShortcut(QKeySequence.ZoomOut)
         view_menu.addAction(self.action_zoom_out)
-        self.action_zoom_reset = QAction('&Reset Zoom', self)
+        self.action_zoom_reset = QAction('&Normal Size', self)
         view_menu.addAction(self.action_zoom_reset)
         view_menu.addSeparator()
+        self.action_expand_subtrees = QAction('&Expand Subtrees', self)
+        view_menu.addAction(self.action_expand_subtrees)
+        self.action_collapse_subtrees = QAction('&Collapse Subtrees', self)
+        view_menu.addAction(self.action_collapse_subtrees)
+        self.action_expand_all = QAction('Expand &All', self)
+        view_menu.addAction(self.action_expand_all)
+        self.action_collapse_all = QAction('Collapse A&ll', self)
+        view_menu.addAction(self.action_collapse_all)
+        view_menu.addSeparator()
+        self.action_view_colorize_packet_list = QAction('Colorize Packet &List', self)
+        self.action_view_colorize_packet_list.setCheckable(True)
+        self.action_view_colorize_packet_list.setChecked(True)
+        view_menu.addAction(self.action_view_colorize_packet_list)
+        self.action_view_colorize_conversation = QAction('Colorize C&onversation', self)
+        view_menu.addAction(self.action_view_colorize_conversation)
+        self.action_view_coloring_rules = QAction('Coloring &Rules...', self)
+        view_menu.addAction(self.action_view_coloring_rules)
+        view_menu.addSeparator()
+        self.action_view_resize_all_columns = QAction('&Resize All Columns', self)
+        view_menu.addAction(self.action_view_resize_all_columns)
+        self.action_view_show_packet_new_window = QAction('Show Packet in &New Window', self)
+        view_menu.addAction(self.action_view_show_packet_new_window)
+        self.action_view_redissect_packets = QAction('&Redissect Packets', self)
+        view_menu.addAction(self.action_view_redissect_packets)
+        self.action_view_reload_as_format_capture = QAction('Reload as File Format/&Capture', self)
+        view_menu.addAction(self.action_view_reload_as_format_capture)
+        self.action_view_reload = QAction('&Reload', self)
+        self.action_view_reload.setShortcut(QKeySequence.Refresh)
+        view_menu.addAction(self.action_view_reload)
+
+        # Hidden non-spec view action
         self.action_fullscreen = QAction('&Fullscreen', self)
         self.action_fullscreen.setShortcut(Qt.Key_F11)
-        view_menu.addAction(self.action_fullscreen)
+
+        # Go menu
+        go_menu = menubar.addMenu('&Go')
+        self.action_go_back = QAction('&Back', self)
+        go_menu.addAction(self.action_go_back)
+        self.action_go_forward = QAction('&Forward', self)
+        go_menu.addAction(self.action_go_forward)
+        go_menu.addSeparator()
+        self.action_go_to_packet = QAction('Go to &Packet...', self)
+        go_menu.addAction(self.action_go_to_packet)
+        self.action_go_to_corresponding_packet = QAction('Go to C&orresponding Packet', self)
+        go_menu.addAction(self.action_go_to_corresponding_packet)
+        go_menu.addSeparator()
+        self.action_go_previous_packet = QAction('&Previous Packet', self)
+        go_menu.addAction(self.action_go_previous_packet)
+        self.action_go_next_packet = QAction('&Next Packet', self)
+        go_menu.addAction(self.action_go_next_packet)
+        self.action_go_first_packet = QAction('&First Packet', self)
+        go_menu.addAction(self.action_go_first_packet)
+        self.action_go_last_packet = QAction('&Last Packet', self)
+        go_menu.addAction(self.action_go_last_packet)
+        go_menu.addSeparator()
+        self.action_go_previous_packet_conversation = QAction('Previous Packet in C&onversation', self)
+        go_menu.addAction(self.action_go_previous_packet_conversation)
+        self.action_go_next_packet_conversation = QAction('Next Packet in Con&versation', self)
+        go_menu.addAction(self.action_go_next_packet_conversation)
+        go_menu.addSeparator()
+        self.action_go_auto_scroll_live_capture = QAction('&Auto Scroll in Live Capture', self)
+        self.action_go_auto_scroll_live_capture.setCheckable(True)
+        self.action_go_auto_scroll_live_capture.setChecked(True)
+        go_menu.addAction(self.action_go_auto_scroll_live_capture)
 
         # Capture menu
         capture_menu = menubar.addMenu('&Capture')
-        self.action_interfaces = QAction('&Interfaces...', self)
-        capture_menu.addAction(self.action_interfaces)
+        self.action_capture_options = QAction('&Options...', self)
+        capture_menu.addAction(self.action_capture_options)
         capture_menu.addSeparator()
         self.action_start_capture = QAction('&Start', self)
         self.action_start_capture.setShortcut(Qt.CTRL | Qt.Key_E)
         capture_menu.addAction(self.action_start_capture)
         self.action_stop_capture = QAction('St&op', self)
-        self.action_stop_capture.setShortcut(Qt.CTRL | Qt.Key_E)
         capture_menu.addAction(self.action_stop_capture)
         self.action_restart_capture = QAction('&Restart', self)
         capture_menu.addAction(self.action_restart_capture)
+        capture_menu.addSeparator()
+        self.action_capture_filters = QAction('Capture &Filters...', self)
+        capture_menu.addAction(self.action_capture_filters)
+        self.action_refresh_interfaces = QAction('&Refresh Interfaces', self)
+        capture_menu.addAction(self.action_refresh_interfaces)
+
+        # Legacy compatibility alias (not shown in menu)
+        self.action_interfaces = QAction('&Interfaces...', self)
 
         # Analyze menu
         analyze_menu = menubar.addMenu('&Analyze')
-        self.action_follow_stream = QAction('&Follow Stream', self)
-        analyze_menu.addAction(self.action_follow_stream)
-        self.action_decode_as = QAction('&Decode As...', self)
-        analyze_menu.addAction(self.action_decode_as)
+        self.action_display_filter_macros = QAction('Display Filter &Macros...', self)
+        analyze_menu.addAction(self.action_display_filter_macros)
+        self.action_display_filter_expression = QAction('Display Filter E&xpression...', self)
+        analyze_menu.addAction(self.action_display_filter_expression)
         analyze_menu.addSeparator()
+        self.action_apply_as_column = QAction('Apply as &Column', self)
+        analyze_menu.addAction(self.action_apply_as_column)
+        self.action_apply_as_filter = QAction('Apply as &Filter', self)
+        analyze_menu.addAction(self.action_apply_as_filter)
+        self.action_conversation_filter = QAction('Conversation F&ilter', self)
+        analyze_menu.addAction(self.action_conversation_filter)
+        analyze_menu.addSeparator()
+        self.action_follow_stream = QAction('&Follow', self)
+        analyze_menu.addAction(self.action_follow_stream)
+        self.action_expert_info = QAction('&Expert Info', self)
+        analyze_menu.addAction(self.action_expert_info)
+
+        # Hidden non-spec analyze actions
+        self.action_decode_as = QAction('&Decode As...', self)
         self.action_display_filters = QAction('&Display Filters', self)
-        analyze_menu.addAction(self.action_display_filters)
 
         # Statistics menu
         statistics_menu = menubar.addMenu('&Statistics')
-        self.action_summary = QAction('&Summary', self)
-        statistics_menu.addAction(self.action_summary)
-        self.action_protocol_hierarchy = QAction('&Protocol Hierarchy', self)
+        self.action_capture_file_properties = QAction('Capture File &Properties', self)
+        statistics_menu.addAction(self.action_capture_file_properties)
+        self.action_resolved_addresses = QAction('&Resolved Addresses', self)
+        statistics_menu.addAction(self.action_resolved_addresses)
+        self.action_protocol_hierarchy = QAction('Protocol &Hierarchy', self)
         statistics_menu.addAction(self.action_protocol_hierarchy)
         self.action_conversations = QAction('&Conversations', self)
         statistics_menu.addAction(self.action_conversations)
         self.action_endpoints = QAction('&Endpoints', self)
         statistics_menu.addAction(self.action_endpoints)
+        self.action_packet_lengths = QAction('Packet &Lengths', self)
+        statistics_menu.addAction(self.action_packet_lengths)
+        self.action_flow_graph = QAction('&Flow Graph', self)
+        statistics_menu.addAction(self.action_flow_graph)
+        self.action_http_statistics = QAction('&HTTP', self)
+        statistics_menu.addAction(self.action_http_statistics)
+        self.action_ipv4_statistics = QAction('I&Pv4 Statistics', self)
+        statistics_menu.addAction(self.action_ipv4_statistics)
+        self.action_ipv6_statistics = QAction('IPv&6 Statistics', self)
+        statistics_menu.addAction(self.action_ipv6_statistics)
+
+        # Hidden non-spec statistics actions
+        self.action_summary = QAction('&Summary', self)
         self.action_io_graph = QAction('&I/O Graph', self)
-        statistics_menu.addAction(self.action_io_graph)
 
-        # Advanced Analysis menu
-        advanced_menu = menubar.addMenu('&Advanced Analysis')
+        # Hidden menus not in current tab feature specs (keep actions for compatibility)
         self.action_advanced_dashboard = QAction('&Dashboard', self)
-        advanced_menu.addAction(self.action_advanced_dashboard)
         self.action_advanced_demo_packet = QAction('&Demo Packet', self)
-        advanced_menu.addAction(self.action_advanced_demo_packet)
         self.action_advanced_draw_topo = QAction('&Draw Topo', self)
-        advanced_menu.addAction(self.action_advanced_draw_topo)
         self.action_advanced_ai_analyst = QAction('&AI Analyst', self)
-        advanced_menu.addAction(self.action_advanced_ai_analyst)
 
-        # Help menu
-        help_menu = menubar.addMenu('&Help')
         self.action_contents = QAction('&Contents', self)
         self.action_contents.setShortcut(QKeySequence.HelpContents)
-        help_menu.addAction(self.action_contents)
-        help_menu.addSeparator()
         self.action_about = QAction('&About Packetra', self)
-        help_menu.addAction(self.action_about)
         self.action_about_qt = QAction('About &Qt', self)
-        help_menu.addAction(self.action_about_qt)
 
     def _build_toolbar(self):
-        """Xây dựng toolbar"""
+        """XĂ¢y dá»±ng toolbar"""
         icon_dir = Path(__file__).resolve().parent.parent / 'image' / 'main_toolbar_items'
 
         def toolbar_icon(name: str) -> QIcon:
@@ -1809,22 +1957,99 @@ class ApplicationWindow(QMainWindow):
         self.toolbar.addWidget(spacer)
 
     def _connect_signals(self):
-        """Kết nối tất cả signals"""
+        """Ket noi tat ca signals."""
         # File menu
         self.action_open.triggered.connect(self._on_open_file)
+        self.action_merge.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Merge...'))
         self.action_save.triggered.connect(self._on_save_file)
         self.action_save_as.triggered.connect(self._on_save_as_file)
+        self.action_separate.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Separate'))
+        self.action_export.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Export Specified Packets...'))
+        self.action_print.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Print...'))
+        self.action_export_flow_csv.triggered.connect(self._on_export_flow_csv_current)
+        self.action_export_selected_flow_csv.triggered.connect(self._on_export_flow_csv_selected)
         self.action_exit.triggered.connect(self.close)
 
+        # Edit menu
+        self.action_copy.triggered.connect(self._on_copy)
+        self.action_find.triggered.connect(self._on_search)
+        self.action_find_next.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Find Next'))
+        self.action_find_previous.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Find Previous'))
+        self.action_mark_unmark_selected.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Mark/Unmark Selected'))
+        self.action_mark_unmark_all_displayed.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Mark/Unmark All Displayed Packets'))
+        self.action_next_mark.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Next Mark'))
+        self.action_previous_mark.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Previous Mark'))
+        self.action_ignore_unignore_selected.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Ignore/Unignore Selected'))
+        self.action_ignore_unignore_all_displayed.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Ignore/Unignore All Displayed'))
+        self.action_packet_comment.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Packet Comment...'))
+        self.action_delete_all_packet_comments.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Delete All Packet Comments'))
+        self.action_preferences.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Preferences...'))
+
+        # View menu
+        self.action_view_main_toolbar.triggered.connect(self._on_toggle_main_toolbar)
+        self.action_view_filter_toolbar.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Filter Toolbar'))
+        self.action_view_statusbar.triggered.connect(self._on_toggle_statusbar)
+        self.action_view_packet_list.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet List'))
+        self.action_view_packet_details.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet Details'))
+        self.action_view_packet_bytes.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet Bytes'))
+        self.action_view_packet_diagram.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet Diagram'))
+        self.action_zoom_in.triggered.connect(self._on_zoom_in)
+        self.action_zoom_out.triggered.connect(self._on_zoom_out)
+        self.action_zoom_reset.triggered.connect(self._on_zoom_reset)
+        self.action_expand_subtrees.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Expand Subtrees'))
+        self.action_collapse_subtrees.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Collapse Subtrees'))
+        self.action_expand_all.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Expand All'))
+        self.action_collapse_all.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Collapse All'))
+        self.action_view_colorize_packet_list.triggered.connect(self._on_toggle_color_rules)
+        self.action_view_colorize_conversation.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Colorize Conversation'))
+        self.action_view_coloring_rules.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Coloring Rules...'))
+        self.action_view_resize_all_columns.triggered.connect(self._on_resize_columns)
+        self.action_view_show_packet_new_window.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Show Packet in New Window'))
+        self.action_view_redissect_packets.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Redissect Packets'))
+        self.action_view_reload_as_format_capture.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Reload as File Format/Capture'))
+        self.action_view_reload.triggered.connect(self._on_reload_file)
+
+        # Go menu
+        self.action_go_back.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Back'))
+        self.action_go_forward.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Forward'))
+        self.action_go_to_packet.triggered.connect(self._on_toggle_go_to_packet)
+        self.action_go_to_corresponding_packet.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Go to Corresponding Packet'))
+        self.action_go_previous_packet.triggered.connect(self._on_go_previous_packet)
+        self.action_go_next_packet.triggered.connect(self._on_go_next_packet)
+        self.action_go_first_packet.triggered.connect(self._on_go_first_packet)
+        self.action_go_last_packet.triggered.connect(self._on_go_last_packet)
+        self.action_go_previous_packet_conversation.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Previous Packet In Conversation'))
+        self.action_go_next_packet_conversation.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Next Packet In Conversation'))
+        self.action_go_auto_scroll_live_capture.triggered.connect(self._on_toggle_auto_scroll)
+
         # Capture menu
-        self.action_interfaces.triggered.connect(self.show_interface_selector)
+        self.action_capture_options.triggered.connect(self._on_capture_options)
         self.action_start_capture.triggered.connect(self._on_start_capture)
         self.action_stop_capture.triggered.connect(self._on_stop_capture)
         self.action_restart_capture.triggered.connect(self._on_restart_capture)
+        self.action_capture_filters.triggered.connect(lambda: self._on_menu_feature_placeholder('Capture > Capture Filters...'))
+        self.action_refresh_interfaces.triggered.connect(self._on_refresh_interfaces)
 
-        # Statistics
-        self.action_summary.triggered.connect(self._on_summary)
+        # Analyze menu
+        self.action_display_filter_macros.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Display Filter Macros...'))
+        self.action_display_filter_expression.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Display Filter Expression...'))
+        self.action_apply_as_column.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Apply as Column'))
+        self.action_apply_as_filter.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Apply as Filter'))
+        self.action_conversation_filter.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Conversation Filter'))
+        self.action_follow_stream.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Follow'))
+        self.action_expert_info.triggered.connect(self._on_open_expert_information)
+
+        # Statistics menu
+        self.action_capture_file_properties.triggered.connect(self._on_open_capture_properties)
+        self.action_resolved_addresses.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Resolved Addresses'))
+        self.action_protocol_hierarchy.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Protocol Hierarchy'))
         self.action_conversations.triggered.connect(self._on_conversations)
+        self.action_endpoints.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Endpoints'))
+        self.action_packet_lengths.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Packet Lengths'))
+        self.action_flow_graph.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Flow Graph'))
+        self.action_http_statistics.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > HTTP'))
+        self.action_ipv4_statistics.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > IPv4 Statistics'))
+        self.action_ipv6_statistics.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > IPv6 Statistics'))
 
         # Advanced Analysis
         self.action_advanced_dashboard.triggered.connect(lambda: self._on_advanced_analysis_action('Dashboard'))
@@ -1887,13 +2112,13 @@ class ApplicationWindow(QMainWindow):
         result = set()
         tokens = [t.strip() for t in text.split(',') if t.strip()]
         if not tokens:
-            raise ValueError('Hãy nhập gói tin (vd: 5,8,10-20) hoặc all.')
+            raise ValueError('HĂ£y nháº­p gĂ³i tin (vd: 5,8,10-20) hoáº·c all.')
 
         for token in tokens:
             if '-' in token:
                 parts = [p.strip() for p in token.split('-', 1)]
                 if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                    raise ValueError(f'Khoảng không hợp lệ: {token}')
+                    raise ValueError(f'Khoáº£ng khĂ´ng há»£p lá»‡: {token}')
                 start = int(parts[0])
                 end = int(parts[1])
                 if start > end:
@@ -1904,14 +2129,14 @@ class ApplicationWindow(QMainWindow):
                 continue
 
             if not token.isdigit():
-                raise ValueError(f'Giá trị không hợp lệ: {token}')
+                raise ValueError(f'GiĂ¡ trá»‹ khĂ´ng há»£p lá»‡: {token}')
             value = int(token)
             if value in available_set:
                 result.add(value)
 
         selected = sorted(result)
         if not selected:
-            raise ValueError('Không có gói nào khớp với lựa chọn hiện tại.')
+            raise ValueError('KhĂ´ng cĂ³ gĂ³i nĂ o khá»›p vá»›i lá»±a chá»n hiá»‡n táº¡i.')
         return selected
 
     def _protocol_number_from_record(self, record) -> int:
@@ -1941,148 +2166,107 @@ class ApplicationWindow(QMainWindow):
         return mean_v, std_v, max_v, min_v
 
     def _build_ai_traffic_rows(self, records: list) -> list[list]:
-        flows = {}
-
-        for record in records:
-            src = str(getattr(record, 'src', '') or '')
-            dst = str(getattr(record, 'dst', '') or '')
-            sport = int(getattr(record, 'sport', 0) or 0)
-            dport = int(getattr(record, 'dport', 0) or 0)
-            proto_num = self._protocol_number_from_record(record)
-            ts = float(getattr(record, 'epoch_time', 0.0) or 0.0)
-            length = int(getattr(record, 'length', 0) or 0)
-            raw = getattr(record, 'raw', None)
-
-            tcp_flags = 0
-            tcp_window = 0
-            payload_len = 0
-            header_len = 8
-            if raw is not None:
-                try:
-                    if raw.haslayer(TCP):
-                        tcp = raw[TCP]
-                        tcp_flags = int(getattr(tcp, 'flags', 0) or 0)
-                        tcp_window = int(getattr(tcp, 'window', 0) or 0)
-                        payload_len = int(len(bytes(getattr(tcp, 'payload', b'')) or b''))
-                        dataofs = int(getattr(tcp, 'dataofs', 5) or 5)
-                        header_len = max(20, dataofs * 4)
-                    elif raw.haslayer(UDP):
-                        udp = raw[UDP]
-                        payload_len = int(len(bytes(getattr(udp, 'payload', b'')) or b''))
-                        header_len = 8
-                except Exception:
-                    pass
-
-            key = (src, sport, dst, dport, proto_num)
-            if key not in flows:
-                flows[key] = {
-                    'src': src,
-                    'dst': dst,
-                    'sport': sport,
-                    'dport': dport,
-                    'proto': proto_num,
-                    'first_ts': ts,
-                    'last_ts': ts,
-                    'times': [],
-                    'lengths': [],
-                    'header_lengths': [],
-                    'payload_bytes': 0,
-                    'fin': 0,
-                    'syn': 0,
-                    'rst': 0,
-                    'psh': 0,
-                    'ack': 0,
-                    'urg': 0,
-                    'cwe': 0,
-                    'ece': 0,
-                    'init_win_fwd': tcp_window,
-                    'act_data_pkt_fwd': 0,
-                    'min_seg_size_forward': header_len,
-                }
-
-            flow = flows[key]
-            flow['first_ts'] = min(float(flow['first_ts']), ts)
-            flow['last_ts'] = max(float(flow['last_ts']), ts)
-            flow['times'].append(ts)
-            flow['lengths'].append(length)
-            flow['header_lengths'].append(header_len)
-            flow['payload_bytes'] += payload_len
-            flow['fin'] += 1 if (tcp_flags & 0x01) else 0
-            flow['syn'] += 1 if (tcp_flags & 0x02) else 0
-            flow['rst'] += 1 if (tcp_flags & 0x04) else 0
-            flow['psh'] += 1 if (tcp_flags & 0x08) else 0
-            flow['ack'] += 1 if (tcp_flags & 0x10) else 0
-            flow['urg'] += 1 if (tcp_flags & 0x20) else 0
-            flow['ece'] += 1 if (tcp_flags & 0x40) else 0
-            flow['cwe'] += 1 if (tcp_flags & 0x80) else 0
-            if payload_len > 0:
-                flow['act_data_pkt_fwd'] += 1
-            flow['min_seg_size_forward'] = min(int(flow['min_seg_size_forward']), header_len)
-
+        packets = [getattr(r, 'raw', None) for r in records if getattr(r, 'raw', None) is not None]
+        if not packets:
+            return []
+        source_rows = extract_cic_rows_from_packets(packets)
         rows = []
-        for (_src, _sport, _dst, _dport, _proto), flow in sorted(flows.items(), key=lambda kv: kv[1]['first_ts']):
-            src = str(flow['src'])
-            dst = str(flow['dst'])
-            sport = int(flow['sport'])
-            dport = int(flow['dport'])
-            proto_num = int(flow['proto'])
-            flow_id = f'{src}-{dst}-{sport}-{dport}-{proto_num}'
-            first_ts = float(flow['first_ts'])
-            last_ts = float(flow['last_ts'])
-            duration_us = max(0, int(round((last_ts - first_ts) * 1_000_000.0)))
-            duration_sec = float(duration_us) / 1_000_000.0 if duration_us > 0 else 0.0
-
-            lengths = [float(v) for v in flow['lengths']]
-            header_lengths = [float(v) for v in flow['header_lengths']]
-            total_fwd_packets = int(len(lengths))
-            total_bwd_packets = 0
-            total_len_fwd = int(sum(lengths))
-            total_len_bwd = 0
-
-            fwd_mean, fwd_std, fwd_max, fwd_min = self._calc_basic_stats(lengths)
-            pkt_mean, pkt_std, pkt_max, pkt_min = self._calc_basic_stats(lengths)
-            fwd_hdr_mean, _, _, _ = self._calc_basic_stats(header_lengths)
-
-            times_sorted = sorted(float(v) for v in flow['times'])
-            iats = []
-            for idx in range(1, len(times_sorted)):
-                iats.append((times_sorted[idx] - times_sorted[idx - 1]) * 1_000_000.0)
-            iat_mean, iat_std, iat_max, iat_min = self._calc_basic_stats(iats)
-
-            flow_bytes_per_s = (total_len_fwd / duration_sec) if duration_sec > 0 else 0.0
-            flow_pkts_per_s = ((total_fwd_packets + total_bwd_packets) / duration_sec) if duration_sec > 0 else 0.0
-            fwd_pkts_per_s = (total_fwd_packets / duration_sec) if duration_sec > 0 else 0.0
-
-            avg_packet_size = ((total_len_fwd + total_len_bwd) / max(1, (total_fwd_packets + total_bwd_packets)))
-            down_up_ratio = (total_bwd_packets / max(1, total_fwd_packets))
-            pkt_var = float(pkt_std ** 2)
-
-            timestamp = datetime.fromtimestamp(first_ts).strftime('%d/%m/%Y %H:%M:%S')
-
-            row = [
-                flow_id, src, sport, dst, dport, proto_num, timestamp,
-                duration_us, total_fwd_packets, total_bwd_packets, total_len_fwd, total_len_bwd,
-                fwd_max, fwd_min, fwd_mean, fwd_std,
-                0, 0, 0, 0,
-                flow_bytes_per_s, flow_pkts_per_s, iat_mean, iat_std, iat_max, iat_min,
-                duration_us, iat_mean, iat_std, iat_max, iat_min,
-                0, 0, 0, 0, 0,
-                int(flow['psh'] > 0), 0, int(flow['urg'] > 0), 0,
-                int(round(fwd_hdr_mean)), 0,
-                fwd_pkts_per_s, 0,
-                pkt_min, pkt_max, pkt_mean, pkt_std, pkt_var,
-                int(flow['fin']), int(flow['syn']), int(flow['rst']), int(flow['psh']),
-                int(flow['ack']), int(flow['urg']), int(flow['cwe']), int(flow['ece']),
-                down_up_ratio, avg_packet_size, fwd_mean, 0,
-                int(round(fwd_hdr_mean)),
-                0, 0, 0, 0, 0, 0,
-                total_fwd_packets, total_len_fwd, 0, 0,
-                int(flow['init_win_fwd']), 0, int(flow['act_data_pkt_fwd']), int(flow['min_seg_size_forward']),
-                0, 0, 0, 0, 0, 0, 0, 0,
-                'BENIGN'
-            ]
+        source_key_map = {
+            'Source IP': 'src_ip',
+            'Source Port': 'src_port',
+            'Destination IP': 'dst_ip',
+            'Destination Port': 'dst_port',
+            'Protocol': 'protocol',
+            'Timestamp': 'timestamp',
+            'Flow Duration': 'flow_duration',
+            'Total Fwd Packets': 'tot_fwd_pkts',
+            'Total Backward Packets': 'tot_bwd_pkts',
+            'Total Length of Fwd Packets': 'totlen_fwd_pkts',
+            'Total Length of Bwd Packets': 'totlen_bwd_pkts',
+            'Fwd Packet Length Max': 'fwd_pkt_len_max',
+            'Fwd Packet Length Min': 'fwd_pkt_len_min',
+            'Fwd Packet Length Mean': 'fwd_pkt_len_mean',
+            'Fwd Packet Length Std': 'fwd_pkt_len_std',
+            'Bwd Packet Length Max': 'bwd_pkt_len_max',
+            'Bwd Packet Length Min': 'bwd_pkt_len_min',
+            'Bwd Packet Length Mean': 'bwd_pkt_len_mean',
+            'Bwd Packet Length Std': 'bwd_pkt_len_std',
+            'Flow Bytes/s': 'flow_byts_s',
+            'Flow Packets/s': 'flow_pkts_s',
+            'Flow IAT Mean': 'flow_iat_mean',
+            'Flow IAT Std': 'flow_iat_std',
+            'Flow IAT Max': 'flow_iat_max',
+            'Flow IAT Min': 'flow_iat_min',
+            'Fwd IAT Total': 'fwd_iat_tot',
+            'Fwd IAT Mean': 'fwd_iat_mean',
+            'Fwd IAT Std': 'fwd_iat_std',
+            'Fwd IAT Max': 'fwd_iat_max',
+            'Fwd IAT Min': 'fwd_iat_min',
+            'Bwd IAT Total': 'bwd_iat_tot',
+            'Bwd IAT Mean': 'bwd_iat_mean',
+            'Bwd IAT Std': 'bwd_iat_std',
+            'Bwd IAT Max': 'bwd_iat_max',
+            'Bwd IAT Min': 'bwd_iat_min',
+            'Fwd PSH Flags': 'fwd_psh_flags',
+            'Bwd PSH Flags': 'bwd_psh_flags',
+            'Fwd URG Flags': 'fwd_urg_flags',
+            'Bwd URG Flags': 'bwd_urg_flags',
+            'Fwd Header Length': 'fwd_header_len',
+            'Bwd Header Length': 'bwd_header_len',
+            'Fwd Packets/s': 'fwd_pkts_s',
+            'Bwd Packets/s': 'bwd_pkts_s',
+            'Min Packet Length': 'pkt_len_min',
+            'Max Packet Length': 'pkt_len_max',
+            'Packet Length Mean': 'pkt_len_mean',
+            'Packet Length Std': 'pkt_len_std',
+            'Packet Length Variance': 'pkt_len_var',
+            'FIN Flag Count': 'fin_flag_cnt',
+            'SYN Flag Count': 'syn_flag_cnt',
+            'RST Flag Count': 'rst_flag_cnt',
+            'PSH Flag Count': 'psh_flag_cnt',
+            'ACK Flag Count': 'ack_flag_cnt',
+            'URG Flag Count': 'urg_flag_cnt',
+            'CWE Flag Count': 'cwr_flag_count',
+            'ECE Flag Count': 'ece_flag_cnt',
+            'Down/Up Ratio': 'down_up_ratio',
+            'Average Packet Size': 'pkt_size_avg',
+            'Avg Fwd Segment Size': 'fwd_seg_size_avg',
+            'Avg Bwd Segment Size': 'bwd_seg_size_avg',
+            'Fwd Avg Bytes/Bulk': 'fwd_byts_b_avg',
+            'Fwd Avg Packets/Bulk': 'fwd_pkts_b_avg',
+            'Fwd Avg Bulk Rate': 'fwd_blk_rate_avg',
+            'Bwd Avg Bytes/Bulk': 'bwd_byts_b_avg',
+            'Bwd Avg Packets/Bulk': 'bwd_pkts_b_avg',
+            'Bwd Avg Bulk Rate': 'bwd_blk_rate_avg',
+            'Subflow Fwd Packets': 'subflow_fwd_pkts',
+            'Subflow Fwd Bytes': 'subflow_fwd_byts',
+            'Subflow Bwd Packets': 'subflow_bwd_pkts',
+            'Subflow Bwd Bytes': 'subflow_bwd_byts',
+            'Init_Win_bytes_forward': 'init_fwd_win_byts',
+            'Init_Win_bytes_backward': 'init_bwd_win_byts',
+            'act_data_pkt_fwd': 'fwd_act_data_pkts',
+            'min_seg_size_forward': 'fwd_seg_size_min',
+            'Active Mean': 'active_mean',
+            'Active Std': 'active_std',
+            'Active Max': 'active_max',
+            'Active Min': 'active_min',
+            'Idle Mean': 'idle_mean',
+            'Idle Std': 'idle_std',
+            'Idle Max': 'idle_max',
+            'Idle Min': 'idle_min',
+        }
+        for src in source_rows:
+            flow_id = f"{src.get('src_ip', '')}-{src.get('dst_ip', '')}-{src.get('src_port', 0)}-{src.get('dst_port', 0)}-{src.get('protocol', '')}"
+            row = []
+            for col in self.AI_TRAFFIC_COLUMNS:
+                name = str(col).strip()
+                if name == 'Label':
+                    row.append('BENIGN')
+                elif name == 'Flow ID':
+                    row.append(flow_id)
+                else:
+                    row.append(src.get(source_key_map.get(name, ''), 0))
             rows.append(row)
-
         return rows
 
     def _traffic_to_ml(self, traffic_header: list[str], traffic_rows: list[list]) -> tuple[list[str], list[list]]:
@@ -2282,7 +2466,67 @@ class ApplicationWindow(QMainWindow):
                     f'proto={proto} | duration_us={duration} | fwd_pkts={packets} | fwd_bytes={bytes_}'
                 )
 
+        lines.append('')
+        lines.append('Per-flow predictions:')
+        for i, (row, pred) in enumerate(zip(traffic_rows, predictions), start=1):
+            flow_id = get(row, 'Flow ID', '-')
+            src = f"{get(row, 'Source IP', '-')}: {get(row, 'Source Port', '-')}"
+            dst = f"{get(row, 'Destination IP', '-')}: {get(row, 'Destination Port', '-')}"
+            proto = get(row, 'Protocol', '-')
+            lines.append(
+                f"- flow#{i} {flow_id} | {src} -> {dst} | proto={proto} | "
+                f"label={pred.get('label', '-')} | confidence={float(pred.get('confidence', 0.0)):.2%}"
+            )
+
         return '\n'.join(lines)
+
+    def _save_ai_analyst_csv_outputs(
+        self,
+        traffic_header: list[str],
+        traffic_rows: list[list],
+        ml_header: list[str],
+        ml_rows: list[list],
+        predictions: list[dict],
+    ) -> tuple[str, str]:
+        out_dir = Path.cwd() / 'docs' / 'ai_analyst_outputs'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        ml_csv_path = out_dir / f'ai_analyst_ml_input_{ts}.csv'
+        pred_csv_path = out_dir / f'ai_analyst_predictions_{ts}.csv'
+
+        with ml_csv_path.open('w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(ml_header)
+            writer.writerows(ml_rows)
+
+        t_index = {name: idx for idx, name in enumerate(traffic_header)}
+        def t_get(row, name, default=''):
+            idx = t_index.get(name)
+            if idx is None or idx >= len(row):
+                return default
+            return row[idx]
+
+        pred_header = [
+            'Flow Index', 'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Destination Port',
+            'Protocol', 'Predicted Label', 'Confidence'
+        ]
+        with pred_csv_path.open('w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(pred_header)
+            for i, (row, pred) in enumerate(zip(traffic_rows, predictions), start=1):
+                writer.writerow([
+                    i,
+                    t_get(row, 'Flow ID', ''),
+                    t_get(row, 'Source IP', ''),
+                    t_get(row, 'Source Port', ''),
+                    t_get(row, 'Destination IP', ''),
+                    t_get(row, 'Destination Port', ''),
+                    t_get(row, 'Protocol', ''),
+                    pred.get('label', ''),
+                    f"{float(pred.get('confidence', 0.0)):.6f}",
+                ])
+
+        return str(ml_csv_path), str(pred_csv_path)
 
     def _open_ai_analyst_dialog(self):
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
@@ -2304,7 +2548,6 @@ class ApplicationWindow(QMainWindow):
         packet_input.setPlaceholderText('Vi du: 5,8,10-20 hoac all')
         packet_input.setText('all')
         root.addWidget(packet_input)
-
         status = QTextEdit(dialog)
         status.setReadOnly(True)
         status.setMinimumHeight(280)
@@ -2346,6 +2589,9 @@ class ApplicationWindow(QMainWindow):
 
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
                 analysis_text = self._build_ai_analysis_text(traffic_header, traffic_rows, predictions)
+                ml_csv_path, pred_csv_path = self._save_ai_analyst_csv_outputs(
+                    traffic_header, traffic_rows, ml_header, ml_rows, predictions
+                )
 
                 state['traffic_header'] = traffic_header
                 state['traffic_rows'] = traffic_rows
@@ -2358,6 +2604,9 @@ class ApplicationWindow(QMainWindow):
                     f"- So goi chon: {len(selected_records)}\n"
                     f"- TrafficLabelling rows: {len(traffic_rows)} | cols: {len(traffic_header)}\n"
                     f"- Inference feature rows: {len(ml_rows)} | cols: {len(ml_header)} | Label removed\n\n"
+                    f"- Flow mode: Strict Upstream (single standard mode)\n"
+                    f"CSV ML input (CIC-like): {ml_csv_path}\n"
+                    f"CSV Predictions per-flow: {pred_csv_path}\n\n"
                     f"{analysis_text}"
                 )
             except Exception as exc:
@@ -2372,7 +2621,7 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def show_interface_selector(self):
-        """Hiển thị màn hình chọn interface"""
+        """Hiá»ƒn thá»‹ mĂ n hĂ¬nh chá»n interface"""
         if not self.iface_selector_view:
             self.iface_selector_view = InterfaceSelectorView()
             self.iface_selector_view.capture_started.connect(self._on_capture_started)
@@ -2393,7 +2642,7 @@ class ApplicationWindow(QMainWindow):
             self.iface_selector_view.refresh_interface_preferences()
 
     def show_capture_view(self, iface: str, iface_display_name: str, capture_filter: str = ''):
-        """Hiển thị màn hình capture"""
+        """Hiá»ƒn thá»‹ mĂ n hĂ¬nh capture"""
         if not self.capture_view:
             self.capture_view = CaptureView(iface, iface_display_name, capture_filter)
             self.capture_view.status_changed.connect(self._on_capture_status_changed)
@@ -2488,9 +2737,13 @@ class ApplicationWindow(QMainWindow):
             self.action_stay_last_btn.blockSignals(True)
             self.action_stay_last_btn.setChecked(bool(options_defaults.get('autoscroll', True)))
             self.action_stay_last_btn.blockSignals(False)
+        if hasattr(self, 'action_go_auto_scroll_live_capture'):
+            self.action_go_auto_scroll_live_capture.blockSignals(True)
+            self.action_go_auto_scroll_live_capture.setChecked(bool(options_defaults.get('autoscroll', True)))
+            self.action_go_auto_scroll_live_capture.blockSignals(False)
 
     def _update_toolbar_state(self, mode: str):
-        """Cập nhật trạng thái toolbar theo mode"""
+        """Cáº­p nháº­t tráº¡ng thĂ¡i toolbar theo mode"""
         has_capture = bool(self.capture_view)
 
         if mode == 'selector':
@@ -2545,33 +2798,47 @@ class ApplicationWindow(QMainWindow):
         self.action_stop_btn.setEnabled(has_capture and (is_running or is_stopping))
 
     def _on_capture_started(self, iface, iface_display_name, capture_filter):
-        """Xử lý khi bắt đầu capture"""
+        """Xá»­ lĂ½ khi báº¯t Ä‘áº§u capture"""
         self.show_capture_view(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self._on_start_capture()
 
     def _on_open_recent_file(self, path: str):
-        if not path:
+        candidate = str(path or '').strip()
+        if not candidate:
             return
-        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        normalized_path = os.path.abspath(os.path.normpath(candidate))
+        if not os.path.exists(normalized_path):
+            QMessageBox.warning(self, 'Open', f'File khong ton tai:\n{normalized_path}')
+            return
+        proceed = self._prompt_save_before_destructive_action('Má»Ÿ file má»›i sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
         if not proceed:
             return
         self.show_capture_view('', 'Offline', '')
-        if self.capture_view:
-            self.capture_view.load_file(path)
-            self._sync_capture_buttons()
-            self._update_capture_window_title()
-            self._refresh_status_metrics()
+        if not self.capture_view:
+            QMessageBox.critical(self, 'Open', 'Khong tao duoc Capture View de mo file.')
+            return
+        try:
+            self.capture_view.load_file(normalized_path)
+        except Exception as exc:
+            QMessageBox.critical(self, 'Open', f'Khong mo duoc file:\n{normalized_path}\n\n{exc}')
+            return
+        if not getattr(self.capture_view, 'records', None):
+            QMessageBox.warning(self, 'Open', f'Mo file xong nhung khong co packet:\n{normalized_path}')
+            return
+        self._sync_capture_buttons()
+        self._update_capture_window_title()
+        self._refresh_status_metrics()
 
     def _on_start_capture(self):
-        """Bắt đầu capture"""
+        """Báº¯t Ä‘áº§u capture"""
         if not self.capture_view:
             return
 
         if self.capture_view.is_capturing():
             return
 
-        proceed = self._prompt_save_before_destructive_action('Start capture mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('Start capture má»›i sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
         if not proceed:
             return
 
@@ -2581,20 +2848,20 @@ class ApplicationWindow(QMainWindow):
         self._update_capture_window_title()
 
     def _on_stop_capture(self):
-        """Dừng capture"""
+        """Dá»«ng capture"""
         if self.capture_view:
             self.capture_view.stop_capture()
             self._sync_capture_buttons()
 
     def _on_restart_capture(self):
-        """Khởi động lại capture"""
+        """Khá»Ÿi Ä‘á»™ng láº¡i capture"""
         if not self.capture_view:
             return
 
         if self.capture_view.is_capturing():
             return
 
-        proceed = self._prompt_save_before_destructive_action('Restart capture sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('Restart capture sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
         if not proceed:
             return
 
@@ -2603,8 +2870,8 @@ class ApplicationWindow(QMainWindow):
         self._update_capture_window_title()
 
     def _on_open_file(self):
-        """Mở file PCAP"""
-        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        """Má»Ÿ file PCAP"""
+        proceed = self._prompt_save_before_destructive_action('Má»Ÿ file má»›i sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
         if not proceed:
             return
 
@@ -2619,35 +2886,184 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
 
     def _on_save_file(self):
-        """Lưu file PCAP"""
+        """LÆ°u file PCAP"""
         if self.capture_view:
             self.capture_view.save_file()
             self._update_capture_window_title()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
         else:
-            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
+            QMessageBox.information(self, 'Info', 'KhĂ´ng cĂ³ dá»¯ liá»‡u Ä‘á»ƒ lÆ°u.')
 
     def _on_save_as_file(self):
-        """Lưu file PCAP với tên mới"""
+        """LÆ°u file PCAP vá»›i tĂªn má»›i"""
         if self.capture_view:
             self.capture_view.save_file(force_dialog=True)
             self._update_capture_window_title()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
         else:
-            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
+            QMessageBox.information(self, 'Info', 'KhĂ´ng cĂ³ dá»¯ liá»‡u Ä‘á»ƒ lÆ°u.')
+
+    def _render_flow_behavior_text(self, result: dict) -> str:
+        flow_count = int(result.get("flow_count", 0) or 0)
+        lines = [f"Da trich xuat {flow_count} flows."]
+        lines.append(f"Model status: {str(result.get('model_status', 'ok') or 'ok')}")
+        summaries = list(result.get("summaries", []) or [])
+        if not summaries:
+            lines.append("Khong co flow de phan tich hanh vi.")
+            return "\n".join(lines)
+        lines.append("")
+        lines.append("Tom tat hanh vi:")
+        for item in summaries[:30]:
+            src = item.get("src_ip", "-")
+            dst = item.get("dst_ip", "-")
+            proto = item.get("protocol", "-")
+            sev = item.get("severity", "normal")
+            summary = item.get("summary", "")
+            lines.append(f"- [{sev}] {src} -> {dst} ({proto}): {summary}")
+        if len(summaries) > 30:
+            lines.append(f"... va {len(summaries) - 30} flows khac.")
+        model_counts = Counter()
+        for item in summaries:
+            pred = item.get("model_prediction")
+            if pred:
+                model_counts[str(pred)] += 1
+        if model_counts:
+            lines.append("")
+            lines.append("Phan bo nhan model:")
+            for label, cnt in model_counts.most_common(10):
+                lines.append(f"- {label}: {cnt} flow(s)")
+        return "\n".join(lines)
+
+    def _build_flow_model_adapter(self):
+        model_path = self.AI_MODEL_DIR / self.AI_MODEL_FILE
+        feature_path = self.AI_MODEL_DIR / self.AI_FEATURE_COLUMNS_FILE
+        encoder_path = self.AI_MODEL_DIR / self.AI_LABEL_ENCODER_FILE
+        return PacketraModelAdapter(
+            model_path=str(model_path),
+            feature_columns_path=str(feature_path),
+            label_encoder_path=str(encoder_path),
+            fallback_labels=list(self.AI_FALLBACK_LABELS),
+        )
+
+    def _on_export_flow_csv_current(self):
+        if not self.capture_view or not getattr(self.capture_view, "records", None):
+            QMessageBox.information(self, "Export Flow CSV", "Khong co du lieu capture de export.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Flow CSV (Current Capture)",
+            str(Path.cwd() / f"flow_features_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+        try:
+            if self.capture_view.loaded_file_path:
+                csv_path, flows = export_pcap_to_csv(self.capture_view.loaded_file_path, file_path)
+            else:
+                packets = [r.raw for r in self.capture_view.records if getattr(r, "raw", None) is not None]
+                csv_path, flows = export_packets_to_csv(packets, file_path)
+            model_adapter = self._build_flow_model_adapter()
+            behavior = analyze_flows(flows, use_model=model_adapter.loaded, model_adapter=model_adapter)
+            QMessageBox.information(
+                self,
+                "Export Flow CSV",
+                f"Export thanh cong:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Flow CSV", f"Export that bai: {exc}")
+
+    def _on_export_flow_csv_selected(self):
+        if not self.capture_view:
+            QMessageBox.information(self, "Export Selected Flow CSV", "Khong co du lieu capture.")
+            return
+        selected_packets = self.capture_view.get_selected_raw_packets()
+        if not selected_packets:
+            QMessageBox.warning(self, "Export Selected Flow CSV", "Ban can chon packet trong bang truoc khi export.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Selected Packets to Flow CSV",
+            str(Path.cwd() / f"selected_flow_features_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+        try:
+            csv_path, flows = export_packets_to_csv(selected_packets, file_path)
+            model_adapter = self._build_flow_model_adapter()
+            behavior = analyze_flows(flows, use_model=model_adapter.loaded, model_adapter=model_adapter)
+            warning = (
+                "Cac packet duoc chon co the chua du toan bo flow, feature chi phan anh phan luu luong da chon.\n\n"
+            )
+            QMessageBox.information(
+                self,
+                "Export Selected Flow CSV",
+                f"{warning}Export thanh cong:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Selected Flow CSV", f"Export that bai: {exc}")
 
     def _on_search(self):
-        """Tìm kiếm"""
+        """TĂ¬m kiáº¿m"""
         if self.capture_view:
             self.capture_view.toggle_find_panel()
+
+    def _on_copy(self):
+        widget = QApplication.focusWidget()
+        if widget is not None and hasattr(widget, 'copy'):
+            try:
+                widget.copy()
+                return
+            except Exception:
+                pass
+        self._on_menu_feature_placeholder('Edit > Copy')
+
+    def _on_toggle_main_toolbar(self, enabled: bool):
+        visible = bool(enabled)
+        self.toolbar.setVisible(visible)
+        if hasattr(self, 'action_view_main_toolbar'):
+            self.action_view_main_toolbar.blockSignals(True)
+            self.action_view_main_toolbar.setChecked(visible)
+            self.action_view_main_toolbar.blockSignals(False)
+
+    def _on_toggle_statusbar(self, enabled: bool):
+        visible = bool(enabled)
+        self.statusbar.setVisible(visible)
+        if hasattr(self, 'action_view_statusbar'):
+            self.action_view_statusbar.blockSignals(True)
+            self.action_view_statusbar.setChecked(visible)
+            self.action_view_statusbar.blockSignals(False)
+
+    def _on_refresh_interfaces(self):
+        if self.iface_selector_view:
+            try:
+                self.iface_selector_view.refresh_list_structure()
+                if hasattr(self.iface_selector_view, 'refresh_recent_files'):
+                    self.iface_selector_view.refresh_recent_files()
+                return
+            except Exception:
+                pass
+        self._on_menu_feature_placeholder('Capture > Refresh Interfaces')
+
+    def _on_menu_feature_placeholder(self, feature_name: str):
+        QMessageBox.information(
+            self,
+            'Menu Feature',
+            f'{feature_name}\n\nFeature name has been updated on menubar. Backend will be integrated in a later step.',
+        )
 
     def _on_close_capture_file(self):
         if not self.capture_view:
             return
 
-        proceed = self._prompt_save_before_destructive_action('Đóng file sẽ bỏ dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('ÄĂ³ng file sáº½ bá» dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
         if not proceed:
             return
 
@@ -2684,12 +3100,30 @@ class ApplicationWindow(QMainWindow):
         self.capture_view.toggle_go_to_packet_row()
 
     def _on_toggle_auto_scroll(self, enabled: bool):
+        checked = bool(enabled)
+        if hasattr(self, 'action_stay_last_btn'):
+            self.action_stay_last_btn.blockSignals(True)
+            self.action_stay_last_btn.setChecked(checked)
+            self.action_stay_last_btn.blockSignals(False)
+        if hasattr(self, 'action_go_auto_scroll_live_capture'):
+            self.action_go_auto_scroll_live_capture.blockSignals(True)
+            self.action_go_auto_scroll_live_capture.setChecked(checked)
+            self.action_go_auto_scroll_live_capture.blockSignals(False)
         if self.capture_view:
-            self.capture_view.set_auto_scroll_enabled(bool(enabled))
+            self.capture_view.set_auto_scroll_enabled(checked)
 
     def _on_toggle_color_rules(self, enabled: bool):
+        checked = bool(enabled)
+        if hasattr(self, 'action_color_btn'):
+            self.action_color_btn.blockSignals(True)
+            self.action_color_btn.setChecked(checked)
+            self.action_color_btn.blockSignals(False)
+        if hasattr(self, 'action_view_colorize_packet_list'):
+            self.action_view_colorize_packet_list.blockSignals(True)
+            self.action_view_colorize_packet_list.setChecked(checked)
+            self.action_view_colorize_packet_list.blockSignals(False)
         if self.capture_view:
-            self.capture_view.set_color_rules_enabled(bool(enabled))
+            self.capture_view.set_color_rules_enabled(checked)
 
     def _on_zoom_in(self):
         if self.capture_view:
@@ -2736,7 +3170,7 @@ class ApplicationWindow(QMainWindow):
         return True
 
     def _on_summary(self):
-        """Xem tóm tắt"""
+        """Xem tĂ³m táº¯t"""
         if self.capture_view:
             self.capture_view.show_summary()
 
@@ -2746,7 +3180,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.show_conversations()
 
     def _on_about(self):
-        """Hiển thị về Packetra"""
+        """Hiá»ƒn thá»‹ vá» Packetra"""
         dialog = QMessageBox(self)
         dialog.setWindowTitle('About Packetra')
         dialog.setIcon(QMessageBox.Information)
@@ -2763,7 +3197,7 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _on_about_qt(self):
-        """Hiển thị về Qt"""
+        """Hiá»ƒn thá»‹ vá» Qt"""
         dialog = QMessageBox(self)
         dialog.setWindowTitle('About Qt')
         dialog.setIcon(QMessageBox.Information)
@@ -2793,7 +3227,7 @@ class ApplicationWindow(QMainWindow):
         widget.resize(min(current_width, max_width), min(current_height, max_height))
 
     def _on_capture_status_changed(self, status):
-        """Cập nhật trạng thái capture"""
+        """Cáº­p nháº­t tráº¡ng thĂ¡i capture"""
         _ = status
         self._refresh_status_metrics()
         self._sync_capture_buttons()
@@ -3047,13 +3481,13 @@ class ApplicationWindow(QMainWindow):
                 'Average bits/s',
             ]
             stats_values = [
-                [safe_text(props.get('packet_count', 0), '0'), safe_text(props.get('stats_packets_displayed', '0 (0.0%)'), '0 (0.0%)'), safe_text(props.get('stats_packets_marked', '—'), '—')],
-                [safe_text(props.get('stats_time_span', '0.000'), '0.000'), safe_text(props.get('stats_time_span', '0.000'), '0.000'), '—'],
-                [safe_text(props.get('stats_average_pps', '0.0'), '0.0'), safe_text(props.get('stats_average_pps', '0.0'), '0.0'), '—'],
-                [safe_text(props.get('stats_average_packet_size', '0'), '0'), safe_text(props.get('stats_average_packet_size', '0'), '0'), '—'],
+                [safe_text(props.get('packet_count', 0), '0'), safe_text(props.get('stats_packets_displayed', '0 (0.0%)'), '0 (0.0%)'), safe_text(props.get('stats_packets_marked', 'â€”'), 'â€”')],
+                [safe_text(props.get('stats_time_span', '0.000'), '0.000'), safe_text(props.get('stats_time_span', '0.000'), '0.000'), 'â€”'],
+                [safe_text(props.get('stats_average_pps', '0.0'), '0.0'), safe_text(props.get('stats_average_pps', '0.0'), '0.0'), 'â€”'],
+                [safe_text(props.get('stats_average_packet_size', '0'), '0'), safe_text(props.get('stats_average_packet_size', '0'), '0'), 'â€”'],
                 [safe_text(props.get('total_bytes', 0), '0'), safe_text(props.get('stats_bytes_displayed', '0 (0.0%)'), '0 (0.0%)'), safe_text(props.get('stats_bytes_marked', '0'), '0')],
-                [safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), '—'],
-                [safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), '—'],
+                [safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), 'â€”'],
+                [safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), 'â€”'],
             ]
             for m, vals in zip(measurements, stats_values):
                 html.append('<tr>')
@@ -3109,20 +3543,20 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _on_capture_options(self):
-        """Mở Capture Options dialog"""
+        """Má»Ÿ Capture Options dialog"""
         dialog = CaptureOptionsDialog(self, self.capture_view)
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
             self._apply_capture_defaults_to_view()
 
     def closeEvent(self, event):
-        """Xử lý khi đóng ứng dụng"""
+        """Xá»­ lĂ½ khi Ä‘Ă³ng á»©ng dá»¥ng"""
         # 1. If capturing, prompt to stop capture first
         if self.capture_view and self.capture_view.is_capturing():
             reply = QMessageBox.question(
                 self,
                 'Confirm',
-                'Đang capture. Bạn có muốn dừng?',
+                'Äang capture. Báº¡n cĂ³ muá»‘n dá»«ng?',
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.No:
@@ -3134,7 +3568,7 @@ class ApplicationWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 'Unsaved Changes',
-                'Có thay đổi chưa lưu. Bạn có muốn lưu lại trước khi thoát?',
+                'CĂ³ thay Ä‘á»•i chÆ°a lÆ°u. Báº¡n cĂ³ muá»‘n lÆ°u láº¡i trÆ°á»›c khi thoĂ¡t?',
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save
             )
@@ -3170,3 +3604,5 @@ class ApplicationWindow(QMainWindow):
                      'stop_duration_enabled', 'stop_duration_value', 'stop_duration_unit']
         for key in stop_keys:
             settings.remove(f'options/{key}')
+
+

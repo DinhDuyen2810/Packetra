@@ -1198,6 +1198,24 @@ class CaptureView(QWidget):
         self.table.set_color_rules_enabled(self.color_rules_enabled)
         self._update_status('Display filter applied')
 
+    def get_selected_records(self):
+        selected_rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()}) if self.table.selectionModel() else []
+        records = []
+        for row in selected_rows:
+            if 0 <= row < len(self.visible_indices):
+                rec_idx = self.visible_indices[row]
+                if 0 <= rec_idx < len(self.records):
+                    records.append(self.records[rec_idx])
+        return records
+
+    def get_selected_raw_packets(self):
+        packets = []
+        for record in self.get_selected_records():
+            raw = getattr(record, "raw", None)
+            if raw is not None:
+                packets.append(raw)
+        return packets
+
     def clear_display_filter(self):
         self.display_filter_input.clear()
         self.apply_display_filter()
