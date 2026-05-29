@@ -111,7 +111,7 @@ class PacketParser:
 
         stream_hint = ''
         if sport is not None or dport is not None:
-            stream_hint = f'{src}:{sport or "-"} -> {dst}:{dport or "-"}'
+            stream_hint = f'{src}:{sport or "-"} \u2192 {dst}:{dport or "-"}'
 
         metadata = {
             'is_ipv6': packet.haslayer(IPv6),
@@ -188,7 +188,7 @@ class PacketParser:
             dst = str(wlan.get('destination', '') or dst)
             sport = None
             dport = None
-            stream_hint = f'{src} -> {dst}' if src or dst else ''
+            stream_hint = f'{src} \u2192 {dst}' if src or dst else ''
             if 'WLAN' not in layers:
                 layers.append('WLAN')
         elif protocol == 'DHCPv6':
@@ -304,7 +304,7 @@ class PacketParser:
 
         stream_hint = ''
         if sport is not None or dport is not None:
-            stream_hint = f'{src}:{sport or "-"} -> {dst}:{dport or "-"}'
+            stream_hint = f'{src}:{sport or "-"} \u2192 {dst}:{dport or "-"}'
 
         record = PacketRecord(
             number=number,

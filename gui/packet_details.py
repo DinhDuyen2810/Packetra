@@ -57,8 +57,15 @@ class PacketDetailsTree(QTreeWidget):
             return ''
         if ' = ' in text:
             text = text.split(' = ', 1)[1].strip()
-        if ':' in text:
-            text = text.split(':', 1)[0].strip()
+        if ',' in text:
+            text = text.split(',', 1)[0].strip()
+        if ': ' in text:
+            text = text.split(': ', 1)[0].strip()
+        elif text.endswith(':'):
+            text = text[:-1].strip()
+        text = ' '.join(text.split())
+        if len(text) > 140:
+            text = text[:137].rstrip() + '...'
         return text
 
     def _show_context_menu(self, position):

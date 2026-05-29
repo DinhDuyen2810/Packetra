@@ -5,6 +5,8 @@ import math
 import pickle
 import csv
 import os
+import re
+import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -15,10 +17,10 @@ from PySide6.QtWidgets import (
     QSizePolicy, QToolButton, QDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QTextEdit, QInputDialog, QGridLayout, QScrollArea,
     QFrame, QTextBrowser, QTabWidget, QCheckBox, QSpinBox, QLineEdit, QComboBox,
-    QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox,
-    QButtonGroup
+    QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup
 )
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextDocument
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from scapy.all import IP, IPv6, TCP, UDP
 
 from gui.interface_selector_view import InterfaceSelectorView
@@ -32,7 +34,7 @@ from core.flow_engine import (
     FlowFeatureExtractor,
 )
 from core.flow_engine.cic_reference import extract_cic_rows_from_packets
-from utils.pcap_io import normalize_capture_extension
+from utils.pcap_io import normalize_capture_extension, iter_pcap_packets, save_capture_file
 
 log = logging.getLogger('application')
 
@@ -71,7 +73,7 @@ class InterfaceTreeWidget(QTreeWidget):
 
 
 class CaptureOptionsDialog(QDialog):
-    """Capture Options dialog vá»›i 3 tabs: Input, Output, Options"""
+    """Capture Options dialog với 3 tabs: Input, Output, Options"""
     
     def __init__(self, parent, capture_view):
         super().__init__(parent)
@@ -780,7 +782,7 @@ class CaptureOptionsDialog(QDialog):
         """Start capture using selected interface and current Output/Options settings"""
         if not self._validate_output_settings() or not self._validate_options_settings():
             return
-        # Validate capture filter syntax (náº¿u cĂ³)
+        # Validate capture filter syntax (nếu có)
         capture_filter = item.data(6, Qt.UserRole)
         iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
         is_valid_filter, filter_error = self._validate_capture_filter_expression(capture_filter, iface_name=iface_name)
@@ -810,7 +812,7 @@ class CaptureOptionsDialog(QDialog):
             'buffer_mb': buffer_mb,
             'capture_filter': capture_filter,
         }
-        # ThĂªm thĂ´ng tin pipes vĂ  remote interfaces tá»« settings náº¿u cĂ³
+        # Thêm thông tin pipes và remote interfaces từ settings nếu có
         from PySide6.QtCore import QSettings
         import json
         settings = QSettings('Packetra', 'Packetra')
@@ -861,14 +863,14 @@ class CaptureOptionsDialog(QDialog):
             self._update_start_button_state()
             self._start_capture_with_item(item)
 
-        # Column 2 (Link-layer Header) - Inline combo edit, chá»‰ cho phĂ©p cĂ¡c giĂ¡ trá»‹ há»£p lá»‡ tĂ¹y loáº¡i interface
+        # Column 2 (Link-layer Header) - Inline combo edit, chỉ cho phép các giá trị hợp lệ tùy loại interface
         elif column == 2:
             iface_name = item.data(0, Qt.UserRole) or item.text(0)
-            # Láº¥y loáº¡i interface tá»« network_utils (náº¿u cĂ³)
+            # Lấy loại interface từ network_utils (nếu có)
             from utils.network_utils import get_interface_details
             details = get_interface_details().get(iface_name, {})
             iface_type = details.get('type', '').lower()
-            # Mapping loáº¡i interface sang cĂ¡c header há»£p lá»‡
+            # Mapping loại interface sang các header hợp lệ
             if 'ethernet' in iface_type:
                 options = ['Ethernet', 'DOCSIS']
             elif 'wifi' in iface_type or '802.11' in iface_type:
@@ -884,7 +886,7 @@ class CaptureOptionsDialog(QDialog):
             elif 'raw' in iface_type:
                 options = ['Raw IP']
             else:
-                # Náº¿u khĂ´ng xĂ¡c Ä‘á»‹nh, cho phĂ©p táº¥t cáº£
+                # Nếu không xác định, cho phép tất cả
                 options = ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC',
                            'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback']
             self._edit_inline_combobox(item, column, options)
@@ -1484,9 +1486,9 @@ class ApplicationWindow(QMainWindow):
         'Web Attack - Brute Force': 'Co dau hieu brute force tren ung dung web.',
         'Web Attack - Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
         'Web Attack - XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
-        'Web Attack ï¿½ Brute Force': 'Co dau hieu brute force tren ung dung web.',
-        'Web Attack ï¿½ Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
-        'Web Attack ï¿½ XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
+        'Web Attack - Brute Force': 'Co dau hieu brute force tren ung dung web.',
+        'Web Attack - Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
+        'Web Attack - XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
     }
 
     def __init__(self):
@@ -1495,7 +1497,7 @@ class ApplicationWindow(QMainWindow):
         self.resize(1700, 930)
         self._ai_model_bundle = None
 
-        # Tráº¡ng thĂ¡i á»©ng dá»¥ng
+        # Trạng thái ứng dụng
         self.current_view = None
         self.capture_view = None
         self.iface_selector_view = None
@@ -1505,6 +1507,12 @@ class ApplicationWindow(QMainWindow):
         }
         self._search_icon_off = QIcon()
         self._search_icon_on = QIcon()
+        self._status_mode = 'activity'
+        self._status_activity_kind = 'load'
+        self._selected_packet_number = None
+        self._last_loaded_seconds = None
+        self._capture_started_monotonic = None
+        self._last_capture_seconds = None
 
         # Build UI
         self._build_ui()
@@ -1514,7 +1522,7 @@ class ApplicationWindow(QMainWindow):
         self.show_interface_selector()
 
     def _build_ui(self):
-        """XĂ¢y dá»±ng giao diá»‡n chĂ­nh"""
+        """Xây dựng giao diện chính"""
         # Central widget
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -1547,10 +1555,10 @@ class ApplicationWindow(QMainWindow):
         self.properties_btn.setIcon(QIcon(str(status_icon_dir / 'cap_properties.png')))
         self.properties_btn.setAutoRaise(True)
 
-        self.detail_field_label = QLabel('Field: - | Bytes: 0')
+        self.detail_field_label = QLabel('Field: - | Byte: 0')
         self.detail_field_label.setMinimumWidth(260)
-        self.packet_label = QLabel('Packet: 0')
-        self.dropped_label = QLabel('dropped: 0')
+        self.packet_label = QLabel('Loaded in -')
+        self.dropped_label = QLabel('Dropped: 0')
 
         self.statusbar.addWidget(self.expert_btn)
         self.statusbar.addWidget(self.properties_btn)
@@ -1573,7 +1581,7 @@ class ApplicationWindow(QMainWindow):
         self.action_merge = QAction('&Merge...', self)
         file_menu.addAction(self.action_merge)
         file_menu.addSeparator()
-        self.action_save = QAction('&Save...', self)
+        self.action_save = QAction('&Save', self)
         self.action_save.setShortcut(QKeySequence.Save)
         file_menu.addAction(self.action_save)
         self.action_save_as = QAction('Save &As...', self)
@@ -1830,7 +1838,7 @@ class ApplicationWindow(QMainWindow):
         self.action_about_qt = QAction('About &Qt', self)
 
     def _build_toolbar(self):
-        """XĂ¢y dá»±ng toolbar"""
+        """Xây dựng toolbar"""
         icon_dir = Path(__file__).resolve().parent.parent / 'image' / 'main_toolbar_items'
 
         def toolbar_icon(name: str) -> QIcon:
@@ -1960,15 +1968,15 @@ class ApplicationWindow(QMainWindow):
         """Ket noi tat ca signals."""
         # File menu
         self.action_open.triggered.connect(self._on_open_file)
-        self.action_merge.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Merge...'))
+        self.action_merge.triggered.connect(self._on_merge_file)
         self.action_save.triggered.connect(self._on_save_file)
         self.action_save_as.triggered.connect(self._on_save_as_file)
-        self.action_separate.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Separate'))
-        self.action_export.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Export Specified Packets...'))
-        self.action_print.triggered.connect(lambda: self._on_menu_feature_placeholder('File > Print...'))
+        self.action_separate.triggered.connect(self._on_separate_packets)
+        self.action_export.triggered.connect(self._on_export_specified_packets)
+        self.action_print.triggered.connect(self._on_print_packets)
         self.action_export_flow_csv.triggered.connect(self._on_export_flow_csv_current)
         self.action_export_selected_flow_csv.triggered.connect(self._on_export_flow_csv_selected)
-        self.action_exit.triggered.connect(self.close)
+        self.action_exit.triggered.connect(self._on_quit)
 
         # Edit menu
         self.action_copy.triggered.connect(self._on_copy)
@@ -2112,13 +2120,13 @@ class ApplicationWindow(QMainWindow):
         result = set()
         tokens = [t.strip() for t in text.split(',') if t.strip()]
         if not tokens:
-            raise ValueError('HĂ£y nháº­p gĂ³i tin (vd: 5,8,10-20) hoáº·c all.')
+            raise ValueError('Hãy nhập gói tin (vd: 5,8,10-20) hoặc all.')
 
         for token in tokens:
             if '-' in token:
                 parts = [p.strip() for p in token.split('-', 1)]
                 if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                    raise ValueError(f'Khoáº£ng khĂ´ng há»£p lá»‡: {token}')
+                    raise ValueError(f'Khoảng không hợp lệ: {token}')
                 start = int(parts[0])
                 end = int(parts[1])
                 if start > end:
@@ -2129,14 +2137,14 @@ class ApplicationWindow(QMainWindow):
                 continue
 
             if not token.isdigit():
-                raise ValueError(f'GiĂ¡ trá»‹ khĂ´ng há»£p lá»‡: {token}')
+                raise ValueError(f'Giá trị không hợp lệ: {token}')
             value = int(token)
             if value in available_set:
                 result.add(value)
 
         selected = sorted(result)
         if not selected:
-            raise ValueError('KhĂ´ng cĂ³ gĂ³i nĂ o khá»›p vá»›i lá»±a chá»n hiá»‡n táº¡i.')
+            raise ValueError('Không có gói nào khớp với lựa chọn hiện tại.')
         return selected
 
     def _protocol_number_from_record(self, record) -> int:
@@ -2621,7 +2629,7 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def show_interface_selector(self):
-        """Hiá»ƒn thá»‹ mĂ n hĂ¬nh chá»n interface"""
+        """Hiển thị màn hình chọn interface"""
         if not self.iface_selector_view:
             self.iface_selector_view = InterfaceSelectorView()
             self.iface_selector_view.capture_started.connect(self._on_capture_started)
@@ -2642,7 +2650,7 @@ class ApplicationWindow(QMainWindow):
             self.iface_selector_view.refresh_interface_preferences()
 
     def show_capture_view(self, iface: str, iface_display_name: str, capture_filter: str = ''):
-        """Hiá»ƒn thá»‹ mĂ n hĂ¬nh capture"""
+        """Hiển thị màn hình capture"""
         if not self.capture_view:
             self.capture_view = CaptureView(iface, iface_display_name, capture_filter)
             self.capture_view.status_changed.connect(self._on_capture_status_changed)
@@ -2657,6 +2665,11 @@ class ApplicationWindow(QMainWindow):
         self.stacked_widget.setCurrentWidget(self.capture_view)
         self._update_capture_window_title()
         self._update_toolbar_state('capture')
+        self._status_mode = 'activity'
+        self._selected_packet_number = None
+        self._status_activity_kind = 'load'
+        self._update_packet_status_label()
+        self.detail_field_label.setText('Field: - | Byte: 0')
         self._refresh_status_metrics()
 
     def _update_capture_window_title(self):
@@ -2788,6 +2801,32 @@ class ApplicationWindow(QMainWindow):
             self.action_reset_layout_btn.setEnabled(has_capture)
             self.action_search_btn.setEnabled(has_capture)
             self.action_color_btn.setEnabled(has_capture)
+        self._refresh_file_menu_state()
+
+    def _refresh_file_menu_state(self):
+        active_capture = bool(
+            self.capture_view
+            and self.stacked_widget.currentWidget() is self.capture_view
+        )
+        has_packets = bool(active_capture and self.capture_view.has_packets())
+        is_running = bool(active_capture and self.capture_view.is_capturing())
+
+        if hasattr(self, 'action_open'):
+            self.action_open.setEnabled(True)
+        if hasattr(self, 'action_merge'):
+            self.action_merge.setEnabled(has_packets and not is_running)
+        if hasattr(self, 'action_save'):
+            self.action_save.setEnabled(has_packets and not is_running)
+        if hasattr(self, 'action_save_as'):
+            self.action_save_as.setEnabled(has_packets and not is_running)
+        if hasattr(self, 'action_separate'):
+            self.action_separate.setEnabled(has_packets and not is_running)
+        if hasattr(self, 'action_export'):
+            self.action_export.setEnabled(has_packets and not is_running)
+        if hasattr(self, 'action_print'):
+            self.action_print.setEnabled(has_packets)
+        if hasattr(self, 'action_exit'):
+            self.action_exit.setEnabled(True)
 
     def _sync_capture_buttons(self):
         is_running = bool(self.capture_view and self.capture_view.is_capturing())
@@ -2798,7 +2837,7 @@ class ApplicationWindow(QMainWindow):
         self.action_stop_btn.setEnabled(has_capture and (is_running or is_stopping))
 
     def _on_capture_started(self, iface, iface_display_name, capture_filter):
-        """Xá»­ lĂ½ khi báº¯t Ä‘áº§u capture"""
+        """Xử lý khi bắt đầu capture"""
         self.show_capture_view(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self._on_start_capture()
@@ -2811,99 +2850,979 @@ class ApplicationWindow(QMainWindow):
         if not os.path.exists(normalized_path):
             QMessageBox.warning(self, 'Open', f'File khong ton tai:\n{normalized_path}')
             return
-        proceed = self._prompt_save_before_destructive_action('Má»Ÿ file má»›i sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
+        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
             return
         self.show_capture_view('', 'Offline', '')
         if not self.capture_view:
             QMessageBox.critical(self, 'Open', 'Khong tao duoc Capture View de mo file.')
             return
+        started = time.perf_counter()
         try:
             self.capture_view.load_file(normalized_path)
         except Exception as exc:
             QMessageBox.critical(self, 'Open', f'Khong mo duoc file:\n{normalized_path}\n\n{exc}')
             return
+        self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
+        self._status_mode = 'activity'
+        self._status_activity_kind = 'load'
+        self._selected_packet_number = None
+        self._capture_started_monotonic = None
+        self._update_packet_status_label()
+        self.detail_field_label.setText('Field: - | Byte: 0')
         if not getattr(self.capture_view, 'records', None):
             QMessageBox.warning(self, 'Open', f'Mo file xong nhung khong co packet:\n{normalized_path}')
             return
         self._sync_capture_buttons()
         self._update_capture_window_title()
         self._refresh_status_metrics()
+        self._refresh_file_menu_state()
 
     def _on_start_capture(self):
-        """Báº¯t Ä‘áº§u capture"""
+        """Bắt đầu capture"""
         if not self.capture_view:
             return
 
         if self.capture_view.is_capturing():
             return
 
-        proceed = self._prompt_save_before_destructive_action('Start capture má»›i sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
+        proceed = self._prompt_save_before_destructive_action('Start capture mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
             return
 
         self._apply_capture_defaults_to_view()
         self.capture_view.start_new_capture()
+        self._capture_started_monotonic = time.monotonic()
+        self._last_capture_seconds = 0.0
+        self._status_mode = 'activity'
+        self._status_activity_kind = 'capture'
+        self._selected_packet_number = None
+        self._update_packet_status_label()
+        self.detail_field_label.setText('Field: - | Byte: 0')
         self._sync_capture_buttons()
         self._update_capture_window_title()
 
     def _on_stop_capture(self):
-        """Dá»«ng capture"""
-        if self.capture_view:
-            self.capture_view.stop_capture()
-            self._sync_capture_buttons()
+        """Dừng capture"""
+        if not self.capture_view:
+            return
+        self.capture_view.stop_capture()
+        if self._capture_started_monotonic is not None:
+            self._last_capture_seconds = max(0.0, time.monotonic() - float(self._capture_started_monotonic))
+            self._capture_started_monotonic = None
+        self._status_mode = 'activity'
+        self._status_activity_kind = 'capture'
+        self._selected_packet_number = None
+        self._update_packet_status_label()
+        self._sync_capture_buttons()
 
     def _on_restart_capture(self):
-        """Khá»Ÿi Ä‘á»™ng láº¡i capture"""
+        """Khởi động lại capture"""
         if not self.capture_view:
             return
 
         if self.capture_view.is_capturing():
             return
 
-        proceed = self._prompt_save_before_destructive_action('Restart capture sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
+        proceed = self._prompt_save_before_destructive_action('Restart capture sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
             return
 
         self.capture_view.restart_capture()
+        self._capture_started_monotonic = time.monotonic()
+        self._last_capture_seconds = 0.0
+        self._status_mode = 'activity'
+        self._status_activity_kind = 'capture'
+        self._selected_packet_number = None
+        self._update_packet_status_label()
+        self.detail_field_label.setText('Field: - | Byte: 0')
         self._sync_capture_buttons()
         self._update_capture_window_title()
 
     def _on_open_file(self):
-        """Má»Ÿ file PCAP"""
-        proceed = self._prompt_save_before_destructive_action('Má»Ÿ file má»›i sáº½ thay tháº¿ dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
+        """Mở file PCAP"""
+        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
             return
 
         if not self.capture_view:
             self.show_capture_view('', 'Offline', '')
         if self.capture_view:
+            started = time.perf_counter()
             self.capture_view.load_file()
+            self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
+            self._status_mode = 'activity'
+            self._status_activity_kind = 'load'
+            self._selected_packet_number = None
+            self._capture_started_monotonic = None
+            self._update_packet_status_label()
+            self.detail_field_label.setText('Field: - | Byte: 0')
             self._sync_capture_buttons()
             self._update_capture_window_title()
             self._refresh_status_metrics()
+            self._refresh_file_menu_state()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
 
     def _on_save_file(self):
-        """LÆ°u file PCAP"""
+        """Lưu file PCAP"""
         if self.capture_view:
+            if self.capture_view.is_capturing():
+                QMessageBox.information(self, 'Save', 'Khong the Save khi dang capture. Vui long dung capture truoc.')
+                return
             self.capture_view.save_file()
             self._update_capture_window_title()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
+            self._refresh_file_menu_state()
         else:
-            QMessageBox.information(self, 'Info', 'KhĂ´ng cĂ³ dá»¯ liá»‡u Ä‘á»ƒ lÆ°u.')
+            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
 
     def _on_save_as_file(self):
-        """LÆ°u file PCAP vá»›i tĂªn má»›i"""
+        """Lưu file PCAP với tên mới"""
         if self.capture_view:
+            if self.capture_view.is_capturing():
+                QMessageBox.information(self, 'Save As', 'Khong the Save As khi dang capture. Vui long dung capture truoc.')
+                return
             self.capture_view.save_file(force_dialog=True)
             self._update_capture_window_title()
             if self.iface_selector_view:
                 self.iface_selector_view.refresh_recent_files()
+            self._refresh_file_menu_state()
         else:
-            QMessageBox.information(self, 'Info', 'KhĂ´ng cĂ³ dá»¯ liá»‡u Ä‘á»ƒ lÆ°u.')
+            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
+
+    def _on_merge_file(self):
+        cv = self.capture_view
+        if not cv or not cv.has_packets():
+            QMessageBox.information(self, 'Merge', 'Khong co capture hien tai de merge. Vui long mo hoac bat capture truoc.')
+            return
+        if cv.is_capturing():
+            QMessageBox.warning(self, 'Merge', 'Vui long dung capture truoc khi merge.')
+            return
+
+        dialog = QFileDialog(self, 'Merge Capture File')
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setNameFilter('Capture Files (*.pcap *.pcapng)')
+        if not dialog.exec():
+            return
+        selected = dialog.selectedFiles()
+        if not selected:
+            return
+        merge_path = selected[0]
+
+        mode_dialog = QMessageBox(self)
+        mode_dialog.setWindowTitle('Merge Mode')
+        mode_dialog.setText('Chon cach merge packet:')
+        append_btn = mode_dialog.addButton('Them vao cuoi danh sach', QMessageBox.AcceptRole)
+        chrono_btn = mode_dialog.addButton('Sap xep lai theo thoi gian', QMessageBox.ActionRole)
+        cancel_btn = mode_dialog.addButton(QMessageBox.Cancel)
+        mode_dialog.setDefaultButton(append_btn)
+        mode_dialog.exec()
+        clicked = mode_dialog.clickedButton()
+        if clicked == cancel_btn or clicked is None:
+            return
+        chronological = clicked == chrono_btn
+
+        try:
+            incoming_packets = list(iter_pcap_packets(merge_path))
+        except Exception as exc:
+            QMessageBox.critical(self, 'Merge', f'Khong the doc file merge:\n{exc}')
+            return
+
+        if not incoming_packets:
+            QMessageBox.warning(self, 'Merge', 'File duoc chon khong co packet hop le de merge.')
+            return
+
+        current_packets = [r.raw for r in cv.records if getattr(r, 'raw', None) is not None]
+        merged_packets = current_packets + incoming_packets
+        if chronological:
+            merged_packets.sort(key=lambda p: float(getattr(p, 'time', 0.0) or 0.0))
+
+        self._replace_capture_packets(
+            merged_packets,
+            preserve_metadata=True,
+            preserve_loaded_path=True,
+            mark_dirty=True,
+            status_message=f'Merged {len(incoming_packets)} packets from {os.path.basename(merge_path)}',
+        )
+        self._update_capture_window_title()
+        self._refresh_status_metrics()
+        self._refresh_file_menu_state()
+
+    def _on_separate_packets(self):
+        cv = self.capture_view
+        if not cv or not cv.has_packets():
+            QMessageBox.information(self, 'Separate', 'Khong co packet de tach.')
+            return
+        if cv.is_capturing():
+            QMessageBox.warning(self, 'Separate', 'Vui long dung capture truoc khi tach packet.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Separate Packets')
+        layout = QVBoxLayout(dialog)
+        total_packets = len(cv.records)
+        layout.addWidget(QLabel(f'Tong so packet hien tai: {total_packets}'))
+
+        layout.addWidget(QLabel('Mode:'))
+        mode_combo = QComboBox(dialog)
+        mode_combo.addItems([
+            'Mode 1: Tach 1 file ra thanh nhieu file',
+            'Mode 2: Xoa goi tin trong file',
+        ])
+        layout.addWidget(mode_combo)
+
+        mode_stack = QStackedWidget(dialog)
+        layout.addWidget(mode_stack)
+
+        # Mode 1 UI
+        split_page = QWidget(dialog)
+        split_layout = QVBoxLayout(split_page)
+        split_toolbar = QHBoxLayout()
+        split_toolbar.addWidget(QLabel('Danh sach file tach:'))
+        split_remove_btn = QPushButton('-', split_page)
+        split_add_btn = QPushButton('+', split_page)
+        split_count_label = QLabel('', split_page)
+        split_toolbar.addStretch()
+        split_toolbar.addWidget(split_remove_btn)
+        split_toolbar.addWidget(split_add_btn)
+        split_toolbar.addWidget(split_count_label)
+        split_layout.addLayout(split_toolbar)
+
+        split_table = QTableWidget(0, 3, split_page)
+        split_table.setHorizontalHeaderLabels(['File', 'From', 'To'])
+        split_table.verticalHeader().setVisible(False)
+        split_table.horizontalHeader().setStretchLastSection(True)
+        split_layout.addWidget(split_table)
+
+        split_note = QLabel(
+            'Co the sua cot "To". From cua file sau se tu dong = To truoc + 1.',
+            split_page,
+        )
+        split_note.setWordWrap(True)
+        split_layout.addWidget(split_note)
+
+        mode_stack.addWidget(split_page)
+
+        # Mode 2 UI
+        delete_page = QWidget(dialog)
+        delete_layout = QVBoxLayout(delete_page)
+
+        delete_selected_cb = QCheckBox('Xoa goi tin dang chon (Selected packets)', delete_page)
+        delete_layout.addWidget(delete_selected_cb)
+
+        delete_protocol_cb = QCheckBox('Xoa theo protocol', delete_page)
+        delete_layout.addWidget(delete_protocol_cb)
+        delete_protocol_input = QLineEdit(delete_page)
+        delete_protocol_input.setPlaceholderText('VD: TCP,UDP,DNS')
+        delete_layout.addWidget(delete_protocol_input)
+
+        delete_ranges_cb = QCheckBox('Xoa theo khoang packet (nhieu khoang)', delete_page)
+        delete_layout.addWidget(delete_ranges_cb)
+        delete_ranges_input = QTextEdit(delete_page)
+        delete_ranges_input.setPlaceholderText('VD: 1-100, 150, 200-260')
+        delete_ranges_input.setMinimumHeight(90)
+        delete_layout.addWidget(delete_ranges_input)
+
+        delete_criteria_cbs = [delete_selected_cb, delete_protocol_cb, delete_ranges_cb]
+
+        def _on_delete_criteria_toggled(changed_cb, checked: bool):
+            if not checked:
+                return
+            for cb in delete_criteria_cbs:
+                if cb is not changed_cb:
+                    cb.blockSignals(True)
+                    cb.setChecked(False)
+                    cb.blockSignals(False)
+            _toggle_delete_fields()
+
+        mode_stack.addWidget(delete_page)
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton('Separate', dialog)
+        cancel_btn = QPushButton('Cancel', dialog)
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        split_state = {'file_count': 2, 'manual_edit': False}
+        split_guard = {'busy': False}
+
+        def _build_even_ranges(packet_total: int, file_count: int):
+            if packet_total <= 0 or file_count <= 0:
+                return []
+            base = packet_total // file_count
+            rem = packet_total % file_count
+            ranges = []
+            start = 1
+            for i in range(file_count):
+                length = base + (1 if i < rem else 0)
+                end = start + max(0, length) - 1
+                ranges.append((start, end))
+                start = end + 1
+            return ranges
+
+        def _renumber_split_rows():
+            for r in range(split_table.rowCount()):
+                name_item = split_table.item(r, 0)
+                if name_item is None:
+                    name_item = QTableWidgetItem()
+                    name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+                    split_table.setItem(r, 0, name_item)
+                name_item.setText(f'File {r + 1}')
+
+        def _render_split_ranges(ranges):
+            split_guard['busy'] = True
+            try:
+                split_table.setRowCount(len(ranges))
+                for row, (frm, to_) in enumerate(ranges, start=1):
+                    name_item = QTableWidgetItem(f'File {row}')
+                    from_item = QTableWidgetItem(str(frm))
+                    to_item = QTableWidgetItem(str(to_))
+                    name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+                    from_item.setFlags(from_item.flags() & ~Qt.ItemIsEditable)
+                    split_table.setItem(row - 1, 0, name_item)
+                    split_table.setItem(row - 1, 1, from_item)
+                    split_table.setItem(row - 1, 2, to_item)
+                split_count_label.setText(f'So file: {len(ranges)}')
+                split_table.resizeColumnsToContents()
+            finally:
+                split_guard['busy'] = False
+
+        def _reset_split_even():
+            count = int(split_state['file_count'])
+            count = max(2, min(count, total_packets))
+            split_state['file_count'] = count
+            _render_split_ranges(_build_even_ranges(total_packets, count))
+            split_state['manual_edit'] = False
+
+        def _collect_split_ranges_from_table():
+            rows = split_table.rowCount()
+            if rows < 2:
+                raise ValueError('Can it nhat 2 file de tach.')
+            ranges = []
+            expected_from = 1
+            for r in range(rows):
+                from_item = split_table.item(r, 1)
+                to_item = split_table.item(r, 2)
+                if from_item is None or to_item is None:
+                    raise ValueError('Bang tach file dang thieu du lieu.')
+                frm = int((from_item.text() or '0').strip())
+                to_ = int((to_item.text() or '0').strip())
+                if frm != expected_from:
+                    raise ValueError(f'From cua File {r+1} phai bang {expected_from}.')
+                if to_ < frm:
+                    raise ValueError(f'To cua File {r+1} phai >= From.')
+                ranges.append((frm, to_))
+                expected_from = to_ + 1
+            if ranges[-1][1] != total_packets:
+                raise ValueError(f'To cua file cuoi phai bang {total_packets}.')
+            return ranges
+
+        def _on_split_to_changed(item):
+            if split_guard['busy'] or item is None or item.column() != 2:
+                return
+            row = int(item.row())
+            rows = split_table.rowCount()
+            if row < 0 or row >= rows:
+                return
+            if row == rows - 1:
+                split_guard['busy'] = True
+                try:
+                    split_table.item(row, 2).setText(str(total_packets))
+                finally:
+                    split_guard['busy'] = False
+                return
+
+            try:
+                frm = int((split_table.item(row, 1).text() or '1').strip())
+            except Exception:
+                frm = 1
+            min_to = frm
+            try:
+                next_to = int((split_table.item(row + 1, 2).text() or str(total_packets)).strip())
+            except Exception:
+                next_to = total_packets
+            max_to = max(min_to, next_to - 1)
+            try:
+                new_to = int((item.text() or '').strip())
+            except Exception:
+                new_to = min_to
+            new_to = max(min_to, min(max_to, new_to))
+
+            split_guard['busy'] = True
+            try:
+                split_table.item(row, 2).setText(str(new_to))
+                for rr in range(row + 1, rows):
+                    prev_to = int((split_table.item(rr - 1, 2).text() or '0').strip())
+                    new_from = prev_to + 1
+                    split_table.item(rr, 1).setText(str(new_from))
+            finally:
+                split_guard['busy'] = False
+            split_state['manual_edit'] = True
+
+        def _split_last_file_in_half():
+            rows = split_table.rowCount()
+            if rows <= 0:
+                return
+            last_row = rows - 1
+            last_from = int((split_table.item(last_row, 1).text() or '1').strip())
+            last_to = int((split_table.item(last_row, 2).text() or str(total_packets)).strip())
+            last_len = last_to - last_from + 1
+            if last_len < 2:
+                QMessageBox.warning(dialog, 'Separate', 'Khong the tach them: file cuoi qua nho de chia doi.')
+                return
+
+            left_len = last_len // 2
+            left_to = last_from + left_len - 1
+            right_from = left_to + 1
+            right_to = last_to
+
+            split_guard['busy'] = True
+            try:
+                split_table.item(last_row, 2).setText(str(left_to))
+                split_table.insertRow(rows)
+
+                name_item = QTableWidgetItem('')
+                name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+                from_item = QTableWidgetItem(str(right_from))
+                from_item.setFlags(from_item.flags() & ~Qt.ItemIsEditable)
+                to_item = QTableWidgetItem(str(right_to))
+
+                split_table.setItem(rows, 0, name_item)
+                split_table.setItem(rows, 1, from_item)
+                split_table.setItem(rows, 2, to_item)
+                _renumber_split_rows()
+                split_count_label.setText(f'So file: {split_table.rowCount()}')
+                split_table.resizeColumnsToContents()
+            finally:
+                split_guard['busy'] = False
+
+        def _on_split_add():
+            current_rows = split_table.rowCount()
+            if current_rows >= total_packets:
+                QMessageBox.warning(dialog, 'Separate', 'So file khong the lon hon tong so packet.')
+                return
+            if split_state['manual_edit']:
+                _split_last_file_in_half()
+                split_state['file_count'] = split_table.rowCount()
+            else:
+                split_state['file_count'] += 1
+                _reset_split_even()
+
+        def _on_split_remove():
+            current_rows = split_table.rowCount()
+            if current_rows <= 2:
+                return
+            if split_state['manual_edit']:
+                split_guard['busy'] = True
+                try:
+                    last_row = split_table.rowCount() - 1
+                    prev_row = last_row - 1
+                    last_to = int((split_table.item(last_row, 2).text() or str(total_packets)).strip())
+                    split_table.item(prev_row, 2).setText(str(last_to))
+                    split_table.removeRow(last_row)
+                    _renumber_split_rows()
+                    split_count_label.setText(f'So file: {split_table.rowCount()}')
+                finally:
+                    split_guard['busy'] = False
+                split_state['file_count'] = split_table.rowCount()
+            else:
+                split_state['file_count'] -= 1
+                _reset_split_even()
+
+        split_add_btn.clicked.connect(_on_split_add)
+        split_remove_btn.clicked.connect(_on_split_remove)
+        split_table.itemChanged.connect(_on_split_to_changed)
+
+        def _toggle_delete_fields():
+            delete_protocol_input.setEnabled(delete_protocol_cb.isChecked())
+            delete_ranges_input.setEnabled(delete_ranges_cb.isChecked())
+
+        def _on_mode_changed():
+            mode_stack.setCurrentIndex(mode_combo.currentIndex())
+
+        _on_mode_changed()
+        _toggle_delete_fields()
+        _reset_split_even()
+
+        mode_combo.currentIndexChanged.connect(_on_mode_changed)
+        delete_selected_cb.toggled.connect(lambda checked: _on_delete_criteria_toggled(delete_selected_cb, checked))
+        delete_protocol_cb.toggled.connect(lambda checked: _on_delete_criteria_toggled(delete_protocol_cb, checked))
+        delete_ranges_cb.toggled.connect(lambda checked: _on_delete_criteria_toggled(delete_ranges_cb, checked))
+        delete_protocol_cb.toggled.connect(lambda _checked: _toggle_delete_fields())
+        delete_ranges_cb.toggled.connect(lambda _checked: _toggle_delete_fields())
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if mode_combo.currentIndex() == 0:
+            try:
+                ranges = _collect_split_ranges_from_table()
+            except Exception as exc:
+                QMessageBox.warning(self, 'Separate', str(exc))
+                return
+
+            default_dir = os.path.dirname(str(cv.loaded_file_path)) if cv.loaded_file_path else str(Path.cwd())
+            output_dir = QFileDialog.getExistingDirectory(self, 'Chon thu muc luu cac file tach', default_dir)
+            if not output_dir:
+                return
+
+            default_base = Path(cv.loaded_file_path).stem if cv.loaded_file_path else 'separated_capture'
+            base_name, ok = QInputDialog.getText(
+                self,
+                'Ten file tach',
+                'Nhap tien to ten file:',
+                text=str(default_base or 'separated_capture'),
+            )
+            if not ok:
+                return
+            base_name = str(base_name or '').strip()
+            if not base_name:
+                QMessageBox.warning(self, 'Separate', 'Ten file khong duoc de trong.')
+                return
+
+            file_format = 'pcapng'
+            compression = 'none'
+            loaded = str(cv.loaded_file_path or '').lower()
+            base_path = loaded
+            if loaded.endswith('.gz'):
+                compression = 'gzip'
+                base_path = os.path.splitext(loaded)[0]
+            elif loaded.endswith('.lz4'):
+                compression = 'lz4'
+                base_path = os.path.splitext(loaded)[0]
+            if base_path.endswith('.pcap'):
+                file_format = 'pcap'
+
+            saved_paths = []
+            try:
+                for part_no, (frm, to_) in enumerate(ranges, start=1):
+                    chunk_packets = [
+                        rec.raw
+                        for rec in cv.records
+                        if frm <= int(getattr(rec, 'number', 0) or 0) <= to_
+                        and getattr(rec, 'raw', None) is not None
+                    ]
+                    target = os.path.join(output_dir, f'{base_name}_part{part_no:03d}')
+                    saved_path = save_capture_file(
+                        target,
+                        chunk_packets,
+                        file_format=file_format,
+                        compression=compression,
+                    )
+                    saved_paths.append(saved_path)
+            except Exception as exc:
+                QMessageBox.critical(self, 'Separate', f'Tach thanh nhieu file that bai:\n{exc}')
+                return
+
+            QMessageBox.information(
+                self,
+                'Separate',
+                f'Da tach thanh {len(saved_paths)} file.\nThu muc: {output_dir}',
+            )
+            return
+
+        # Mode 2: delete packets in current file
+        delete_indices = set()
+        criteria_used = False
+
+        if delete_selected_cb.isChecked():
+            criteria_used = True
+            delete_indices.update(self._resolve_record_indices('Selected packets'))
+
+        if delete_protocol_cb.isChecked():
+            criteria_used = True
+            protocol_indices = self._resolve_indices_by_protocol_text(delete_protocol_input.text())
+            delete_indices.update(protocol_indices)
+
+        if delete_ranges_cb.isChecked():
+            criteria_used = True
+            range_indices = self._resolve_indices_by_ranges_text(delete_ranges_input.toPlainText())
+            delete_indices.update(range_indices)
+
+        if not criteria_used:
+            QMessageBox.warning(self, 'Separate', 'Hay chon it nhat 1 tieu chi xoa packet.')
+            return
+        if not delete_indices:
+            QMessageBox.warning(self, 'Separate', 'Khong co packet nao phu hop de xoa.')
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            'Separate',
+            f'Ban chac chan muon xoa {len(delete_indices)} packet khoi file hien tai?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        remaining_packets = [
+            rec.raw
+            for i, rec in enumerate(cv.records)
+            if i not in delete_indices and getattr(rec, 'raw', None) is not None
+        ]
+        self._replace_capture_packets(
+            remaining_packets,
+            preserve_metadata=True,
+            preserve_loaded_path=True,
+            mark_dirty=True,
+            status_message=f'Deleted {len(delete_indices)} packets from current capture',
+        )
+        self._update_capture_window_title()
+        self._refresh_status_metrics()
+        self._refresh_file_menu_state()
+
+    def _on_export_specified_packets(self):
+        cv = self.capture_view
+        if not cv or not cv.has_packets():
+            QMessageBox.information(self, 'Export Specified Packets', 'Khong co packet de export.')
+            return
+        if cv.is_capturing():
+            QMessageBox.warning(self, 'Export Specified Packets', 'Vui long dung capture truoc khi export.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Export Specified Packets')
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('Tao file PCAP moi tu cac packet theo tieu chi:'))
+
+        export_selected_cb = QCheckBox('Packet dang chon (Selected packets)', dialog)
+        layout.addWidget(export_selected_cb)
+
+        export_protocol_cb = QCheckBox('Theo protocol', dialog)
+        layout.addWidget(export_protocol_cb)
+        export_protocol_input = QLineEdit(dialog)
+        export_protocol_input.setPlaceholderText('VD: TCP,UDP,DNS')
+        layout.addWidget(export_protocol_input)
+
+        export_ranges_cb = QCheckBox('Theo khoang packet (nhieu khoang)', dialog)
+        layout.addWidget(export_ranges_cb)
+        export_ranges_input = QTextEdit(dialog)
+        export_ranges_input.setPlaceholderText('VD: 1-100, 150, 200-260')
+        export_ranges_input.setMinimumHeight(90)
+        layout.addWidget(export_ranges_input)
+
+        export_criteria_cbs = [export_selected_cb, export_protocol_cb, export_ranges_cb]
+
+        def _on_export_criteria_toggled(changed_cb, checked: bool):
+            if not checked:
+                return
+            for cb in export_criteria_cbs:
+                if cb is not changed_cb:
+                    cb.blockSignals(True)
+                    cb.setChecked(False)
+                    cb.blockSignals(False)
+            _toggle_export_fields()
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton('Choose Output...', dialog)
+        cancel_btn = QPushButton('Cancel', dialog)
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        def _toggle_export_fields():
+            export_protocol_input.setEnabled(export_protocol_cb.isChecked())
+            export_ranges_input.setEnabled(export_ranges_cb.isChecked())
+
+        _toggle_export_fields()
+        export_selected_cb.toggled.connect(lambda checked: _on_export_criteria_toggled(export_selected_cb, checked))
+        export_protocol_cb.toggled.connect(lambda checked: _on_export_criteria_toggled(export_protocol_cb, checked))
+        export_ranges_cb.toggled.connect(lambda checked: _on_export_criteria_toggled(export_ranges_cb, checked))
+        export_protocol_cb.toggled.connect(lambda _checked: _toggle_export_fields())
+        export_ranges_cb.toggled.connect(lambda _checked: _toggle_export_fields())
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        export_indices = set()
+        criteria_used = False
+
+        if export_selected_cb.isChecked():
+            criteria_used = True
+            export_indices.update(self._resolve_record_indices('Selected packets'))
+
+        if export_protocol_cb.isChecked():
+            criteria_used = True
+            export_indices.update(self._resolve_indices_by_protocol_text(export_protocol_input.text()))
+
+        if export_ranges_cb.isChecked():
+            criteria_used = True
+            export_indices.update(self._resolve_indices_by_ranges_text(export_ranges_input.toPlainText()))
+
+        if not criteria_used:
+            QMessageBox.warning(self, 'Export Specified Packets', 'Hay chon it nhat 1 tieu chi export.')
+            return
+
+        if not export_indices:
+            QMessageBox.warning(self, 'Export Specified Packets', 'Khong co packet phu hop de export.')
+            return
+
+        packets = [cv.records[i].raw for i in sorted(export_indices) if getattr(cv.records[i], 'raw', None) is not None]
+        if not packets:
+            QMessageBox.warning(self, 'Export Specified Packets', 'Khong co packet hop le de export.')
+            return
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            'Export Specified Packets',
+            str(Path.cwd() / f'export_packets_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pcap'),
+            'PCAP Files (*.pcap)',
+        )
+        if not filename:
+            return
+
+        try:
+            out_path = save_capture_file(filename, packets, file_format='pcap', compression='none')
+            QMessageBox.information(
+                self,
+                'Export Specified Packets',
+                f'Export thanh cong {len(packets)} packet:\n{out_path}',
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, 'Export Specified Packets', f'Export that bai:\n{exc}')
+
+    def _parse_packet_ranges_to_numbers(self, ranges_text: str):
+        text = str(ranges_text or '').strip()
+        if not text:
+            return set()
+        tokens = [tok.strip() for tok in re.split(r'[,\s;]+', text) if tok.strip()]
+        if not tokens:
+            return set()
+        numbers = set()
+        for tok in tokens:
+            if '-' in tok:
+                parts = [p.strip() for p in tok.split('-', 1)]
+                if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                    raise ValueError(f'Khoang khong hop le: {tok}')
+                lo = int(parts[0])
+                hi = int(parts[1])
+                if lo > hi:
+                    lo, hi = hi, lo
+                for n in range(lo, hi + 1):
+                    numbers.add(n)
+            else:
+                if not tok.isdigit():
+                    raise ValueError(f'Gia tri khong hop le: {tok}')
+                numbers.add(int(tok))
+        return numbers
+
+    def _resolve_indices_by_ranges_text(self, ranges_text: str):
+        cv = self.capture_view
+        if not cv:
+            return set()
+        try:
+            numbers = self._parse_packet_ranges_to_numbers(ranges_text)
+        except Exception as exc:
+            QMessageBox.warning(self, 'Range', str(exc))
+            return set()
+        if not numbers:
+            return set()
+        return {
+            i for i, rec in enumerate(cv.records)
+            if int(getattr(rec, 'number', 0) or 0) in numbers
+        }
+
+    def _resolve_indices_by_protocol_text(self, protocol_text: str):
+        cv = self.capture_view
+        if not cv:
+            return set()
+        text = str(protocol_text or '').strip()
+        if not text:
+            QMessageBox.warning(self, 'Protocol', 'Vui long nhap protocol can loc/xoa.')
+            return set()
+        tokens = [t.strip().lower() for t in re.split(r'[,\s;]+', text) if t.strip()]
+        if not tokens:
+            QMessageBox.warning(self, 'Protocol', 'Protocol khong hop le.')
+            return set()
+        token_set = set(tokens)
+        return {
+            i for i, rec in enumerate(cv.records)
+            if str(getattr(rec, 'protocol', '') or '').strip().lower() in token_set
+        }
+
+    def _on_print_packets(self):
+        cv = self.capture_view
+        if not cv or not cv.has_packets():
+            QMessageBox.information(self, 'Print', 'Khong co packet de in.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Print Packets')
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel('Print range:'))
+        scope_combo = QComboBox(dialog)
+        scope_combo.addItems(['All packets', 'Displayed packets', 'Selected packets'])
+        layout.addWidget(scope_combo)
+
+        summary_cb = QCheckBox('Packet summary', dialog)
+        summary_cb.setChecked(True)
+        detail_cb = QCheckBox('Packet details', dialog)
+        detail_cb.setChecked(False)
+        bytes_cb = QCheckBox('Packet bytes (hex)', dialog)
+        bytes_cb.setChecked(False)
+        layout.addWidget(summary_cb)
+        layout.addWidget(detail_cb)
+        layout.addWidget(bytes_cb)
+
+        btn_row = QHBoxLayout()
+        print_btn = QPushButton('Print...', dialog)
+        cancel_btn = QPushButton('Cancel', dialog)
+        btn_row.addStretch()
+        btn_row.addWidget(print_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        print_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if not (summary_cb.isChecked() or detail_cb.isChecked() or bytes_cb.isChecked()):
+            QMessageBox.warning(self, 'Print', 'Can chon it nhat 1 noi dung de in.')
+            return
+
+        scope = scope_combo.currentText()
+        indexes = self._resolve_record_indices(scope, from_no=None, to_no=None, filter_expr='')
+        if not indexes:
+            QMessageBox.warning(self, 'Print', 'Khong co packet phu hop de in.')
+            return
+
+        lines = []
+        lines.append('Packetra - Print Packets')
+        lines.append(f'Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+        lines.append(f'Range: {scope}')
+        lines.append(f'Total packets: {len(indexes)}')
+        lines.append('')
+
+        for i, rec_idx in enumerate(indexes, start=1):
+            record = cv.records[rec_idx]
+            lines.append(f'[{i}] No={record.number} Time={record.relative_time:.6f} Src={record.src} Dst={record.dst} Proto={record.protocol} Len={record.length}')
+            if summary_cb.isChecked():
+                lines.append(f'  Info: {record.info}')
+            if detail_cb.isChecked():
+                layer_text = ', '.join(record.layers or [])
+                lines.append(f'  Layers: {layer_text}')
+                if getattr(record, 'stream_hint', ''):
+                    lines.append(f'  Stream: {record.stream_hint}')
+            if bytes_cb.isChecked():
+                raw_bytes = bytes(record.raw) if getattr(record, 'raw', None) is not None else b''
+                lines.append('  Raw bytes:')
+                for off in range(0, len(raw_bytes), 16):
+                    chunk = raw_bytes[off:off + 16]
+                    hex_part = ' '.join(f'{b:02x}' for b in chunk)
+                    ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
+                    lines.append(f'    {off:04x}  {hex_part:<47}  {ascii_part}')
+            lines.append('')
+
+        document = QTextDocument(self)
+        document.setPlainText('\n'.join(lines))
+        printer = QPrinter(QPrinter.HighResolution)
+        print_dialog = QPrintDialog(printer, self)
+        print_dialog.setWindowTitle('Print Packets')
+        if print_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        document.print(printer)
+        QMessageBox.information(self, 'Print', 'Da gui tai lieu den may in.')
+
+    def _on_quit(self):
+        self.close()
+
+    def _resolve_record_indices(self, scope: str, from_no=None, to_no=None, filter_expr: str = ''):
+        cv = self.capture_view
+        if not cv:
+            return []
+
+        scope = str(scope or '').strip()
+        if scope in ('All packets',):
+            return list(range(len(cv.records)))
+        if scope in ('Displayed packets',):
+            return list(cv.visible_indices)
+        if scope in ('Selected packets',):
+            selected_rows = (
+                sorted({idx.row() for idx in cv.table.selectionModel().selectedRows()})
+                if cv.table.selectionModel()
+                else []
+            )
+            indexes = []
+            for row in selected_rows:
+                if 0 <= row < len(cv.visible_indices):
+                    indexes.append(cv.visible_indices[row])
+            return indexes
+        if scope in ('Packet number range',):
+            if from_no is None or to_no is None:
+                return []
+            lo = min(int(from_no), int(to_no))
+            hi = max(int(from_no), int(to_no))
+            return [i for i, rec in enumerate(cv.records) if lo <= int(getattr(rec, 'number', 0) or 0) <= hi]
+        if scope in ('By display filter expression',):
+            expr = str(filter_expr or '').strip()
+            if not expr:
+                return []
+            try:
+                return [i for i, rec in enumerate(cv.records) if cv.display_filter.matches(rec, expr)]
+            except Exception as exc:
+                QMessageBox.warning(self, 'Filter', f'Filter khong hop le:\n{exc}')
+                return []
+        return []
+
+    def _replace_capture_packets(
+        self,
+        packets,
+        preserve_metadata: bool,
+        preserve_loaded_path: bool,
+        mark_dirty: bool,
+        status_message: str,
+    ):
+        cv = self.capture_view
+        if not cv:
+            return
+
+        packets = list(packets or [])
+        old_loaded_path = cv.loaded_file_path
+        old_metadata = cv.capture_metadata
+        old_comments = cv.capture_comments
+        old_filter = str(cv.display_filter_input.text() or '')
+
+        cv.stop_capture()
+        cv._set_packet_panes_visible(False)
+        cv._set_packet_panes_updates_enabled(False)
+        try:
+            cv.clear_packets(reset_file_path=True)
+            if preserve_loaded_path:
+                cv.loaded_file_path = old_loaded_path
+
+            cv._configure_parser_capture_context(cv.parser, str(cv.loaded_file_path or ''))
+            for idx, packet in enumerate(packets, start=1):
+                record = cv.parser.parse(packet, idx, cv.iface)
+                cv.records.append(record)
+
+            if preserve_metadata:
+                cv.capture_metadata = old_metadata
+                cv.capture_comments = old_comments
+            else:
+                cv.capture_metadata = None
+                cv.capture_comments = ''
+
+            cv.display_filter_input.setText(old_filter)
+            cv.apply_display_filter()
+            if cv.visible_indices:
+                cv.goto_first_packet()
+            cv._set_dirty(bool(mark_dirty))
+            cv._update_status(status_message)
+        finally:
+            cv._set_packet_panes_updates_enabled(True)
+            cv._set_packet_panes_visible(True)
 
     def _render_flow_behavior_text(self, result: dict) -> str:
         flow_count = int(result.get("flow_count", 0) or 0)
@@ -3063,13 +3982,14 @@ class ApplicationWindow(QMainWindow):
         if not self.capture_view:
             return
 
-        proceed = self._prompt_save_before_destructive_action('ÄĂ³ng file sáº½ bá» dá»¯ liá»‡u hiá»‡n táº¡i. Báº¡n cĂ³ muá»‘n lÆ°u trÆ°á»›c khĂ´ng?')
+        proceed = self._prompt_save_before_destructive_action('Đóng file sẽ bỏ dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
             return
 
         self.capture_view.stop_capture()
         self.show_interface_selector()
         self._refresh_status_metrics()
+        self._refresh_file_menu_state()
 
     def _on_reload_file(self):
         if not self.capture_view:
@@ -3077,6 +3997,7 @@ class ApplicationWindow(QMainWindow):
         self.capture_view.reload_file()
         self._sync_capture_buttons()
         self._refresh_status_metrics()
+        self._refresh_file_menu_state()
 
     def _on_go_previous_packet(self):
         if self.capture_view:
@@ -3170,7 +4091,7 @@ class ApplicationWindow(QMainWindow):
         return True
 
     def _on_summary(self):
-        """Xem tĂ³m táº¯t"""
+        """Xem tóm tắt"""
         if self.capture_view:
             self.capture_view.show_summary()
 
@@ -3180,7 +4101,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.show_conversations()
 
     def _on_about(self):
-        """Hiá»ƒn thá»‹ vá» Packetra"""
+        """Hiển thị về Packetra"""
         dialog = QMessageBox(self)
         dialog.setWindowTitle('About Packetra')
         dialog.setIcon(QMessageBox.Information)
@@ -3197,7 +4118,7 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _on_about_qt(self):
-        """Hiá»ƒn thá»‹ vá» Qt"""
+        """Hiển thị về Qt"""
         dialog = QMessageBox(self)
         dialog.setWindowTitle('About Qt')
         dialog.setIcon(QMessageBox.Information)
@@ -3227,29 +4148,81 @@ class ApplicationWindow(QMainWindow):
         widget.resize(min(current_width, max_width), min(current_height, max_height))
 
     def _on_capture_status_changed(self, status):
-        """Cáº­p nháº­t tráº¡ng thĂ¡i capture"""
-        _ = status
+        """Cap nhat trang thai capture/statusbar."""
+        status_text = str(status or '')
         self._refresh_status_metrics()
         self._sync_capture_buttons()
         self._update_capture_window_title()
+        match = re.search(r'Selected frame\s+(\d+)', status_text)
+        if match:
+            self._status_mode = 'selected'
+            self._selected_packet_number = int(match.group(1))
+            self._update_packet_status_label()
+        elif any(token in status_text for token in ('Loaded', 'Reloaded')):
+            self._status_mode = 'activity'
+            self._status_activity_kind = 'load'
+            self._selected_packet_number = None
+            self._update_packet_status_label()
+        elif any(token in status_text for token in ('Live capture', 'Capture stopped', 'Capture stopping')):
+            self._status_mode = 'activity'
+            self._status_activity_kind = 'capture'
+            self._selected_packet_number = None
+            self._update_packet_status_label()
         if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view:
             self._update_toolbar_state('capture')
 
     def _refresh_status_metrics(self):
-        packets = 0
         dropped = 0
         if self.capture_view:
             metrics = self.capture_view.get_status_metrics()
-            packets = int(metrics.get('packets', 0) or 0)
             dropped = int(metrics.get('dropped', 0) or 0)
-        self.packet_label.setText(f'Packet: {packets}')
-        self.dropped_label.setText(f'dropped: {dropped}')
+        self.dropped_label.setText(f'Dropped: {dropped}')
+        if self._status_mode == 'activity':
+            self._update_packet_status_label()
+
+    def _current_capture_duration_seconds(self):
+        if self.capture_view and getattr(self.capture_view, 'records', None):
+            records = self.capture_view.records
+            if len(records) >= 2:
+                try:
+                    first = float(getattr(records[0], 'epoch_time', 0.0) or 0.0)
+                    last = float(getattr(records[-1], 'epoch_time', 0.0) or 0.0)
+                    return max(0.0, last - first)
+                except Exception:
+                    pass
+        if self.capture_view and self.capture_view.is_capturing() and self._capture_started_monotonic is not None:
+            return max(0.0, time.monotonic() - float(self._capture_started_monotonic))
+        if self._last_capture_seconds is not None:
+            return max(0.0, float(self._last_capture_seconds))
+        return None
+
+    def _update_packet_status_label(self):
+        if self._status_mode == 'selected' and self._selected_packet_number is not None:
+            self.packet_label.setText(f'Selected packet: {self._selected_packet_number}')
+            return
+
+        if self._status_activity_kind == 'capture':
+            capture_secs = self._current_capture_duration_seconds()
+            capture_text = (
+                f'Capture in {float(capture_secs):.2f} seconds'
+                if capture_secs is not None
+                else 'Capture in -'
+            )
+            self.packet_label.setText(capture_text)
+            return
+
+        loaded_text = (
+            f'Loaded in {float(self._last_loaded_seconds):.2f} seconds'
+            if self._last_loaded_seconds is not None
+            else 'Loaded in -'
+        )
+        self.packet_label.setText(loaded_text)
 
     def _on_detail_status_changed(self, field_name: str, byte_count: int):
         if field_name and byte_count > 0:
-            self.detail_field_label.setText(f'Field: {field_name} | Bytes: {byte_count}')
+            self.detail_field_label.setText(f'Field: {field_name} | Byte: {byte_count}')
             return
-        self.detail_field_label.setText('Field: - | Bytes: 0')
+        self.detail_field_label.setText('Field: - | Byte: 0')
 
     def _on_open_expert_information(self):
         if not self.capture_view:
@@ -3481,13 +4454,13 @@ class ApplicationWindow(QMainWindow):
                 'Average bits/s',
             ]
             stats_values = [
-                [safe_text(props.get('packet_count', 0), '0'), safe_text(props.get('stats_packets_displayed', '0 (0.0%)'), '0 (0.0%)'), safe_text(props.get('stats_packets_marked', 'â€”'), 'â€”')],
-                [safe_text(props.get('stats_time_span', '0.000'), '0.000'), safe_text(props.get('stats_time_span', '0.000'), '0.000'), 'â€”'],
-                [safe_text(props.get('stats_average_pps', '0.0'), '0.0'), safe_text(props.get('stats_average_pps', '0.0'), '0.0'), 'â€”'],
-                [safe_text(props.get('stats_average_packet_size', '0'), '0'), safe_text(props.get('stats_average_packet_size', '0'), '0'), 'â€”'],
+                [safe_text(props.get('packet_count', 0), '0'), safe_text(props.get('stats_packets_displayed', '0 (0.0%)'), '0 (0.0%)'), safe_text(props.get('stats_packets_marked', '-'), '-')],
+                [safe_text(props.get('stats_time_span', '0.000'), '0.000'), safe_text(props.get('stats_time_span', '0.000'), '0.000'), '-'],
+                [safe_text(props.get('stats_average_pps', '0.0'), '0.0'), safe_text(props.get('stats_average_pps', '0.0'), '0.0'), '-'],
+                [safe_text(props.get('stats_average_packet_size', '0'), '0'), safe_text(props.get('stats_average_packet_size', '0'), '0'), '-'],
                 [safe_text(props.get('total_bytes', 0), '0'), safe_text(props.get('stats_bytes_displayed', '0 (0.0%)'), '0 (0.0%)'), safe_text(props.get('stats_bytes_marked', '0'), '0')],
-                [safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), 'â€”'],
-                [safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), 'â€”'],
+                [safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bytes_s', '0 k'), '0 k'), '-'],
+                [safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), safe_text(props.get('stats_average_bits_s', '0 k'), '0 k'), '-'],
             ]
             for m, vals in zip(measurements, stats_values):
                 html.append('<tr>')
@@ -3543,32 +4516,33 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _on_capture_options(self):
-        """Má»Ÿ Capture Options dialog"""
+        """Mở Capture Options dialog"""
         dialog = CaptureOptionsDialog(self, self.capture_view)
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
             self._apply_capture_defaults_to_view()
 
     def closeEvent(self, event):
-        """Xá»­ lĂ½ khi Ä‘Ă³ng á»©ng dá»¥ng"""
+        """Xử lý khi đóng ứng dụng"""
         # 1. If capturing, prompt to stop capture first
         if self.capture_view and self.capture_view.is_capturing():
             reply = QMessageBox.question(
                 self,
                 'Confirm',
-                'Äang capture. Báº¡n cĂ³ muá»‘n dá»«ng?',
+                'Đang capture. Bạn có muốn dừng?',
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.No:
                 event.ignore()
                 return
+            self.capture_view.stop_capture()
 
         # 2. If there are unsaved changes, prompt to save/discard/cancel
         if self.capture_view and hasattr(self.capture_view, 'has_unsaved_changes') and self.capture_view.has_unsaved_changes():
             reply = QMessageBox.question(
                 self,
                 'Unsaved Changes',
-                'CĂ³ thay Ä‘á»•i chÆ°a lÆ°u. Báº¡n cĂ³ muá»‘n lÆ°u láº¡i trÆ°á»›c khi thoĂ¡t?',
+                'Có thay đổi chưa lưu. Bạn có muốn lưu lại trước khi thoát?',
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save
             )

@@ -767,9 +767,10 @@ class CaptureView(QWidget):
         self.table = PacketTable()
         self.details_tree = PacketDetailsTree()
         self.hex_view = PacketBytesView()
+        self._sync_fonts_to_hex_reference()
         self._base_fonts = {
-            'table': self.table.font().pointSizeF(),
-            'details': self.details_tree.font().pointSizeF(),
+            'table': self.hex_view.font().pointSizeF(),
+            'details': self.hex_view.font().pointSizeF(),
             'hex': self.hex_view.font().pointSizeF(),
         }
 
@@ -2072,16 +2073,12 @@ class CaptureView(QWidget):
         self.goto_packet_widget.setVisible(False)
 
     def _apply_font_delta(self, delta: float):
-        for widget, key in ((self.table, 'table'), (self.details_tree, 'details'), (self.hex_view, 'hex')):
-            font = widget.font()
-            current = font.pointSizeF()
-            if current <= 0:
-                current = self._base_fonts.get(key, 10.0)
-            new_size = max(7.0, min(32.0, current + delta))
-            font.setPointSizeF(new_size)
-            widget.setFont(font)
-        if hasattr(self.table, 'sync_row_height_to_font'):
-            self.table.sync_row_height_to_font()
+        ref_font = self.hex_view.font()
+        current = ref_font.pointSizeF()
+        if current <= 0:
+            current = self._base_fonts.get('hex', 10.0)
+        new_size = max(7.0, min(32.0, current + delta))
+        self._sync_fonts_to_hex_reference(point_size=new_size)
 
     def increase_main_text_size(self):
         self._apply_font_delta(1.0)
@@ -2090,12 +2087,20 @@ class CaptureView(QWidget):
         self._apply_font_delta(-1.0)
 
     def reset_main_text_size(self):
-        for widget, key in ((self.table, 'table'), (self.details_tree, 'details'), (self.hex_view, 'hex')):
-            font = widget.font()
-            base_size = self._base_fonts.get(key, 10.0)
-            if base_size > 0:
-                font.setPointSizeF(base_size)
-                widget.setFont(font)
+        base_size = self._base_fonts.get('hex', 10.0)
+        if base_size > 0:
+            self._sync_fonts_to_hex_reference(point_size=base_size)
+
+    def _sync_fonts_to_hex_reference(self, point_size: float | None = None):
+        """Use Packet Bytes font as canonical font for packet list and details."""
+        ref_font = self.hex_view.font()
+        if point_size is not None and point_size > 0:
+            ref_font.setPointSizeF(float(point_size))
+
+        self.hex_view.setFont(ref_font)
+        self.table.setFont(ref_font)
+        self.details_tree.setFont(ref_font)
+
         if hasattr(self.table, 'sync_row_height_to_font'):
             self.table.sync_row_height_to_font()
 

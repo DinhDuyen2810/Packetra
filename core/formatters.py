@@ -837,7 +837,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 'offset': offset,
                 'length': len(frag_data),
                 'children': [
-                    {'title': f'Data [â€¦]: {preview}', 'offset': offset, 'length': len(frag_data)},
+                    {'title': f'Data [...]: {preview}', 'offset': offset, 'length': len(frag_data)},
                     {'title': f'[Length: {len(frag_data)}]'},
                 ],
             })
@@ -11372,11 +11372,11 @@ def _isakmp_section(payload: bytes, offset: int) -> Dict[str, Any]:
                 p_children.append({'title': f'Reserved: {body[2:4].hex()}', 'offset': offset + body_off + 2, 'length': 2})
                 if len(body) > 4:
                     preview = body[4:].hex()
-                    title = f'Key Exchange Data{" [â€¦]" if len(preview) > 320 else ""}: {preview[:320] if len(preview)>320 else preview}'
+                    title = f'Key Exchange Data{" [...]" if len(preview) > 320 else ""}: {preview[:320] if len(preview)>320 else preview}'
                     p_children.append({'title': title, 'offset': offset + body_off + 4, 'length': len(body) - 4})
             else:
                 preview = body.hex()
-                title = f'Key Exchange Data{" [â€¦]" if len(preview) > 320 else ""}: {preview[:320] if len(preview)>320 else preview}'
+                title = f'Key Exchange Data{" [...]" if len(preview) > 320 else ""}: {preview[:320] if len(preview)>320 else preview}'
                 p_children.append({'title': title, 'offset': offset + body_off, 'length': len(body)})
         elif current_type in {40, 10}:  # Nonce
             p_children.append({'title': f'Nonce DATA: {body.hex()}', 'offset': offset + body_off, 'length': len(body)})
