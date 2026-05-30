@@ -1637,12 +1637,14 @@ class CaptureView(QWidget):
             return
         if self.sniffer and self.sniffer.isRunning():
             return
+        effective_filter = self._resolve_capture_filter_alias(self.capture_filter)
         # Use RemotePacketSniffer if iface is remote://
         if str(self.iface).startswith('remote://'):
             from core.capture import RemotePacketSniffer
-            self.sniffer = RemotePacketSniffer(self.iface, self.capture_filter)
+            self.sniffer = RemotePacketSniffer(self.iface, effective_filter)
         else:
-            self.sniffer = PacketSniffer(self.iface, self.capture_filter)
+            self.sniffer = PacketSniffer(self.iface, effective_filter)
+        self.capture_filter = effective_filter
         self._capture_started_at = time.monotonic()
         self._captured_bytes = 0
         self._auto_output_written_files = []
@@ -1660,6 +1662,27 @@ class CaptureView(QWidget):
         # Open Capture Information window if enabled
         if bool((self.options_settings or {}).get('show_info', False)):
             self._open_capture_info_dialog()
+
+    def _resolve_capture_filter_alias(self, expression: str) -> str:
+        expr = str(expression or '').strip()
+        if not expr:
+            return ''
+        try:
+            raw = str(self._settings().value('capture/filter_presets', '[]', str) or '[]')
+            presets = json.loads(raw)
+        except Exception:
+            return expr
+        if not isinstance(presets, list):
+            return expr
+        lookup = {}
+        for item in presets:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '') or '').strip()
+            value = str(item.get('expression', '') or '').strip()
+            if name and value:
+                lookup[name.casefold()] = value
+        return lookup.get(expr.casefold(), expr)
 
 
     def stop_capture(self):

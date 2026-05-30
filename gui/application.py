@@ -76,13 +76,197 @@ class InterfaceTreeWidget(QTreeWidget):
         super().mouseMoveEvent(event)
 
 
+class CaptureFiltersDialog(QDialog):
+    def __init__(self, parent, presets: list[dict], validator):
+        super().__init__(parent)
+        self.setWindowTitle('Capture Filters')
+        self.resize(900, 520)
+        self._validator = validator
+        self._presets: list[dict] = [
+            {
+                'name': str(item.get('name', '') or '').strip(),
+                'expression': str(item.get('expression', '') or '').strip(),
+                'comment': str(item.get('comment', '') or '').strip(),
+            }
+            for item in (presets or [])
+            if isinstance(item, dict)
+        ]
+
+        root = QVBoxLayout(self)
+
+        self.table = QTableWidget(0, 3, self)
+        self.table.setHorizontalHeaderLabels(['Name', 'Filter Expression', 'Comment'])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        root.addWidget(self.table)
+
+        form = QGridLayout()
+        form.addWidget(QLabel('Name:'), 0, 0)
+        self.name_input = QLineEdit(self)
+        form.addWidget(self.name_input, 0, 1)
+        form.addWidget(QLabel('Filter Expression:'), 1, 0)
+        self.expr_input = QLineEdit(self)
+        form.addWidget(self.expr_input, 1, 1)
+        form.addWidget(QLabel('Comment:'), 2, 0)
+        self.comment_input = QLineEdit(self)
+        form.addWidget(self.comment_input, 2, 1)
+        root.addLayout(form)
+
+        self.status_label = QLabel('', self)
+        root.addWidget(self.status_label)
+
+        row_actions = QHBoxLayout()
+        self.new_btn = QPushButton('New', self)
+        self.copy_btn = QPushButton('Copy', self)
+        self.delete_btn = QPushButton('Delete', self)
+        self.validate_btn = QPushButton('Validate', self)
+        self.apply_btn = QPushButton('Apply', self)
+        row_actions.addWidget(self.new_btn)
+        row_actions.addWidget(self.copy_btn)
+        row_actions.addWidget(self.delete_btn)
+        row_actions.addWidget(self.validate_btn)
+        row_actions.addWidget(self.apply_btn)
+        row_actions.addStretch(1)
+        root.addLayout(row_actions)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        self.ok_btn = QPushButton('OK', self)
+        self.cancel_btn = QPushButton('Cancel', self)
+        bottom.addWidget(self.ok_btn)
+        bottom.addWidget(self.cancel_btn)
+        root.addLayout(bottom)
+
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.new_btn.clicked.connect(self._on_new)
+        self.copy_btn.clicked.connect(self._on_copy)
+        self.delete_btn.clicked.connect(self._on_delete)
+        self.validate_btn.clicked.connect(self._on_validate)
+        self.apply_btn.clicked.connect(self._on_apply)
+        self.ok_btn.clicked.connect(self._on_ok)
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self._reload_table()
+
+    def presets(self) -> list[dict]:
+        return list(self._presets)
+
+    def _selected_row(self) -> int:
+        row = self.table.currentRow()
+        return row if 0 <= row < len(self._presets) else -1
+
+    def _reload_table(self):
+        self.table.setRowCount(0)
+        for preset in self._presets:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(str(preset.get('name', ''))))
+            self.table.setItem(row, 1, QTableWidgetItem(str(preset.get('expression', ''))))
+            self.table.setItem(row, 2, QTableWidgetItem(str(preset.get('comment', ''))))
+        if self.table.rowCount() > 0:
+            self.table.selectRow(0)
+        else:
+            self._on_selection_changed()
+
+    def _on_selection_changed(self):
+        row = self._selected_row()
+        enabled = row >= 0
+        self.copy_btn.setEnabled(enabled)
+        self.delete_btn.setEnabled(enabled)
+        if not enabled:
+            self.name_input.clear()
+            self.expr_input.clear()
+            self.comment_input.clear()
+            return
+        preset = self._presets[row]
+        self.name_input.setText(str(preset.get('name', '')))
+        self.expr_input.setText(str(preset.get('expression', '')))
+        self.comment_input.setText(str(preset.get('comment', '')))
+
+    def _build_current_preset(self) -> dict:
+        return {
+            'name': self.name_input.text().strip(),
+            'expression': self.expr_input.text().strip(),
+            'comment': self.comment_input.text().strip(),
+        }
+
+    def _validate_current_expression(self, show_ok: bool = False) -> bool:
+        expression = self.expr_input.text().strip()
+        ok, err = self._validator(expression, None)
+        if ok:
+            self.status_label.setText('Valid capture filter')
+            if show_ok:
+                QMessageBox.information(self, 'Capture Filter', 'Valid capture filter.')
+            return True
+        self.status_label.setText(f'Invalid capture filter: {err}')
+        QMessageBox.warning(self, 'Invalid Capture Filter', f'Capture filter syntax error:\n{err}')
+        return False
+
+    def _on_new(self):
+        self.name_input.setText('New Filter')
+        self.expr_input.clear()
+        self.comment_input.clear()
+        self.status_label.clear()
+        self.table.clearSelection()
+
+    def _on_copy(self):
+        row = self._selected_row()
+        if row < 0:
+            return
+        current = self._presets[row]
+        self.name_input.setText(f"{str(current.get('name', '')).strip()} Copy")
+        self.expr_input.setText(str(current.get('expression', '')))
+        self.comment_input.setText(str(current.get('comment', '')))
+
+    def _on_delete(self):
+        row = self._selected_row()
+        if row < 0:
+            return
+        del self._presets[row]
+        self._reload_table()
+
+    def _on_validate(self):
+        self._validate_current_expression(show_ok=True)
+
+    def _on_apply(self):
+        candidate = self._build_current_preset()
+        if not candidate['name']:
+            QMessageBox.warning(self, 'Capture Filter', 'Filter name is required.')
+            return
+        if not self._validate_current_expression(show_ok=False):
+            return
+
+        row = self._selected_row()
+        if row >= 0:
+            self._presets[row] = candidate
+        else:
+            self._presets.append(candidate)
+        self._reload_table()
+
+        for idx, preset in enumerate(self._presets):
+            if preset.get('name') == candidate['name'] and preset.get('expression') == candidate['expression']:
+                self.table.selectRow(idx)
+                break
+
+    def _on_ok(self):
+        if self.name_input.text().strip() or self.expr_input.text().strip() or self.comment_input.text().strip():
+            self._on_apply()
+        self.accept()
+
+
 class CaptureOptionsDialog(QDialog):
     """Capture Options dialog với 3 tabs: Input, Output, Options"""
     
-    def __init__(self, parent, capture_view):
+    def __init__(self, parent, capture_view, read_only: bool = False):
         super().__init__(parent)
         self.setWindowTitle('Capture Options')
         self.capture_view = capture_view
+        self._read_only_mode = bool(read_only)
         self.resize(1100, 600)
         
         # Initialize state model for Output tab
@@ -167,6 +351,14 @@ class CaptureOptionsDialog(QDialog):
         self._load_output_settings()
         self._load_options_settings()
         self._update_start_button_state()
+        if self._read_only_mode:
+            self._apply_read_only_mode()
+
+    def _apply_read_only_mode(self):
+        self.start_btn.setEnabled(False)
+        self.start_btn.setVisible(False)
+        for widget in [self.input_tab, self.output_tab, self.options_tab]:
+            widget.setEnabled(False)
     
     def _load_output_settings(self):
         """Load Output tab settings from QSettings and apply to widgets"""
@@ -427,6 +619,7 @@ class CaptureOptionsDialog(QDialog):
         self.iface_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.iface_tree.setUniformRowHeights(True)
         self.iface_tree.itemSelectionChanged.connect(self._update_start_button_state)
+        self.iface_tree.itemSelectionChanged.connect(self._sync_filter_input_from_selection)
         
         # Double-click starts capture
         self.iface_tree.doubleClicked.connect(self._on_interface_double_clicked)
@@ -460,8 +653,14 @@ class CaptureOptionsDialog(QDialog):
         filter_label = QLabel('Capture filter for selected interfaces:')
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText('Enter a capture filter ...')
+        self.apply_filter_btn = QPushButton('Apply')
+        self.capture_filters_btn = QPushButton('Capture Filters...')
+        self.apply_filter_btn.clicked.connect(self._apply_filter_to_selected_interface)
+        self.capture_filters_btn.clicked.connect(self._open_capture_filters_manager)
         filter_layout.addWidget(filter_label)
         filter_layout.addWidget(self.filter_input)
+        filter_layout.addWidget(self.apply_filter_btn)
+        filter_layout.addWidget(self.capture_filters_btn)
         bottom_layout.addLayout(filter_layout)
         
         layout.addLayout(bottom_layout)
@@ -477,6 +676,7 @@ class CaptureOptionsDialog(QDialog):
         # Setup hover tooltip
         self.tooltip_item = None
         self.iface_tree.setMouseTracking(True)
+        self._sync_filter_input_from_selection()
     
     def _on_tree_header_clicked(self, section):
         """Prevent default header behavior"""
@@ -718,11 +918,64 @@ class CaptureOptionsDialog(QDialog):
     
     def _on_start_from_options(self):
         """Handle Start button click in Capture Options"""
+        self._apply_filter_to_selected_interface()
         item = self._get_selected_interface_item()
         if not item:
             QMessageBox.warning(self, 'No Interface', 'Please select an interface in the Input tab.')
             return
         self._start_capture_with_item(item)
+
+    def _sync_filter_input_from_selection(self):
+        if not hasattr(self, 'filter_input'):
+            return
+        item = self._get_selected_interface_item()
+        if item is None:
+            self.filter_input.setEnabled(False)
+            if hasattr(self, 'apply_filter_btn'):
+                self.apply_filter_btn.setEnabled(False)
+            if hasattr(self, 'capture_filters_btn'):
+                self.capture_filters_btn.setEnabled(True)
+            self.filter_input.clear()
+            return
+        self.filter_input.setEnabled(True)
+        if hasattr(self, 'apply_filter_btn'):
+            self.apply_filter_btn.setEnabled(True)
+        value = str(item.data(6, Qt.UserRole) or item.text(6) or '').strip()
+        self.filter_input.setText(value)
+
+    def _apply_filter_to_selected_interface(self):
+        item = self._get_selected_interface_item()
+        if item is None:
+            return
+        expression = self.filter_input.text().strip() if hasattr(self, 'filter_input') else ''
+        item.setText(6, expression)
+        item.setData(6, Qt.UserRole, expression)
+
+    def _open_capture_filters_manager(self):
+        parent_window = self.parent()
+        if parent_window is None:
+            return
+        presets = []
+        if hasattr(parent_window, '_load_capture_filter_presets'):
+            presets = parent_window._load_capture_filter_presets()
+        validator = getattr(parent_window, '_validate_capture_filter_expression', lambda expr, iface: (True, ''))
+        dialog = CaptureFiltersDialog(self, presets, validator)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if hasattr(parent_window, '_save_capture_filter_presets'):
+            parent_window._save_capture_filter_presets(dialog.presets())
+
+        applied = False
+        if dialog.table.currentRow() >= 0:
+            idx = dialog.table.currentRow()
+            values = dialog.presets()
+            if 0 <= idx < len(values):
+                expression = str(values[idx].get('expression', '') or '').strip()
+                self.filter_input.setText(expression)
+                self._apply_filter_to_selected_interface()
+                applied = True
+        if not applied:
+            self._sync_filter_input_from_selection()
 
     def _get_selected_interface_item(self):
         """Return selected top-level interface item or None"""
@@ -787,7 +1040,10 @@ class CaptureOptionsDialog(QDialog):
         if not self._validate_output_settings() or not self._validate_options_settings():
             return
         # Validate capture filter syntax (nếu có)
-        capture_filter = item.data(6, Qt.UserRole)
+        capture_filter = str(item.data(6, Qt.UserRole) or '').strip()
+        parent_window = self.parent()
+        if hasattr(parent_window, '_resolve_capture_filter_alias'):
+            capture_filter = str(parent_window._resolve_capture_filter_alias(capture_filter) or '').strip()
         iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
         is_valid_filter, filter_error = self._validate_capture_filter_expression(capture_filter, iface_name=iface_name)
         if not is_valid_filter:
@@ -2078,7 +2334,7 @@ class ApplicationWindow(QMainWindow):
         self.action_start_capture.triggered.connect(self._on_start_capture)
         self.action_stop_capture.triggered.connect(self._on_stop_capture)
         self.action_restart_capture.triggered.connect(self._on_restart_capture)
-        self.action_capture_filters.triggered.connect(lambda: self._on_menu_feature_placeholder('Capture > Capture Filters...'))
+        self.action_capture_filters.triggered.connect(self._on_capture_filters)
         self.action_refresh_interfaces.triggered.connect(self._on_refresh_interfaces)
 
         # Analyze menu
@@ -2689,6 +2945,7 @@ class ApplicationWindow(QMainWindow):
         self.setWindowTitle('Packetra - Select Interface')
         self._on_find_panel_visibility_changed(False)
         self._update_toolbar_state('selector')
+        self._refresh_capture_menu_state()
 
     def _on_interface_preferences_changed(self):
         """Apply interface preference updates to start screen in real time."""
@@ -2730,6 +2987,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._refresh_status_metrics()
+        self._refresh_capture_menu_state()
         self._refresh_go_menu_state()
 
     def _update_capture_window_title(self):
@@ -3008,14 +3266,136 @@ class ApplicationWindow(QMainWindow):
         is_stopping = bool(self.capture_view and self.capture_view.is_stopping())
         has_capture = bool(self.capture_view)
         self.action_start_btn.setEnabled(has_capture and not is_running and not is_stopping)
-        self.action_restart_btn.setEnabled(has_capture and not is_running and not is_stopping)
+        self.action_restart_btn.setEnabled(has_capture and is_running and not is_stopping)
         self.action_stop_btn.setEnabled(has_capture and (is_running or is_stopping))
+        self._refresh_capture_menu_state()
+
+    def _refresh_capture_menu_state(self):
+        active_capture = bool(self.capture_view and self.stacked_widget.currentWidget() is self.capture_view)
+        is_running = bool(active_capture and self.capture_view.is_capturing())
+        is_stopping = bool(active_capture and self.capture_view.is_stopping())
+        has_iface = bool(active_capture and str(getattr(self.capture_view, 'iface', '') or '').strip())
+
+        if not active_capture:
+            if hasattr(self, 'action_capture_options'):
+                self.action_capture_options.setEnabled(True)
+            if hasattr(self, 'action_start_capture'):
+                self.action_start_capture.setEnabled(True)
+            if hasattr(self, 'action_stop_capture'):
+                self.action_stop_capture.setEnabled(False)
+            if hasattr(self, 'action_restart_capture'):
+                self.action_restart_capture.setEnabled(False)
+            if hasattr(self, 'action_capture_filters'):
+                self.action_capture_filters.setEnabled(True)
+            if hasattr(self, 'action_refresh_interfaces'):
+                self.action_refresh_interfaces.setEnabled(True)
+            return
+
+        if hasattr(self, 'action_capture_options'):
+            self.action_capture_options.setEnabled(active_capture)
+        if hasattr(self, 'action_start_capture'):
+            self.action_start_capture.setEnabled(active_capture and has_iface and not is_running and not is_stopping)
+        if hasattr(self, 'action_stop_capture'):
+            self.action_stop_capture.setEnabled(active_capture and (is_running or is_stopping))
+        if hasattr(self, 'action_restart_capture'):
+            self.action_restart_capture.setEnabled(active_capture and is_running and not is_stopping)
+        if hasattr(self, 'action_capture_filters'):
+            self.action_capture_filters.setEnabled(active_capture)
+        if hasattr(self, 'action_refresh_interfaces'):
+            self.action_refresh_interfaces.setEnabled(not is_running and not is_stopping)
+
+    def _load_capture_filter_presets(self) -> list[dict]:
+        settings = QSettings('Packetra', 'Packetra')
+        raw = str(settings.value('capture/filter_presets', '[]', str) or '[]')
+        try:
+            values = json.loads(raw)
+        except Exception:
+            values = []
+        presets = []
+        if isinstance(values, list):
+            for entry in values:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name', '') or '').strip()
+                expression = str(entry.get('expression', '') or '').strip()
+                comment = str(entry.get('comment', '') or '').strip()
+                if not name and not expression:
+                    continue
+                presets.append({'name': name, 'expression': expression, 'comment': comment})
+        return presets
+
+    def _save_capture_filter_presets(self, presets: list[dict]):
+        normalized = []
+        for item in presets or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '') or '').strip()
+            expression = str(item.get('expression', '') or '').strip()
+            comment = str(item.get('comment', '') or '').strip()
+            if not name and not expression:
+                continue
+            normalized.append({'name': name, 'expression': expression, 'comment': comment})
+        settings = QSettings('Packetra', 'Packetra')
+        settings.setValue('capture/filter_presets', json.dumps(normalized, ensure_ascii=True))
+
+    def _resolve_capture_filter_alias(self, expression: str) -> str:
+        expr = str(expression or '').strip()
+        if not expr:
+            return ''
+        lookup = {}
+        for item in self._load_capture_filter_presets():
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '') or '').strip()
+            value = str(item.get('expression', '') or '').strip()
+            if name and value:
+                lookup[name.casefold()] = value
+        return lookup.get(expr.casefold(), expr)
+
+    def _validate_capture_filter_expression(self, expression, iface_name=None):
+        expr = self._resolve_capture_filter_alias(expression)
+        if not expr:
+            return True, ''
+
+        compile_errors = []
+        compile_backends = []
+
+        try:
+            from scapy.arch.pcapdnet import compile_filter as pcap_compile_filter
+            compile_backends.append(lambda: pcap_compile_filter(expr, iface_name or None))
+        except Exception:
+            pass
+
+        try:
+            from scapy.all import compile_filter as scapy_compile_filter
+            compile_backends.append(lambda: scapy_compile_filter(expr, iface=iface_name or None))
+        except Exception:
+            pass
+
+        for backend in compile_backends:
+            try:
+                backend()
+                return True, ''
+            except Exception as exc:
+                compile_errors.append(str(exc))
+
+        if compile_backends:
+            return False, compile_errors[-1] if compile_errors else 'Unknown capture filter syntax error.'
+        return True, ''
+
+    def _on_capture_filters(self):
+        presets = self._load_capture_filter_presets()
+        dialog = CaptureFiltersDialog(self, presets, self._validate_capture_filter_expression)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._save_capture_filter_presets(dialog.presets())
 
     def _on_capture_started(self, iface, iface_display_name, capture_filter):
         """Xử lý khi bắt đầu capture"""
         self.show_capture_view(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self._on_start_capture()
+        self._refresh_capture_menu_state()
 
     def _on_open_recent_file(self, path: str):
         candidate = str(path or '').strip()
@@ -3056,10 +3436,17 @@ class ApplicationWindow(QMainWindow):
     def _on_start_capture(self):
         """Bắt đầu capture"""
         if not self.capture_view:
+            self._on_capture_options()
             return
 
         if self.capture_view.is_capturing():
             return
+
+        if not str(getattr(self.capture_view, 'iface', '') or '').strip():
+            self._on_capture_options()
+            return
+
+        self.capture_view.capture_filter = self._resolve_capture_filter_alias(getattr(self.capture_view, 'capture_filter', ''))
 
         proceed = self._prompt_save_before_destructive_action('Start capture mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
@@ -3075,6 +3462,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._sync_capture_buttons()
+        self._refresh_capture_menu_state()
         self._update_capture_window_title()
 
     def _on_stop_capture(self):
@@ -3090,13 +3478,14 @@ class ApplicationWindow(QMainWindow):
         self._selected_packet_number = None
         self._update_packet_status_label()
         self._sync_capture_buttons()
+        self._refresh_capture_menu_state()
 
     def _on_restart_capture(self):
         """Khởi động lại capture"""
         if not self.capture_view:
             return
 
-        if self.capture_view.is_capturing():
+        if not self.capture_view.is_capturing():
             return
 
         proceed = self._prompt_save_before_destructive_action('Restart capture sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
@@ -3112,6 +3501,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._sync_capture_buttons()
+        self._refresh_capture_menu_state()
         self._update_capture_window_title()
 
     def _on_open_file(self):
@@ -5627,11 +6017,15 @@ class ApplicationWindow(QMainWindow):
             self.action_view_reload_as_format_capture.blockSignals(False)
 
     def _on_refresh_interfaces(self):
+        if self.capture_view and self.capture_view.is_capturing():
+            QMessageBox.information(self, 'Refresh Interfaces', 'Cannot refresh interfaces while capture is running.')
+            return
         if self.iface_selector_view:
             try:
                 self.iface_selector_view.refresh_list_structure()
                 if hasattr(self.iface_selector_view, 'refresh_recent_files'):
                     self.iface_selector_view.refresh_recent_files()
+                self._refresh_capture_menu_state()
                 return
             except Exception:
                 pass
@@ -6229,10 +6623,12 @@ class ApplicationWindow(QMainWindow):
 
     def _on_capture_options(self):
         """Mở Capture Options dialog"""
-        dialog = CaptureOptionsDialog(self, self.capture_view)
+        read_only = bool(self.capture_view and self.capture_view.is_capturing())
+        dialog = CaptureOptionsDialog(self, self.capture_view, read_only=read_only)
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
             self._apply_capture_defaults_to_view()
+        self._refresh_capture_menu_state()
 
     def closeEvent(self, event):
         """Xử lý khi đóng ứng dụng"""
