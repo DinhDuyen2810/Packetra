@@ -20,4 +20,6 @@ class PacketRecord:
     raw: Any = None
     iface: str = ''
     interface_id: int = 0
+    marked: bool = False
+    ignored: bool = False
     packet_comment: str = ''

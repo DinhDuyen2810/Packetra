@@ -148,6 +148,20 @@ class PacketDetailsTree(QTreeWidget):
             if isinstance(metadata, dict):
                 metadata['_detail_tree_cache'] = cached_tree
 
+        packet_comment = str(getattr(record, 'packet_comment', '') or '').strip()
+        if packet_comment:
+            comment_lines = packet_comment.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            if not comment_lines:
+                comment_lines = [packet_comment]
+            comment_children = []
+            for idx, line in enumerate(comment_lines, start=1):
+                comment_children.append({'title': f'Line {idx}: {line}'})
+            comment_node = {
+                'title': 'Packet Comment',
+                'children': comment_children,
+            }
+            self._add_node(self.invisibleRootItem(), comment_node)
+
         for node in cached_tree:
             self._add_node(self.invisibleRootItem(), node)
 
@@ -156,7 +170,9 @@ class PacketDetailsTree(QTreeWidget):
         self.horizontalScrollBar().setValue(h_scroll)
 
     def _add_node(self, parent, data):
-        item = QTreeWidgetItem([data['title']])
+        title = str(data.get('title', '') or '')
+        item = QTreeWidgetItem([title])
+        item.setToolTip(0, title)
         parent_source = parent.data(0, self.BYTE_SOURCE_ROLE) if parent is not self.invisibleRootItem() else 'packet'
         offset = int(data['offset']) if 'offset' in data else -1
         length = int(data['length']) if 'length' in data else 0
@@ -213,7 +229,7 @@ class PacketDetailsTree(QTreeWidget):
 
         def walk(item: QTreeWidgetItem):
             key = self._item_state_key(item)
-            if key:
+            if key and not key.startswith('packet comment'):
                 state[key] = bool(item.isExpanded())
             for idx in range(item.childCount()):
                 walk(item.child(idx))
@@ -227,7 +243,9 @@ class PacketDetailsTree(QTreeWidget):
         # Restore expand/collapse state recursively by normalized path.
         def walk(item: QTreeWidgetItem):
             key = self._item_state_key(item)
-            if key in self._expand_state:
+            if key.startswith('packet comment'):
+                item.setExpanded(False)
+            elif key in self._expand_state:
                 item.setExpanded(bool(self._expand_state.get(key)))
             for idx in range(item.childCount()):
                 walk(item.child(idx))

@@ -122,6 +122,13 @@ def save_pcapng_file_comment(filename: str, comment: str) -> bool:
     return PcapngFileWriter(filename).update_file_comment(comment)
 
 
+def save_pcapng_packet_comments(filename: str, packet_comments: Dict[int, str]) -> bool:
+    """Persist per-packet comments into a pcapng file."""
+    if not filename or not filename.lower().endswith('.pcapng'):
+        return False
+    return PcapngFileWriter(filename).update_packet_comments(packet_comments or {})
+
+
 def load_capture_metadata(filename: str) -> CaptureMetadata:
     """Load capture metadata only (without loading all packets)."""
     metadata = CaptureMetadata()

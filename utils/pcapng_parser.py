@@ -520,6 +520,7 @@ class PcapngFileWriter:
     """Write/update comments in PCAPNG files."""
     
     BLOCK_SHB = 0x0A0D0D0A
+    BLOCK_EPB = 0x00000006
     OPT_COMMENT = 1
     OPT_ENDOFOPT = 0
     
@@ -549,6 +550,157 @@ class PcapngFileWriter:
         except Exception as e:
             print(f"Error updating PCAPNG file: {e}")
             return False
+
+    def update_packet_comments(self, packet_comments: Dict[int, str]) -> bool:
+        """Update per-packet comments (EPB option comment) in a pcapng file."""
+        try:
+            with open(self.filename, 'rb') as f:
+                file_data = f.read()
+
+            if len(file_data) < 32:
+                return False
+
+            byte_order, _first_block_len = self._detect_byte_order(file_data)
+            if not byte_order:
+                return False
+
+            normalized: Dict[int, str] = {}
+            for key, value in (packet_comments or {}).items():
+                try:
+                    packet_no = int(key)
+                except Exception:
+                    continue
+                comment = str(value or '')
+                if packet_no > 0 and comment:
+                    normalized[packet_no] = comment
+
+            rebuilt = self._rewrite_epb_packet_comments(file_data, byte_order, normalized)
+            if not rebuilt:
+                return False
+
+            with open(self.filename, 'w+b') as f:
+                f.write(rebuilt)
+            return True
+        except Exception as e:
+            print(f"Error updating packet comments in PCAPNG file: {e}")
+            return False
+
+    def _detect_byte_order(self, data: bytes) -> tuple[str, int]:
+        if len(data) < 16:
+            return '', 0
+        if struct.unpack('<I', data[0:4])[0] != self.BLOCK_SHB:
+            return '', 0
+
+        for candidate in ('<', '>'):
+            try:
+                block_len = struct.unpack(candidate + 'I', data[4:8])[0]
+            except Exception:
+                continue
+            if block_len < 28 or block_len > len(data):
+                continue
+            trailer = data[block_len - 4:block_len]
+            if trailer != struct.pack(candidate + 'I', block_len):
+                continue
+            body = data[8:block_len - 4]
+            if len(body) >= 4 and struct.unpack(candidate + 'I', body[0:4])[0] == 0x1A2B3C4D:
+                return candidate, block_len
+        return '', 0
+
+    def _rewrite_epb_packet_comments(self, data: bytes, byte_order: str, packet_comments: Dict[int, str]) -> bytes:
+        out = bytearray()
+        offset = 0
+        packet_number = 0
+        data_len = len(data)
+
+        while offset + 12 <= data_len:
+            try:
+                block_type = struct.unpack(byte_order + 'I', data[offset:offset + 4])[0]
+                block_len = struct.unpack(byte_order + 'I', data[offset + 4:offset + 8])[0]
+            except Exception:
+                return b''
+
+            if block_len < 12 or offset + block_len > data_len:
+                return b''
+
+            block_bytes = data[offset:offset + block_len]
+            body = block_bytes[8:-4]
+
+            if block_type != self.BLOCK_EPB:
+                out.extend(block_bytes)
+                offset += block_len
+                continue
+
+            packet_number += 1
+            rebuilt = self._rebuild_single_epb(block_type, body, byte_order, packet_comments.get(packet_number, ''))
+            if not rebuilt:
+                out.extend(block_bytes)
+            else:
+                out.extend(rebuilt)
+            offset += block_len
+
+        if offset != data_len:
+            out.extend(data[offset:])
+        return bytes(out)
+
+    def _rebuild_single_epb(self, block_type: int, body: bytes, byte_order: str, comment: str) -> bytes:
+        if len(body) < 20:
+            return b''
+
+        try:
+            captured_len = struct.unpack(byte_order + 'I', body[12:16])[0]
+        except Exception:
+            return b''
+
+        packet_end = 20 + int(captured_len)
+        options_start = (packet_end + 3) & ~3
+        if options_start > len(body):
+            return b''
+
+        packet_prefix = body[:options_start]
+        options = body[options_start:]
+
+        rebuilt_options = bytearray()
+        cursor = 0
+        while cursor + 4 <= len(options):
+            opt_type = struct.unpack(byte_order + 'H', options[cursor:cursor + 2])[0]
+            opt_len = struct.unpack(byte_order + 'H', options[cursor + 2:cursor + 4])[0]
+            if opt_type == self.OPT_ENDOFOPT:
+                break
+            value_start = cursor + 4
+            value_end = value_start + opt_len
+            if value_end > len(options):
+                break
+
+            if opt_type != self.OPT_COMMENT:
+                rebuilt_options.extend(struct.pack(byte_order + 'HH', opt_type, opt_len))
+                rebuilt_options.extend(options[value_start:value_end])
+                padding = (4 - (opt_len % 4)) % 4
+                if padding:
+                    rebuilt_options.extend(b'\x00' * padding)
+
+            cursor = value_end + ((4 - (opt_len % 4)) % 4)
+
+        comment_bytes = str(comment or '').encode('utf-8')
+        if comment_bytes:
+            rebuilt_options.extend(struct.pack(byte_order + 'HH', self.OPT_COMMENT, len(comment_bytes)))
+            rebuilt_options.extend(comment_bytes)
+            padding = (4 - (len(comment_bytes) % 4)) % 4
+            if padding:
+                rebuilt_options.extend(b'\x00' * padding)
+
+        rebuilt_options.extend(struct.pack(byte_order + 'HH', self.OPT_ENDOFOPT, 0))
+        new_body = packet_prefix + bytes(rebuilt_options)
+
+        if len(new_body) % 4 != 0:
+            new_body += b'\x00' * (4 - (len(new_body) % 4))
+
+        new_block_len = 8 + len(new_body) + 4
+        result = bytearray()
+        result.extend(struct.pack(byte_order + 'I', block_type))
+        result.extend(struct.pack(byte_order + 'I', new_block_len))
+        result.extend(new_body)
+        result.extend(struct.pack(byte_order + 'I', new_block_len))
+        return bytes(result)
     
     def _update_shb_in_data(self, data: bytes, new_comment: str) -> bytes:
         """Update SHB comment in file data with valid block lengths and alignment."""

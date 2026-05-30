@@ -1,17 +1,18 @@
-import logging
+﻿import logging
 import re
 import os
 import hashlib
 import time
 import threading
 import queue
+from pathlib import Path
 from collections import Counter
 from scapy.all import TCP, ICMP, IP
-from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer
+from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer, QStringListModel
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStackedWidget
+    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStackedWidget, QCompleter
 )
 from PySide6.QtGui import QAction, QPainter, QColor, QPen, QPixmap
 
@@ -28,13 +29,14 @@ from utils.pcap_io import (
     normalize_capture_extension,
     save_capture_file,
     save_pcapng_file_comment,
+    save_pcapng_packet_comments,
 )
 
 log = logging.getLogger('capture_view')
 
 
 class _ProtocolSparkline(QLabel):
-    """Sparkline label for one protocol — identical style to interface traffic chart."""
+    """Sparkline label for one protocol â€” identical style to interface traffic chart."""
     HISTORY_LEN = 30
 
     def __init__(self, parent=None):
@@ -83,7 +85,7 @@ class _ProtocolSparkline(QLabel):
 
 
 def _sparkline_pixmap(values, width=280, height=24):
-    """Standalone sparkline pixmap — same style as interface traffic chart."""
+    """Standalone sparkline pixmap â€” same style as interface traffic chart."""
     pix = QPixmap(width, height)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
@@ -110,7 +112,7 @@ def _sparkline_pixmap(values, width=280, height=24):
 
 
 class CaptureInformationDialog(QDialog):
-    """Live capture statistics — sparkline per protocol, same style as Interface traffic chart."""
+    """Live capture statistics â€” sparkline per protocol, same style as Interface traffic chart."""
 
     stop_requested = Signal()
 
@@ -141,7 +143,7 @@ class CaptureInformationDialog(QDialog):
         stop_btn.clicked.connect(self.stop_requested.emit)
         layout.addWidget(stop_btn)
 
-        # Tick every 1 s — push delta counts into each sparkline
+        # Tick every 1 s â€” push delta counts into each sparkline
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -216,6 +218,7 @@ class CaptureView(QWidget):
         self._captured_bytes = 0
         self.default_main_splitter_sizes = [500, 360]
         self.default_lower_splitter_sizes = [980, 650]
+        self._current_pane_layout = 'Layout A'
         self._base_fonts = {}
         self._last_find_row = None
         self._last_find_signature = None
@@ -225,6 +228,7 @@ class CaptureView(QWidget):
         self._filter_history = self._load_filter_history()
         self.capture_comments = ''
         self.capture_metadata = None  # pcapng metadata (interfaces, file comment, packet comments)
+        self._packet_state_by_number = {}
         self._is_dirty = False
         self._auto_output_written_files = []
         self._auto_output_base_path = ''
@@ -237,6 +241,7 @@ class CaptureView(QWidget):
         self._refine_timer.timeout.connect(self._drain_refine_queue)
 
         self._build_ui()
+        self.refresh_preferences_from_settings()
         self._update_status('Ready')
 
     def _settings(self):
@@ -255,21 +260,28 @@ class CaptureView(QWidget):
             values = self._settings().value('filter_history', [], list)
             if not isinstance(values, list):
                 return []
-            return [str(v) for v in values][:10]
+            limit = int(self._settings().value('preferences/show_up_to_filter_entries', 10, int) or 10)
+            limit = max(1, min(limit, 100))
+            return [str(v) for v in values][:limit]
         except Exception:
             return []
 
     def _save_filter_history(self):
-        self._settings().setValue('filter_history', self._filter_history[:10])
+        limit = int(self._settings().value('preferences/show_up_to_filter_entries', 10, int) or 10)
+        limit = max(1, min(limit, 100))
+        self._settings().setValue('filter_history', self._filter_history[:limit])
 
     def _remember_filter(self, expr: str):
         expr = (expr or '').strip()
         if not expr:
             return
+        limit = int(self._settings().value('preferences/show_up_to_filter_entries', 10, int) or 10)
+        limit = max(1, min(limit, 100))
         self._filter_history = [f for f in self._filter_history if f != expr]
         self._filter_history.insert(0, expr)
-        self._filter_history = self._filter_history[:10]
+        self._filter_history = self._filter_history[:limit]
         self._save_filter_history()
+        self._update_filter_autocomplete_model()
         self._refresh_filter_history_menu()
 
     def _load_recent_files(self):
@@ -277,12 +289,48 @@ class CaptureView(QWidget):
             values = self._settings().value('recent_capture_files', [], list)
             if not isinstance(values, list):
                 return []
-            return [str(v) for v in values][:20]
+            limit = int(self._settings().value('preferences/show_up_to_recent_files', 10, int) or 10)
+            limit = max(1, min(limit, 100))
+            return [str(v) for v in values][:limit]
         except Exception:
             return []
 
+    def _preferred_open_directory(self) -> str:
+        settings = self._settings()
+        mode = str(settings.value('preferences/open_files_mode', 'recent_folder', str) or 'recent_folder')
+        fixed_dir = str(settings.value('preferences/open_files_fixed_directory', '', str) or '').strip()
+        if mode == 'fixed_folder' and fixed_dir and os.path.isdir(fixed_dir):
+            return fixed_dir
+
+        recent = self._load_recent_files()
+        if recent:
+            first_path = str(recent[0] or '').strip()
+            if first_path:
+                folder = os.path.dirname(first_path)
+                if folder and os.path.isdir(folder):
+                    return folder
+        return str(Path.cwd())
+
+    def refresh_preferences_from_settings(self):
+        settings = self._settings()
+        autocomplete = bool(settings.value('preferences/display_filter_autocomplete', True, bool))
+        if hasattr(self, 'filter_history_action'):
+            self.filter_history_action.setVisible(autocomplete)
+        if autocomplete:
+            if hasattr(self, 'display_filter_completer'):
+                self.display_filter_input.setCompleter(self.display_filter_completer)
+            if hasattr(self, 'find_type_combo') and self.find_type_combo.currentText() == 'Display filter':
+                self.find_input.setCompleter(getattr(self, 'find_filter_completer', None))
+        else:
+            self.display_filter_input.setCompleter(None)
+            if hasattr(self, 'find_input'):
+                self.find_input.setCompleter(None)
+        self._update_filter_autocomplete_model()
+
     def _save_recent_files(self, paths: list[str]):
-        self._settings().setValue('recent_capture_files', paths[:20])
+        limit = int(self._settings().value('preferences/show_up_to_recent_files', 10, int) or 10)
+        limit = max(1, min(limit, 100))
+        self._settings().setValue('recent_capture_files', paths[:limit])
 
     def _remember_recent_file(self, path: str):
         if not path:
@@ -307,6 +355,7 @@ class CaptureView(QWidget):
         self._configure_parser_capture_context(self.parser, '')
         self.capture_comments = ''
         self.capture_metadata = None
+        self._packet_state_by_number = {}
         self.loaded_file_path = None
         self._auto_output_written_files = []
         self._auto_output_base_path = ''
@@ -495,21 +544,62 @@ class CaptureView(QWidget):
 
         return f'{root}{infix}{ext}'
 
+    def _packet_number_from_record(self, record) -> int:
+        try:
+            return int(getattr(record, 'number', 0) or 0)
+        except Exception:
+            return 0
+
+    def _runtime_packet_state(self, packet_number: int) -> dict:
+        key = int(packet_number or 0)
+        state = self._packet_state_by_number.get(key)
+        if state is None:
+            state = {
+                'marked': False,
+                'ignored': False,
+                'comment': '',
+            }
+            self._packet_state_by_number[key] = state
+        return state
+
+    def _apply_runtime_state_to_record(self, record):
+        if record is None:
+            return record
+        packet_number = self._packet_number_from_record(record)
+        state = self._runtime_packet_state(packet_number)
+        record.marked = bool(state.get('marked', False))
+        record.ignored = bool(state.get('ignored', False))
+        runtime_comment = str(state.get('comment', '') or '')
+        if runtime_comment:
+            record.packet_comment = runtime_comment
+        return record
+
+    def _sync_runtime_state_from_record(self, record):
+        if record is None:
+            return
+        packet_number = self._packet_number_from_record(record)
+        state = self._runtime_packet_state(packet_number)
+        state['marked'] = bool(getattr(record, 'marked', False))
+        state['ignored'] = bool(getattr(record, 'ignored', False))
+        state['comment'] = str(getattr(record, 'packet_comment', '') or '')
+
     def _apply_capture_metadata_to_record(self, record, packet_number: int):
         if record is None:
             return record
 
+        self._apply_runtime_state_to_record(record)
         file_path = str(self.loaded_file_path or '').strip()
         if file_path:
             record.metadata['capture_file_path'] = file_path
 
+        packet_number = int(packet_number)
         if self.capture_metadata is None:
+            self._sync_runtime_state_from_record(record)
             return record
 
-        packet_number = int(packet_number)
         packet_comments = getattr(self.capture_metadata, 'packet_comments', {}) or {}
         packet_comment = str(packet_comments.get(packet_number, '') or '')
-        if packet_comment:
+        if packet_comment and not str(getattr(record, 'packet_comment', '') or '').strip():
             record.packet_comment = packet_comment
 
         interfaces = list(getattr(self.capture_metadata, 'interfaces', []) or [])
@@ -554,6 +644,7 @@ class CaptureView(QWidget):
         if interface_description:
             record.metadata['frame_interface_description'] = interface_description
 
+        self._sync_runtime_state_from_record(record)
         return record
 
     def _persist_capture_records(self, records, file_path: str, file_format: str, compression: str) -> str:
@@ -678,15 +769,17 @@ class CaptureView(QWidget):
         filter_row.setContentsMargins(8, 4, 8, 4)
         self.display_filter_input = QLineEdit()
         self.display_filter_input.setPlaceholderText('Apply a display filter ... <Ctrl+/>')
-        self.apply_filter_btn = QPushButton('➡')
+        self.apply_filter_btn = QPushButton('Apply')
+        self.apply_filter_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
         self.filter_history_menu = QMenu(self)
         self.filter_history_action = self.display_filter_input.addAction(
             self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
             QLineEdit.ActionPosition.TrailingPosition,
         )
-        self.clear_filter_btn = QPushButton('✕')
-        self.apply_filter_btn.setFixedWidth(38)
-        self.clear_filter_btn.setFixedWidth(38)
+        self.clear_filter_btn = QPushButton('Clear')
+        self.clear_filter_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
+        self.apply_filter_btn.setMinimumWidth(72)
+        self.clear_filter_btn.setMinimumWidth(72)
         filter_row.addWidget(self.display_filter_input)
         filter_row.addWidget(self.apply_filter_btn)
         filter_row.addWidget(self.clear_filter_btn)
@@ -820,6 +913,8 @@ class CaptureView(QWidget):
         self.hex_view.hover_left.connect(self._on_hex_hover_left)
 
         self._on_find_option_changed()
+        self._setup_filter_autocomplete()
+        self._update_filter_autocomplete_model()
         self._refresh_filter_history_menu()
 
     def _refresh_filter_history_menu(self):
@@ -830,10 +925,58 @@ class CaptureView(QWidget):
             self.filter_history_menu.addAction(action)
             return
 
-        for expr in self._filter_history[:10]:
+        limit = int(self._settings().value('preferences/show_up_to_filter_entries', 10, int) or 10)
+        limit = max(1, min(limit, 100))
+        for expr in self._filter_history[:limit]:
             action = QAction(expr, self.filter_history_menu)
             action.triggered.connect(lambda checked=False, value=expr: self._apply_filter_from_history(value))
             self.filter_history_menu.addAction(action)
+
+    def _filter_autocomplete_tokens(self) -> list[str]:
+        protocol_tokens = sorted({str(token).lower() for token in getattr(DisplayFilter, 'PROTOCOL_ALIASES', set())})
+        field_tokens = [
+            'frame.number', 'frame.len', 'frame.time_delta',
+            'eth.addr', 'eth.src', 'eth.dst', 'eth.type',
+            'vlan.id',
+            'arp.opcode', 'arp.src.proto_ipv4', 'arp.dst.proto_ipv4',
+            'ip.addr', 'ip.src', 'ip.dst', 'ip.proto', 'ip.ttl',
+            'ipv6.addr', 'ipv6.src', 'ipv6.dst', 'ipv6.nxt', 'ipv6.hlim',
+            'tcp.port', 'tcp.srcport', 'tcp.dstport', 'tcp.flags',
+            'udp.port', 'udp.srcport', 'udp.dstport',
+            'icmp.type', 'icmp.code',
+            'dns.id', 'dns.qry.name',
+        ]
+        keywords = ['and', 'or', 'not', 'contains', '==', '!=', '>=', '<=', '>', '<', '(', ')']
+        values = list(self._filter_history) + protocol_tokens + field_tokens + keywords
+        seen = set()
+        unique = []
+        for value in values:
+            text = str(value or '').strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(text)
+        return unique
+
+    def _setup_filter_autocomplete(self):
+        self.filter_autocomplete_model = QStringListModel(self)
+        self.display_filter_completer = QCompleter(self.filter_autocomplete_model, self)
+        self.display_filter_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.display_filter_completer.setFilterMode(Qt.MatchContains)
+        self.display_filter_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.display_filter_input.setCompleter(self.display_filter_completer)
+
+        self.find_filter_completer = QCompleter(self.filter_autocomplete_model, self)
+        self.find_filter_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.find_filter_completer.setFilterMode(Qt.MatchContains)
+        self.find_filter_completer.setCompletionMode(QCompleter.PopupCompletion)
+
+    def _update_filter_autocomplete_model(self):
+        if hasattr(self, 'filter_autocomplete_model'):
+            self.filter_autocomplete_model.setStringList(self._filter_autocomplete_tokens())
 
     def _set_packet_panes_updates_enabled(self, enabled: bool):
         enabled = bool(enabled)
@@ -845,6 +988,56 @@ class CaptureView(QWidget):
 
     def _set_packet_panes_visible(self, visible: bool):
         self.packet_panes_stack.setCurrentWidget(self.main_splitter if bool(visible) else self.packet_panes_placeholder)
+
+    def _clear_splitter(self, splitter: QSplitter):
+        while splitter.count() > 0:
+            widget = splitter.widget(0)
+            if widget is None:
+                break
+            widget.setParent(None)
+
+    def apply_pane_layout(self, layout_name: str):
+        mode = str(layout_name or 'Layout A').strip()
+        if mode not in ('Layout A', 'Layout B', 'Layout C'):
+            mode = 'Layout A'
+        self._current_pane_layout = mode
+
+        # Detach current arrangement before rebuilding.
+        self._clear_splitter(self.main_splitter)
+        self._clear_splitter(self.lower_splitter)
+
+        if mode == 'Layout A':
+            # Packet List on top, Details + Bytes below.
+            self.lower_splitter.setOrientation(Qt.Horizontal)
+            self.lower_splitter.addWidget(self.details_tree)
+            self.lower_splitter.addWidget(self.hex_view)
+            self.lower_splitter.setSizes(self.default_lower_splitter_sizes)
+
+            self.main_splitter.setOrientation(Qt.Vertical)
+            self.main_splitter.addWidget(self.table)
+            self.main_splitter.addWidget(self.lower_splitter)
+            self.main_splitter.setSizes(self.default_main_splitter_sizes)
+            return
+
+        if mode == 'Layout B':
+            # Packet List + Details on top row, Bytes below.
+            self.lower_splitter.setOrientation(Qt.Horizontal)
+            self.lower_splitter.addWidget(self.table)
+            self.lower_splitter.addWidget(self.details_tree)
+            self.lower_splitter.setSizes(self.default_lower_splitter_sizes)
+
+            self.main_splitter.setOrientation(Qt.Vertical)
+            self.main_splitter.addWidget(self.lower_splitter)
+            self.main_splitter.addWidget(self.hex_view)
+            self.main_splitter.setSizes(self.default_main_splitter_sizes)
+            return
+
+        # Layout C: Packet List | Details | Bytes side-by-side.
+        self.main_splitter.setOrientation(Qt.Horizontal)
+        self.main_splitter.addWidget(self.table)
+        self.main_splitter.addWidget(self.details_tree)
+        self.main_splitter.addWidget(self.hex_view)
+        self.main_splitter.setSizes([500, 380, 500])
 
     def _show_filter_history_menu(self):
         pos = self.display_filter_input.mapToGlobal(self.display_filter_input.rect().bottomRight())
@@ -954,6 +1147,7 @@ class CaptureView(QWidget):
         self._configure_parser_capture_context(self.parser, '')
         self.capture_comments = ''
         self.capture_metadata = None
+        self._packet_state_by_number = {}
         self._captured_bytes = 0
         self._capture_started_at = None
         self._last_live_status_count = 0
@@ -1018,20 +1212,13 @@ class CaptureView(QWidget):
         self._refine_timer.start()
 
     def _update_table_row_from_record(self, row: int, record):
-        values = [
-            str(record.number),
-            f'{record.relative_time:.9f}',
-            record.src,
-            record.dst,
-            record.protocol,
-            str(record.length),
-            record.info,
-        ]
+        values = self.table.display_values(record)
         for col, value in enumerate(values):
             item = self.table.item(row, col)
             if item is not None:
                 item.setText(value)
-        self.table._paint_row(row, record.protocol)
+        self.table._store_row_state(row, record)
+        self.table._paint_row(row, record)
 
     def _drain_refine_queue(self):
         processed = 0
@@ -1323,6 +1510,8 @@ class CaptureView(QWidget):
             save_capture_file(file_path, [r.raw for r in self.records], file_format=file_format, compression=compression)
             self._remember_recent_file(self.loaded_file_path)
             self._set_dirty(False)
+            if file_format == 'pcapng':
+                self.save_packet_comments_to_file()
             self._update_status(f'Saved to {self.loaded_file_path}')
             return True
 
@@ -1339,6 +1528,8 @@ class CaptureView(QWidget):
         self.loaded_file_path = saved_path
         self._remember_recent_file(saved_path)
         self._set_dirty(False)
+        if selected_format == 'pcapng':
+            self.save_packet_comments_to_file()
         self._update_status(f'Saved to {saved_path}')
         return True
 
@@ -1412,6 +1603,7 @@ class CaptureView(QWidget):
             dialog = QFileDialog(self, 'Open PCAP')
             dialog.setFileMode(QFileDialog.ExistingFile)
             dialog.setNameFilter('PCAP Files (*.pcap *.pcapng)')
+            dialog.setDirectory(self._preferred_open_directory())
             dialog.resize(1100, 700)
             self._fit_widget_90(dialog)
 
@@ -1503,6 +1695,52 @@ class CaptureView(QWidget):
                     return self.goto_row(row)
         return False
 
+    def get_current_visible_row(self) -> int:
+        row = int(self.table.currentRow())
+        return row if row >= 0 else -1
+
+    def get_current_record(self):
+        row = self.get_current_visible_row()
+        if row < 0 or row >= len(self.visible_indices):
+            return None
+        rec_idx = self.visible_indices[row]
+        if rec_idx < 0 or rec_idx >= len(self.records):
+            return None
+        return self.records[rec_idx]
+
+    def _selected_visible_rows(self) -> list[int]:
+        if not self.table.selectionModel():
+            return []
+        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+        return [row for row in rows if 0 <= row < len(self.visible_indices)]
+
+    def _selected_record_indexes(self) -> list[int]:
+        indexes = []
+        for row in self._selected_visible_rows():
+            rec_idx = self.visible_indices[row]
+            if 0 <= rec_idx < len(self.records):
+                indexes.append(rec_idx)
+        return indexes
+
+    def _record_index_for_visible_row(self, row: int) -> int:
+        if row < 0 or row >= len(self.visible_indices):
+            return -1
+        rec_idx = self.visible_indices[row]
+        if rec_idx < 0 or rec_idx >= len(self.records):
+            return -1
+        return rec_idx
+
+    def _refresh_row_style(self, row: int):
+        rec_idx = self._record_index_for_visible_row(row)
+        if rec_idx < 0:
+            return
+        record = self.records[rec_idx]
+        self._update_table_row_from_record(row, record)
+
+    def _refresh_all_visible_row_styles(self):
+        for row in range(len(self.visible_indices)):
+            self._refresh_row_style(row)
+
     def toggle_go_to_packet_row(self):
         visible = not self.goto_packet_widget.isVisible()
         self.goto_packet_widget.setVisible(visible)
@@ -1542,6 +1780,11 @@ class CaptureView(QWidget):
 
         encoding_enabled = scope_enabled and scope == 'Packet bytes'
         self.find_encoding_combo.setEnabled(encoding_enabled)
+
+        if search_type == 'Display filter':
+            self.find_input.setCompleter(getattr(self, 'find_filter_completer', None))
+        else:
+            self.find_input.setCompleter(None)
 
         self._on_find_query_changed()
         self._last_find_signature = None
@@ -2059,6 +2302,202 @@ class CaptureView(QWidget):
 
         QMessageBox.information(self, 'Find', 'Không tìm thấy kết quả phù hợp.')
 
+    def find_next(self) -> bool:
+        query = self.find_input.text().strip()
+        if not query:
+            return False
+        previous = self.find_backwards_cb.isChecked()
+        before_row = self.get_current_visible_row()
+        self.find_backwards_cb.setChecked(False)
+        self._on_find_clicked()
+        self.find_backwards_cb.setChecked(previous)
+        return self.get_current_visible_row() != before_row
+
+    def find_previous(self) -> bool:
+        query = self.find_input.text().strip()
+        if not query:
+            return False
+        previous = self.find_backwards_cb.isChecked()
+        before_row = self.get_current_visible_row()
+        self.find_backwards_cb.setChecked(True)
+        self._on_find_clicked()
+        self.find_backwards_cb.setChecked(previous)
+        return self.get_current_visible_row() != before_row
+
+    def _toggle_state_for_record_indexes(self, record_indexes: list[int], state_key: str) -> bool:
+        targets = [idx for idx in record_indexes if 0 <= idx < len(self.records)]
+        if not targets:
+            return False
+        all_enabled = all(bool(getattr(self.records[idx], state_key, False)) for idx in targets)
+        next_value = not all_enabled
+        visible_rows = {rec_idx: row for row, rec_idx in enumerate(self.visible_indices)}
+        for rec_idx in targets:
+            record = self.records[rec_idx]
+            setattr(record, state_key, next_value)
+            self._sync_runtime_state_from_record(record)
+            row = visible_rows.get(rec_idx, -1)
+            if row >= 0:
+                self._refresh_row_style(row)
+        self._set_dirty(True)
+        return True
+
+    def _record_indexes_for_selected_or_current(self) -> list[int]:
+        selected = self._selected_record_indexes()
+        if selected:
+            return selected
+        current_row = self.get_current_visible_row()
+        if current_row >= 0:
+            rec_idx = self._record_index_for_visible_row(current_row)
+            if rec_idx >= 0:
+                return [rec_idx]
+        return []
+
+    def toggle_mark_selected(self) -> bool:
+        indexes = self._record_indexes_for_selected_or_current()
+        changed = self._toggle_state_for_record_indexes(indexes, 'marked')
+        if changed:
+            self._update_status('Updated mark state for selected packet(s)')
+        return changed
+
+    def toggle_mark_all_displayed(self) -> bool:
+        if not self.visible_indices:
+            return False
+        changed = self._toggle_state_for_record_indexes(list(self.visible_indices), 'marked')
+        if changed:
+            self._update_status('Updated mark state for displayed packet(s)')
+        return changed
+
+    def _goto_mark(self, backwards: bool) -> bool:
+        total = len(self.visible_indices)
+        if total <= 0:
+            return False
+        current = self.get_current_visible_row()
+        if current < 0:
+            current = total if backwards else -1
+        candidates = []
+        if backwards:
+            candidates.extend(range(current - 1, -1, -1))
+            candidates.extend(range(total - 1, current, -1))
+        else:
+            candidates.extend(range(current + 1, total))
+            candidates.extend(range(0, current))
+        for row in candidates:
+            rec_idx = self._record_index_for_visible_row(row)
+            if rec_idx < 0:
+                continue
+            if bool(getattr(self.records[rec_idx], 'marked', False)):
+                return self.goto_row(row)
+        return False
+
+    def goto_next_mark(self) -> bool:
+        found = self._goto_mark(backwards=False)
+        if found:
+            self._update_status('Moved to next marked packet')
+        return found
+
+    def goto_previous_mark(self) -> bool:
+        found = self._goto_mark(backwards=True)
+        if found:
+            self._update_status('Moved to previous marked packet')
+        return found
+
+    def toggle_ignore_selected(self) -> bool:
+        indexes = self._record_indexes_for_selected_or_current()
+        changed = self._toggle_state_for_record_indexes(indexes, 'ignored')
+        if changed:
+            self._update_status('Updated ignore state for selected packet(s)')
+        return changed
+
+    def toggle_ignore_all_displayed(self) -> bool:
+        if not self.visible_indices:
+            return False
+        changed = self._toggle_state_for_record_indexes(list(self.visible_indices), 'ignored')
+        if changed:
+            self._update_status('Updated ignore state for displayed packet(s)')
+        return changed
+
+    def set_comment_for_selected(self, comment: str) -> bool:
+        indexes = self._record_indexes_for_selected_or_current()
+        targets = [idx for idx in indexes if 0 <= idx < len(self.records)]
+        if not targets:
+            return False
+        normalized = str(comment or '')
+        for rec_idx in targets:
+            record = self.records[rec_idx]
+            record.packet_comment = normalized
+            self._sync_runtime_state_from_record(record)
+            if rec_idx == self._selected_record_index:
+                self.details_tree.show_packet(record)
+        self._set_dirty(True)
+        self._update_status('Updated packet comment')
+        return True
+
+    def get_selected_packet_comment(self) -> str:
+        current = self.get_current_record()
+        if current is None:
+            return ''
+        return str(getattr(current, 'packet_comment', '') or '')
+
+    def delete_all_packet_comments(self) -> int:
+        changed = 0
+        for record in self.records:
+            if str(getattr(record, 'packet_comment', '') or ''):
+                record.packet_comment = ''
+                self._sync_runtime_state_from_record(record)
+                changed += 1
+        if changed > 0:
+            if 0 <= self._selected_record_index < len(self.records):
+                self.details_tree.show_packet(self.records[self._selected_record_index])
+            self._set_dirty(True)
+            self._update_status('Deleted all packet comments')
+        return changed
+
+    def _collect_packet_comments_for_persistence(self) -> dict[int, str]:
+        comments: dict[int, str] = {}
+        for record in self.records:
+            try:
+                packet_no = int(getattr(record, 'number', 0) or 0)
+            except Exception:
+                continue
+            if packet_no <= 0:
+                continue
+            comment = str(getattr(record, 'packet_comment', '') or '').strip()
+            if comment:
+                comments[packet_no] = comment
+        return comments
+
+    def save_packet_comments_to_file(self) -> bool:
+        if not self.loaded_file_path or not str(self.loaded_file_path).lower().endswith('.pcapng'):
+            return False
+        comments = self._collect_packet_comments_for_persistence()
+        ok = save_pcapng_packet_comments(self.loaded_file_path, comments)
+        if not ok:
+            return False
+        if self.capture_metadata is not None:
+            self.capture_metadata.packet_comments = dict(comments)
+        self._set_dirty(False)
+        return True
+
+    def save_as_pcapng(self, target_path: str) -> bool:
+        filename = str(target_path or '').strip()
+        if not filename:
+            return False
+        try:
+            filename = normalize_capture_extension(filename, 'pcapng')
+            saved_path = save_capture_file(
+                filename,
+                [r.raw for r in self.records],
+                file_format='pcapng',
+                compression='none',
+            )
+            self.loaded_file_path = saved_path
+            self.capture_metadata = load_capture_metadata(saved_path)
+            self._remember_recent_file(saved_path)
+            self._set_dirty(False)
+            return True
+        except Exception:
+            return False
+
     def _on_go_to_packet_row_submit(self):
         text = self.goto_packet_input.text().strip()
         if not text.isdigit():
@@ -2231,6 +2670,9 @@ class CaptureView(QWidget):
         displayed_ratio = 100.0 if total_packets == 0 else (float(displayed_packets) / float(total_packets)) * 100.0
         displayed_bytes = sum(self.records[i].length for i in self.visible_indices) if self.visible_indices else 0
         byte_ratio = 100.0 if total_bytes == 0 else (float(displayed_bytes) / float(total_bytes)) * 100.0
+        marked_packets = [record for record in self.records if bool(getattr(record, 'marked', False))]
+        marked_count = len(marked_packets)
+        marked_bytes = sum(int(getattr(record, 'length', 0) or 0) for record in marked_packets)
 
         file_length_text = f'{max(1, (total_bytes + 1023) // 1024)} kB'
         if self.loaded_file_path and os.path.exists(self.loaded_file_path):
@@ -2309,15 +2751,20 @@ class CaptureView(QWidget):
             'comment': file_comment,
             'interfaces': interfaces_list,
             'stats_packets_displayed': f'{displayed_packets} ({displayed_ratio:.1f}%)',
-            'stats_packets_marked': '—',
+            'stats_packets_marked': str(marked_count),
             'stats_time_span': f'{elapsed_seconds:.3f}',
             'stats_average_pps': f'{avg_pps:.1f}',
             'stats_average_packet_size': f'{avg_pkt_size:.0f}',
             'stats_bytes_displayed': f'{displayed_bytes} ({byte_ratio:.1f}%)',
-            'stats_bytes_marked': '0',
+            'stats_bytes_marked': str(marked_bytes),
             'stats_average_bytes_s': f'{avg_bytes_per_sec / 1000.0:.0f} k',
             'stats_average_bits_s': f'{avg_bits_per_sec / 1000.0:.0f} k',
         }
+
+    def get_effective_records(self, include_ignored: bool = False):
+        if include_ignored:
+            return list(self.records)
+        return [record for record in self.records if not bool(getattr(record, 'ignored', False))]
 
     def get_expert_information(self):
         entries = []
@@ -2477,7 +2924,7 @@ class CaptureView(QWidget):
             {'severity': 'Note', 'summary': 'Coalesced Padding Data', 'group': 'Protocol', 'protocol': 'QUIC', 'all': ['coalesced padding data', 'padding data appended']},
         ]
 
-        for rec in self.records:
+        for rec in self.get_effective_records(include_ignored=False):
             seen = set()
             title_lowers = []
             protocol_text = _canon_protocol(str(rec.protocol or ''))
@@ -2596,20 +3043,24 @@ class CaptureView(QWidget):
         return entries
 
     def focus_filter(self):
-        """Focus vào display filter input"""
+        """Focus vĂ o display filter input"""
         self.display_filter_input.setFocus()
         self.display_filter_input.selectAll()
 
     def show_summary(self):
-        """Xem tóm tắt"""
-        if not self.records:
-            QMessageBox.information(None, 'Summary', 'Không có packet')
+        """Xem tong quan capture."""
+        effective_records = self.get_effective_records(include_ignored=False)
+        if not effective_records:
+            QMessageBox.information(None, 'Summary', 'Khong co packet')
             return
 
-        proto_counts = Counter(r.protocol for r in self.records)
-        total_bytes = sum(r.length for r in self.records)
+        proto_counts = Counter(r.protocol for r in effective_records)
+        total_bytes = sum(r.length for r in effective_records)
+        ignored_count = max(0, len(self.records) - len(effective_records))
 
-        summary = f"Total Packets: {len(self.records)}\n"
+        summary = f"Total Packets: {len(effective_records)}\n"
+        if ignored_count > 0:
+            summary += f"Ignored Packets: {ignored_count}\n"
         summary += f"Total Bytes: {total_bytes:,}\n\n"
         summary += "Protocol Distribution:\n"
         for proto, count in sorted(proto_counts.items()):
@@ -2632,13 +3083,14 @@ class CaptureView(QWidget):
         dialog.exec()
 
     def show_conversations(self):
-        """Xem conversations"""
-        if not self.records:
-            QMessageBox.information(None, 'Conversations', 'Không có conversation')
+        """Xem conversations."""
+        effective_records = self.get_effective_records(include_ignored=False)
+        if not effective_records:
+            QMessageBox.information(None, 'Conversations', 'Khong co conversation')
             return
 
         from gui.conversations_dialog import ConversationsDialog
-        dialog = ConversationsDialog(self.records, self)
+        dialog = ConversationsDialog(effective_records, self)
         self._fit_widget_90(dialog)
         dialog.exec()
 

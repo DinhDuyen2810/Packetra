@@ -142,12 +142,16 @@ class InterfaceSelectorView(QWidget):
             values = self._settings().value('recent_capture_files', [], list)
             if not isinstance(values, list):
                 return []
-            return [str(v) for v in values if os.path.exists(str(v))][:20]
+            limit = int(self._settings().value('preferences/show_up_to_recent_files', 10, int) or 10)
+            limit = max(1, min(limit, 100))
+            return [str(v) for v in values if os.path.exists(str(v))][:limit]
         except Exception:
             return []
 
     def _save_recent_paths(self, paths):
-        self._settings().setValue('recent_capture_files', paths[:20])
+        limit = int(self._settings().value('preferences/show_up_to_recent_files', 10, int) or 10)
+        limit = max(1, min(limit, 100))
+        self._settings().setValue('recent_capture_files', paths[:limit])
 
     def _remember_recent_path(self, path: str):
         if not path:
@@ -186,7 +190,7 @@ class InterfaceSelectorView(QWidget):
 
     def refresh_recent_files(self):
         self.recent_list.clear()
-        for path in self._load_recent_paths()[:10]:
+        for path in self._load_recent_paths():
             self.recent_list.addItem(path)
 
     def _build_capture_header(self):

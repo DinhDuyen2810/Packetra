@@ -17,7 +17,7 @@
 - ✓ Capture filters & Display filters
 - ✓ Windows Npcap integration
 
-## � Cài Đặt
+## Cài Đặt
 
 ### Yêu cầu
 - Python 3.8+

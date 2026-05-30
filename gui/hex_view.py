@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QTextCursor, QTextCharFormat, QColor
-from PySide6.QtWidgets import QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget
 
 from core.formatters import hex_dump
 
@@ -47,16 +47,30 @@ class PacketHexView(QPlainTextEdit):
         self._selected_ranges = []
         self._hover_highlight_ranges = []
         self._last_hovered_byte = None
+        self._raw_data = b''
         
 
     def show_packet(self, record):
         self.show_bytes(_record_packet_bytes(record))
 
     def show_bytes(self, data):
+        self._raw_data = bytes(data or b'')
         self._selected_ranges = []
         self._hover_highlight_ranges = []
         self._last_hovered_byte = None
-        self.setPlainText(hex_dump(data) if data else '')
+        self.setPlainText(hex_dump(self._raw_data) if self._raw_data else '')
+
+    def selected_raw_bytes(self) -> bytes:
+        if not self._selected_ranges:
+            return b''
+        chunks = []
+        data = self._raw_data or b''
+        for start, length in self._selected_ranges:
+            s = max(0, int(start))
+            e = max(s, min(len(data), s + int(length)))
+            if e > s:
+                chunks.append(data[s:e])
+        return b''.join(chunks)
 
     def _line_byte_count(self, line: str) -> int:
         if len(line) <= self.ASCII_START_COLUMN:
@@ -460,3 +474,23 @@ class PacketBytesView(QWidget):
             return
         for source in self._tab_sources:
             self._views[source].clear_hover_range()
+
+    def copy_selected_bytes_to_clipboard(self) -> bool:
+        if not self._tab_sources:
+            return False
+        source = self._active_source()
+        view = self._views.get(source)
+        if view is None:
+            return False
+
+        payload = view.selected_raw_bytes()
+        if payload:
+            text = ' '.join(f'{byte:02X}' for byte in payload)
+            QApplication.clipboard().setText(text)
+            return True
+
+        cursor_text = str(view.textCursor().selectedText() or '').strip()
+        if cursor_text:
+            QApplication.clipboard().setText(cursor_text)
+            return True
+        return False

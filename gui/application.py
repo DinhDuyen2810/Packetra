@@ -17,9 +17,11 @@ from PySide6.QtWidgets import (
     QSizePolicy, QToolButton, QDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QTextEdit, QInputDialog, QGridLayout, QScrollArea,
     QFrame, QTextBrowser, QTabWidget, QCheckBox, QSpinBox, QLineEdit, QComboBox,
-    QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup
+    QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup,
+    QListWidget
 )
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextDocument
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont
+from PySide6.QtWidgets import QColorDialog, QFontDialog
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from scapy.all import IP, IPv6, TCP, UDP
 
@@ -1517,9 +1519,33 @@ class ApplicationWindow(QMainWindow):
         # Build UI
         self._build_ui()
         self._connect_signals()
+        self._restore_main_window_placement_if_needed()
 
         # Show interface selector by default
         self.show_interface_selector()
+
+    def _restore_main_window_placement_if_needed(self):
+        settings = QSettings('Packetra', 'Packetra')
+        enabled = bool(settings.value('preferences/remember_main_window_size_and_placement', True, bool))
+        if not enabled:
+            return
+        geometry_hex = settings.value('preferences/main_window_geometry', '', str)
+        if geometry_hex:
+            try:
+                self.restoreGeometry(bytes.fromhex(str(geometry_hex)))
+            except Exception:
+                pass
+
+    def _save_main_window_placement_if_needed(self):
+        settings = QSettings('Packetra', 'Packetra')
+        enabled = bool(settings.value('preferences/remember_main_window_size_and_placement', True, bool))
+        if not enabled:
+            settings.remove('preferences/main_window_geometry')
+            return
+        try:
+            settings.setValue('preferences/main_window_geometry', bytes(self.saveGeometry()).hex())
+        except Exception:
+            pass
 
     def _build_ui(self):
         """Xây dựng giao diện chính"""
@@ -1981,17 +2007,17 @@ class ApplicationWindow(QMainWindow):
         # Edit menu
         self.action_copy.triggered.connect(self._on_copy)
         self.action_find.triggered.connect(self._on_search)
-        self.action_find_next.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Find Next'))
-        self.action_find_previous.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Find Previous'))
-        self.action_mark_unmark_selected.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Mark/Unmark Selected'))
-        self.action_mark_unmark_all_displayed.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Mark/Unmark All Displayed Packets'))
-        self.action_next_mark.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Next Mark'))
-        self.action_previous_mark.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Previous Mark'))
-        self.action_ignore_unignore_selected.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Ignore/Unignore Selected'))
-        self.action_ignore_unignore_all_displayed.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Ignore/Unignore All Displayed'))
-        self.action_packet_comment.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Packet Comment...'))
-        self.action_delete_all_packet_comments.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Delete All Packet Comments'))
-        self.action_preferences.triggered.connect(lambda: self._on_menu_feature_placeholder('Edit > Preferences...'))
+        self.action_find_next.triggered.connect(self._on_find_next)
+        self.action_find_previous.triggered.connect(self._on_find_previous)
+        self.action_mark_unmark_selected.triggered.connect(self._on_mark_unmark_selected)
+        self.action_mark_unmark_all_displayed.triggered.connect(self._on_mark_unmark_all_displayed)
+        self.action_next_mark.triggered.connect(self._on_next_mark)
+        self.action_previous_mark.triggered.connect(self._on_previous_mark)
+        self.action_ignore_unignore_selected.triggered.connect(self._on_ignore_unignore_selected)
+        self.action_ignore_unignore_all_displayed.triggered.connect(self._on_ignore_unignore_all_displayed)
+        self.action_packet_comment.triggered.connect(self._on_packet_comment)
+        self.action_delete_all_packet_comments.triggered.connect(self._on_delete_all_packet_comments)
+        self.action_preferences.triggered.connect(self._on_preferences)
 
         # View menu
         self.action_view_main_toolbar.triggered.connect(self._on_toggle_main_toolbar)
@@ -2541,7 +2567,10 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'AI Analyst', 'Khong co capture de phan tich.')
             return
 
-        records = list(self.capture_view.records)
+        records = list(self.capture_view.get_effective_records(include_ignored=False))
+        if not records:
+            QMessageBox.information(self, 'AI Analyst', 'Tat ca packet hien tai dang o trang thai ignored.')
+            return
         packet_numbers = sorted(int(r.number) for r in records)
         record_by_number = {}
         for rec in records:
@@ -2662,6 +2691,7 @@ class ApplicationWindow(QMainWindow):
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self.capture_view.set_color_rules_enabled(self.action_color_btn.isChecked())
+        self._apply_edit_preferences(self._load_edit_preferences())
         self.stacked_widget.setCurrentWidget(self.capture_view)
         self._update_capture_window_title()
         self._update_toolbar_state('capture')
@@ -2827,6 +2857,40 @@ class ApplicationWindow(QMainWindow):
             self.action_print.setEnabled(has_packets)
         if hasattr(self, 'action_exit'):
             self.action_exit.setEnabled(True)
+        self._refresh_edit_menu_state()
+
+    def _refresh_edit_menu_state(self):
+        active_capture = bool(
+            self.capture_view
+            and self.stacked_widget.currentWidget() is self.capture_view
+        )
+        has_packets = bool(active_capture and self.capture_view.has_packets())
+        if hasattr(self, 'action_copy'):
+            self.action_copy.setEnabled(active_capture)
+        if hasattr(self, 'action_find'):
+            self.action_find.setEnabled(has_packets)
+        if hasattr(self, 'action_find_next'):
+            self.action_find_next.setEnabled(has_packets)
+        if hasattr(self, 'action_find_previous'):
+            self.action_find_previous.setEnabled(has_packets)
+        if hasattr(self, 'action_mark_unmark_selected'):
+            self.action_mark_unmark_selected.setEnabled(has_packets)
+        if hasattr(self, 'action_mark_unmark_all_displayed'):
+            self.action_mark_unmark_all_displayed.setEnabled(has_packets)
+        if hasattr(self, 'action_next_mark'):
+            self.action_next_mark.setEnabled(has_packets)
+        if hasattr(self, 'action_previous_mark'):
+            self.action_previous_mark.setEnabled(has_packets)
+        if hasattr(self, 'action_ignore_unignore_selected'):
+            self.action_ignore_unignore_selected.setEnabled(has_packets)
+        if hasattr(self, 'action_ignore_unignore_all_displayed'):
+            self.action_ignore_unignore_all_displayed.setEnabled(has_packets)
+        if hasattr(self, 'action_packet_comment'):
+            self.action_packet_comment.setEnabled(has_packets)
+        if hasattr(self, 'action_delete_all_packet_comments'):
+            self.action_delete_all_packet_comments.setEnabled(has_packets)
+        if hasattr(self, 'action_preferences'):
+            self.action_preferences.setEnabled(True)
 
     def _sync_capture_buttons(self):
         is_running = bool(self.capture_view and self.capture_view.is_capturing())
@@ -2941,28 +3005,35 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_file(self):
         """Mở file PCAP"""
-        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
-        if not proceed:
+        settings = QSettings('Packetra', 'Packetra')
+        mode = str(settings.value('preferences/open_files_mode', 'recent_folder', str) or 'recent_folder')
+        fixed_dir = str(settings.value('preferences/open_files_fixed_directory', '', str) or '').strip()
+        initial_dir = ''
+        if mode == 'fixed_folder' and fixed_dir and os.path.isdir(fixed_dir):
+            initial_dir = fixed_dir
+        else:
+            recent = settings.value('recent_capture_files', [], list)
+            if isinstance(recent, list):
+                for path in recent:
+                    normalized = os.path.normpath(str(path or '').strip())
+                    if normalized and os.path.exists(normalized):
+                        folder = os.path.dirname(normalized)
+                        if folder and os.path.isdir(folder):
+                            initial_dir = folder
+                            break
+        if not initial_dir:
+            initial_dir = str(Path.cwd())
+
+        selected_path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Open PCAP',
+            initial_dir,
+            'PCAP Files (*.pcap *.pcapng)',
+        )
+        if not selected_path:
             return
 
-        if not self.capture_view:
-            self.show_capture_view('', 'Offline', '')
-        if self.capture_view:
-            started = time.perf_counter()
-            self.capture_view.load_file()
-            self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
-            self._status_mode = 'activity'
-            self._status_activity_kind = 'load'
-            self._selected_packet_number = None
-            self._capture_started_monotonic = None
-            self._update_packet_status_label()
-            self.detail_field_label.setText('Field: - | Byte: 0')
-            self._sync_capture_buttons()
-            self._update_capture_window_title()
-            self._refresh_status_metrics()
-            self._refresh_file_menu_state()
-            if self.iface_selector_view:
-                self.iface_selector_view.refresh_recent_files()
+        self._on_open_recent_file(selected_path)
 
     def _on_save_file(self):
         """Lưu file PCAP"""
@@ -3881,11 +3952,15 @@ class ApplicationWindow(QMainWindow):
         if not file_path.lower().endswith(".csv"):
             file_path += ".csv"
         try:
-            if self.capture_view.loaded_file_path:
-                csv_path, flows = export_pcap_to_csv(self.capture_view.loaded_file_path, file_path)
-            else:
-                packets = [r.raw for r in self.capture_view.records if getattr(r, "raw", None) is not None]
-                csv_path, flows = export_packets_to_csv(packets, file_path)
+            packets = [
+                r.raw
+                for r in self.capture_view.get_effective_records(include_ignored=False)
+                if getattr(r, "raw", None) is not None
+            ]
+            if not packets:
+                QMessageBox.information(self, "Export Flow CSV", "Khong co packet hop le (cac packet co the da ignored).")
+                return
+            csv_path, flows = export_packets_to_csv(packets, file_path)
             model_adapter = self._build_flow_model_adapter()
             behavior = analyze_flows(flows, use_model=model_adapter.loaded, model_adapter=model_adapter)
             QMessageBox.information(
@@ -3900,9 +3975,15 @@ class ApplicationWindow(QMainWindow):
         if not self.capture_view:
             QMessageBox.information(self, "Export Selected Flow CSV", "Khong co du lieu capture.")
             return
-        selected_packets = self.capture_view.get_selected_raw_packets()
+        selected_packets = []
+        for record in self.capture_view.get_selected_records():
+            if bool(getattr(record, "ignored", False)):
+                continue
+            raw = getattr(record, "raw", None)
+            if raw is not None:
+                selected_packets.append(raw)
         if not selected_packets:
-            QMessageBox.warning(self, "Export Selected Flow CSV", "Ban can chon packet trong bang truoc khi export.")
+            QMessageBox.warning(self, "Export Selected Flow CSV", "Khong co packet hop le de export (co the da ignored).")
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -3936,13 +4017,1071 @@ class ApplicationWindow(QMainWindow):
 
     def _on_copy(self):
         widget = QApplication.focusWidget()
+        cv = self.capture_view
+        if cv and widget is not None:
+            if widget is cv.details_tree or cv.details_tree.isAncestorOf(widget):
+                selected_items = cv.details_tree.selectedItems()
+                if selected_items:
+                    QApplication.clipboard().setText(str(selected_items[0].text(0)))
+                    return
+                lines = []
+                root = cv.details_tree.invisibleRootItem()
+                def _walk(item, level=0):
+                    lines.append(('  ' * level) + item.text(0))
+                    for i in range(item.childCount()):
+                        _walk(item.child(i), level + 1)
+                for i in range(root.childCount()):
+                    _walk(root.child(i), 0)
+                if lines:
+                    QApplication.clipboard().setText('\n'.join(lines))
+                    return
+
+            if widget is cv.hex_view or cv.hex_view.isAncestorOf(widget):
+                if cv.hex_view.copy_selected_bytes_to_clipboard():
+                    return
+
         if widget is not None and hasattr(widget, 'copy'):
             try:
                 widget.copy()
                 return
             except Exception:
                 pass
-        self._on_menu_feature_placeholder('Edit > Copy')
+        if cv:
+            table = cv.table
+            selected_rows = []
+            if table.selectionModel():
+                selected_rows = sorted({index.row() for index in table.selectionModel().selectedRows()})
+            if selected_rows:
+                lines = []
+                header_values = []
+                header = table.horizontalHeader()
+                for visual_idx in range(table.columnCount()):
+                    logical = header.logicalIndex(visual_idx)
+                    if table.isColumnHidden(logical):
+                        continue
+                    header_item = table.horizontalHeaderItem(logical)
+                    header_values.append(str(header_item.text() if header_item is not None else ''))
+                if header_values:
+                    lines.append('\t'.join(header_values))
+                for row in selected_rows:
+                    values = []
+                    for visual_idx in range(table.columnCount()):
+                        logical = header.logicalIndex(visual_idx)
+                        if table.isColumnHidden(logical):
+                            continue
+                        item = table.item(row, logical)
+                        values.append(str(item.text() if item is not None else ''))
+                    lines.append('\t'.join(values))
+                QApplication.clipboard().setText('\n'.join(lines))
+                return
+        QMessageBox.information(self, 'Copy', 'Khong co du lieu de sao chep.')
+
+    def _require_capture_for_edit_action(self) -> bool:
+        if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view and self.capture_view.has_packets():
+            return True
+        QMessageBox.information(self, 'Edit', 'Khong co du lieu packet de thuc hien thao tac.')
+        return False
+
+    def _on_find_next(self):
+        if not self.capture_view:
+            return
+        if not self.capture_view.find_input.text().strip():
+            if not self.capture_view.find_widget.isVisible():
+                self.capture_view.toggle_find_panel()
+            self.capture_view.find_input.setFocus()
+            self.capture_view.find_input.selectAll()
+            QMessageBox.information(self, 'Find Next', 'Hay nhap noi dung tim kiem truoc.')
+            return
+        self.capture_view.find_next()
+
+    def _on_find_previous(self):
+        if not self.capture_view:
+            return
+        if not self.capture_view.find_input.text().strip():
+            if not self.capture_view.find_widget.isVisible():
+                self.capture_view.toggle_find_panel()
+            self.capture_view.find_input.setFocus()
+            self.capture_view.find_input.selectAll()
+            QMessageBox.information(self, 'Find Previous', 'Hay nhap noi dung tim kiem truoc.')
+            return
+        self.capture_view.find_previous()
+
+    def _on_mark_unmark_selected(self):
+        if not self._require_capture_for_edit_action():
+            return
+        if not self.capture_view.toggle_mark_selected():
+            QMessageBox.information(self, 'Mark/Unmark Selected', 'Hay chon it nhat mot packet.')
+            return
+        self._update_capture_window_title()
+
+    def _on_mark_unmark_all_displayed(self):
+        if not self._require_capture_for_edit_action():
+            return
+        if not self.capture_view.visible_indices:
+            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'Khong co packet hien thi.')
+            return
+        if not self.capture_view.toggle_mark_all_displayed():
+            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'Khong thay doi du lieu.')
+            return
+        self._update_capture_window_title()
+
+    def _on_next_mark(self):
+        if not self._require_capture_for_edit_action():
+            return
+        if not self.capture_view.goto_next_mark():
+            QMessageBox.information(self, 'Next Mark', 'Khong tim thay packet da danh dau tiep theo.')
+
+    def _on_previous_mark(self):
+        if not self._require_capture_for_edit_action():
+            return
+        if not self.capture_view.goto_previous_mark():
+            QMessageBox.information(self, 'Previous Mark', 'Khong tim thay packet da danh dau truoc do.')
+
+    def _on_ignore_unignore_selected(self):
+        if not self._require_capture_for_edit_action():
+            return
+        if not self.capture_view.toggle_ignore_selected():
+            QMessageBox.information(self, 'Ignore/Unignore Selected', 'Hay chon it nhat mot packet.')
+            return
+        self._update_capture_window_title()
+
+    def _on_ignore_unignore_all_displayed(self):
+        if not self._require_capture_for_edit_action():
+            return
+        if not self.capture_view.visible_indices:
+            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'Khong co packet hien thi.')
+            return
+        if not self.capture_view.toggle_ignore_all_displayed():
+            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'Khong thay doi du lieu.')
+            return
+        self._update_capture_window_title()
+
+    def _on_packet_comment(self):
+        if not self._require_capture_for_edit_action():
+            return
+        current_comment = self.capture_view.get_selected_packet_comment()
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            'Packet Comment',
+            'Nhap ghi chu cho packet dang chon:',
+            current_comment,
+        )
+        if not ok:
+            return
+        if not self.capture_view.set_comment_for_selected(text):
+            QMessageBox.information(self, 'Packet Comment', 'Hay chon packet can ghi chu.')
+            return
+        current_path = str(getattr(self.capture_view, 'loaded_file_path', '') or '').strip()
+        if current_path and current_path.lower().endswith('.pcap'):
+            reply = QMessageBox.question(
+                self,
+                'Packet Comment',
+                'File hien tai la .pcap. Packet comment can dinh dang .pcapng de luu ben vung.\nBan co muon luu moi sang .pcapng ngay bay gio khong?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                suggested = os.path.splitext(current_path)[0] + '.pcapng'
+                target_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    'Save As PCAPNG',
+                    suggested,
+                    'PCAPNG Files (*.pcapng)',
+                )
+                if target_path:
+                    if not target_path.lower().endswith('.pcapng'):
+                        target_path += '.pcapng'
+                    if not self.capture_view.save_as_pcapng(target_path):
+                        QMessageBox.warning(self, 'Packet Comment', 'Khong the luu sang file pcapng.')
+                        self._update_capture_window_title()
+                        return
+                else:
+                    self._update_capture_window_title()
+                    return
+
+        persisted = self.capture_view.save_packet_comments_to_file()
+        if not persisted:
+            QMessageBox.information(self, 'Packet Comment', 'Packet comment da cap nhat trong bo nho. Hay luu file pcapng de ghi ben vung.')
+        self._update_capture_window_title()
+
+    def _on_delete_all_packet_comments(self):
+        if not self._require_capture_for_edit_action():
+            return
+        reply = QMessageBox.question(
+            self,
+            'Delete All Packet Comments',
+            'Ban co chac muon xoa toan bo ghi chu packet?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        count = int(self.capture_view.delete_all_packet_comments() or 0)
+        if count <= 0:
+            QMessageBox.information(self, 'Delete All Packet Comments', 'Khong co ghi chu nao de xoa.')
+            return
+        self.capture_view.save_packet_comments_to_file()
+        self._update_capture_window_title()
+        QMessageBox.information(self, 'Delete All Packet Comments', f'Da xoa {count} ghi chu packet.')
+
+    def _default_edit_preferences(self) -> dict:
+        default_columns = [
+            {'index': 0, 'displayed': True, 'title': 'No.', 'field': 'frame.number', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 1, 'displayed': True, 'title': 'Time', 'field': 'frame.time_relative', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 2, 'displayed': True, 'title': 'Source', 'field': 'ip.src', 'occurrence': 1, 'alignment': 'Left'},
+            {'index': 3, 'displayed': True, 'title': 'Destination', 'field': 'ip.dst', 'occurrence': 1, 'alignment': 'Left'},
+            {'index': 4, 'displayed': True, 'title': 'Protocol', 'field': '_ws.col.protocol', 'occurrence': 1, 'alignment': 'Center'},
+            {'index': 5, 'displayed': True, 'title': 'Length', 'field': 'frame.len', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 6, 'displayed': True, 'title': 'Info', 'field': '_ws.col.info', 'occurrence': 1, 'alignment': 'Left'},
+        ]
+        return {
+            'appearance': {
+                'remember_main_window_size_and_placement': True,
+                'open_files_mode': 'recent_folder',
+                'open_files_fixed_directory': '',
+                'show_up_to_filter_entries': 10,
+                'show_up_to_recent_files': 10,
+                'confirm_unsaved_capture_files': True,
+                'display_filter_autocomplete': True,
+            },
+            'columns': default_columns,
+            'font_and_colors': {
+                'packet_list_font': '',
+                'packet_details_font': '',
+                'packet_bytes_font': '',
+                'marked_packet_color': '#fff3b0',
+                'ignored_packet_color': '#e0e0e0',
+                'search_highlight_color': '#ffcc00',
+            },
+            'layout': {
+                'pane_layout': 'Layout A',
+                'show_packet_list_separator': True,
+            },
+            'capture': {
+                'default_interface': '',
+                'promiscuous_mode': True,
+                'capture_format_pcapng': True,
+                'realtime_update': True,
+                'update_interval_ms': 1000,
+            },
+            'expert_items': [],
+            'name_resolution': {
+                'resolve_mac_addresses': True,
+                'resolve_transport_names': False,
+                'resolve_network_ip_addresses': False,
+                'use_captured_dns_packet_data': True,
+            },
+        }
+
+    def _load_edit_preferences(self) -> dict:
+        defaults = self._default_edit_preferences()
+        settings = QSettings('Packetra', 'Packetra')
+        raw = settings.value('preferences/edit_payload', '', str)
+        if not raw:
+            return defaults
+        try:
+            loaded = json.loads(raw)
+        except Exception:
+            return defaults
+        if not isinstance(loaded, dict):
+            return defaults
+        merged = defaults
+        for key, value in loaded.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                merged[key].update(value)
+            else:
+                merged[key] = value
+        if not isinstance(merged.get('columns'), list):
+            merged['columns'] = defaults['columns']
+        appearance = merged.get('appearance', {}) if isinstance(merged.get('appearance'), dict) else {}
+        legacy_open = str(appearance.get('open_files_in', '') or '').strip()
+        if legacy_open and 'open_files_mode' not in appearance:
+            appearance['open_files_mode'] = 'recent_folder' if legacy_open == 'last_used_directory' else 'fixed_folder'
+        legacy_show = appearance.get('show_up_to', None)
+        if legacy_show is not None:
+            try:
+                value = int(legacy_show)
+            except Exception:
+                value = 10
+            appearance.setdefault('show_up_to_filter_entries', value)
+            appearance.setdefault('show_up_to_recent_files', value)
+        appearance.setdefault('remember_main_window_size_and_placement', True)
+        appearance.setdefault('open_files_mode', 'recent_folder')
+        appearance.setdefault('open_files_fixed_directory', '')
+        appearance.setdefault('show_up_to_filter_entries', 10)
+        appearance.setdefault('show_up_to_recent_files', 10)
+        merged['appearance'] = appearance
+        return merged
+
+    def _save_edit_preferences(self, prefs: dict):
+        settings = QSettings('Packetra', 'Packetra')
+        settings.setValue('preferences/edit_payload', json.dumps(prefs, ensure_ascii=False))
+
+    def _apply_column_preferences_to_capture_view(self, prefs: dict):
+        if not self.capture_view:
+            return
+        table = self.capture_view.table
+        columns = list(prefs.get('columns', []) or [])
+        if not columns:
+            return
+
+        max_columns = min(table.columnCount(), len(columns))
+        header = table.horizontalHeader()
+        movable_before = header.sectionsMovable()
+        header.setSectionsMovable(True)
+
+        for visual_idx in range(max_columns):
+            spec = columns[visual_idx] if isinstance(columns[visual_idx], dict) else {}
+            logical = int(spec.get('index', visual_idx) or visual_idx)
+            if logical < 0 or logical >= table.columnCount():
+                continue
+            current_visual = header.visualIndex(logical)
+            if current_visual != visual_idx:
+                header.moveSection(current_visual, visual_idx)
+
+        header.setSectionsMovable(movable_before)
+
+        alignment_map = {
+            'Left': Qt.AlignVCenter | Qt.AlignLeft,
+            'Center': Qt.AlignVCenter | Qt.AlignHCenter,
+            'Right': Qt.AlignVCenter | Qt.AlignRight,
+        }
+
+        for visual_idx in range(max_columns):
+            spec = columns[visual_idx] if isinstance(columns[visual_idx], dict) else {}
+            logical = int(spec.get('index', visual_idx) or visual_idx)
+            if logical < 0 or logical >= table.columnCount():
+                continue
+            title = str(spec.get('title', '') or '').strip() or str(table.horizontalHeaderItem(logical).text() if table.horizontalHeaderItem(logical) else '')
+            displayed = bool(spec.get('displayed', True))
+            alignment = alignment_map.get(str(spec.get('alignment', 'Left')), Qt.AlignVCenter | Qt.AlignLeft)
+            header_item = table.horizontalHeaderItem(logical)
+            if header_item is None:
+                header_item = QTableWidgetItem(title)
+                table.setHorizontalHeaderItem(logical, header_item)
+            else:
+                header_item.setText(title)
+            table.setColumnHidden(logical, not displayed)
+            for row in range(table.rowCount()):
+                item = table.item(row, logical)
+                if item is not None:
+                    item.setTextAlignment(alignment)
+
+    def _apply_edit_preferences(self, prefs: dict):
+        settings = QSettings('Packetra', 'Packetra')
+
+        appearance = prefs.get('appearance', {}) or {}
+        settings.setValue('preferences/remember_main_window_size_and_placement', bool(appearance.get('remember_main_window_size_and_placement', True)))
+        settings.setValue('preferences/open_files_mode', str(appearance.get('open_files_mode', 'recent_folder')))
+        settings.setValue('preferences/open_files_fixed_directory', str(appearance.get('open_files_fixed_directory', '') or ''))
+        settings.setValue('preferences/show_up_to_filter_entries', int(appearance.get('show_up_to_filter_entries', 10) or 10))
+        settings.setValue('preferences/show_up_to_recent_files', int(appearance.get('show_up_to_recent_files', 10) or 10))
+        settings.setValue('preferences/confirm_unsaved_capture_files', bool(appearance.get('confirm_unsaved_capture_files', True)))
+        settings.setValue('preferences/display_filter_autocomplete', bool(appearance.get('display_filter_autocomplete', True)))
+
+        capture = prefs.get('capture', {}) or {}
+        settings.setValue('capture/default_interface', str(capture.get('default_interface', '') or ''))
+        settings.setValue('capture/promiscuous_mode', bool(capture.get('promiscuous_mode', True)))
+        settings.setValue('output/format', 'pcapng' if bool(capture.get('capture_format_pcapng', True)) else 'pcap')
+        settings.setValue('options/realtime', bool(capture.get('realtime_update', True)))
+        settings.setValue('capture/update_interval_ms', int(capture.get('update_interval_ms', 1000) or 1000))
+
+        name_resolution = prefs.get('name_resolution', {}) or {}
+        settings.setValue('options/resolve_mac', bool(name_resolution.get('resolve_mac_addresses', True)))
+        settings.setValue('options/resolve_transport', bool(name_resolution.get('resolve_transport_names', False)))
+        settings.setValue('options/resolve_network', bool(name_resolution.get('resolve_network_ip_addresses', False)))
+        settings.setValue('preferences/use_captured_dns_packet_data', bool(name_resolution.get('use_captured_dns_packet_data', True)))
+
+        settings.setValue('preferences/expert_items', json.dumps(prefs.get('expert_items', []), ensure_ascii=False))
+        if not bool(appearance.get('remember_main_window_size_and_placement', True)):
+            settings.remove('preferences/main_window_geometry')
+
+        self._apply_column_preferences_to_capture_view(prefs)
+
+        if self.capture_view:
+            font_cfg = prefs.get('font_and_colors', {}) or {}
+            list_font_text = str(font_cfg.get('packet_list_font', '') or '').strip()
+            details_font_text = str(font_cfg.get('packet_details_font', '') or '').strip()
+            bytes_font_text = str(font_cfg.get('packet_bytes_font', '') or '').strip()
+
+            list_font = QFont()
+            details_font = QFont()
+            bytes_font = QFont()
+            if list_font_text:
+                list_font.fromString(list_font_text)
+                self.capture_view.table.setFont(list_font)
+            if details_font_text:
+                details_font.fromString(details_font_text)
+                self.capture_view.details_tree.setFont(details_font)
+            if bytes_font_text:
+                bytes_font.fromString(bytes_font_text)
+                self.capture_view.hex_view.setFont(bytes_font)
+            if hasattr(self.capture_view.table, 'sync_row_height_to_font'):
+                self.capture_view.table.sync_row_height_to_font()
+
+            marked_hex = str(font_cfg.get('marked_packet_color', '#fff3b0') or '#fff3b0')
+            ignored_hex = str(font_cfg.get('ignored_packet_color', '#e0e0e0') or '#e0e0e0')
+            self.capture_view.table.set_marked_color(QColor(marked_hex))
+            self.capture_view.table.set_ignored_color(QColor(ignored_hex))
+            self.capture_view._refresh_all_visible_row_styles()
+
+            layout_cfg = prefs.get('layout', {}) or {}
+            show_separator = bool(layout_cfg.get('show_packet_list_separator', True))
+            self.capture_view.table.setShowGrid(show_separator)
+            if hasattr(self.capture_view, 'apply_pane_layout'):
+                self.capture_view.apply_pane_layout(str(layout_cfg.get('pane_layout', 'Layout A') or 'Layout A'))
+
+            if 'realtime_update' in capture:
+                self.capture_view.realtime_update_enabled = bool(capture.get('realtime_update', True))
+            current_output = dict(getattr(self.capture_view, 'output_settings', {}) or {})
+            current_output['format'] = 'pcapng' if bool(capture.get('capture_format_pcapng', True)) else 'pcap'
+            self.capture_view.set_output_settings(current_output)
+
+            current_options = dict(getattr(self.capture_view, 'options_settings', {}) or {})
+            current_options['realtime'] = bool(capture.get('realtime_update', True))
+            current_options['resolve_mac'] = bool(name_resolution.get('resolve_mac_addresses', True))
+            current_options['resolve_transport'] = bool(name_resolution.get('resolve_transport_names', False))
+            current_options['resolve_network'] = bool(name_resolution.get('resolve_network_ip_addresses', False))
+            self.capture_view.set_options_settings(current_options)
+            if hasattr(self.capture_view, 'refresh_preferences_from_settings'):
+                self.capture_view.refresh_preferences_from_settings()
+        if self.iface_selector_view and hasattr(self.iface_selector_view, 'refresh_recent_files'):
+            self.iface_selector_view.refresh_recent_files()
+
+    def _on_preferences(self):
+        prefs = self._load_edit_preferences()
+        defaults = self._default_edit_preferences()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Preferences')
+        app = QApplication.instance()
+        if app is not None and app.primaryScreen() is not None:
+            geometry = app.primaryScreen().availableGeometry()
+            dialog.resize(int(geometry.width() * 0.6), int(geometry.height() * 0.6))
+
+        root = QVBoxLayout(dialog)
+        content_layout = QHBoxLayout()
+        root.addLayout(content_layout, 1)
+
+        nav_list = QListWidget(dialog)
+        nav_list.setFixedWidth(220)
+        page_stack = QStackedWidget(dialog)
+        content_layout.addWidget(nav_list)
+        content_layout.addWidget(page_stack, 1)
+
+        page_keys = [
+            ('appearance', 'Appearance'),
+            ('columns', 'Columns'),
+            ('font_and_colors', 'Font and Colors'),
+            ('layout', 'Layout'),
+            ('capture', 'Capture'),
+            ('expert_items', 'Expert Items'),
+            ('name_resolution', 'Name Resolution'),
+        ]
+        for _key, title in page_keys:
+            nav_list.addItem(title)
+
+        # --- Appearance ---
+        appearance_page = QWidget(dialog)
+        appearance_layout = QGridLayout(appearance_page)
+        appearance_cfg = prefs.get('appearance', {}) or {}
+
+        remember_window_cb = QCheckBox('Remember main window size and placement', appearance_page)
+        remember_window_cb.setChecked(bool(appearance_cfg.get('remember_main_window_size_and_placement', True)))
+        appearance_layout.addWidget(remember_window_cb, 0, 0, 1, 3)
+
+        appearance_layout.addWidget(QLabel('Open files in:'), 1, 0, 1, 3)
+        open_recent_radio = QRadioButton('The most recently used folder', appearance_page)
+        open_fixed_radio = QRadioButton('This folder:', appearance_page)
+        open_mode_group = QButtonGroup(appearance_page)
+        open_mode_group.addButton(open_recent_radio)
+        open_mode_group.addButton(open_fixed_radio)
+        open_mode = str(appearance_cfg.get('open_files_mode', 'recent_folder') or 'recent_folder')
+        open_recent_radio.setChecked(open_mode == 'recent_folder')
+        open_fixed_radio.setChecked(open_mode == 'fixed_folder')
+        fixed_directory_input = QLineEdit(str(appearance_cfg.get('open_files_fixed_directory', '') or ''), appearance_page)
+        browse_fixed_dir_btn = QPushButton('Browse...', appearance_page)
+        appearance_layout.addWidget(open_recent_radio, 2, 0, 1, 3)
+        appearance_layout.addWidget(open_fixed_radio, 3, 0, 1, 1)
+        appearance_layout.addWidget(fixed_directory_input, 3, 1, 1, 1)
+        appearance_layout.addWidget(browse_fixed_dir_btn, 3, 2, 1, 1)
+
+        appearance_layout.addWidget(QLabel('Show up to'), 4, 0)
+        show_filter_entries_spin = QSpinBox(appearance_page)
+        show_filter_entries_spin.setRange(1, 100)
+        show_filter_entries_spin.setValue(int(appearance_cfg.get('show_up_to_filter_entries', 10) or 10))
+        appearance_layout.addWidget(show_filter_entries_spin, 4, 1)
+        appearance_layout.addWidget(QLabel('filter entries'), 4, 2)
+
+        show_recent_files_spin = QSpinBox(appearance_page)
+        show_recent_files_spin.setRange(1, 100)
+        show_recent_files_spin.setValue(int(appearance_cfg.get('show_up_to_recent_files', 10) or 10))
+        appearance_layout.addWidget(show_recent_files_spin, 5, 1)
+        appearance_layout.addWidget(QLabel('recent files'), 5, 2)
+
+        confirm_unsaved_cb = QCheckBox('Confirm unsaved capture files', appearance_page)
+        confirm_unsaved_cb.setChecked(bool(appearance_cfg.get('confirm_unsaved_capture_files', True)))
+        appearance_layout.addWidget(confirm_unsaved_cb, 6, 0, 1, 3)
+        autocomplete_cb = QCheckBox('Display autocompletion for filter text', appearance_page)
+        autocomplete_cb.setChecked(bool(appearance_cfg.get('display_filter_autocomplete', True)))
+        appearance_layout.addWidget(autocomplete_cb, 7, 0, 1, 3)
+        appearance_layout.setRowStretch(8, 1)
+
+        def _sync_open_mode_widgets():
+            use_fixed = open_fixed_radio.isChecked()
+            fixed_directory_input.setEnabled(use_fixed)
+            browse_fixed_dir_btn.setEnabled(use_fixed)
+
+        def _browse_fixed_directory():
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                'Select default folder',
+                fixed_directory_input.text().strip() or str(Path.cwd()),
+            )
+            if selected:
+                fixed_directory_input.setText(selected)
+                open_fixed_radio.setChecked(True)
+                _sync_open_mode_widgets()
+
+        open_recent_radio.toggled.connect(_sync_open_mode_widgets)
+        open_fixed_radio.toggled.connect(_sync_open_mode_widgets)
+        browse_fixed_dir_btn.clicked.connect(_browse_fixed_directory)
+        _sync_open_mode_widgets()
+
+        # --- Columns ---
+        columns_page = QWidget(dialog)
+        columns_layout = QVBoxLayout(columns_page)
+        show_displayed_only_cb = QCheckBox('Show displayed columns only', columns_page)
+        show_displayed_only_cb.setChecked(True)
+        columns_layout.addWidget(show_displayed_only_cb)
+
+        columns_table = QTableWidget(columns_page)
+        columns_table.setColumnCount(5)
+        columns_table.setHorizontalHeaderLabels(['Displayed', 'Title', 'Fields', 'Field Occurrence', 'Alignment'])
+        columns_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        columns_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        columns_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        columns_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        columns_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        columns_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        columns_layout.addWidget(columns_table, 1)
+
+        col_btn_row = QHBoxLayout()
+        col_add_btn = QPushButton('Add column', columns_page)
+        col_remove_btn = QPushButton('Remove column', columns_page)
+        col_up_btn = QPushButton('Move up', columns_page)
+        col_down_btn = QPushButton('Move down', columns_page)
+        col_btn_row.addWidget(col_add_btn)
+        col_btn_row.addWidget(col_remove_btn)
+        col_btn_row.addWidget(col_up_btn)
+        col_btn_row.addWidget(col_down_btn)
+        col_btn_row.addStretch()
+        columns_layout.addLayout(col_btn_row)
+
+        def _normalize_alignment(value: str) -> str:
+            text = str(value or '').strip().lower()
+            if text == 'right':
+                return 'Right'
+            if text == 'center':
+                return 'Center'
+            return 'Left'
+
+        def _set_column_row(row: int, spec: dict):
+            logical_index = int(spec.get('index', row) or row)
+            displayed = bool(spec.get('displayed', True))
+            title = str(spec.get('title', '') or '').strip()
+            field = str(spec.get('field', '') or '').strip()
+            try:
+                occurrence = max(1, int(spec.get('occurrence', 1) or 1))
+            except Exception:
+                occurrence = 1
+            alignment = _normalize_alignment(str(spec.get('alignment', 'Left') or 'Left'))
+
+            displayed_item = QTableWidgetItem('')
+            displayed_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+            displayed_item.setCheckState(Qt.Checked if displayed else Qt.Unchecked)
+            displayed_item.setData(Qt.UserRole, logical_index)
+            columns_table.setItem(row, 0, displayed_item)
+            columns_table.setItem(row, 1, QTableWidgetItem(title))
+            columns_table.setItem(row, 2, QTableWidgetItem(field))
+            columns_table.setItem(row, 3, QTableWidgetItem(str(occurrence)))
+            columns_table.setItem(row, 4, QTableWidgetItem(alignment))
+
+        def _read_column_row(row: int) -> dict:
+            displayed_item = columns_table.item(row, 0)
+            title_item = columns_table.item(row, 1)
+            field_item = columns_table.item(row, 2)
+            occurrence_item = columns_table.item(row, 3)
+            alignment_item = columns_table.item(row, 4)
+            try:
+                occurrence = max(1, int(str(occurrence_item.text() if occurrence_item else '1').strip() or '1'))
+            except Exception:
+                occurrence = 1
+            return {
+                'index': int(displayed_item.data(Qt.UserRole)) if displayed_item is not None and displayed_item.data(Qt.UserRole) is not None else row,
+                'displayed': bool(displayed_item.checkState() == Qt.Checked) if displayed_item is not None else True,
+                'title': str(title_item.text() if title_item is not None else '').strip(),
+                'field': str(field_item.text() if field_item is not None else '').strip(),
+                'occurrence': occurrence,
+                'alignment': _normalize_alignment(str(alignment_item.text() if alignment_item is not None else 'Left')),
+            }
+
+        def _load_columns_rows(specs: list[dict]):
+            columns_table.blockSignals(True)
+            columns_table.setRowCount(0)
+            for row, spec in enumerate(specs):
+                columns_table.insertRow(row)
+                _set_column_row(row, spec if isinstance(spec, dict) else {})
+            columns_table.blockSignals(False)
+            _toggle_columns_filter_rows()
+
+        def _toggle_columns_filter_rows():
+            only_displayed = bool(show_displayed_only_cb.isChecked())
+            for row in range(columns_table.rowCount()):
+                displayed_item = columns_table.item(row, 0)
+                is_displayed = bool(displayed_item and displayed_item.checkState() == Qt.Checked)
+                columns_table.setRowHidden(row, only_displayed and not is_displayed)
+
+        def _move_column_row(delta: int):
+            row = columns_table.currentRow()
+            if row < 0:
+                return
+            target = row + delta
+            if target < 0 or target >= columns_table.rowCount():
+                return
+            current = _read_column_row(row)
+            other = _read_column_row(target)
+            columns_table.blockSignals(True)
+            _set_column_row(row, other)
+            _set_column_row(target, current)
+            columns_table.blockSignals(False)
+            columns_table.setCurrentCell(target, 1)
+            _toggle_columns_filter_rows()
+
+        def _add_column_row():
+            row = columns_table.rowCount()
+            columns_table.insertRow(row)
+            _set_column_row(
+                row,
+                {
+                    'index': row,
+                    'displayed': True,
+                    'title': f'New Column {row + 1}',
+                    'field': 'frame.number',
+                    'occurrence': 1,
+                    'alignment': 'Left',
+                },
+            )
+            columns_table.setCurrentCell(row, 1)
+            _toggle_columns_filter_rows()
+
+        def _remove_column_row():
+            row = columns_table.currentRow()
+            if row < 0:
+                return
+            if columns_table.rowCount() <= 1:
+                QMessageBox.warning(dialog, 'Columns', 'Phai giu it nhat 1 cot.')
+                return
+            columns_table.removeRow(row)
+            _toggle_columns_filter_rows()
+
+        col_add_btn.clicked.connect(_add_column_row)
+        col_remove_btn.clicked.connect(_remove_column_row)
+        col_up_btn.clicked.connect(lambda: _move_column_row(-1))
+        col_down_btn.clicked.connect(lambda: _move_column_row(1))
+        show_displayed_only_cb.toggled.connect(_toggle_columns_filter_rows)
+        columns_table.itemChanged.connect(lambda _item: _toggle_columns_filter_rows())
+
+        _load_columns_rows(list(prefs.get('columns', []) or defaults.get('columns', [])))
+
+        # --- Font and Colors ---
+        font_page = QWidget(dialog)
+        font_layout = QGridLayout(font_page)
+        font_cfg = prefs.get('font_and_colors', {}) or {}
+        list_font_label = QLabel(str(font_cfg.get('packet_list_font', '') or ''), font_page)
+        details_font_label = QLabel(str(font_cfg.get('packet_details_font', '') or ''), font_page)
+        bytes_font_label = QLabel(str(font_cfg.get('packet_bytes_font', '') or ''), font_page)
+        marked_color_btn = QPushButton(str(font_cfg.get('marked_packet_color', '#fff3b0') or '#fff3b0'), font_page)
+        ignored_color_btn = QPushButton(str(font_cfg.get('ignored_packet_color', '#e0e0e0') or '#e0e0e0'), font_page)
+        search_color_btn = QPushButton(str(font_cfg.get('search_highlight_color', '#ffcc00') or '#ffcc00'), font_page)
+        for btn in (marked_color_btn, ignored_color_btn, search_color_btn):
+            btn.setStyleSheet(f"background-color: {btn.text()};")
+
+        font_layout.addWidget(QLabel('Packet List Font:'), 0, 0)
+        font_layout.addWidget(list_font_label, 0, 1)
+        choose_list_font_btn = QPushButton('Choose...', font_page)
+        font_layout.addWidget(choose_list_font_btn, 0, 2)
+        font_layout.addWidget(QLabel('Packet Details Font:'), 1, 0)
+        font_layout.addWidget(details_font_label, 1, 1)
+        choose_details_font_btn = QPushButton('Choose...', font_page)
+        font_layout.addWidget(choose_details_font_btn, 1, 2)
+        font_layout.addWidget(QLabel('Packet Bytes Font:'), 2, 0)
+        font_layout.addWidget(bytes_font_label, 2, 1)
+        choose_bytes_font_btn = QPushButton('Choose...', font_page)
+        font_layout.addWidget(choose_bytes_font_btn, 2, 2)
+        font_layout.addWidget(QLabel('Marked packet color:'), 3, 0)
+        font_layout.addWidget(marked_color_btn, 3, 1)
+        font_layout.addWidget(QLabel('Ignored packet color:'), 4, 0)
+        font_layout.addWidget(ignored_color_btn, 4, 1)
+        font_layout.addWidget(QLabel('Search highlight:'), 5, 0)
+        font_layout.addWidget(search_color_btn, 5, 1)
+        font_layout.setRowStretch(6, 1)
+
+        def _pick_font(label: QLabel):
+            initial = QFont()
+            if label.text().strip():
+                initial.fromString(label.text().strip())
+            selected, ok = QFontDialog.getFont(initial, dialog, 'Choose Font')
+            if ok:
+                label.setText(selected.toString())
+
+        def _pick_color(button: QPushButton):
+            initial = QColor(button.text().strip() or '#ffffff')
+            selected = QColorDialog.getColor(initial, dialog, 'Choose Color')
+            if selected.isValid():
+                button.setText(selected.name())
+                button.setStyleSheet(f'background-color: {selected.name()};')
+
+        choose_list_font_btn.clicked.connect(lambda: _pick_font(list_font_label))
+        choose_details_font_btn.clicked.connect(lambda: _pick_font(details_font_label))
+        choose_bytes_font_btn.clicked.connect(lambda: _pick_font(bytes_font_label))
+        marked_color_btn.clicked.connect(lambda: _pick_color(marked_color_btn))
+        ignored_color_btn.clicked.connect(lambda: _pick_color(ignored_color_btn))
+        search_color_btn.clicked.connect(lambda: _pick_color(search_color_btn))
+
+        # --- Layout ---
+        layout_page = QWidget(dialog)
+        layout_layout = QGridLayout(layout_page)
+        layout_cfg = prefs.get('layout', {}) or {}
+        pane_layout_combo = QComboBox(layout_page)
+        pane_layout_combo.addItems(['Layout A', 'Layout B', 'Layout C'])
+        pane_layout_combo.setCurrentText(str(layout_cfg.get('pane_layout', 'Layout A') or 'Layout A'))
+        show_separator_cb = QCheckBox('Show packet list separator', layout_page)
+        show_separator_cb.setChecked(bool(layout_cfg.get('show_packet_list_separator', True)))
+        restore_layout_btn = QPushButton('Restore Defaults', layout_page)
+        layout_layout.addWidget(QLabel('Pane layout:'), 0, 0)
+        layout_layout.addWidget(pane_layout_combo, 0, 1)
+        layout_layout.addWidget(show_separator_cb, 1, 0, 1, 2)
+        layout_layout.addWidget(restore_layout_btn, 2, 0, 1, 2)
+        layout_layout.setRowStretch(3, 1)
+
+        def _restore_layout_defaults():
+            reply = QMessageBox.question(
+                dialog,
+                'Layout',
+                'Restore layout preferences to default values?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            pane_layout_combo.setCurrentText('Layout A')
+            show_separator_cb.setChecked(True)
+
+        restore_layout_btn.clicked.connect(_restore_layout_defaults)
+
+        # --- Capture ---
+        capture_page = QWidget(dialog)
+        capture_layout = QGridLayout(capture_page)
+        capture_cfg = prefs.get('capture', {}) or {}
+        default_interface_combo = QComboBox(capture_page)
+        default_interface_combo.setEditable(True)
+        default_interface_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        default_interfaces = []
+        if self.iface_selector_view and hasattr(self.iface_selector_view, 'interfaces'):
+            interface_map = getattr(self.iface_selector_view, 'interfaces', {}) or {}
+            default_interfaces = [str(name) for name in interface_map.keys()]
+        default_interface_combo.addItems(sorted(default_interfaces))
+        default_interface_combo.setCurrentText(str(capture_cfg.get('default_interface', '') or ''))
+        promiscuous_cb = QCheckBox('Capture packets in promiscuous mode', capture_page)
+        promiscuous_cb.setChecked(bool(capture_cfg.get('promiscuous_mode', True)))
+        pcapng_cb = QCheckBox('Capture packets in pcapng format', capture_page)
+        pcapng_cb.setChecked(bool(capture_cfg.get('capture_format_pcapng', True)))
+        realtime_cb = QCheckBox('Update list of packets in real time', capture_page)
+        realtime_cb.setChecked(bool(capture_cfg.get('realtime_update', True)))
+        interval_spin = QSpinBox(capture_page)
+        interval_spin.setRange(100, 10000)
+        interval_spin.setSingleStep(100)
+        interval_spin.setValue(int(capture_cfg.get('update_interval_ms', 1000) or 1000))
+        capture_layout.addWidget(QLabel('Default interface:'), 0, 0)
+        capture_layout.addWidget(default_interface_combo, 0, 1)
+        capture_layout.addWidget(promiscuous_cb, 1, 0, 1, 2)
+        capture_layout.addWidget(pcapng_cb, 2, 0, 1, 2)
+        capture_layout.addWidget(realtime_cb, 3, 0, 1, 2)
+        capture_layout.addWidget(QLabel('Interval between updates (ms):'), 4, 0)
+        capture_layout.addWidget(interval_spin, 4, 1)
+        capture_layout.setRowStretch(5, 1)
+
+        def _sync_capture_widgets():
+            interval_spin.setEnabled(bool(realtime_cb.isChecked()))
+
+        realtime_cb.toggled.connect(_sync_capture_widgets)
+        _sync_capture_widgets()
+
+        # --- Expert Items ---
+        expert_page = QWidget(dialog)
+        expert_layout = QVBoxLayout(expert_page)
+        expert_table = QTableWidget(expert_page)
+        expert_table.setColumnCount(2)
+        expert_table.setHorizontalHeaderLabels(['Field Name', 'Severity'])
+        expert_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        expert_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        expert_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        expert_layout.addWidget(expert_table, 1)
+
+        expert_btn_row = QHBoxLayout()
+        expert_add_btn = QPushButton('Add', expert_page)
+        expert_remove_btn = QPushButton('Remove', expert_page)
+        expert_up_btn = QPushButton('Move up', expert_page)
+        expert_down_btn = QPushButton('Move down', expert_page)
+        expert_clear_btn = QPushButton('Clear', expert_page)
+        expert_btn_row.addWidget(expert_add_btn)
+        expert_btn_row.addWidget(expert_remove_btn)
+        expert_btn_row.addWidget(expert_up_btn)
+        expert_btn_row.addWidget(expert_down_btn)
+        expert_btn_row.addWidget(expert_clear_btn)
+        expert_btn_row.addStretch()
+        expert_layout.addLayout(expert_btn_row)
+
+        severity_values = ['Error', 'Warning', 'Note', 'Chat']
+
+        def _set_expert_row(row: int, field_name: str, severity: str):
+            expert_table.setItem(row, 0, QTableWidgetItem(str(field_name or '').strip()))
+            severity_combo = QComboBox(expert_table)
+            severity_combo.addItems(severity_values)
+            severity_text = str(severity or 'Warning').strip().title()
+            if severity_text not in severity_values:
+                severity_text = 'Warning'
+            severity_combo.setCurrentText(severity_text)
+            expert_table.setCellWidget(row, 1, severity_combo)
+
+        def _load_expert_rows(items: list[dict]):
+            expert_table.setRowCount(0)
+            for row, item in enumerate(items):
+                expert_table.insertRow(row)
+                field_name = str(item.get('field', '') if isinstance(item, dict) else '')
+                severity = str(item.get('severity', 'Warning') if isinstance(item, dict) else 'Warning')
+                _set_expert_row(row, field_name, severity)
+
+        def _read_expert_row(row: int) -> tuple[str, str]:
+            field_item = expert_table.item(row, 0)
+            severity_combo = expert_table.cellWidget(row, 1)
+            field_name = str(field_item.text() if field_item is not None else '').strip()
+            severity = str(severity_combo.currentText() if isinstance(severity_combo, QComboBox) else 'Warning').strip()
+            return field_name, severity or 'Warning'
+
+        def _move_expert_row(delta: int):
+            row = expert_table.currentRow()
+            if row < 0:
+                return
+            target = row + delta
+            if target < 0 or target >= expert_table.rowCount():
+                return
+            src_field, src_sev = _read_expert_row(row)
+            dst_field, dst_sev = _read_expert_row(target)
+            _set_expert_row(row, dst_field, dst_sev)
+            _set_expert_row(target, src_field, src_sev)
+            expert_table.setCurrentCell(target, 0)
+
+        expert_add_btn.clicked.connect(lambda: (expert_table.insertRow(expert_table.rowCount()), _set_expert_row(expert_table.rowCount() - 1, '', 'Warning')))
+        expert_remove_btn.clicked.connect(lambda: expert_table.removeRow(expert_table.currentRow()) if expert_table.currentRow() >= 0 else None)
+        expert_up_btn.clicked.connect(lambda: _move_expert_row(-1))
+        expert_down_btn.clicked.connect(lambda: _move_expert_row(1))
+        expert_clear_btn.clicked.connect(lambda: expert_table.setRowCount(0))
+        _load_expert_rows(list(prefs.get('expert_items', []) or []))
+
+        # --- Name Resolution ---
+        name_page = QWidget(dialog)
+        name_layout = QVBoxLayout(name_page)
+        name_cfg = prefs.get('name_resolution', {}) or {}
+        resolve_mac_cb = QCheckBox('Resolve MAC addresses', name_page)
+        resolve_mac_cb.setChecked(bool(name_cfg.get('resolve_mac_addresses', True)))
+        resolve_transport_cb = QCheckBox('Resolve transport names', name_page)
+        resolve_transport_cb.setChecked(bool(name_cfg.get('resolve_transport_names', False)))
+        resolve_network_cb = QCheckBox('Resolve network IP addresses', name_page)
+        resolve_network_cb.setChecked(bool(name_cfg.get('resolve_network_ip_addresses', False)))
+        use_captured_dns_cb = QCheckBox('Use captured DNS packet data for name resolution', name_page)
+        use_captured_dns_cb.setChecked(bool(name_cfg.get('use_captured_dns_packet_data', True)))
+        for cb in (resolve_mac_cb, resolve_transport_cb, resolve_network_cb, use_captured_dns_cb):
+            name_layout.addWidget(cb)
+        name_layout.addStretch()
+
+        for page in (
+            appearance_page,
+            columns_page,
+            font_page,
+            layout_page,
+            capture_page,
+            expert_page,
+            name_page,
+        ):
+            page_stack.addWidget(page)
+
+        nav_list.currentRowChanged.connect(page_stack.setCurrentIndex)
+        nav_list.setCurrentRow(0)
+
+        # --- Buttons ---
+        bottom_row = QHBoxLayout()
+        restore_page_btn = QPushButton('Restore Page Defaults', dialog)
+        cancel_btn = QPushButton('Cancel', dialog)
+        apply_btn = QPushButton('Apply', dialog)
+        ok_btn = QPushButton('OK', dialog)
+        bottom_row.addWidget(restore_page_btn)
+        bottom_row.addStretch()
+        bottom_row.addWidget(cancel_btn)
+        bottom_row.addWidget(apply_btn)
+        bottom_row.addWidget(ok_btn)
+        root.addLayout(bottom_row)
+
+        def _collect_preferences_from_dialog() -> dict | None:
+            collected_columns = []
+            for row in range(columns_table.rowCount()):
+                spec = _read_column_row(row)
+                if not spec.get('title'):
+                    spec['title'] = f'Column {row + 1}'
+                if not spec.get('field'):
+                    spec['field'] = 'frame.number'
+                collected_columns.append(spec)
+
+            if not collected_columns:
+                QMessageBox.warning(dialog, 'Preferences', 'Canh bao: Columns khong duoc de rong.')
+                return None
+            if not any(bool(spec.get('displayed', True)) for spec in collected_columns):
+                QMessageBox.warning(dialog, 'Preferences', 'Canh bao: Phai hien thi it nhat 1 cot.')
+                return None
+
+            collected_expert = []
+            for row in range(expert_table.rowCount()):
+                field_name, severity = _read_expert_row(row)
+                if field_name:
+                    collected_expert.append({'field': field_name, 'severity': severity})
+
+            new_prefs = dict(prefs)
+            new_prefs['appearance'] = {
+                'remember_main_window_size_and_placement': bool(remember_window_cb.isChecked()),
+                'open_files_mode': 'fixed_folder' if open_fixed_radio.isChecked() else 'recent_folder',
+                'open_files_fixed_directory': fixed_directory_input.text().strip(),
+                'show_up_to_filter_entries': int(show_filter_entries_spin.value()),
+                'show_up_to_recent_files': int(show_recent_files_spin.value()),
+                'confirm_unsaved_capture_files': bool(confirm_unsaved_cb.isChecked()),
+                'display_filter_autocomplete': bool(autocomplete_cb.isChecked()),
+            }
+            new_prefs['columns'] = collected_columns
+            new_prefs['font_and_colors'] = {
+                'packet_list_font': list_font_label.text().strip(),
+                'packet_details_font': details_font_label.text().strip(),
+                'packet_bytes_font': bytes_font_label.text().strip(),
+                'marked_packet_color': marked_color_btn.text().strip() or '#fff3b0',
+                'ignored_packet_color': ignored_color_btn.text().strip() or '#e0e0e0',
+                'search_highlight_color': search_color_btn.text().strip() or '#ffcc00',
+            }
+            new_prefs['layout'] = {
+                'pane_layout': str(pane_layout_combo.currentText() or 'Layout A'),
+                'show_packet_list_separator': bool(show_separator_cb.isChecked()),
+            }
+            new_prefs['capture'] = {
+                'default_interface': default_interface_combo.currentText().strip(),
+                'promiscuous_mode': bool(promiscuous_cb.isChecked()),
+                'capture_format_pcapng': bool(pcapng_cb.isChecked()),
+                'realtime_update': bool(realtime_cb.isChecked()),
+                'update_interval_ms': int(interval_spin.value()),
+            }
+            new_prefs['expert_items'] = collected_expert
+            new_prefs['name_resolution'] = {
+                'resolve_mac_addresses': bool(resolve_mac_cb.isChecked()),
+                'resolve_transport_names': bool(resolve_transport_cb.isChecked()),
+                'resolve_network_ip_addresses': bool(resolve_network_cb.isChecked()),
+                'use_captured_dns_packet_data': bool(use_captured_dns_cb.isChecked()),
+            }
+            return new_prefs
+
+        def _apply_current_preferences() -> bool:
+            nonlocal prefs
+            new_prefs = _collect_preferences_from_dialog()
+            if not isinstance(new_prefs, dict):
+                return False
+            self._save_edit_preferences(new_prefs)
+            self._apply_edit_preferences(new_prefs)
+            prefs = new_prefs
+            return True
+
+        def _restore_current_page_defaults():
+            page_index = nav_list.currentRow()
+            if page_index < 0 or page_index >= len(page_keys):
+                return
+            key = page_keys[page_index][0]
+            reply = QMessageBox.question(
+                dialog,
+                'Restore Defaults',
+                f'Restore default values for "{page_keys[page_index][1]}"?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            if key == 'appearance':
+                default_cfg = defaults.get('appearance', {}) or {}
+                remember_window_cb.setChecked(bool(default_cfg.get('remember_main_window_size_and_placement', True)))
+                open_mode = str(default_cfg.get('open_files_mode', 'recent_folder') or 'recent_folder')
+                open_recent_radio.setChecked(open_mode == 'recent_folder')
+                open_fixed_radio.setChecked(open_mode == 'fixed_folder')
+                fixed_directory_input.setText(str(default_cfg.get('open_files_fixed_directory', '') or ''))
+                show_filter_entries_spin.setValue(int(default_cfg.get('show_up_to_filter_entries', 10) or 10))
+                show_recent_files_spin.setValue(int(default_cfg.get('show_up_to_recent_files', 10) or 10))
+                confirm_unsaved_cb.setChecked(bool(default_cfg.get('confirm_unsaved_capture_files', True)))
+                autocomplete_cb.setChecked(bool(default_cfg.get('display_filter_autocomplete', True)))
+                _sync_open_mode_widgets()
+                return
+            if key == 'columns':
+                _load_columns_rows(list(defaults.get('columns', []) or []))
+                return
+            if key == 'font_and_colors':
+                default_cfg = defaults.get('font_and_colors', {}) or {}
+                list_font_label.setText(str(default_cfg.get('packet_list_font', '') or ''))
+                details_font_label.setText(str(default_cfg.get('packet_details_font', '') or ''))
+                bytes_font_label.setText(str(default_cfg.get('packet_bytes_font', '') or ''))
+                marked_color_btn.setText(str(default_cfg.get('marked_packet_color', '#fff3b0') or '#fff3b0'))
+                ignored_color_btn.setText(str(default_cfg.get('ignored_packet_color', '#e0e0e0') or '#e0e0e0'))
+                search_color_btn.setText(str(default_cfg.get('search_highlight_color', '#ffcc00') or '#ffcc00'))
+                for btn in (marked_color_btn, ignored_color_btn, search_color_btn):
+                    btn.setStyleSheet(f'background-color: {btn.text()};')
+                return
+            if key == 'layout':
+                default_cfg = defaults.get('layout', {}) or {}
+                pane_layout_combo.setCurrentText(str(default_cfg.get('pane_layout', 'Layout A') or 'Layout A'))
+                show_separator_cb.setChecked(bool(default_cfg.get('show_packet_list_separator', True)))
+                return
+            if key == 'capture':
+                default_cfg = defaults.get('capture', {}) or {}
+                default_interface_combo.setCurrentText(str(default_cfg.get('default_interface', '') or ''))
+                promiscuous_cb.setChecked(bool(default_cfg.get('promiscuous_mode', True)))
+                pcapng_cb.setChecked(bool(default_cfg.get('capture_format_pcapng', True)))
+                realtime_cb.setChecked(bool(default_cfg.get('realtime_update', True)))
+                interval_spin.setValue(int(default_cfg.get('update_interval_ms', 1000) or 1000))
+                _sync_capture_widgets()
+                return
+            if key == 'expert_items':
+                _load_expert_rows(list(defaults.get('expert_items', []) or []))
+                return
+            if key == 'name_resolution':
+                default_cfg = defaults.get('name_resolution', {}) or {}
+                resolve_mac_cb.setChecked(bool(default_cfg.get('resolve_mac_addresses', True)))
+                resolve_transport_cb.setChecked(bool(default_cfg.get('resolve_transport_names', False)))
+                resolve_network_cb.setChecked(bool(default_cfg.get('resolve_network_ip_addresses', False)))
+                use_captured_dns_cb.setChecked(bool(default_cfg.get('use_captured_dns_packet_data', True)))
+                return
+
+        restore_page_btn.clicked.connect(_restore_current_page_defaults)
+        apply_btn.clicked.connect(_apply_current_preferences)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        def _on_ok_clicked():
+            if _apply_current_preferences():
+                dialog.accept()
+
+        ok_btn.clicked.connect(_on_ok_clicked)
+        dialog.exec()
 
     def _on_toggle_main_toolbar(self, enabled: bool):
         visible = bool(enabled)
@@ -4068,6 +5207,11 @@ class ApplicationWindow(QMainWindow):
 
     def _prompt_save_before_destructive_action(self, message: str) -> bool:
         if not self.capture_view or not self.capture_view.has_unsaved_changes():
+            return True
+
+        settings = QSettings('Packetra', 'Packetra')
+        confirm_unsaved = bool(settings.value('preferences/confirm_unsaved_capture_files', True, bool))
+        if not confirm_unsaved:
             return True
 
         reply = QMessageBox.question(
@@ -4558,6 +5702,7 @@ class ApplicationWindow(QMainWindow):
             # If Discard, just continue
 
         # Reset Output and Options settings before closing app
+        self._save_main_window_placement_if_needed()
         self._reset_output_options_on_close()
         
         event.accept()
