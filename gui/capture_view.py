@@ -12,7 +12,8 @@ from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer, QStringList
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStackedWidget, QCompleter
+    QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStackedWidget, QCompleter,
+    QToolButton
 )
 from PySide6.QtGui import QAction, QPainter, QColor, QPen, QPixmap
 
@@ -218,7 +219,8 @@ class CaptureView(QWidget):
         self._captured_bytes = 0
         self.default_main_splitter_sizes = [500, 360]
         self.default_lower_splitter_sizes = [980, 650]
-        self._current_pane_layout = 'Layout A'
+        self._current_pane_layout = 'Layout 2'
+        self._pane_assignments = ('packet_list', 'packet_details', 'packet_bytes')
         self._base_fonts = {}
         self._last_find_row = None
         self._last_find_signature = None
@@ -315,7 +317,7 @@ class CaptureView(QWidget):
         settings = self._settings()
         autocomplete = bool(settings.value('preferences/display_filter_autocomplete', True, bool))
         if hasattr(self, 'filter_history_action'):
-            self.filter_history_action.setVisible(autocomplete)
+            self.filter_history_action.setVisible(True)
         if autocomplete:
             if hasattr(self, 'display_filter_completer'):
                 self.display_filter_input.setCompleter(self.display_filter_completer)
@@ -769,17 +771,19 @@ class CaptureView(QWidget):
         filter_row.setContentsMargins(8, 4, 8, 4)
         self.display_filter_input = QLineEdit()
         self.display_filter_input.setPlaceholderText('Apply a display filter ... <Ctrl+/>')
-        self.apply_filter_btn = QPushButton('Apply')
-        self.apply_filter_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
+        self.apply_filter_btn = QToolButton()
+        self.apply_filter_btn.setText('→')
+        self.apply_filter_btn.setToolTip('Apply display filter')
         self.filter_history_menu = QMenu(self)
         self.filter_history_action = self.display_filter_input.addAction(
             self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
             QLineEdit.ActionPosition.TrailingPosition,
         )
-        self.clear_filter_btn = QPushButton('Clear')
-        self.clear_filter_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
-        self.apply_filter_btn.setMinimumWidth(72)
-        self.clear_filter_btn.setMinimumWidth(72)
+        self.clear_filter_btn = QToolButton()
+        self.clear_filter_btn.setText('x')
+        self.clear_filter_btn.setToolTip('Clear display filter')
+        self.apply_filter_btn.setFixedWidth(28)
+        self.clear_filter_btn.setFixedWidth(28)
         filter_row.addWidget(self.display_filter_input)
         filter_row.addWidget(self.apply_filter_btn)
         filter_row.addWidget(self.clear_filter_btn)
@@ -860,6 +864,10 @@ class CaptureView(QWidget):
         self.table = PacketTable()
         self.details_tree = PacketDetailsTree()
         self.hex_view = PacketBytesView()
+        self.packet_diagram_view = QTextEdit()
+        self.packet_diagram_view.setReadOnly(True)
+        self.packet_diagram_view.setPlainText('Packet Diagram is not available yet.')
+        self._empty_pane_widgets = [QWidget(), QWidget(), QWidget()]
         self._sync_fonts_to_hex_reference()
         self._base_fonts = {
             'table': self.hex_view.font().pointSizeF(),
@@ -996,48 +1004,125 @@ class CaptureView(QWidget):
                 break
             widget.setParent(None)
 
+    def _normalize_layout_name(self, layout_name: str) -> str:
+        mode = str(layout_name or 'Layout 2').strip()
+        mode = {
+            'Layout A': 'Layout 2',
+            'Layout B': 'Layout 3',
+            'Layout C': 'Layout 6',
+        }.get(mode, mode)
+        if mode not in {'Layout 1', 'Layout 2', 'Layout 3', 'Layout 4', 'Layout 5', 'Layout 6'}:
+            mode = 'Layout 2'
+        return mode
+
+    def _normalize_pane_assignments(self, pane_assignments) -> tuple[str, str, str]:
+        allowed = {'packet_list', 'packet_details', 'packet_bytes', 'packet_diagram', 'none'}
+        values = list(pane_assignments or self._pane_assignments or ('packet_list', 'packet_details', 'packet_bytes'))[:3]
+        while len(values) < 3:
+            values.append('none')
+        normalized = []
+        for value in values:
+            text = str(value or 'none').strip().lower()
+            normalized.append(text if text in allowed else 'none')
+        return tuple(normalized[:3])
+
+    def set_pane_assignments(self, pane_assignments) -> bool:
+        normalized = self._normalize_pane_assignments(pane_assignments)
+        assigned = [value for value in normalized if value != 'none']
+        if len(assigned) != len(set(assigned)):
+            return False
+        self._pane_assignments = normalized
+        if hasattr(self, 'main_splitter'):
+            self.apply_pane_layout(self._current_pane_layout)
+        return True
+
+    def _pane_widget(self, pane_key: str, pane_index: int):
+        key = str(pane_key or 'none').strip().lower()
+        if key == 'packet_list':
+            return self.table
+        if key == 'packet_details':
+            return self.details_tree
+        if key == 'packet_bytes':
+            return self.hex_view
+        if key == 'packet_diagram':
+            return self.packet_diagram_view
+        return self._empty_pane_widgets[max(0, min(int(pane_index), len(self._empty_pane_widgets) - 1))]
+
     def apply_pane_layout(self, layout_name: str):
-        mode = str(layout_name or 'Layout A').strip()
-        if mode not in ('Layout A', 'Layout B', 'Layout C'):
-            mode = 'Layout A'
+        mode = self._normalize_layout_name(layout_name)
         self._current_pane_layout = mode
+        pane_widgets = [self._pane_widget(key, idx) for idx, key in enumerate(self._pane_assignments)]
 
         # Detach current arrangement before rebuilding.
         self._clear_splitter(self.main_splitter)
         self._clear_splitter(self.lower_splitter)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.lower_splitter.setChildrenCollapsible(False)
 
-        if mode == 'Layout A':
-            # Packet List on top, Details + Bytes below.
+        if mode == 'Layout 1':
+            self.main_splitter.setOrientation(Qt.Vertical)
+            for widget in pane_widgets:
+                self.main_splitter.addWidget(widget)
+            self.main_splitter.setSizes([360, 280, 280])
+            return
+
+        if mode == 'Layout 2':
+            # Pane 1 on top, Pane 2 + Pane 3 below.
             self.lower_splitter.setOrientation(Qt.Horizontal)
-            self.lower_splitter.addWidget(self.details_tree)
-            self.lower_splitter.addWidget(self.hex_view)
+            self.lower_splitter.addWidget(pane_widgets[1])
+            self.lower_splitter.addWidget(pane_widgets[2])
             self.lower_splitter.setSizes(self.default_lower_splitter_sizes)
 
             self.main_splitter.setOrientation(Qt.Vertical)
-            self.main_splitter.addWidget(self.table)
+            self.main_splitter.addWidget(pane_widgets[0])
             self.main_splitter.addWidget(self.lower_splitter)
             self.main_splitter.setSizes(self.default_main_splitter_sizes)
             return
 
-        if mode == 'Layout B':
-            # Packet List + Details on top row, Bytes below.
+        if mode == 'Layout 3':
+            # Pane 1 + Pane 2 on top, Pane 3 below.
             self.lower_splitter.setOrientation(Qt.Horizontal)
-            self.lower_splitter.addWidget(self.table)
-            self.lower_splitter.addWidget(self.details_tree)
+            self.lower_splitter.addWidget(pane_widgets[0])
+            self.lower_splitter.addWidget(pane_widgets[1])
             self.lower_splitter.setSizes(self.default_lower_splitter_sizes)
 
             self.main_splitter.setOrientation(Qt.Vertical)
             self.main_splitter.addWidget(self.lower_splitter)
-            self.main_splitter.addWidget(self.hex_view)
+            self.main_splitter.addWidget(pane_widgets[2])
             self.main_splitter.setSizes(self.default_main_splitter_sizes)
             return
 
-        # Layout C: Packet List | Details | Bytes side-by-side.
+        if mode == 'Layout 4':
+            # Pane 1 left, Pane 2 top-right, Pane 3 bottom-right.
+            self.lower_splitter.setOrientation(Qt.Vertical)
+            self.lower_splitter.addWidget(pane_widgets[1])
+            self.lower_splitter.addWidget(pane_widgets[2])
+            self.lower_splitter.setSizes([260, 260])
+
+            self.main_splitter.setOrientation(Qt.Horizontal)
+            self.main_splitter.addWidget(pane_widgets[0])
+            self.main_splitter.addWidget(self.lower_splitter)
+            self.main_splitter.setSizes([520, 520])
+            return
+
+        if mode == 'Layout 5':
+            # Pane 1 top-left, Pane 2 bottom-left, Pane 3 right.
+            self.lower_splitter.setOrientation(Qt.Vertical)
+            self.lower_splitter.addWidget(pane_widgets[0])
+            self.lower_splitter.addWidget(pane_widgets[1])
+            self.lower_splitter.setSizes([260, 260])
+
+            self.main_splitter.setOrientation(Qt.Horizontal)
+            self.main_splitter.addWidget(self.lower_splitter)
+            self.main_splitter.addWidget(pane_widgets[2])
+            self.main_splitter.setSizes([520, 520])
+            return
+
+        # Layout 6: Pane 1 | Pane 2 | Pane 3 side-by-side.
         self.main_splitter.setOrientation(Qt.Horizontal)
-        self.main_splitter.addWidget(self.table)
-        self.main_splitter.addWidget(self.details_tree)
-        self.main_splitter.addWidget(self.hex_view)
-        self.main_splitter.setSizes([500, 380, 500])
+        for widget in pane_widgets:
+            self.main_splitter.addWidget(widget)
+        self.main_splitter.setSizes([420, 320, 420])
 
     def _show_filter_history_menu(self):
         pos = self.display_filter_input.mapToGlobal(self.display_filter_input.rect().bottomRight())

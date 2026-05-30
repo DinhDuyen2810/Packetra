@@ -4228,11 +4228,11 @@ class ApplicationWindow(QMainWindow):
         default_columns = [
             {'index': 0, 'displayed': True, 'title': 'No.', 'field': 'frame.number', 'occurrence': 1, 'alignment': 'Right'},
             {'index': 1, 'displayed': True, 'title': 'Time', 'field': 'frame.time_relative', 'occurrence': 1, 'alignment': 'Right'},
-            {'index': 2, 'displayed': True, 'title': 'Source', 'field': 'ip.src', 'occurrence': 1, 'alignment': 'Left'},
-            {'index': 3, 'displayed': True, 'title': 'Destination', 'field': 'ip.dst', 'occurrence': 1, 'alignment': 'Left'},
-            {'index': 4, 'displayed': True, 'title': 'Protocol', 'field': '_ws.col.protocol', 'occurrence': 1, 'alignment': 'Center'},
+            {'index': 2, 'displayed': True, 'title': 'Source', 'field': 'ip.src', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 3, 'displayed': True, 'title': 'Destination', 'field': 'ip.dst', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 4, 'displayed': True, 'title': 'Protocol', 'field': '_ws.col.protocol', 'occurrence': 1, 'alignment': 'Right'},
             {'index': 5, 'displayed': True, 'title': 'Length', 'field': 'frame.len', 'occurrence': 1, 'alignment': 'Right'},
-            {'index': 6, 'displayed': True, 'title': 'Info', 'field': '_ws.col.info', 'occurrence': 1, 'alignment': 'Left'},
+            {'index': 6, 'displayed': True, 'title': 'Info', 'field': '_ws.col.info', 'occurrence': 1, 'alignment': 'Right'},
         ]
         return {
             'appearance': {
@@ -4254,8 +4254,11 @@ class ApplicationWindow(QMainWindow):
                 'search_highlight_color': '#ffcc00',
             },
             'layout': {
-                'pane_layout': 'Layout A',
-                'show_packet_list_separator': True,
+                'pane_layout': 'Layout 2',
+                'show_packet_list_separator': False,
+                'pane_1': 'packet_list',
+                'pane_2': 'packet_details',
+                'pane_3': 'packet_bytes',
             },
             'capture': {
                 'default_interface': '',
@@ -4311,6 +4314,18 @@ class ApplicationWindow(QMainWindow):
         appearance.setdefault('show_up_to_filter_entries', 10)
         appearance.setdefault('show_up_to_recent_files', 10)
         merged['appearance'] = appearance
+        layout_cfg = merged.get('layout', {}) if isinstance(merged.get('layout'), dict) else {}
+        legacy_layout = str(layout_cfg.get('pane_layout', 'Layout 2') or 'Layout 2').strip()
+        layout_cfg['pane_layout'] = {
+            'Layout A': 'Layout 2',
+            'Layout B': 'Layout 3',
+            'Layout C': 'Layout 6',
+        }.get(legacy_layout, legacy_layout if legacy_layout else 'Layout 2')
+        layout_cfg.setdefault('show_packet_list_separator', False)
+        layout_cfg.setdefault('pane_1', 'packet_list')
+        layout_cfg.setdefault('pane_2', 'packet_details')
+        layout_cfg.setdefault('pane_3', 'packet_bytes')
+        merged['layout'] = layout_cfg
         return merged
 
     def _save_edit_preferences(self, prefs: dict):
@@ -4426,10 +4441,16 @@ class ApplicationWindow(QMainWindow):
             self.capture_view._refresh_all_visible_row_styles()
 
             layout_cfg = prefs.get('layout', {}) or {}
-            show_separator = bool(layout_cfg.get('show_packet_list_separator', True))
+            show_separator = bool(layout_cfg.get('show_packet_list_separator', False))
             self.capture_view.table.setShowGrid(show_separator)
+            if hasattr(self.capture_view, 'set_pane_assignments'):
+                self.capture_view.set_pane_assignments([
+                    str(layout_cfg.get('pane_1', 'packet_list') or 'packet_list'),
+                    str(layout_cfg.get('pane_2', 'packet_details') or 'packet_details'),
+                    str(layout_cfg.get('pane_3', 'packet_bytes') or 'packet_bytes'),
+                ])
             if hasattr(self.capture_view, 'apply_pane_layout'):
-                self.capture_view.apply_pane_layout(str(layout_cfg.get('pane_layout', 'Layout A') or 'Layout A'))
+                self.capture_view.apply_pane_layout(str(layout_cfg.get('pane_layout', 'Layout 2') or 'Layout 2'))
 
             if 'realtime_update' in capture:
                 self.capture_view.realtime_update_enabled = bool(capture.get('realtime_update', True))
@@ -4552,7 +4573,7 @@ class ApplicationWindow(QMainWindow):
         columns_page = QWidget(dialog)
         columns_layout = QVBoxLayout(columns_page)
         show_displayed_only_cb = QCheckBox('Show displayed columns only', columns_page)
-        show_displayed_only_cb.setChecked(True)
+        show_displayed_only_cb.setChecked(False)
         columns_layout.addWidget(show_displayed_only_cb)
 
         columns_table = QTableWidget(columns_page)
@@ -4584,7 +4605,7 @@ class ApplicationWindow(QMainWindow):
                 return 'Right'
             if text == 'center':
                 return 'Center'
-            return 'Left'
+            return 'Right' if text == '' else 'Left'
 
         def _set_column_row(row: int, spec: dict):
             logical_index = int(spec.get('index', row) or row)
@@ -4595,7 +4616,7 @@ class ApplicationWindow(QMainWindow):
                 occurrence = max(1, int(spec.get('occurrence', 1) or 1))
             except Exception:
                 occurrence = 1
-            alignment = _normalize_alignment(str(spec.get('alignment', 'Left') or 'Left'))
+            alignment = _normalize_alignment(str(spec.get('alignment', 'Right') or 'Right'))
 
             displayed_item = QTableWidgetItem('')
             displayed_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
@@ -4605,14 +4626,17 @@ class ApplicationWindow(QMainWindow):
             columns_table.setItem(row, 1, QTableWidgetItem(title))
             columns_table.setItem(row, 2, QTableWidgetItem(field))
             columns_table.setItem(row, 3, QTableWidgetItem(str(occurrence)))
-            columns_table.setItem(row, 4, QTableWidgetItem(alignment))
+            align_combo = QComboBox(columns_table)
+            align_combo.addItems(['Right', 'Left', 'Center'])
+            align_combo.setCurrentText(alignment)
+            columns_table.setCellWidget(row, 4, align_combo)
 
         def _read_column_row(row: int) -> dict:
             displayed_item = columns_table.item(row, 0)
             title_item = columns_table.item(row, 1)
             field_item = columns_table.item(row, 2)
             occurrence_item = columns_table.item(row, 3)
-            alignment_item = columns_table.item(row, 4)
+            alignment_combo = columns_table.cellWidget(row, 4)
             try:
                 occurrence = max(1, int(str(occurrence_item.text() if occurrence_item else '1').strip() or '1'))
             except Exception:
@@ -4623,7 +4647,7 @@ class ApplicationWindow(QMainWindow):
                 'title': str(title_item.text() if title_item is not None else '').strip(),
                 'field': str(field_item.text() if field_item is not None else '').strip(),
                 'occurrence': occurrence,
-                'alignment': _normalize_alignment(str(alignment_item.text() if alignment_item is not None else 'Left')),
+                'alignment': _normalize_alignment(str(alignment_combo.currentText() if isinstance(alignment_combo, QComboBox) else 'Right')),
             }
 
         def _load_columns_rows(specs: list[dict]):
@@ -4669,7 +4693,7 @@ class ApplicationWindow(QMainWindow):
                     'title': f'New Column {row + 1}',
                     'field': 'frame.number',
                     'occurrence': 1,
-                    'alignment': 'Left',
+                    'alignment': 'Right',
                 },
             )
             columns_table.setCurrentCell(row, 1)
@@ -4690,7 +4714,6 @@ class ApplicationWindow(QMainWindow):
         col_up_btn.clicked.connect(lambda: _move_column_row(-1))
         col_down_btn.clicked.connect(lambda: _move_column_row(1))
         show_displayed_only_cb.toggled.connect(_toggle_columns_filter_rows)
-        columns_table.itemChanged.connect(lambda _item: _toggle_columns_filter_rows())
 
         _load_columns_rows(list(prefs.get('columns', []) or defaults.get('columns', [])))
 
@@ -4698,9 +4721,33 @@ class ApplicationWindow(QMainWindow):
         font_page = QWidget(dialog)
         font_layout = QGridLayout(font_page)
         font_cfg = prefs.get('font_and_colors', {}) or {}
-        list_font_label = QLabel(str(font_cfg.get('packet_list_font', '') or ''), font_page)
-        details_font_label = QLabel(str(font_cfg.get('packet_details_font', '') or ''), font_page)
-        bytes_font_label = QLabel(str(font_cfg.get('packet_bytes_font', '') or ''), font_page)
+        current_list_font = self.capture_view.table.font() if self.capture_view else dialog.font()
+        current_details_font = self.capture_view.details_tree.font() if self.capture_view else dialog.font()
+        current_bytes_font = self.capture_view.hex_view.font() if self.capture_view else dialog.font()
+
+        def _font_display_text(font: QFont) -> str:
+            size = font.pointSize()
+            if size <= 0:
+                size = int(round(font.pointSizeF())) if font.pointSizeF() > 0 else 10
+            family = str(font.family() or 'Consolas').strip() or 'Consolas'
+            return f'{family} {size}'
+
+        def _set_font_choice(label: QLabel, stored_text: str, fallback: QFont) -> None:
+            font = QFont(fallback)
+            stored = str(stored_text or '').strip()
+            if stored:
+                parsed = QFont()
+                if parsed.fromString(stored):
+                    font = parsed
+            label.setProperty('font_string', font.toString())
+            label.setText(_font_display_text(font))
+
+        list_font_label = QLabel(font_page)
+        details_font_label = QLabel(font_page)
+        bytes_font_label = QLabel(font_page)
+        _set_font_choice(list_font_label, str(font_cfg.get('packet_list_font', '') or ''), current_list_font)
+        _set_font_choice(details_font_label, str(font_cfg.get('packet_details_font', '') or ''), current_details_font)
+        _set_font_choice(bytes_font_label, str(font_cfg.get('packet_bytes_font', '') or ''), current_bytes_font)
         marked_color_btn = QPushButton(str(font_cfg.get('marked_packet_color', '#fff3b0') or '#fff3b0'), font_page)
         ignored_color_btn = QPushButton(str(font_cfg.get('ignored_packet_color', '#e0e0e0') or '#e0e0e0'), font_page)
         search_color_btn = QPushButton(str(font_cfg.get('search_highlight_color', '#ffcc00') or '#ffcc00'), font_page)
@@ -4711,14 +4758,17 @@ class ApplicationWindow(QMainWindow):
         font_layout.addWidget(list_font_label, 0, 1)
         choose_list_font_btn = QPushButton('Choose...', font_page)
         font_layout.addWidget(choose_list_font_btn, 0, 2)
+
         font_layout.addWidget(QLabel('Packet Details Font:'), 1, 0)
         font_layout.addWidget(details_font_label, 1, 1)
         choose_details_font_btn = QPushButton('Choose...', font_page)
         font_layout.addWidget(choose_details_font_btn, 1, 2)
+
         font_layout.addWidget(QLabel('Packet Bytes Font:'), 2, 0)
         font_layout.addWidget(bytes_font_label, 2, 1)
         choose_bytes_font_btn = QPushButton('Choose...', font_page)
         font_layout.addWidget(choose_bytes_font_btn, 2, 2)
+
         font_layout.addWidget(QLabel('Marked packet color:'), 3, 0)
         font_layout.addWidget(marked_color_btn, 3, 1)
         font_layout.addWidget(QLabel('Ignored packet color:'), 4, 0)
@@ -4727,13 +4777,18 @@ class ApplicationWindow(QMainWindow):
         font_layout.addWidget(search_color_btn, 5, 1)
         font_layout.setRowStretch(6, 1)
 
+        def _font_from_text_or_default(text: str, fallback: QFont) -> QFont:
+            font = QFont(fallback)
+            if text and font.fromString(text):
+                return font
+            return QFont(fallback)
+
         def _pick_font(label: QLabel):
-            initial = QFont()
-            if label.text().strip():
-                initial.fromString(label.text().strip())
+            initial = _font_from_text_or_default(str(label.property('font_string') or '').strip(), dialog.font())
             selected, ok = QFontDialog.getFont(initial, dialog, 'Choose Font')
             if ok:
-                label.setText(selected.toString())
+                label.setProperty('font_string', selected.toString())
+                label.setText(_font_display_text(selected))
 
         def _pick_color(button: QPushButton):
             initial = QColor(button.text().strip() or '#ffffff')
@@ -4742,28 +4797,114 @@ class ApplicationWindow(QMainWindow):
                 button.setText(selected.name())
                 button.setStyleSheet(f'background-color: {selected.name()};')
 
-        choose_list_font_btn.clicked.connect(lambda: _pick_font(list_font_label))
-        choose_details_font_btn.clicked.connect(lambda: _pick_font(details_font_label))
-        choose_bytes_font_btn.clicked.connect(lambda: _pick_font(bytes_font_label))
-        marked_color_btn.clicked.connect(lambda: _pick_color(marked_color_btn))
-        ignored_color_btn.clicked.connect(lambda: _pick_color(ignored_color_btn))
-        search_color_btn.clicked.connect(lambda: _pick_color(search_color_btn))
+        choose_list_font_btn.clicked.connect(lambda checked=False, target=list_font_label: _pick_font(target))
+        choose_details_font_btn.clicked.connect(lambda checked=False, target=details_font_label: _pick_font(target))
+        choose_bytes_font_btn.clicked.connect(lambda checked=False, target=bytes_font_label: _pick_font(target))
+        marked_color_btn.clicked.connect(lambda checked=False, target=marked_color_btn: _pick_color(target))
+        ignored_color_btn.clicked.connect(lambda checked=False, target=ignored_color_btn: _pick_color(target))
+        search_color_btn.clicked.connect(lambda checked=False, target=search_color_btn: _pick_color(target))
 
         # --- Layout ---
         layout_page = QWidget(dialog)
         layout_layout = QGridLayout(layout_page)
         layout_cfg = prefs.get('layout', {}) or {}
-        pane_layout_combo = QComboBox(layout_page)
-        pane_layout_combo.addItems(['Layout A', 'Layout B', 'Layout C'])
-        pane_layout_combo.setCurrentText(str(layout_cfg.get('pane_layout', 'Layout A') or 'Layout A'))
+        selected_layout = {'value': str(layout_cfg.get('pane_layout', 'Layout 2') or 'Layout 2')}
+
+        layout_preview_defs = [
+            {'id': 0, 'layout': 'Layout 1', 'image': os.path.join('d:\\DATN-Packetra', 'image', 'layout', 'layout_5.png')},
+            {'id': 1, 'layout': 'Layout 2', 'image': os.path.join('d:\\DATN-Packetra', 'image', 'layout', 'layout_2.png')},
+            {'id': 2, 'layout': 'Layout 3', 'image': os.path.join('d:\\DATN-Packetra', 'image', 'layout', 'layout_1.png')},
+            {'id': 3, 'layout': 'Layout 4', 'image': os.path.join('d:\\DATN-Packetra', 'image', 'layout', 'layout_4.png')},
+            {'id': 4, 'layout': 'Layout 5', 'image': os.path.join('d:\\DATN-Packetra', 'image', 'layout', 'layout_3.png')},
+            {'id': 5, 'layout': 'Layout 6', 'image': os.path.join('d:\\DATN-Packetra', 'image', 'layout', 'layout_6.png')},
+        ]
+        layout_btn_group = QButtonGroup(layout_page)
+        layout_btn_group.setExclusive(True)
+        layout_preview_row = QHBoxLayout()
+        layout_preview_row.setContentsMargins(0, 0, 0, 0)
+        layout_preview_row.setSpacing(12)
+        preview_buttons = []
+        for spec in layout_preview_defs:
+            btn = QToolButton(layout_page)
+            btn.setCheckable(True)
+            btn.setAutoRaise(False)
+            btn.setIcon(QIcon(spec['image']))
+            btn.setIconSize(QSize(72, 72))
+            btn.setFixedSize(84, 84)
+            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            btn.setToolTip(spec['layout'])
+            layout_btn_group.addButton(btn, int(spec['id']))
+            layout_preview_row.addWidget(btn)
+            preview_buttons.append(btn)
+        layout_preview_row.addStretch(1)
+
+        pane_defs = [
+            ('packet_list', 'Packet List'),
+            ('packet_details', 'Packet Details'),
+            ('packet_bytes', 'Packet Bytes'),
+            ('packet_diagram', 'Packet Diagram'),
+            ('none', 'None'),
+        ]
+        pane_group_box = QGroupBox('Pane contents', layout_page)
+        pane_group_layout = QGridLayout(pane_group_box)
+        pane_buttons = {}
+
+        def _create_pane_selector(column: int, title: str, selected_key: str):
+            group = QButtonGroup(pane_group_box)
+            group.setExclusive(True)
+            pane_group_layout.addWidget(QLabel(title, pane_group_box), 0, column)
+            buttons = {}
+            for row, (value, caption) in enumerate(pane_defs, start=1):
+                button = QRadioButton(caption, pane_group_box)
+                button.setChecked(value == selected_key)
+                buttons[value] = button
+                group.addButton(button)
+                pane_group_layout.addWidget(button, row, column)
+            return buttons
+
+        pane_buttons['pane_1'] = _create_pane_selector(0, 'Pane 1:', str(layout_cfg.get('pane_1', 'packet_list') or 'packet_list'))
+        pane_buttons['pane_2'] = _create_pane_selector(1, 'Pane 2:', str(layout_cfg.get('pane_2', 'packet_details') or 'packet_details'))
+        pane_buttons['pane_3'] = _create_pane_selector(2, 'Pane 3:', str(layout_cfg.get('pane_3', 'packet_bytes') or 'packet_bytes'))
+
+        def _selected_pane_value(key: str) -> str:
+            buttons = pane_buttons.get(key, {})
+            for value, button in buttons.items():
+                if button.isChecked():
+                    return value
+            return 'none'
+
+        def _apply_preview_selection(layout_name: str):
+            target = str(layout_name or 'Layout 2')
+            selected_layout['value'] = target
+            picked = None
+            for spec in layout_preview_defs:
+                if spec['layout'] == target:
+                    picked = int(spec['id'])
+                    break
+            if picked is None:
+                picked = 0
+            button = layout_btn_group.button(picked)
+            if button is not None:
+                button.setChecked(True)
+
+        def _on_layout_preview_changed(button_id: int):
+            for spec in layout_preview_defs:
+                if int(spec['id']) == int(button_id):
+                    selected_layout['value'] = str(spec['layout'])
+                    break
+
+        layout_btn_group.idClicked.connect(_on_layout_preview_changed)
+        _apply_preview_selection(selected_layout['value'])
+
         show_separator_cb = QCheckBox('Show packet list separator', layout_page)
-        show_separator_cb.setChecked(bool(layout_cfg.get('show_packet_list_separator', True)))
+        show_separator_cb.setChecked(bool(layout_cfg.get('show_packet_list_separator', False)))
         restore_layout_btn = QPushButton('Restore Defaults', layout_page)
-        layout_layout.addWidget(QLabel('Pane layout:'), 0, 0)
-        layout_layout.addWidget(pane_layout_combo, 0, 1)
-        layout_layout.addWidget(show_separator_cb, 1, 0, 1, 2)
-        layout_layout.addWidget(restore_layout_btn, 2, 0, 1, 2)
-        layout_layout.setRowStretch(3, 1)
+        layout_layout.addWidget(QLabel('Pane layout:'), 0, 0, 1, 2)
+        layout_layout.addLayout(layout_preview_row, 1, 0, 1, 2)
+        layout_layout.addWidget(pane_group_box, 2, 0, 1, 2)
+        layout_layout.addWidget(show_separator_cb, 3, 0, 1, 2)
+        layout_layout.addWidget(restore_layout_btn, 4, 0, 1, 2)
+        layout_layout.setRowStretch(5, 1)
 
         def _restore_layout_defaults():
             reply = QMessageBox.question(
@@ -4775,8 +4916,11 @@ class ApplicationWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
-            pane_layout_combo.setCurrentText('Layout A')
-            show_separator_cb.setChecked(True)
+            _apply_preview_selection('Layout 2')
+            show_separator_cb.setChecked(False)
+            pane_buttons['pane_1']['packet_list'].setChecked(True)
+            pane_buttons['pane_2']['packet_details'].setChecked(True)
+            pane_buttons['pane_3']['packet_bytes'].setChecked(True)
 
         restore_layout_btn.clicked.connect(_restore_layout_defaults)
 
@@ -4956,6 +5100,16 @@ class ApplicationWindow(QMainWindow):
                 if field_name:
                     collected_expert.append({'field': field_name, 'severity': severity})
 
+            pane_values = [
+                _selected_pane_value('pane_1'),
+                _selected_pane_value('pane_2'),
+                _selected_pane_value('pane_3'),
+            ]
+            non_empty_panes = [value for value in pane_values if value != 'none']
+            if len(non_empty_panes) != len(set(non_empty_panes)):
+                QMessageBox.warning(dialog, 'Preferences', 'Pane 1, Pane 2 va Pane 3 khong duoc trung noi dung.')
+                return None
+
             new_prefs = dict(prefs)
             new_prefs['appearance'] = {
                 'remember_main_window_size_and_placement': bool(remember_window_cb.isChecked()),
@@ -4968,16 +5122,19 @@ class ApplicationWindow(QMainWindow):
             }
             new_prefs['columns'] = collected_columns
             new_prefs['font_and_colors'] = {
-                'packet_list_font': list_font_label.text().strip(),
-                'packet_details_font': details_font_label.text().strip(),
-                'packet_bytes_font': bytes_font_label.text().strip(),
+                'packet_list_font': str(list_font_label.property('font_string') or '').strip(),
+                'packet_details_font': str(details_font_label.property('font_string') or '').strip(),
+                'packet_bytes_font': str(bytes_font_label.property('font_string') or '').strip(),
                 'marked_packet_color': marked_color_btn.text().strip() or '#fff3b0',
                 'ignored_packet_color': ignored_color_btn.text().strip() or '#e0e0e0',
                 'search_highlight_color': search_color_btn.text().strip() or '#ffcc00',
             }
             new_prefs['layout'] = {
-                'pane_layout': str(pane_layout_combo.currentText() or 'Layout A'),
+                'pane_layout': str(selected_layout.get('value', 'Layout 2') or 'Layout 2'),
                 'show_packet_list_separator': bool(show_separator_cb.isChecked()),
+                'pane_1': pane_values[0],
+                'pane_2': pane_values[1],
+                'pane_3': pane_values[2],
             }
             new_prefs['capture'] = {
                 'default_interface': default_interface_combo.currentText().strip(),
@@ -5038,9 +5195,9 @@ class ApplicationWindow(QMainWindow):
                 return
             if key == 'font_and_colors':
                 default_cfg = defaults.get('font_and_colors', {}) or {}
-                list_font_label.setText(str(default_cfg.get('packet_list_font', '') or ''))
-                details_font_label.setText(str(default_cfg.get('packet_details_font', '') or ''))
-                bytes_font_label.setText(str(default_cfg.get('packet_bytes_font', '') or ''))
+                _set_font_choice(list_font_label, str(default_cfg.get('packet_list_font', '') or ''), current_list_font)
+                _set_font_choice(details_font_label, str(default_cfg.get('packet_details_font', '') or ''), current_details_font)
+                _set_font_choice(bytes_font_label, str(default_cfg.get('packet_bytes_font', '') or ''), current_bytes_font)
                 marked_color_btn.setText(str(default_cfg.get('marked_packet_color', '#fff3b0') or '#fff3b0'))
                 ignored_color_btn.setText(str(default_cfg.get('ignored_packet_color', '#e0e0e0') or '#e0e0e0'))
                 search_color_btn.setText(str(default_cfg.get('search_highlight_color', '#ffcc00') or '#ffcc00'))
@@ -5049,8 +5206,11 @@ class ApplicationWindow(QMainWindow):
                 return
             if key == 'layout':
                 default_cfg = defaults.get('layout', {}) or {}
-                pane_layout_combo.setCurrentText(str(default_cfg.get('pane_layout', 'Layout A') or 'Layout A'))
-                show_separator_cb.setChecked(bool(default_cfg.get('show_packet_list_separator', True)))
+                _apply_preview_selection(str(default_cfg.get('pane_layout', 'Layout 2') or 'Layout 2'))
+                show_separator_cb.setChecked(bool(default_cfg.get('show_packet_list_separator', False)))
+                pane_buttons['pane_1'][str(default_cfg.get('pane_1', 'packet_list') or 'packet_list')].setChecked(True)
+                pane_buttons['pane_2'][str(default_cfg.get('pane_2', 'packet_details') or 'packet_details')].setChecked(True)
+                pane_buttons['pane_3'][str(default_cfg.get('pane_3', 'packet_bytes') or 'packet_bytes')].setChecked(True)
                 return
             if key == 'capture':
                 default_cfg = defaults.get('capture', {}) or {}
