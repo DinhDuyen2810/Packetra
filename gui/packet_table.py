@@ -7,48 +7,31 @@ class PacketTable(QTableWidget):
     INFO_COLUMN = 6
     MARKED_ROLE = int(Qt.UserRole) + 100
     IGNORED_ROLE = int(Qt.UserRole) + 101
+    ROW_RECORD_ROLE = int(Qt.UserRole) + 102
 
-    COLOR_MAP = {
-        'TCP': QColor(227, 240, 255),
-        'UDP': QColor(233, 255, 233),
-        'DNS': QColor(247, 238, 220),
-        'MDNS': QColor(247, 238, 220),
-        'ARP': QColor(255, 228, 228),
-        'ICMP': QColor(245, 236, 255),
-        'ICMPV6': QColor(245, 236, 255),
-        'ICMPv6': QColor(245, 236, 255),
-        'IGMP': QColor(235, 245, 255),
-        'IGMPv3': QColor(235, 245, 255),
-        'TLS': QColor(237, 233, 255),
-        'TLSv1.0': QColor(237, 233, 255),
-        'TLSv1.1': QColor(237, 233, 255),
-        'TLSv1.2': QColor(237, 233, 255),
-        'TLSv1.3': QColor(237, 233, 255),
-        'RIPng': QColor(233, 255, 233),
-        'RIPv2': QColor(233, 255, 233),
-        'STP': QColor(255, 244, 222),
-        'Syslog': QColor(233, 255, 233),
-        'NTP': QColor(233, 255, 233),
-        'LACP': QColor(255, 244, 222),
-        'VTP': QColor(255, 244, 222),
-        'DTP': QColor(255, 244, 222),
-        '0x6002': QColor(255, 244, 222),
-        'UDLD': QColor(255, 244, 222),
-        'LLDP': QColor(255, 244, 222),
-        'HSRPv2': QColor(242, 236, 255),
-        'LOOP': QColor(255, 255, 255),
-        'QUIC': QColor(216, 237, 255),
-        'HTTP': QColor(255, 245, 219),
-        'SSDP': QColor(255, 245, 219),
-        'SSHv2': QColor(227, 240, 255),
-        'SMTP': QColor(255, 240, 216),
-        'SMTP/IMF': QColor(255, 240, 216),
-        'DHCP': QColor(229, 245, 238),
-        'DHCPv6': QColor(229, 245, 238),
-        'TFTP': QColor(229, 245, 238),
-        'ESP': QColor(237, 233, 255),
-        'ISAKMP': QColor(237, 233, 255),
-    }
+    WIRESHARK_DEFAULT_RULES = [
+        {'name': 'Bad TCP', 'filter': 'tcp.analysis.flags && !tcp.analysis.window_update && !tcp.analysis.keep_alive && !tcp.analysis.keep_alive_ack', 'bg': QColor('#0B2C36'), 'fg': QColor('#FF6D6D')},
+        {'name': 'HSRP State Change', 'filter': 'hsrp.state != 8 && hsrp.state != 16', 'bg': QColor('#0B2C36'), 'fg': QColor('#E4FF75')},
+        {'name': 'Spanning Tree Topology Change', 'filter': 'stp.type == 0x80', 'bg': QColor('#0B2C36'), 'fg': QColor('#FFE082')},
+        {'name': 'OSPF State Change', 'filter': 'ospf.msg != 1', 'bg': QColor('#0B2C36'), 'fg': QColor('#FFF59D')},
+        {'name': 'ICMP errors', 'filter': 'icmp.type in {3,5,11} || icmpv6.type in {1,4}', 'bg': QColor('#0B2C36'), 'fg': QColor('#B7FF5A')},
+        {'name': 'ARP', 'filter': 'arp', 'bg': QColor('#F2EED8'), 'fg': QColor('#111111')},
+        {'name': 'ICMP', 'filter': 'icmp || icmpv6', 'bg': QColor('#E8D8EE'), 'fg': QColor('#111111')},
+        {'name': 'TCP RST', 'filter': 'tcp.flags.reset == 1', 'bg': QColor('#CC0000'), 'fg': QColor('#FFFFFF')},
+        {'name': 'SCTP ABORT', 'filter': 'sctp.chunk_type == ABORT', 'bg': QColor('#CC0000'), 'fg': QColor('#FFFFFF')},
+        {'name': 'IPv4 TTL low or unexpected', 'filter': '(ip.dst != 224.0.0.0/4 && ip.ttl < 5)', 'bg': QColor('#CC0000'), 'fg': QColor('#FFFFFF')},
+        {'name': 'IPv6 hop limit low or unexpected', 'filter': '(ipv6.dst != ff00::/8 && ipv6.hlim < 5)', 'bg': QColor('#CC0000'), 'fg': QColor('#FFFFFF')},
+        {'name': 'Checksum Errors', 'filter': 'ip.checksum.status=="Bad" || tcp.checksum.status=="Bad" || udp.checksum.status=="Bad"', 'bg': QColor('#102A43'), 'fg': QColor('#FFC1E3')},
+        {'name': 'SMB', 'filter': 'smb || nbss || nbns || netbios', 'bg': QColor('#F0EFD5'), 'fg': QColor('#111111')},
+        {'name': 'HTTP', 'filter': 'http || tcp.port == 80 || http2', 'bg': QColor('#CFE8B4'), 'fg': QColor('#111111')},
+        {'name': 'DCERPC', 'filter': 'dcerpc', 'bg': QColor('#B897EA'), 'fg': QColor('#111111')},
+        {'name': 'Routing', 'filter': 'hsrp || eigrp || ospf || bgp || cdp || vrrp || carp || gvrp || igmp || ismp', 'bg': QColor('#EFE4C6'), 'fg': QColor('#111111')},
+        {'name': 'TCP SYN/FIN', 'filter': 'tcp.flags & 0x02 || tcp.flags.fin == 1', 'bg': QColor('#A9A9A9'), 'fg': QColor('#111111')},
+        {'name': 'TCP', 'filter': 'tcp', 'bg': QColor('#D8D8E8'), 'fg': QColor('#111111')},
+        {'name': 'UDP', 'filter': 'udp', 'bg': QColor('#D2E9F7'), 'fg': QColor('#111111')},
+        {'name': 'Broadcast', 'filter': 'eth[0] & 1', 'bg': QColor('#E6E6E6'), 'fg': QColor('#111111')},
+        {'name': 'System Event', 'filter': 'systemd_journal || sysdig', 'bg': QColor('#DCDCDC'), 'fg': QColor('#1C5D99')},
+    ]
     DEFAULT_MARKED_COLOR = QColor(255, 243, 176)
     DEFAULT_IGNORED_COLOR = QColor(224, 224, 224)
 
@@ -57,6 +40,7 @@ class PacketTable(QTableWidget):
         self._color_rules_enabled = True
         self._marked_color = QColor(self.DEFAULT_MARKED_COLOR)
         self._ignored_color = QColor(self.DEFAULT_IGNORED_COLOR)
+        self._rule_background_overrides = {}
         self.setColumnCount(7)
         self.setHorizontalHeaderLabels(['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'])
         self.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -81,7 +65,186 @@ class PacketTable(QTableWidget):
         self.setColumnWidth(4, 90)
         self.setColumnWidth(5, 80)
         self.setColumnWidth(6, 720)
+        self._default_column_widths = [self.columnWidth(i) for i in range(self.columnCount())]
+        self._resize_all_columns_enabled = False
         self.apply_content_resize_layout()
+
+    def wireshark_coloring_rules(self):
+        return [
+            {
+                'name': str(rule['name']),
+                'filter': str(rule['filter']),
+                'background': QColor(self._effective_rule_background(str(rule['name']))),
+                'foreground': QColor(rule['fg']),
+            }
+            for rule in self.WIRESHARK_DEFAULT_RULES
+        ]
+
+    def _effective_rule_background(self, rule_name: str) -> QColor:
+        name = str(rule_name or '').strip()
+        override = self._rule_background_overrides.get(name)
+        if isinstance(override, QColor) and override.isValid():
+            return QColor(override)
+        for rule in self.WIRESHARK_DEFAULT_RULES:
+            if str(rule.get('name', '')).strip() == name:
+                return QColor(rule['bg'])
+        return QColor('#FFFFFF')
+
+    def set_rule_background_overrides(self, overrides: dict | None):
+        normalized = {}
+        if isinstance(overrides, dict):
+            for key, value in overrides.items():
+                name = str(key or '').strip()
+                if not name:
+                    continue
+                color = QColor(str(value or '').strip())
+                if color.isValid():
+                    normalized[name] = color
+        self._rule_background_overrides = normalized
+        self.set_color_rules_enabled(self._color_rules_enabled)
+
+    def get_rule_background_overrides(self) -> dict[str, str]:
+        return {name: color.name() for name, color in self._rule_background_overrides.items()}
+
+    def _record_metadata(self, record_or_proto):
+        if isinstance(record_or_proto, str):
+            return {}
+        metadata = getattr(record_or_proto, 'metadata', None)
+        return metadata if isinstance(metadata, dict) else {}
+
+    def _info_lower(self, record_or_proto):
+        if isinstance(record_or_proto, str):
+            return ''
+        return str(getattr(record_or_proto, 'info', '') or '').lower()
+
+    def _protocol_upper(self, record_or_proto):
+        if isinstance(record_or_proto, str):
+            return str(record_or_proto or '').upper()
+        return str(getattr(record_or_proto, 'protocol', '') or '').upper()
+
+    def _tcp_flags_value(self, metadata) -> int:
+        raw_flags = metadata.get('tcp_flags', 0)
+        if isinstance(raw_flags, int):
+            return int(raw_flags)
+        text = str(raw_flags or '').upper()
+        value = 0
+        if 'F' in text:
+            value |= 0x01
+        if 'S' in text:
+            value |= 0x02
+        if 'R' in text:
+            value |= 0x04
+        if 'P' in text:
+            value |= 0x08
+        if 'A' in text:
+            value |= 0x10
+        if 'U' in text:
+            value |= 0x20
+        return value
+
+    def _has_bad_checksum(self, metadata, info_low: str) -> bool:
+        if 'bad checksum' in info_low or 'checksum status: bad' in info_low:
+            return True
+        for value in metadata.values():
+            if isinstance(value, dict):
+                if str(value.get('checksum_status', '')).strip().lower() == 'bad':
+                    return True
+        return False
+
+    def _is_multicast_or_broadcast_dst(self, record_or_proto) -> bool:
+        if isinstance(record_or_proto, str):
+            return False
+        dst = str(getattr(record_or_proto, 'dst', '') or '').strip().lower()
+        if not dst:
+            return False
+        if dst == 'ff:ff:ff:ff:ff:ff':
+            return True
+        if dst.startswith('224.'):
+            return True
+        if dst.startswith('ff') and ':' in dst:
+            return True
+        return False
+
+    def _match_wireshark_style(self, record_or_proto):
+        proto = self._protocol_upper(record_or_proto)
+        metadata = self._record_metadata(record_or_proto)
+        info_low = self._info_lower(record_or_proto)
+        flags = self._tcp_flags_value(metadata)
+
+        def _rule_matches(name: str) -> bool:
+            rule_name = str(name or '').strip().lower()
+            if rule_name == 'bad tcp':
+                return (
+                    proto == 'TCP' and (
+                        bool(metadata.get('tcp_is_retransmission', False))
+                        or bool(metadata.get('tcp_is_duplicate_ack', False))
+                        or bool(metadata.get('tcp_previous_segment_not_captured', False))
+                        or bool(metadata.get('tcp_is_acked_unseen_segment', False))
+                        or bool(metadata.get('tcp_is_window_full', False))
+                        or bool(metadata.get('tcp_is_spurious_retransmission', False))
+                    )
+                )
+            if rule_name == 'hsrp state change':
+                return proto in {'HSRP', 'HSRPV2'}
+            if rule_name == 'spanning tree topology change':
+                return proto == 'STP'
+            if rule_name == 'ospf state change':
+                return proto == 'OSPF' and 'hello' not in info_low
+            if rule_name == 'icmp errors':
+                return proto in {'ICMP', 'ICMPV6'} and any(
+                    token in info_low for token in ('unreachable', 'time exceeded', 'parameter problem', 'redirect')
+                )
+            if rule_name == 'arp':
+                return proto == 'ARP'
+            if rule_name == 'icmp':
+                return proto in {'ICMP', 'ICMPV6'}
+            if rule_name == 'tcp rst':
+                return proto == 'TCP' and bool(flags & 0x04)
+            if rule_name == 'sctp abort':
+                return proto == 'SCTP' and 'abort' in info_low
+            if rule_name == 'ipv4 ttl low or unexpected':
+                try:
+                    ttl_value = int(metadata.get('ttl', -1))
+                except Exception:
+                    ttl_value = -1
+                return ttl_value >= 0 and ttl_value < 5 and not self._is_multicast_or_broadcast_dst(record_or_proto)
+            if rule_name == 'ipv6 hop limit low or unexpected':
+                try:
+                    hlim_value = int(metadata.get('hlim', -1))
+                except Exception:
+                    hlim_value = -1
+                return hlim_value >= 0 and hlim_value < 5 and not self._is_multicast_or_broadcast_dst(record_or_proto)
+            if rule_name == 'checksum errors':
+                return self._has_bad_checksum(metadata, info_low)
+            if rule_name == 'smb':
+                return proto in {'SMB', 'SMB2', 'NBSS', 'NBNS', 'NETBIOS'}
+            if rule_name == 'http':
+                return proto in {'HTTP', 'HTTP/XML', 'HTTP2'}
+            if rule_name == 'dcerpc':
+                return proto in {'DCERPC', 'DRSUAPI', 'RPC_NETLOGON', 'SAMR'}
+            if rule_name == 'routing':
+                return proto in {
+                    'EIGRP', 'OSPF', 'BGP', 'CDP', 'VRRP', 'CARP', 'GVRP', 'IGMP', 'ISMP',
+                    'RIPNG', 'RIPV2', 'PIMV1', 'PIMV2', 'GRE',
+                }
+            if rule_name == 'tcp syn/fin':
+                return proto == 'TCP' and bool(flags & (0x02 | 0x01))
+            if rule_name == 'tcp':
+                return proto == 'TCP'
+            if rule_name == 'udp':
+                return proto == 'UDP'
+            if rule_name == 'broadcast':
+                return self._is_multicast_or_broadcast_dst(record_or_proto)
+            if rule_name == 'system event':
+                return proto in {'SYSTEM EVENT', 'SYSTEMD_JOURNAL', 'SYSDIG'}
+            return False
+
+        # Rules are applied from top to bottom; first match wins.
+        for rule in self.WIRESHARK_DEFAULT_RULES:
+            if _rule_matches(str(rule.get('name', ''))):
+                return QColor(self._effective_rule_background(str(rule.get('name', '')))), QColor(rule['fg'])
+
+        return None, None
 
     @staticmethod
     def display_values(record):
@@ -155,6 +318,7 @@ class PacketTable(QTableWidget):
             self.setItem(row, 0, marker)
         marker.setData(self.MARKED_ROLE, bool(getattr(record, 'marked', False)))
         marker.setData(self.IGNORED_ROLE, bool(getattr(record, 'ignored', False)))
+        marker.setData(self.ROW_RECORD_ROLE, record)
 
     def _paint_row(self, row, record_or_proto):
         if isinstance(record_or_proto, str):
@@ -162,6 +326,9 @@ class PacketTable(QTableWidget):
             marker = self.item(row, 0)
             marked = bool(marker.data(self.MARKED_ROLE)) if marker is not None else False
             ignored = bool(marker.data(self.IGNORED_ROLE)) if marker is not None else False
+            record_obj = marker.data(self.ROW_RECORD_ROLE) if marker is not None else None
+            if record_obj is not None:
+                record_or_proto = record_obj
         else:
             proto = str(getattr(record_or_proto, 'protocol', '') or '')
             marked = bool(getattr(record_or_proto, 'marked', False))
@@ -177,12 +344,15 @@ class PacketTable(QTableWidget):
 
         if ignored:
             color = self._ignored_color
+            text_color = QColor(100, 100, 100)
         elif marked:
             color = self._marked_color
+            text_color = QColor(0, 0, 0)
         else:
-            color = self.COLOR_MAP.get(proto)
+            color, text_color = self._match_wireshark_style(record_or_proto)
+            if text_color is None:
+                text_color = QColor(0, 0, 0)
 
-        text_color = QColor(100, 100, 100) if ignored else QColor(0, 0, 0)
         for col in range(self.columnCount()):
             item = self.item(row, col)
             if item:
@@ -214,6 +384,16 @@ class PacketTable(QTableWidget):
         for col in range(self.INFO_COLUMN):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
         header.setSectionResizeMode(self.INFO_COLUMN, QHeaderView.Stretch)
+
+    def set_resize_all_columns_mode(self, enabled: bool):
+        self._resize_all_columns_enabled = bool(enabled)
+        if self._resize_all_columns_enabled:
+            self.resizeColumnsToContents()
+            self.apply_content_resize_layout()
+            return
+        for col, width in enumerate(self._default_column_widths):
+            self.setColumnWidth(col, int(width))
+        self.apply_content_resize_layout()
 
     def sync_row_height_to_font(self):
         row_height = max(16, self.fontMetrics().height() + 4)

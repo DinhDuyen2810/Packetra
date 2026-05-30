@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QPushButton, QTextEdit, QInputDialog, QGridLayout, QScrollArea,
     QFrame, QTextBrowser, QTabWidget, QCheckBox, QSpinBox, QLineEdit, QComboBox,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup,
-    QListWidget
+    QListWidget, QSplitter
 )
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont
 from PySide6.QtWidgets import QColorDialog, QFontDialog
@@ -27,6 +27,8 @@ from scapy.all import IP, IPv6, TCP, UDP
 
 from gui.interface_selector_view import InterfaceSelectorView
 from gui.capture_view import CaptureView
+from gui.packet_details import PacketDetailsTree
+from gui.hex_view import PacketBytesView
 from gui.manage_interfaces_dialog import ManageInterfacesDialog
 from core.flow_engine import (
     analyze_flows,
@@ -1735,12 +1737,16 @@ class ApplicationWindow(QMainWindow):
         view_menu.addAction(self.action_view_coloring_rules)
         view_menu.addSeparator()
         self.action_view_resize_all_columns = QAction('&Resize All Columns', self)
+        self.action_view_resize_all_columns.setCheckable(True)
+        self.action_view_resize_all_columns.setChecked(False)
         view_menu.addAction(self.action_view_resize_all_columns)
         self.action_view_show_packet_new_window = QAction('Show Packet in &New Window', self)
         view_menu.addAction(self.action_view_show_packet_new_window)
         self.action_view_redissect_packets = QAction('&Redissect Packets', self)
         view_menu.addAction(self.action_view_redissect_packets)
         self.action_view_reload_as_format_capture = QAction('Reload as File Format/&Capture', self)
+        self.action_view_reload_as_format_capture.setCheckable(True)
+        self.action_view_reload_as_format_capture.setChecked(False)
         view_menu.addAction(self.action_view_reload_as_format_capture)
         self.action_view_reload = QAction('&Reload', self)
         self.action_view_reload.setShortcut(QKeySequence.Refresh)
@@ -1979,6 +1985,8 @@ class ApplicationWindow(QMainWindow):
 
         self.action_resize_cols_btn = QAction(toolbar_icon('x-resize-columns.png'), 'Resize to fit content', self)
         self.action_resize_cols_btn.setToolTip('Resize to fit content')
+        self.action_resize_cols_btn.setCheckable(True)
+        self.action_resize_cols_btn.setChecked(False)
         self.toolbar.addAction(self.action_resize_cols_btn)
 
         self.action_reset_layout_btn = QAction(toolbar_icon('x-reset-layout_2.png'), 'Reset layout to default size', self)
@@ -2021,26 +2029,26 @@ class ApplicationWindow(QMainWindow):
 
         # View menu
         self.action_view_main_toolbar.triggered.connect(self._on_toggle_main_toolbar)
-        self.action_view_filter_toolbar.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Filter Toolbar'))
+        self.action_view_filter_toolbar.triggered.connect(self._on_toggle_filter_toolbar)
         self.action_view_statusbar.triggered.connect(self._on_toggle_statusbar)
-        self.action_view_packet_list.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet List'))
-        self.action_view_packet_details.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet Details'))
-        self.action_view_packet_bytes.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet Bytes'))
-        self.action_view_packet_diagram.triggered.connect(lambda checked: self._on_menu_feature_placeholder('View > Packet Diagram'))
+        self.action_view_packet_list.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_list', checked))
+        self.action_view_packet_details.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_details', checked))
+        self.action_view_packet_bytes.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_bytes', checked))
+        self.action_view_packet_diagram.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_diagram', checked))
         self.action_zoom_in.triggered.connect(self._on_zoom_in)
         self.action_zoom_out.triggered.connect(self._on_zoom_out)
         self.action_zoom_reset.triggered.connect(self._on_zoom_reset)
-        self.action_expand_subtrees.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Expand Subtrees'))
-        self.action_collapse_subtrees.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Collapse Subtrees'))
-        self.action_expand_all.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Expand All'))
-        self.action_collapse_all.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Collapse All'))
+        self.action_expand_subtrees.triggered.connect(self._on_expand_subtrees)
+        self.action_collapse_subtrees.triggered.connect(self._on_collapse_subtrees)
+        self.action_expand_all.triggered.connect(self._on_expand_all)
+        self.action_collapse_all.triggered.connect(self._on_collapse_all)
         self.action_view_colorize_packet_list.triggered.connect(self._on_toggle_color_rules)
-        self.action_view_colorize_conversation.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Colorize Conversation'))
-        self.action_view_coloring_rules.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Coloring Rules...'))
+        self.action_view_colorize_conversation.triggered.connect(self._on_colorize_conversation)
+        self.action_view_coloring_rules.triggered.connect(self._on_coloring_rules)
         self.action_view_resize_all_columns.triggered.connect(self._on_resize_columns)
-        self.action_view_show_packet_new_window.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Show Packet in New Window'))
-        self.action_view_redissect_packets.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Redissect Packets'))
-        self.action_view_reload_as_format_capture.triggered.connect(lambda: self._on_menu_feature_placeholder('View > Reload as File Format/Capture'))
+        self.action_view_show_packet_new_window.triggered.connect(self._on_show_packet_new_window)
+        self.action_view_redissect_packets.triggered.connect(self._on_redissect_packets)
+        self.action_view_reload_as_format_capture.triggered.connect(self._on_reload_as_format_capture)
         self.action_view_reload.triggered.connect(self._on_reload_file)
 
         # Go menu
@@ -2686,13 +2694,24 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.capture_state_changed.connect(lambda _running: self._sync_capture_buttons())
             self.capture_view.find_panel_visibility_changed.connect(self._on_find_panel_visibility_changed)
             self.capture_view.detail_status_changed.connect(self._on_detail_status_changed)
+            self.capture_view.open_packet_window_requested.connect(self._on_show_packet_new_window)
             self.stacked_widget.addWidget(self.capture_view)
 
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
+        try:
+            settings = QSettings('Packetra', 'Packetra')
+            raw_overrides = str(settings.value('view/rule_background_overrides', '', str) or '').strip()
+            overrides = json.loads(raw_overrides) if raw_overrides else {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+        except Exception:
+            overrides = {}
+        self.capture_view.table.set_rule_background_overrides(overrides)
         self.capture_view.set_color_rules_enabled(self.action_color_btn.isChecked())
         self._apply_edit_preferences(self._load_edit_preferences())
         self.stacked_widget.setCurrentWidget(self.capture_view)
+        self._sync_view_action_states()
         self._update_capture_window_title()
         self._update_toolbar_state('capture')
         self._status_mode = 'activity'
@@ -2720,6 +2739,31 @@ class ApplicationWindow(QMainWindow):
         self.action_search_btn.setChecked(bool(visible))
         self.action_search_btn.setIcon(self._search_icon_off)
         self.action_search_btn.blockSignals(False)
+
+    def _sync_view_action_states(self):
+        if not self.capture_view:
+            return
+
+        pairs = [
+            (getattr(self, 'action_view_filter_toolbar', None), self.capture_view.is_filter_toolbar_visible()),
+            (getattr(self, 'action_view_packet_list', None), self.capture_view.is_component_visible('packet_list')),
+            (getattr(self, 'action_view_packet_details', None), self.capture_view.is_component_visible('packet_details')),
+            (getattr(self, 'action_view_packet_bytes', None), self.capture_view.is_component_visible('packet_bytes')),
+            (getattr(self, 'action_view_packet_diagram', None), self.capture_view.is_component_visible('packet_diagram')),
+            (getattr(self, 'action_view_resize_all_columns', None), self.capture_view.is_resize_all_columns_enabled()),
+            (getattr(self, 'action_view_reload_as_format_capture', None), self.capture_view.is_file_format_view_mode()),
+        ]
+        for action, checked in pairs:
+            if action is None:
+                continue
+            action.blockSignals(True)
+            action.setChecked(bool(checked))
+            action.blockSignals(False)
+
+        if hasattr(self, 'action_resize_cols_btn'):
+            self.action_resize_cols_btn.blockSignals(True)
+            self.action_resize_cols_btn.setChecked(self.capture_view.is_resize_all_columns_enabled())
+            self.action_resize_cols_btn.blockSignals(False)
 
     def _load_capture_defaults(self):
         """Load default Output/Options capture settings from QSettings"""
@@ -5251,6 +5295,15 @@ class ApplicationWindow(QMainWindow):
             self.action_view_main_toolbar.setChecked(visible)
             self.action_view_main_toolbar.blockSignals(False)
 
+    def _on_toggle_filter_toolbar(self, enabled: bool):
+        visible = bool(enabled)
+        if self.capture_view:
+            self.capture_view.set_filter_toolbar_visible(visible)
+        if hasattr(self, 'action_view_filter_toolbar'):
+            self.action_view_filter_toolbar.blockSignals(True)
+            self.action_view_filter_toolbar.setChecked(visible)
+            self.action_view_filter_toolbar.blockSignals(False)
+
     def _on_toggle_statusbar(self, enabled: bool):
         visible = bool(enabled)
         self.statusbar.setVisible(visible)
@@ -5258,6 +5311,253 @@ class ApplicationWindow(QMainWindow):
             self.action_view_statusbar.blockSignals(True)
             self.action_view_statusbar.setChecked(visible)
             self.action_view_statusbar.blockSignals(False)
+
+    def _on_toggle_packet_pane(self, pane_name: str, enabled: bool):
+        checked = bool(enabled)
+        if self.capture_view:
+            self.capture_view.set_component_visible(pane_name, checked)
+        action_name = {
+            'packet_list': 'action_view_packet_list',
+            'packet_details': 'action_view_packet_details',
+            'packet_bytes': 'action_view_packet_bytes',
+            'packet_diagram': 'action_view_packet_diagram',
+        }.get(str(pane_name or '').strip().lower())
+        if action_name and hasattr(self, action_name):
+            action = getattr(self, action_name)
+            action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(False)
+
+    def _on_expand_subtrees(self):
+        if self.capture_view:
+            self.capture_view.expand_selected_subtrees()
+
+    def _on_collapse_subtrees(self):
+        if self.capture_view:
+            self.capture_view.collapse_selected_subtrees()
+
+    def _on_expand_all(self):
+        if self.capture_view:
+            self.capture_view.expand_all_details()
+
+    def _on_collapse_all(self):
+        if self.capture_view:
+            self.capture_view.collapse_all_details()
+
+    def _conversation_key_for_record(self, record):
+        metadata = getattr(record, 'metadata', {}) if record else {}
+        stream_index = metadata.get('tcp_stream_index')
+        if stream_index is not None:
+            return ('tcp_stream', int(stream_index))
+        src = str(getattr(record, 'src', '') or '')
+        dst = str(getattr(record, 'dst', '') or '')
+        sport = str(getattr(record, 'sport', '') or '')
+        dport = str(getattr(record, 'dport', '') or '')
+        proto = str(getattr(record, 'protocol', '') or '').upper()
+        endpoints = sorted([(src, sport), (dst, dport)])
+        return (proto, tuple(endpoints))
+
+    def _on_colorize_conversation(self):
+        if not self.capture_view:
+            return
+        current = self.capture_view.get_current_record()
+        if current is None:
+            QMessageBox.information(self, 'Colorize Conversation', 'Select a packet first.')
+            return
+
+        key = self._conversation_key_for_record(current)
+        highlight_indexes = []
+        for idx, record in enumerate(self.capture_view.records):
+            if self._conversation_key_for_record(record) == key:
+                highlight_indexes.append(idx)
+
+        if not highlight_indexes:
+            QMessageBox.information(self, 'Colorize Conversation', 'No matching packets found for this conversation.')
+            return
+
+        settings = QSettings('Packetra', 'Packetra')
+        color_hex = str(settings.value('view/conversation_color', '#FFF2A8', str) or '#FFF2A8')
+        self.capture_view.set_conversation_highlight(highlight_indexes, QColor(color_hex))
+        self.capture_view.status_changed.emit(f'Colorized {len(highlight_indexes)} packets in current conversation')
+
+    def _on_coloring_rules(self):
+        if not self.capture_view:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Coloring Rules')
+        dialog.resize(1020, 640)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel('Select a rule row, then choose color to edit that rule:'))
+        rules_table = QTableWidget(dialog)
+        rules_table.setColumnCount(3)
+        rules_table.setHorizontalHeaderLabels(['Color', 'Name', 'Filter'])
+        rules_table.verticalHeader().setVisible(False)
+        rules_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        rules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        rules_table.setSelectionMode(QAbstractItemView.SingleSelection)
+
+        settings = QSettings('Packetra', 'Packetra')
+        conversation_color = QColor(str(settings.value('view/conversation_color', '#FFF2A8', str) or '#FFF2A8'))
+        rule_overrides = self.capture_view.table.get_rule_background_overrides()
+
+        rules = [
+            {
+                'name': 'Colorize Conversation',
+                'filter': 'temporary conversation highlight',
+                'background': QColor(conversation_color),
+                'foreground': QColor('#111111'),
+            }
+        ] + self.capture_view.table.wireshark_coloring_rules()
+
+        def _paint_row(row: int):
+            rule = rules[row]
+            for col, text in enumerate(['', str(rule['name']), str(rule['filter'])]):
+                item = rules_table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    rules_table.setItem(row, col, item)
+                item.setText(text)
+                item.setBackground(QColor(rule['background']))
+                item.setForeground(QColor(rule['foreground']))
+
+        rules_table.setRowCount(len(rules))
+        for row in range(len(rules)):
+            _paint_row(row)
+
+        rules_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        rules_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        rules_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(rules_table, 1)
+
+        edit_row = QHBoxLayout()
+        selected_rule_label = QLabel('Rule: Colorize Conversation')
+        edit_row.addWidget(selected_rule_label)
+
+        color_preview = QFrame(dialog)
+        color_preview.setFrameShape(QFrame.StyledPanel)
+        color_preview.setFixedSize(88, 24)
+        edit_row.addWidget(color_preview)
+
+        choose_btn = QPushButton('Choose...')
+        edit_row.addWidget(choose_btn)
+        edit_row.addStretch(1)
+        layout.addLayout(edit_row)
+
+        def _selected_row() -> int:
+            row = int(rules_table.currentRow())
+            return row if 0 <= row < len(rules) else 0
+
+        def _refresh_selected_preview():
+            row = _selected_row()
+            rule = rules[row]
+            selected_rule_label.setText(f'Rule: {rule["name"]}')
+            color_preview.setStyleSheet(f'background-color: {QColor(rule["background"]).name()}; border: 1px solid #808080;')
+
+        def _choose_color_for_selected():
+            row = _selected_row()
+            current = QColor(rules[row]['background'])
+            picked = QColorDialog.getColor(current, self, f'Rule Color - {rules[row]["name"]}')
+            if not picked.isValid():
+                return
+            rules[row]['background'] = QColor(picked)
+            _paint_row(row)
+            _refresh_selected_preview()
+
+        buttons_row = QHBoxLayout()
+        choose_btn.clicked.connect(_choose_color_for_selected)
+        buttons_row.addStretch(1)
+        clear_btn = QPushButton('Clear highlight')
+        clear_btn.setFixedWidth(120)
+        clear_btn.setFixedHeight(24)
+        clear_btn.clicked.connect(lambda: self.capture_view.clear_conversation_highlight())
+        buttons_row.addWidget(clear_btn)
+        layout.addLayout(buttons_row)
+
+        dialog_buttons = QHBoxLayout()
+        apply_btn = QPushButton('Apply')
+        close_btn = QPushButton('Close')
+        dialog_buttons.addStretch(1)
+        dialog_buttons.addWidget(apply_btn)
+        dialog_buttons.addWidget(close_btn)
+        layout.addLayout(dialog_buttons)
+
+        def _apply_rules():
+            conv_bg = QColor(rules[0]['background']).name()
+            settings.setValue('view/conversation_color', conv_bg)
+
+            updated_overrides = {}
+            for rule in rules[1:]:
+                name = str(rule['name'])
+                color_hex = QColor(rule['background']).name()
+                default_hex = '#ffffff'
+                for default_rule in self.capture_view.table.WIRESHARK_DEFAULT_RULES:
+                    if str(default_rule.get('name', '')) == name:
+                        default_hex = QColor(default_rule.get('bg')).name()
+                        break
+                if color_hex.lower() != default_hex.lower():
+                    updated_overrides[name] = color_hex
+
+            rule_overrides.clear()
+            rule_overrides.update(updated_overrides)
+            settings.setValue('view/rule_background_overrides', json.dumps(rule_overrides))
+
+            self.capture_view.table.set_rule_background_overrides(rule_overrides)
+            self.capture_view.set_conversation_highlight([], QColor(conv_bg))
+            self.capture_view.set_color_rules_enabled(True)
+
+        rules_table.currentCellChanged.connect(lambda *_: _refresh_selected_preview())
+        apply_btn.clicked.connect(_apply_rules)
+        close_btn.clicked.connect(dialog.accept)
+
+        rules_table.selectRow(0)
+        _refresh_selected_preview()
+        dialog.exec()
+
+    def _on_show_packet_new_window(self):
+        if not self.capture_view:
+            return
+        record = self.capture_view.get_current_record()
+        if record is None:
+            QMessageBox.information(self, 'Show Packet', 'Select a packet first.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f'Show Packet - Frame {getattr(record, "number", "?")}')
+        dialog.resize(900, 620)
+
+        layout = QVBoxLayout(dialog)
+        splitter = QSplitter(Qt.Vertical, dialog)
+        details_tree = PacketDetailsTree()
+        bytes_view = PacketBytesView()
+        details_tree.item_bytes_selected.connect(bytes_view.highlight_bytes)
+        bytes_view.bytes_hovered.connect(lambda offset, source: details_tree.select_offset(offset, source))
+        bytes_view.hover_left.connect(lambda _source: details_tree.clearSelection())
+        splitter.addWidget(details_tree)
+        splitter.addWidget(bytes_view)
+        splitter.setSizes([360, 240])
+        layout.addWidget(splitter)
+
+        details_tree.show_packet(record)
+        bytes_view.show_packet(record)
+        dialog.exec()
+
+    def _on_redissect_packets(self):
+        if not self.capture_view:
+            return
+        self.capture_view.reload_file()
+        self._refresh_status_metrics()
+
+    def _on_reload_as_format_capture(self, enabled: bool):
+        checked = bool(enabled)
+        if self.capture_view:
+            self.capture_view.set_file_format_view_mode(checked)
+            checked = self.capture_view.is_file_format_view_mode()
+        if hasattr(self, 'action_view_reload_as_format_capture'):
+            self.action_view_reload_as_format_capture.blockSignals(True)
+            self.action_view_reload_as_format_capture.setChecked(checked)
+            self.action_view_reload_as_format_capture.blockSignals(False)
 
     def _on_refresh_interfaces(self):
         if self.iface_selector_view:
@@ -5357,9 +5657,18 @@ class ApplicationWindow(QMainWindow):
         if self.capture_view:
             self.capture_view.reset_main_text_size()
 
-    def _on_resize_columns(self):
+    def _on_resize_columns(self, enabled: bool = True):
+        checked = bool(enabled)
+        if hasattr(self, 'action_view_resize_all_columns'):
+            self.action_view_resize_all_columns.blockSignals(True)
+            self.action_view_resize_all_columns.setChecked(checked)
+            self.action_view_resize_all_columns.blockSignals(False)
+        if hasattr(self, 'action_resize_cols_btn'):
+            self.action_resize_cols_btn.blockSignals(True)
+            self.action_resize_cols_btn.setChecked(checked)
+            self.action_resize_cols_btn.blockSignals(False)
         if self.capture_view:
-            self.capture_view.resize_columns_to_content()
+            self.capture_view.set_resize_all_columns_enabled(checked)
 
     def _on_reset_layout(self):
         if self.capture_view:

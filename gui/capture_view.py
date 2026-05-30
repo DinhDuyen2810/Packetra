@@ -5,6 +5,7 @@ import hashlib
 import time
 import threading
 import queue
+from datetime import datetime
 from pathlib import Path
 from collections import Counter
 from scapy.all import TCP, ICMP, IP
@@ -20,6 +21,7 @@ from PySide6.QtGui import QAction, QPainter, QColor, QPen, QPixmap
 from core.capture import PacketSniffer
 from core.filtering import DisplayFilter
 from core.formatters import packet_summary_tree
+from core.models import PacketRecord
 from core.parser import PacketParser
 from gui.hex_view import PacketBytesView
 from gui.packet_details import PacketDetailsTree
@@ -192,6 +194,7 @@ class CaptureView(QWidget):
     capture_state_changed = Signal(bool)
     find_panel_visibility_changed = Signal(bool)
     detail_status_changed = Signal(str, int)
+    open_packet_window_requested = Signal()
 
     def __init__(self, iface: str = '', iface_display_name: str = '', capture_filter: str = ''):
         super().__init__()
@@ -221,12 +224,23 @@ class CaptureView(QWidget):
         self.default_lower_splitter_sizes = [980, 650]
         self._current_pane_layout = 'Layout 2'
         self._pane_assignments = ('packet_list', 'packet_details', 'packet_bytes')
+        self._pane_component_visibility = {
+            'packet_list': True,
+            'packet_details': True,
+            'packet_bytes': True,
+            'packet_diagram': True,
+        }
+        self._show_file_format_view = False
+        self._file_format_record = None
+        self._file_format_raw_bytes = b''
         self._base_fonts = {}
         self._last_find_row = None
         self._last_find_signature = None
         self._last_find_offset = None
         self._last_find_detail_index = None
         self._selected_record_index = -1
+        self._conversation_highlight_indexes = set()
+        self._conversation_highlight_color = QColor('#FFF2A8')
         self._filter_history = self._load_filter_history()
         self.capture_comments = ''
         self.capture_metadata = None  # pcapng metadata (interfaces, file comment, packet comments)
@@ -362,6 +376,8 @@ class CaptureView(QWidget):
         self._auto_output_written_files = []
         self._auto_output_base_path = ''
         self._rollover_file_counter = 0
+        self.clear_conversation_highlight()
+        self.set_file_format_view_mode(False)
         self._set_dirty(False)
         self.capture_state_changed.emit(False)
         self._update_status('Ready')
@@ -787,9 +803,9 @@ class CaptureView(QWidget):
         filter_row.addWidget(self.display_filter_input)
         filter_row.addWidget(self.apply_filter_btn)
         filter_row.addWidget(self.clear_filter_btn)
-        filter_widget = QWidget()
-        filter_widget.setLayout(filter_row)
-        root_layout.addWidget(filter_widget)
+        self.filter_toolbar_widget = QWidget()
+        self.filter_toolbar_widget.setLayout(filter_row)
+        root_layout.addWidget(self.filter_toolbar_widget)
 
         # Find row (similar behavior), hidden by default.
         find_root = QVBoxLayout()
@@ -891,6 +907,13 @@ class CaptureView(QWidget):
 
         self.packet_panes_placeholder = QWidget()
         self.packet_panes_placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        placeholder_layout = QVBoxLayout(self.packet_panes_placeholder)
+        placeholder_layout.setContentsMargins(16, 16, 16, 16)
+        placeholder_layout.addStretch(1)
+        self.packet_panes_placeholder_label = QLabel('File format view mode')
+        self.packet_panes_placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_layout.addWidget(self.packet_panes_placeholder_label)
+        placeholder_layout.addStretch(1)
 
         self.packet_panes_stack = QStackedWidget()
         self.packet_panes_stack.addWidget(self.main_splitter)
@@ -914,6 +937,7 @@ class CaptureView(QWidget):
         self.find_input.textChanged.connect(self._on_find_query_changed)
         self.filter_history_action.triggered.connect(self._show_filter_history_menu)
         self.table.cellClicked.connect(self.show_details)
+        self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self.details_tree.detail_field_selected.connect(self._on_detail_field_selected)
         self.details_tree.item_bytes_selected.connect(self.hex_view.highlight_bytes)
         self.hex_view.bytes_range_selected.connect(self._on_bytes_range_selected)
@@ -1038,6 +1062,8 @@ class CaptureView(QWidget):
 
     def _pane_widget(self, pane_key: str, pane_index: int):
         key = str(pane_key or 'none').strip().lower()
+        if key in self._pane_component_visibility and not self._pane_component_visibility.get(key, True):
+            key = 'none'
         if key == 'packet_list':
             return self.table
         if key == 'packet_details':
@@ -1047,6 +1073,477 @@ class CaptureView(QWidget):
         if key == 'packet_diagram':
             return self.packet_diagram_view
         return self._empty_pane_widgets[max(0, min(int(pane_index), len(self._empty_pane_widgets) - 1))]
+
+    def is_filter_toolbar_visible(self) -> bool:
+        return bool(getattr(self, 'filter_toolbar_widget', None) and self.filter_toolbar_widget.isVisible())
+
+    def set_filter_toolbar_visible(self, visible: bool):
+        if hasattr(self, 'filter_toolbar_widget'):
+            self.filter_toolbar_widget.setVisible(bool(visible))
+
+    def is_component_visible(self, component_name: str) -> bool:
+        key = str(component_name or '').strip().lower()
+        if key not in self._pane_component_visibility:
+            return True
+        return bool(self._pane_component_visibility.get(key, True))
+
+    def set_component_visible(self, component_name: str, visible: bool):
+        key = str(component_name or '').strip().lower()
+        if key not in self._pane_component_visibility:
+            return
+        self._pane_component_visibility[key] = bool(visible)
+        self.apply_pane_layout(self._current_pane_layout)
+
+    def is_file_format_view_mode(self) -> bool:
+        return bool(self._show_file_format_view)
+
+    def _build_file_format_mode_record(self):
+        if not self.loaded_file_path or not os.path.exists(self.loaded_file_path):
+            return None
+        try:
+            raw_bytes = Path(self.loaded_file_path).read_bytes()
+        except Exception:
+            return None
+
+        self._file_format_raw_bytes = bytes(raw_bytes)
+        file_name = os.path.basename(self.loaded_file_path)
+        file_size = len(self._file_format_raw_bytes)
+
+        block_type_names = {
+            0x0A0D0D0A: 'Section Header Block',
+            0x00000001: 'Interface Description Block',
+            0x00000002: 'Packet Block (obsolete)',
+            0x00000003: 'Simple Packet Block',
+            0x00000004: 'Name Resolution Block',
+            0x00000005: 'Interface Statistics Block',
+            0x00000006: 'Enhanced Packet Block',
+            0x0000000A: 'Decryption Secrets Block',
+            0x00000BAD: 'Custom Block',
+            0x40000BAD: 'Custom Block (copy-safe)',
+        }
+
+        def _u16(data: bytes, off: int, endian: str):
+            if off + 2 > len(data):
+                return None
+            return int.from_bytes(data[off:off + 2], endian)
+
+        def _u32(data: bytes, off: int, endian: str):
+            if off + 4 > len(data):
+                return None
+            return int.from_bytes(data[off:off + 4], endian)
+
+        def _u64(data: bytes, off: int, endian: str, signed: bool = False):
+            if off + 8 > len(data):
+                return None
+            return int.from_bytes(data[off:off + 8], endian, signed=signed)
+
+        def _parse_options(start: int, end: int, endian: str):
+            nodes = []
+            parsed = []
+            cursor = start
+            while cursor + 4 <= end:
+                code = _u16(self._file_format_raw_bytes, cursor, endian)
+                length = _u16(self._file_format_raw_bytes, cursor + 2, endian)
+                if code is None or length is None:
+                    break
+                value_start = cursor + 4
+                value_end = value_start + int(length)
+                if value_end > end:
+                    break
+                total_len = 4 + int(length)
+                padding = (4 - (total_len % 4)) % 4
+                full_len = total_len + padding
+                if cursor + full_len > end:
+                    break
+
+                value_bytes = self._file_format_raw_bytes[value_start:value_end]
+                parsed.append((int(code), bytes(value_bytes)))
+
+                if int(code) == 0:
+                    nodes.append({
+                        'title': 'Option: End of Options',
+                        'offset': cursor,
+                        'length': full_len,
+                        'children': [
+                            {'title': 'Code: End of Options (0)', 'offset': cursor, 'length': 2},
+                            {'title': 'Length: 0', 'offset': cursor + 2, 'length': 2},
+                        ],
+                    })
+                    cursor += full_len
+                    break
+
+                nodes.append({
+                    'title': f'Option code {int(code)}, length {int(length)}',
+                    'offset': cursor,
+                    'length': full_len,
+                    'children': [
+                        {'title': f'Code: {int(code)}', 'offset': cursor, 'length': 2},
+                        {'title': f'Length: {int(length)}', 'offset': cursor + 2, 'length': 2},
+                        {'title': f'Option Value ({int(length)} bytes)', 'offset': value_start, 'length': int(length)},
+                    ],
+                })
+                cursor += full_len
+            return nodes, parsed
+
+        def _format_timestamp(ts_value: int | None, resolution: float):
+            if ts_value is None:
+                return ''
+            try:
+                seconds = float(ts_value) * float(resolution)
+                dt = datetime.fromtimestamp(seconds)
+                tz_name = time.tzname[0] if time.tzname else 'Local Time'
+                return f'[Timestamp: {dt.strftime("%b %d, %Y %H:%M:%S")}.{dt.microsecond:06d}000 {tz_name}]'
+            except Exception:
+                return ''
+
+        blocks = []
+        mapping_nodes = []
+        offset = 0
+        total = len(self._file_format_raw_bytes)
+        section_endian = 'little'
+        section_index = 0
+        current_interface_tsres = []
+        epb_index = 0
+
+        while offset + 12 <= total:
+            block_type = _u32(self._file_format_raw_bytes, offset, section_endian)
+            block_len = _u32(self._file_format_raw_bytes, offset + 4, section_endian)
+
+            if block_len is None or int(block_len) < 12 or offset + int(block_len) > total:
+                alt_endian = 'big' if section_endian == 'little' else 'little'
+                alt_type = _u32(self._file_format_raw_bytes, offset, alt_endian)
+                alt_len = _u32(self._file_format_raw_bytes, offset + 4, alt_endian)
+                if alt_len is None or int(alt_len) < 12 or offset + int(alt_len) > total:
+                    break
+                block_type = alt_type
+                block_len = alt_len
+                section_endian = alt_endian
+
+            block_type = int(block_type)
+            block_len = int(block_len)
+            body_offset = offset + 8
+            body_end = offset + block_len - 4
+            body_len = max(0, body_end - body_offset)
+            trailer_len = _u32(self._file_format_raw_bytes, body_end, section_endian)
+            name = block_type_names.get(block_type, f'Unknown Block 0x{block_type:08x}')
+
+            block_type_vendor = bool(block_type & 0x80000000)
+            block_type_value = int(block_type & 0x7FFFFFFF)
+
+            block_data_children = []
+            block_title_suffix = ''
+
+            if block_type == 0x0A0D0D0A:
+                section_index += 1
+                current_interface_tsres = []
+                block_title_suffix = f' {section_index}'
+
+                bom_bytes = self._file_format_raw_bytes[body_offset:body_offset + 4]
+                if bom_bytes == b'\x4d\x3c\x2b\x1a':
+                    section_endian = 'little'
+                    bom_label = 'Little-endian'
+                elif bom_bytes == b'\x1a\x2b\x3c\x4d':
+                    section_endian = 'big'
+                    bom_label = 'Big-endian'
+                else:
+                    bom_label = 'Unknown-endian'
+
+                major = _u16(self._file_format_raw_bytes, body_offset + 4, section_endian)
+                minor = _u16(self._file_format_raw_bytes, body_offset + 6, section_endian)
+                section_len = _u64(self._file_format_raw_bytes, body_offset + 8, section_endian, signed=True)
+
+                block_data_children.extend([
+                    {'title': f'Byte Order Magic: {bom_bytes.hex()} ({bom_label})', 'offset': body_offset, 'length': 4},
+                    {'title': f'Major Version: {major if major is not None else "?"}', 'offset': body_offset + 4, 'length': 2},
+                    {'title': f'Minor Version: {minor if minor is not None else "?"}', 'offset': body_offset + 6, 'length': 2},
+                    {'title': f'Section Length: {section_len if section_len is not None else "?"}', 'offset': body_offset + 8, 'length': 8},
+                ])
+                option_nodes, _ = _parse_options(body_offset + 16, body_end, section_endian)
+                if option_nodes:
+                    block_data_children.append({'title': 'Options', 'children': option_nodes})
+
+            elif block_type == 0x00000001:
+                interface_id = len(current_interface_tsres)
+                block_title_suffix = f' {interface_id}'
+
+                linktype = _u16(self._file_format_raw_bytes, body_offset, section_endian)
+                snaplen = _u32(self._file_format_raw_bytes, body_offset + 4, section_endian)
+                block_data_children.extend([
+                    {'title': f'Link Type: ETHERNET ({linktype})' if linktype == 1 else f'Link Type: {linktype if linktype is not None else "?"}', 'offset': body_offset, 'length': 2},
+                    {'title': 'Reserved: 0x0000', 'offset': body_offset + 2, 'length': 2},
+                    {'title': f'Snap Length: {snaplen if snaplen is not None else "?"}', 'offset': body_offset + 4, 'length': 4},
+                ])
+                option_nodes, option_values = _parse_options(body_offset + 8, body_end, section_endian)
+                resolution = 1e-6
+                for opt_code, opt_value in option_values:
+                    if opt_code == 9 and len(opt_value) >= 1:
+                        raw_val = int(opt_value[0])
+                        if raw_val & 0x80:
+                            exp = raw_val & 0x7F
+                            resolution = 2.0 ** (-exp)
+                        else:
+                            resolution = 10.0 ** (-raw_val)
+                current_interface_tsres.append(float(resolution))
+                if option_nodes:
+                    block_data_children.append({'title': 'Options', 'children': option_nodes})
+
+            elif block_type == 0x00000006:
+                epb_index += 1
+                block_title_suffix = f' {epb_index}'
+
+                iface_id = _u32(self._file_format_raw_bytes, body_offset, section_endian)
+                ts_hi = _u32(self._file_format_raw_bytes, body_offset + 4, section_endian)
+                ts_lo = _u32(self._file_format_raw_bytes, body_offset + 8, section_endian)
+                cap_len = int(_u32(self._file_format_raw_bytes, body_offset + 12, section_endian) or 0)
+                orig_len = _u32(self._file_format_raw_bytes, body_offset + 16, section_endian)
+
+                ts_value = None
+                if ts_hi is not None and ts_lo is not None:
+                    ts_value = (int(ts_hi) << 32) | int(ts_lo)
+                if_index = int(iface_id or 0)
+                if 0 <= if_index < len(current_interface_tsres):
+                    ts_res = current_interface_tsres[if_index]
+                else:
+                    ts_res = 1e-6
+
+                pkt_off = body_offset + 20
+                pkt_len = min(cap_len, max(0, body_end - pkt_off))
+                pad_len = (4 - (pkt_len % 4)) % 4
+                opts_start = pkt_off + pkt_len + pad_len
+
+                block_data_children.extend([
+                    {'title': f'Interface: {iface_id if iface_id is not None else "?"}', 'offset': body_offset, 'length': 4},
+                    {'title': f'Timestamp (High): {ts_hi if ts_hi is not None else "?"}', 'offset': body_offset + 4, 'length': 4},
+                    {'title': f'Timestamp (Low): {ts_lo if ts_lo is not None else "?"}', 'offset': body_offset + 8, 'length': 4},
+                ])
+                timestamp_line = _format_timestamp(ts_value, ts_res)
+                if timestamp_line:
+                    block_data_children.append({'title': timestamp_line})
+                block_data_children.extend([
+                    {'title': f'Captured Packet Length: {cap_len}', 'offset': body_offset + 12, 'length': 4},
+                    {'title': f'Original Packet Length: {orig_len if orig_len is not None else "?"}', 'offset': body_offset + 16, 'length': 4},
+                    {'title': 'Packet Data', 'offset': pkt_off, 'length': pkt_len},
+                ])
+                option_nodes, _ = _parse_options(opts_start, body_end, section_endian)
+                if option_nodes:
+                    block_data_children.append({'title': 'Options', 'children': option_nodes})
+
+                mapping_nodes.append({'title': f'Block {len(blocks) + 1} -> Packet {epb_index}'})
+
+            elif block_type == 0x00000003:
+                orig_len = _u32(self._file_format_raw_bytes, body_offset, section_endian)
+                data_len = max(0, body_len - 4)
+                block_data_children.extend([
+                    {'title': f'Original Packet Length: {orig_len if orig_len is not None else "?"}', 'offset': body_offset, 'length': 4},
+                    {'title': 'Packet Data', 'offset': body_offset + 4, 'length': data_len},
+                ])
+
+            elif block_type == 0x00000004:
+                records = []
+                cursor = body_offset
+                while cursor + 4 <= body_end:
+                    rec_type = _u16(self._file_format_raw_bytes, cursor, section_endian)
+                    rec_len = _u16(self._file_format_raw_bytes, cursor + 2, section_endian)
+                    if rec_type is None or rec_len is None:
+                        break
+                    full = 4 + int(rec_len)
+                    full += (4 - (full % 4)) % 4
+                    if cursor + full > body_end:
+                        break
+                    if int(rec_type) == 0:
+                        records.append({
+                            'title': 'Record: End of Records',
+                            'offset': cursor,
+                            'length': full,
+                            'children': [
+                                {'title': 'Code: End of Records (0)', 'offset': cursor, 'length': 2},
+                                {'title': 'Length: 0', 'offset': cursor + 2, 'length': 2},
+                            ],
+                        })
+                        cursor += full
+                        break
+                    records.append({'title': f'Record type {int(rec_type)}, length {int(rec_len)}', 'offset': cursor, 'length': full})
+                    cursor += full
+                if records:
+                    block_data_children.append({'title': 'Name Records', 'children': records})
+                option_nodes, _ = _parse_options(cursor, body_end, section_endian)
+                if option_nodes:
+                    block_data_children.append({'title': 'Options', 'children': option_nodes})
+
+            elif block_type == 0x00000005:
+                iface_id = _u32(self._file_format_raw_bytes, body_offset, section_endian)
+                ts_hi = _u32(self._file_format_raw_bytes, body_offset + 4, section_endian)
+                ts_lo = _u32(self._file_format_raw_bytes, body_offset + 8, section_endian)
+                block_data_children.extend([
+                    {'title': f'Interface ID: {iface_id if iface_id is not None else "?"}', 'offset': body_offset, 'length': 4},
+                    {'title': f'Timestamp (High): {ts_hi if ts_hi is not None else "?"}', 'offset': body_offset + 4, 'length': 4},
+                    {'title': f'Timestamp (Low): {ts_lo if ts_lo is not None else "?"}', 'offset': body_offset + 8, 'length': 4},
+                ])
+                option_nodes, _ = _parse_options(body_offset + 12, body_end, section_endian)
+                if option_nodes:
+                    block_data_children.append({'title': 'Options', 'children': option_nodes})
+
+            else:
+                if body_len > 0:
+                    block_data_children.append({'title': f'Raw Block Data ({body_len} bytes)', 'offset': body_offset, 'length': body_len})
+
+            block_children = [
+                {
+                    'title': f'Block Type: 0x{block_type:08x}: ({name})',
+                    'offset': offset,
+                    'length': 4,
+                    'children': [
+                        {'title': f'Block Type Vendor: {"True" if block_type_vendor else "False"}'},
+                        {'title': f'Block Type Value: 0x{block_type_value:08x}: ({name})'},
+                    ],
+                },
+                {'title': f'Block Length: {block_len}', 'offset': offset + 4, 'length': 4},
+            ]
+
+            if block_data_children:
+                block_children.append({'title': 'Block Data', 'offset': body_offset, 'length': body_len, 'children': block_data_children})
+            block_children.append({'title': f'Block Length (trailer): {int(trailer_len) if trailer_len is not None else "?"}', 'offset': body_end, 'length': 4})
+
+            block_number = len(blocks) + 1
+            blocks.append({
+                'title': f'Block {block_number}: {name}{block_title_suffix}',
+                'offset': offset,
+                'length': block_len,
+                'children': block_children,
+            })
+            offset += block_len
+
+        if offset < total:
+            blocks.append({
+                'title': f'Trailing/Invalid bytes: {total - offset}',
+                'offset': offset,
+                'length': total - offset,
+            })
+
+        detail_tree = [
+            {
+                'title': f'Frame 1: Packet, {file_size} bytes on wire ({file_size * 8} bits), {file_size} bytes captured ({file_size * 8} bits)',
+                'offset': 0,
+                'length': file_size,
+                'children': [
+                    {'title': 'Encapsulation type: MIME (134)'},
+                    {'title': 'Frame Number: 1'},
+                    {'title': f'Frame Length: {file_size} bytes ({file_size * 8} bits)'},
+                    {'title': f'Capture Length: {file_size} bytes ({file_size * 8} bits)'},
+                    {'title': '[Frame is marked: False]'},
+                    {'title': '[Frame is ignored: False]'},
+                    {'title': '[Protocols in frame: mime_dlt:file-pcapng]'},
+                    {'title': 'Character encoding: ASCII (0)'},
+                    {'title': f'File name: {file_name}'},
+                ],
+            },
+            {
+                'title': 'MIME file',
+                'children': [
+                    {
+                        'title': f'PCAPNG File Format ({len(blocks)} blocks)',
+                        'children': blocks + ([{'title': 'Mapping', 'children': mapping_nodes}] if mapping_nodes else []),
+                    }
+                ],
+            },
+        ]
+
+        return PacketRecord(
+            number=1,
+            epoch_time=0.0,
+            relative_time=0.0,
+            length=file_size,
+            src='',
+            dst='',
+            protocol='MIME_FILE',
+            info=f'PCAPNG file format view: {file_name}',
+            layers=['mime_dlt', 'file-pcapng'],
+            raw=self._file_format_raw_bytes,
+            metadata={'_detail_tree_cache': detail_tree},
+        )
+
+    def set_file_format_view_mode(self, enabled: bool):
+        self._show_file_format_view = bool(enabled)
+        if self._show_file_format_view:
+            self._file_format_record = self._build_file_format_mode_record()
+            if self._file_format_record is None:
+                self._show_file_format_view = False
+                QMessageBox.information(None, 'Reload as File Format/Capture', 'Chế độ File Format chỉ hỗ trợ khi đang mở file capture từ đĩa.')
+                return
+            self.packet_panes_stack.setCurrentWidget(self.main_splitter)
+            self.table.replace_records([self._file_format_record])
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
+            self.show_details(0, 0)
+            self._update_status('Reloaded as File Format mode')
+            return
+        self._file_format_record = None
+        self._file_format_raw_bytes = b''
+        self.packet_panes_stack.setCurrentWidget(self.main_splitter)
+        self.apply_display_filter()
+        if self.visible_indices:
+            self.goto_first_packet()
+        self._update_status('Returned to Capture packet view mode')
+
+    def _iter_subtree_items(self, root_item):
+        yield root_item
+        for idx in range(root_item.childCount()):
+            child = root_item.child(idx)
+            yield from self._iter_subtree_items(child)
+
+    def expand_selected_subtrees(self):
+        selected = self.details_tree.selectedItems()
+        if not selected:
+            return
+        for item in selected:
+            for node in self._iter_subtree_items(item):
+                self.details_tree.expandItem(node)
+
+    def collapse_selected_subtrees(self):
+        selected = self.details_tree.selectedItems()
+        if not selected:
+            return
+        for item in selected:
+            for node in self._iter_subtree_items(item):
+                self.details_tree.collapseItem(node)
+
+    def expand_all_details(self):
+        self.details_tree.expandAll()
+
+    def collapse_all_details(self):
+        self.details_tree.collapseAll()
+
+    def _apply_conversation_highlight_to_row(self, row: int):
+        rec_idx = self._record_index_for_visible_row(row)
+        if rec_idx < 0:
+            return
+        highlighted = rec_idx in self._conversation_highlight_indexes
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item is None:
+                continue
+            if highlighted:
+                item.setBackground(self._conversation_highlight_color)
+
+    def clear_conversation_highlight(self):
+        if not self._conversation_highlight_indexes:
+            return
+        self._conversation_highlight_indexes.clear()
+        self._refresh_all_visible_row_styles()
+
+    def set_conversation_highlight(self, record_indexes, color: QColor | None = None):
+        normalized_indexes = set()
+        for index in (record_indexes or []):
+            try:
+                value = int(index)
+            except Exception:
+                continue
+            if 0 <= value < len(self.records):
+                normalized_indexes.add(value)
+        self._conversation_highlight_indexes = normalized_indexes
+        if color is not None:
+            self._conversation_highlight_color = QColor(color)
+        self._refresh_all_visible_row_styles()
 
     def apply_pane_layout(self, layout_name: str):
         mode = self._normalize_layout_name(layout_name)
@@ -1205,6 +1702,8 @@ class CaptureView(QWidget):
         return bool(self._is_stopping)
 
     def has_packets(self) -> bool:
+        if self._show_file_format_view and self._file_format_record is not None:
+            return True
         return len(self.records) > 0
 
     def _open_capture_info_dialog(self):
@@ -1222,6 +1721,9 @@ class CaptureView(QWidget):
 
     def clear_packets(self, reset_file_path: bool = False):
         self._stop_refine_thread()
+        self._show_file_format_view = False
+        self._file_format_record = None
+        self._file_format_raw_bytes = b''
         self.records.clear()
         self.visible_indices.clear()
         self._selected_record_index = -1
@@ -1304,6 +1806,7 @@ class CaptureView(QWidget):
                 item.setText(value)
         self.table._store_row_state(row, record)
         self.table._paint_row(row, record)
+        self._apply_conversation_highlight_to_row(row)
 
     def _drain_refine_queue(self):
         processed = 0
@@ -1459,6 +1962,10 @@ class CaptureView(QWidget):
         return False
 
     def apply_display_filter(self):
+        if self._show_file_format_view and self._file_format_record is not None:
+            self.table.replace_records([self._file_format_record])
+            self._update_status('File format mode is active')
+            return
         self.visible_indices.clear()
         expr = self.display_filter_input.text()
         self._remember_filter(expr)
@@ -1469,6 +1976,7 @@ class CaptureView(QWidget):
                 visible_records.append(record)
         self.table.replace_records(visible_records)
         self.table.set_color_rules_enabled(self.color_rules_enabled)
+        self._refresh_all_visible_row_styles()
         self._update_status('Display filter applied')
 
     def get_selected_records(self):
@@ -1494,6 +2002,15 @@ class CaptureView(QWidget):
         self.apply_display_filter()
 
     def show_details(self, row, _col):
+        if self._show_file_format_view and self._file_format_record is not None:
+            if row != 0:
+                return
+            self._selected_record_index = -1
+            self.details_tree.show_packet(self._file_format_record)
+            self.hex_view.show_packet(self._file_format_record)
+            self.detail_status_changed.emit('', 0)
+            self._update_status('Selected file format frame')
+            return
         if row < 0 or row >= len(self.visible_indices):
             return
         record_index = self.visible_indices[row]
@@ -1785,6 +2302,9 @@ class CaptureView(QWidget):
         return row if row >= 0 else -1
 
     def get_current_record(self):
+        if self._show_file_format_view and self._file_format_record is not None:
+            row = self.get_current_visible_row()
+            return self._file_format_record if row == 0 else None
         row = self.get_current_visible_row()
         if row < 0 or row >= len(self.visible_indices):
             return None
@@ -2640,12 +3160,23 @@ class CaptureView(QWidget):
         return os.path.basename(self.loaded_file_path)
 
     def resize_columns_to_content(self):
-        self.table.resizeColumnsToContents()
-        self.table.apply_content_resize_layout()
+        self.table.set_resize_all_columns_mode(True)
+
+    def set_resize_all_columns_enabled(self, enabled: bool):
+        self.table.set_resize_all_columns_mode(bool(enabled))
+
+    def is_resize_all_columns_enabled(self) -> bool:
+        return bool(getattr(self.table, '_resize_all_columns_enabled', False))
 
     def reset_layout_to_default_size(self):
         self.main_splitter.setSizes(self.default_main_splitter_sizes)
         self.lower_splitter.setSizes(self.default_lower_splitter_sizes)
+
+    def _on_table_double_clicked(self, row: int, _col: int):
+        if row < 0:
+            return
+        self.show_details(row, 0)
+        self.open_packet_window_requested.emit()
 
     def _update_status(self, message):
         proto_counts = Counter(r.protocol for r in self.records)
