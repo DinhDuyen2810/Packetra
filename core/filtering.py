@@ -244,6 +244,9 @@ class DisplayFilter:
             return self._field_from_layer(raw, UDP, 'sport')
         if low == 'udp.dstport':
             return self._field_from_layer(raw, UDP, 'dport')
+        if low == 'udp.stream':
+            stream_index = metadata.get('udp_stream_index', None)
+            return [int(stream_index)] if stream_index is not None else []
 
         if low == 'dns.flags.response':
             return [int(getattr(raw[DNS], 'qr', 0) or 0)] if raw.haslayer(DNS) else []
@@ -298,7 +301,117 @@ class DisplayFilter:
         if low == 'port':
             return self._ports(record, None)
 
+        if low == 'detail':
+            return self._detail_terms(record)
+        if low == 'detail.title':
+            return [str(item.get('title', '') or '') for item in self._detail_nodes(record)]
+        if low == 'detail.key':
+            return [str(item.get('key', '') or '') for item in self._detail_nodes(record)]
+        if low == 'detail.value':
+            return [str(item.get('value', '') or '') for item in self._detail_nodes(record)]
+        if low == 'detail.pair':
+            return [str(item.get('pair', '') or '') for item in self._detail_nodes(record)]
+        if low == 'detail.path':
+            return [str(item.get('path', '') or '') for item in self._detail_nodes(record)]
+
         return []
+
+    def _detail_nodes(self, record: PacketRecord) -> list:
+        metadata = getattr(record, 'metadata', {}) or {}
+        cached = metadata.get('_detail_filter_nodes') if isinstance(metadata, dict) else None
+        if isinstance(cached, list):
+            return cached
+
+        nodes = []
+        raw = getattr(record, 'raw', None)
+        if raw is None:
+            return nodes
+
+        try:
+            from core.formatters import packet_summary_tree
+
+            tree = packet_summary_tree(raw, record)
+        except Exception:
+            tree = []
+
+        def _strip_bracket_suffix(text: str) -> str:
+            value = str(text or '').strip()
+            if not value:
+                return ''
+            return re.split(r'\s+\[[^\]]*\]', value, 1)[0].strip()
+
+        def _normalize_path_part(text: str) -> str:
+            value = str(text or '').strip().casefold()
+            if not value:
+                return ''
+            if ': ' in value:
+                value = value.split(': ', 1)[0].strip()
+            elif ' = ' in value:
+                value = value.split(' = ', 1)[0].strip()
+            if ',' in value:
+                value = value.split(',', 1)[0].strip()
+            value = re.sub(r'\s+', ' ', value)
+            return value
+
+        def _walk(items, path_parts):
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get('title', '') or '').strip()
+                node_path = list(path_parts)
+                if title:
+                    key = title
+                    value = ''
+                    if ': ' in title:
+                        key, value = title.split(': ', 1)
+                    elif ' = ' in title:
+                        key, value = title.split(' = ', 1)
+                    key = str(key or '').strip()
+                    value = _strip_bracket_suffix(value)
+                    pair = f'{key}: {value}' if key and value else key
+                    key_part = _normalize_path_part(key)
+                    if key_part:
+                        node_path.append(key_part)
+                    nodes.append({
+                        'title': title,
+                        'key': key,
+                        'value': value,
+                        'pair': pair,
+                        'path': ' / '.join(node_path),
+                    })
+                _walk(item.get('children', []), node_path)
+
+        _walk(tree, [])
+        if isinstance(metadata, dict):
+            metadata['_detail_filter_nodes'] = nodes
+        return nodes
+
+    def _detail_terms(self, record: PacketRecord) -> list:
+        metadata = getattr(record, 'metadata', {}) or {}
+        cached = metadata.get('_detail_filter_terms') if isinstance(metadata, dict) else None
+        if isinstance(cached, list):
+            return cached
+
+        terms = []
+        for item in self._detail_nodes(record):
+            title = str(item.get('title', '') or '').strip()
+            key = str(item.get('key', '') or '').strip()
+            value = str(item.get('value', '') or '').strip()
+            pair = str(item.get('pair', '') or '').strip()
+            path = str(item.get('path', '') or '').strip()
+            if title:
+                terms.append(title)
+            if key:
+                terms.append(key)
+            if value:
+                terms.append(value)
+            if pair:
+                terms.append(pair)
+            if path:
+                terms.append(path)
+        if isinstance(metadata, dict):
+            metadata['_detail_filter_terms'] = terms
+        return terms
 
     def _protocol_present(self, record: PacketRecord, name: str) -> bool:
         raw = getattr(record, 'raw', None)

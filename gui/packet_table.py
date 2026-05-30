@@ -41,6 +41,7 @@ class PacketTable(QTableWidget):
         self._marked_color = QColor(self.DEFAULT_MARKED_COLOR)
         self._ignored_color = QColor(self.DEFAULT_IGNORED_COLOR)
         self._rule_background_overrides = {}
+        self._column_alignment_map = {}
         self.setColumnCount(7)
         self.setHorizontalHeaderLabels(['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'])
         self.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -68,6 +69,30 @@ class PacketTable(QTableWidget):
         self._default_column_widths = [self.columnWidth(i) for i in range(self.columnCount())]
         self._resize_all_columns_enabled = False
         self.apply_content_resize_layout()
+
+    def set_column_text_alignment(self, column: int, alignment):
+        try:
+            col = int(column)
+        except Exception:
+            return
+        if col < 0:
+            return
+        self._column_alignment_map[col] = int(alignment)
+        for row in range(self.rowCount()):
+            item = self.item(row, col)
+            if item is not None:
+                item.setTextAlignment(int(alignment))
+
+    def _apply_item_alignment(self, item: QTableWidgetItem, column: int):
+        if item is None:
+            return
+        try:
+            col = int(column)
+        except Exception:
+            col = -1
+        alignment = self._column_alignment_map.get(col)
+        if alignment is not None:
+            item.setTextAlignment(int(alignment))
 
     def wireshark_coloring_rules(self):
         return [
@@ -268,12 +293,27 @@ class PacketTable(QTableWidget):
             info,
         ]
 
+    def _populate_row_from_record(self, row: int, record, clear_extra_columns: bool = True):
+        values = self.display_values(record)
+        info_col = max(0, self.columnCount() - 1)
+        for col in range(self.columnCount()):
+            item = self.item(row, col)
+            if item is None:
+                item = QTableWidgetItem()
+                self.setItem(row, col, item)
+            if col == info_col:
+                text = values[6]
+            elif 0 <= col <= 5:
+                text = values[col]
+            else:
+                text = '' if clear_extra_columns else str(item.text() or '')
+            item.setText(str(text))
+            self._apply_item_alignment(item, col)
+
     def append_record(self, record):
         row = self.rowCount()
         self.insertRow(row)
-        values = self.display_values(record)
-        for col, value in enumerate(values):
-            self.setItem(row, col, QTableWidgetItem(value))
+        self._populate_row_from_record(row, record)
         self._store_row_state(row, record)
         self._paint_row(row, record)
         return row
@@ -286,13 +326,7 @@ class PacketTable(QTableWidget):
         self.setRowCount(start + len(records))
         for rel, record in enumerate(records):
             row = start + rel
-            values = self.display_values(record)
-            for col, value in enumerate(values):
-                item = self.item(row, col)
-                if item is None:
-                    item = QTableWidgetItem()
-                    self.setItem(row, col, item)
-                item.setText(value)
+            self._populate_row_from_record(row, record)
             self._store_row_state(row, record)
             self._paint_row(row, record)
 
@@ -301,13 +335,7 @@ class PacketTable(QTableWidget):
         self.setRowCount(len(records))
 
         for row, record in enumerate(records):
-            values = self.display_values(record)
-            for col, value in enumerate(values):
-                item = self.item(row, col)
-                if item is None:
-                    item = QTableWidgetItem()
-                    self.setItem(row, col, item)
-                item.setText(value)
+            self._populate_row_from_record(row, record)
             self._store_row_state(row, record)
             self._paint_row(row, record)
 
@@ -381,9 +409,10 @@ class PacketTable(QTableWidget):
 
     def apply_content_resize_layout(self):
         header = self.horizontalHeader()
-        for col in range(self.INFO_COLUMN):
-            header.setSectionResizeMode(col, QHeaderView.Interactive)
-        header.setSectionResizeMode(self.INFO_COLUMN, QHeaderView.Stretch)
+        info_col = max(0, self.columnCount() - 1)
+        for col in range(self.columnCount()):
+            mode = QHeaderView.Stretch if col == info_col else QHeaderView.Interactive
+            header.setSectionResizeMode(col, mode)
 
     def set_resize_all_columns_mode(self, enabled: bool):
         self._resize_all_columns_enabled = bool(enabled)

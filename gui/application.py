@@ -1,6 +1,7 @@
 import logging
 import socket
 import json
+import base64
 import math
 import pickle
 import csv
@@ -24,6 +25,7 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextDocument, 
 from PySide6.QtWidgets import QColorDialog, QFontDialog
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from scapy.all import IP, IPv6, TCP, UDP
+from core.filtering import DisplayFilter
 
 from gui.interface_selector_view import InterfaceSelectorView
 from gui.capture_view import CaptureView
@@ -1773,6 +1775,8 @@ class ApplicationWindow(QMainWindow):
         self._last_loaded_seconds = None
         self._capture_started_monotonic = None
         self._last_capture_seconds = None
+        self._display_filter_helper = DisplayFilter()
+        self._analyze_custom_columns = []
 
         # Build UI
         self._build_ui()
@@ -2338,12 +2342,12 @@ class ApplicationWindow(QMainWindow):
         self.action_refresh_interfaces.triggered.connect(self._on_refresh_interfaces)
 
         # Analyze menu
-        self.action_display_filter_macros.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Display Filter Macros...'))
-        self.action_display_filter_expression.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Display Filter Expression...'))
-        self.action_apply_as_column.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Apply as Column'))
-        self.action_apply_as_filter.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Apply as Filter'))
-        self.action_conversation_filter.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Conversation Filter'))
-        self.action_follow_stream.triggered.connect(lambda: self._on_menu_feature_placeholder('Analyze > Follow'))
+        self.action_display_filter_macros.triggered.connect(self._on_display_filter_macros)
+        self.action_display_filter_expression.triggered.connect(self._on_display_filter_expression)
+        self.action_apply_as_column.triggered.connect(self._on_apply_as_column)
+        self.action_apply_as_filter.triggered.connect(self._on_apply_as_filter)
+        self.action_conversation_filter.triggered.connect(self._on_conversation_filter)
+        self.action_follow_stream.triggered.connect(self._on_follow_stream)
         self.action_expert_info.triggered.connect(self._on_open_expert_information)
 
         # Statistics menu
@@ -2946,6 +2950,7 @@ class ApplicationWindow(QMainWindow):
         self._on_find_panel_visibility_changed(False)
         self._update_toolbar_state('selector')
         self._refresh_capture_menu_state()
+        self._refresh_analyze_menu_state()
 
     def _on_interface_preferences_changed(self):
         """Apply interface preference updates to start screen in real time."""
@@ -2960,8 +2965,12 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.capture_state_changed.connect(lambda _running: self._sync_capture_buttons())
             self.capture_view.find_panel_visibility_changed.connect(self._on_find_panel_visibility_changed)
             self.capture_view.detail_status_changed.connect(self._on_detail_status_changed)
+            self.capture_view.display_filter_applied.connect(self._on_display_filter_applied)
+            self.capture_view.records_refined.connect(self._refresh_analyze_custom_column_cells)
             self.capture_view.open_packet_window_requested.connect(self._on_show_packet_new_window)
             self.capture_view.go_state_changed.connect(lambda _state: self._refresh_go_menu_state())
+            self.capture_view.table.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
+            self.capture_view.details_tree.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
             self.stacked_widget.addWidget(self.capture_view)
 
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
@@ -2976,6 +2985,8 @@ class ApplicationWindow(QMainWindow):
             overrides = {}
         self.capture_view.table.set_rule_background_overrides(overrides)
         self.capture_view.set_color_rules_enabled(self.action_color_btn.isChecked())
+        self._analyze_custom_columns = self._load_analyze_custom_columns()
+        self._ensure_analyze_custom_columns_applied()
         self._apply_edit_preferences(self._load_edit_preferences())
         self.stacked_widget.setCurrentWidget(self.capture_view)
         self._sync_view_action_states()
@@ -2989,6 +3000,7 @@ class ApplicationWindow(QMainWindow):
         self._refresh_status_metrics()
         self._refresh_capture_menu_state()
         self._refresh_go_menu_state()
+        self._refresh_analyze_menu_state()
 
     def _update_capture_window_title(self):
         if not self.capture_view:
@@ -4841,21 +4853,8 @@ class ApplicationWindow(QMainWindow):
         if not columns:
             return
 
-        max_columns = min(table.columnCount(), len(columns))
-        header = table.horizontalHeader()
-        movable_before = header.sectionsMovable()
-        header.setSectionsMovable(True)
-
-        for visual_idx in range(max_columns):
-            spec = columns[visual_idx] if isinstance(columns[visual_idx], dict) else {}
-            logical = int(spec.get('index', visual_idx) or visual_idx)
-            if logical < 0 or logical >= table.columnCount():
-                continue
-            current_visual = header.visualIndex(logical)
-            if current_visual != visual_idx:
-                header.moveSection(current_visual, visual_idx)
-
-        header.setSectionsMovable(movable_before)
+        table.setColumnCount(max(7, len(columns)))
+        max_columns = len(columns)
 
         alignment_map = {
             'Left': Qt.AlignVCenter | Qt.AlignLeft,
@@ -4865,7 +4864,7 @@ class ApplicationWindow(QMainWindow):
 
         for visual_idx in range(max_columns):
             spec = columns[visual_idx] if isinstance(columns[visual_idx], dict) else {}
-            logical = int(spec.get('index', visual_idx) or visual_idx)
+            logical = visual_idx
             if logical < 0 or logical >= table.columnCount():
                 continue
             title = str(spec.get('title', '') or '').strip() or str(table.horizontalHeaderItem(logical).text() if table.horizontalHeaderItem(logical) else '')
@@ -4878,6 +4877,8 @@ class ApplicationWindow(QMainWindow):
             else:
                 header_item.setText(title)
             table.setColumnHidden(logical, not displayed)
+            if hasattr(table, 'set_column_text_alignment'):
+                table.set_column_text_alignment(logical, alignment)
             for row in range(table.rowCount()):
                 item = table.item(row, logical)
                 if item is not None:
@@ -4967,6 +4968,8 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.set_options_settings(current_options)
             if hasattr(self.capture_view, 'refresh_preferences_from_settings'):
                 self.capture_view.refresh_preferences_from_settings()
+            self._analyze_custom_columns = self._load_analyze_custom_columns()
+            self._ensure_analyze_custom_columns_applied()
         if self.iface_selector_view and hasattr(self.iface_selector_view, 'refresh_recent_files'):
             self.iface_selector_view.refresh_recent_files()
 
@@ -5143,7 +5146,7 @@ class ApplicationWindow(QMainWindow):
             except Exception:
                 occurrence = 1
             return {
-                'index': int(displayed_item.data(Qt.UserRole)) if displayed_item is not None and displayed_item.data(Qt.UserRole) is not None else row,
+                'index': row,
                 'displayed': bool(displayed_item.checkState() == Qt.Checked) if displayed_item is not None else True,
                 'title': str(title_item.text() if title_item is not None else '').strip(),
                 'field': str(field_item.text() if field_item is not None else '').strip(),
@@ -6031,6 +6034,993 @@ class ApplicationWindow(QMainWindow):
                 pass
         self._on_menu_feature_placeholder('Capture > Refresh Interfaces')
 
+    def _has_capture_document(self) -> bool:
+        return bool(self.capture_view and self.stacked_widget.currentWidget() is self.capture_view and self.capture_view.has_packets())
+
+    def _selected_detail_item(self):
+        cv = self.capture_view
+        if not cv:
+            return None
+        items = cv.details_tree.selectedItems()
+        return items[0] if items else None
+
+    def _refresh_analyze_menu_state(self):
+        has_capture = self._has_capture_document()
+        selected_item = self._selected_detail_item()
+        has_field = has_capture and selected_item is not None
+        current_record = self.capture_view.get_current_record() if self.capture_view else None
+        has_current = has_capture and current_record is not None
+
+        if hasattr(self, 'action_display_filter_macros'):
+            self.action_display_filter_macros.setEnabled(True)
+        if hasattr(self, 'action_display_filter_expression'):
+            self.action_display_filter_expression.setEnabled(True)
+        if hasattr(self, 'action_apply_as_column'):
+            self.action_apply_as_column.setEnabled(bool(has_field))
+        if hasattr(self, 'action_apply_as_filter'):
+            self.action_apply_as_filter.setEnabled(bool(has_field))
+        if hasattr(self, 'action_conversation_filter'):
+            self.action_conversation_filter.setEnabled(bool(has_current))
+        if hasattr(self, 'action_follow_stream'):
+            self.action_follow_stream.setEnabled(bool(has_current))
+        if hasattr(self, 'action_expert_info'):
+            self.action_expert_info.setEnabled(bool(has_capture))
+
+    def _current_display_filter_text(self) -> str:
+        if not self.capture_view:
+            return ''
+        return str(self.capture_view.display_filter_input.text() or '').strip()
+
+    def _set_display_filter_text(self, expression: str, apply_now: bool):
+        if not self.capture_view:
+            return
+        self.capture_view.display_filter_input.setText(str(expression or '').strip())
+        if apply_now:
+            self.capture_view.apply_display_filter()
+
+    def _build_combined_filter(self, base_expr: str, mode: str) -> str:
+        current = self._current_display_filter_text()
+        atom = str(base_expr or '').strip()
+        if not atom:
+            return current
+        mode = str(mode or 'selected').strip().lower()
+        if mode == 'selected':
+            return atom
+        if mode == 'not_selected':
+            return f'!({atom})'
+        if not current:
+            if mode in {'and_not_selected', 'or_not_selected'}:
+                return f'!({atom})'
+            return atom
+        if mode == 'and_selected':
+            return f'({current}) && ({atom})'
+        if mode == 'or_selected':
+            return f'({current}) || ({atom})'
+        if mode == 'and_not_selected':
+            return f'({current}) && !({atom})'
+        if mode == 'or_not_selected':
+            return f'({current}) || !({atom})'
+        return atom
+
+    def _load_analyze_custom_columns(self) -> list[dict]:
+        prefs = self._load_edit_preferences()
+        columns = list((prefs or {}).get('columns', []) or [])
+        base_fields = {
+            'frame.number', 'frame.time_relative', 'ip.src', 'ip.dst', '_ws.col.protocol', 'frame.len', '_ws.col.info'
+        }
+        result = []
+        for item in columns:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get('field', '') or '').strip()
+            detail_query = str(item.get('detail_query', '') or '').strip()
+            detail_key = str(item.get('detail_key', '') or '').strip()
+            detail_path = item.get('detail_path', [])
+            if not isinstance(detail_path, list):
+                detail_path = []
+            detail_path = [str(v).strip() for v in detail_path if str(v).strip()]
+            if field in base_fields and not detail_query:
+                continue
+            title = str(item.get('title', '') or '').strip() or field or detail_query
+            if not title:
+                continue
+            occurrence = int(item.get('occurrence', 0) or 0)
+            result.append({
+                'title': title,
+                'field': field,
+                'detail_query': detail_query,
+                'detail_key': detail_key,
+                'detail_path': detail_path,
+                'occurrence': max(0, occurrence),
+                'alignment': str(item.get('alignment', 'Right') or 'Right'),
+                'displayed': bool(item.get('displayed', True)),
+            })
+        return result
+
+    def _save_analyze_custom_columns(self):
+        prefs = self._load_edit_preferences()
+        base_columns = []
+        for item in list((prefs or {}).get('columns', []) or []):
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get('field', '') or '').strip()
+            if field in {'frame.number', 'frame.time_relative', 'ip.src', 'ip.dst', '_ws.col.protocol', 'frame.len'}:
+                base_columns.append(item)
+        info_col = {
+            'index': 6,
+            'displayed': True,
+            'title': 'Info',
+            'field': '_ws.col.info',
+            'occurrence': 1,
+            'alignment': 'Left',
+        }
+        new_columns = []
+        for idx, item in enumerate(base_columns):
+            spec = dict(item)
+            spec['index'] = idx
+            new_columns.append(spec)
+
+        for item in self._analyze_custom_columns:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get('title', '') or '').strip()
+            field = str(item.get('field', '') or '').strip()
+            detail_query = str(item.get('detail_query', '') or '').strip()
+            detail_key = str(item.get('detail_key', '') or '').strip()
+            detail_path = item.get('detail_path', [])
+            if not isinstance(detail_path, list):
+                detail_path = []
+            detail_path = [str(v).strip() for v in detail_path if str(v).strip()]
+            if not title:
+                continue
+            new_columns.append({
+                'index': len(new_columns),
+                'displayed': bool(item.get('displayed', True)),
+                'title': title,
+                'field': field,
+                'detail_query': detail_query,
+                'detail_key': detail_key,
+                'detail_path': detail_path,
+                'occurrence': int(item.get('occurrence', 0) or 0),
+                'alignment': str(item.get('alignment', 'Right') or 'Right'),
+            })
+
+        info_col['index'] = len(new_columns)
+        new_columns.append(info_col)
+        prefs['columns'] = new_columns
+        self._save_edit_preferences(prefs)
+
+    def _ensure_analyze_custom_columns_applied(self):
+        cv = self.capture_view
+        if not cv:
+            return
+        table = cv.table
+        base_headers = ['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length']
+        extra_headers = [str(item.get('title', item.get('field', item.get('detail_query', ''))) or '') for item in self._analyze_custom_columns]
+        headers = base_headers + extra_headers + ['Info']
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        for idx in range(6, len(headers) - 1):
+            if table.columnWidth(idx) <= 0:
+                table.setColumnWidth(idx, 72)
+        info_col = len(headers) - 1
+        table.setColumnWidth(info_col, max(360, table.columnWidth(info_col) or 360))
+        if hasattr(table, 'apply_content_resize_layout'):
+            table.apply_content_resize_layout()
+        self._refresh_analyze_custom_column_cells()
+        self._fit_all_custom_columns()
+
+    def _fit_all_custom_columns(self):
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        table = cv.table
+        for extra_idx, _cfg in enumerate(self._analyze_custom_columns):
+            col = 6 + extra_idx
+            if 0 <= col < table.columnCount():
+                table.setColumnWidth(col, 72)
+        for extra_idx, _cfg in enumerate(self._analyze_custom_columns):
+            self._fit_custom_column_width(6 + extra_idx)
+
+    def _extract_field_value_for_column(self, record, field: str, occurrence: int = 0) -> str:
+        try:
+            values = self._display_filter_helper._resolve_field_values(record, field)
+        except Exception:
+            values = []
+        if not values:
+            return ''
+        index = int(occurrence or 0)
+        if index < 0:
+            index = 0
+        if index >= len(values):
+            index = len(values) - 1
+        value = values[index]
+        if isinstance(value, bool):
+            return 'True' if value else 'False'
+        return str(value)
+
+    def _normalize_detail_key(self, title: str) -> str:
+        text = str(title or '').strip()
+        if not text:
+            return ''
+        if ': ' in text:
+            text = text.split(': ', 1)[0].strip()
+        elif ' = ' in text:
+            text = text.split(' = ', 1)[0].strip()
+        if ',' in text:
+            text = text.split(',', 1)[0].strip()
+        text = re.sub(r'\s+', ' ', text)
+        return text.casefold()
+
+    def _stable_detail_path(self, path_keys) -> list[str]:
+        values = [str(v).strip().casefold() for v in (path_keys or []) if str(v).strip()]
+        if not values:
+            return []
+        # Drop packet-specific frame root so custom columns resolve across all packets.
+        if values[0].startswith('frame '):
+            values = values[1:]
+        return values
+
+    def _extract_detail_values_for_column(self, record, detail_query: str, detail_key: str = '', detail_path=None) -> str:
+        query = str(detail_query or '').strip().casefold()
+        key = str(detail_key or '').strip().casefold()
+        target_path = self._stable_detail_path(detail_path)
+        if not query and not key and not target_path:
+            return ''
+
+        metadata = getattr(record, 'metadata', {}) if record else {}
+        tree = metadata.get('_detail_tree_cache') if isinstance(metadata, dict) else None
+        if not isinstance(tree, list):
+            try:
+                tree = packet_summary_tree(record.raw, record)
+                if isinstance(metadata, dict):
+                    metadata['_detail_tree_cache'] = tree
+            except Exception:
+                tree = []
+
+        def _walk(nodes, path):
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                title = str(node.get('title', '') or '').strip()
+                if title:
+                    node_key = self._normalize_detail_key(title)
+                    node_path = list(path)
+                    if node_key:
+                        node_path.append(node_key)
+                    yield title, node_key, node_path
+                    yield from _walk(node.get('children', []), node_path)
+
+        def _collect_values(require_path: bool) -> list[str]:
+            values = []
+            for title, node_key, node_path in _walk(tree, []):
+                low = title.casefold()
+                if key and node_key != key:
+                    continue
+                if require_path and target_path and (len(node_path) < len(target_path) or node_path[-len(target_path):] != target_path):
+                    continue
+                if query and query not in low and (not node_key or query != node_key):
+                    continue
+                if ': ' in title:
+                    value = title.split(': ', 1)[1].strip()
+                elif ' = ' in title:
+                    value = title.split(' = ', 1)[1].strip()
+                else:
+                    value = title
+                if value and value not in values:
+                    values.append(value)
+            return values
+
+        # Pass 1: strict match by full stable path.
+        found = _collect_values(require_path=True)
+        # Pass 2: fallback by key/query only (helps across packets where detail hierarchy differs).
+        if not found and target_path:
+            found = _collect_values(require_path=False)
+        return ', '.join(found)
+
+    def _refresh_analyze_custom_column_cells(self):
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        table = cv.table
+        if table.columnCount() < 7 + len(self._analyze_custom_columns):
+            self._ensure_analyze_custom_columns_applied()
+            return
+        row_count = int(table.rowCount() or 0)
+        visible_count = len(cv.visible_indices)
+        if row_count <= 0 or visible_count <= 0:
+            return
+        info_col = 6 + len(self._analyze_custom_columns)
+        max_rows = min(row_count, visible_count)
+        for row in range(max_rows):
+            rec_idx = cv.visible_indices[row]
+            if rec_idx < 0 or rec_idx >= len(cv.records):
+                continue
+            record = cv.records[rec_idx]
+            for extra_idx, cfg in enumerate(self._analyze_custom_columns):
+                col = 6 + extra_idx
+                item = table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    table.setItem(row, col, item)
+                field = str(cfg.get('field', '') or '').strip()
+                detail_query = str(cfg.get('detail_query', '') or '').strip()
+                detail_key = str(cfg.get('detail_key', '') or '').strip()
+                detail_path = cfg.get('detail_path', []) if isinstance(cfg, dict) else []
+                occurrence = int(cfg.get('occurrence', 0) or 0)
+                value = self._extract_field_value_for_column(record, field, occurrence) if field else ''
+                if not value and detail_query:
+                    value = self._extract_detail_values_for_column(record, detail_query, detail_key=detail_key, detail_path=detail_path)
+                if not value and (detail_key or detail_query):
+                    try:
+                        nodes = self._display_filter_helper._detail_nodes(record)
+                    except Exception:
+                        nodes = []
+                    dk = detail_key.casefold()
+                    dq = detail_query.casefold()
+                    for node in nodes:
+                        if not isinstance(node, dict):
+                            continue
+                        nkey = str(node.get('key', '') or '').strip().casefold()
+                        ntitle = str(node.get('title', '') or '').strip().casefold()
+                        nval = str(node.get('value', '') or '').strip()
+                        if dk and nkey != dk:
+                            continue
+                        if dq and dq not in nkey and dq not in ntitle:
+                            continue
+                        if nval:
+                            value = nval
+                            break
+                item.setText(str(value or ''))
+            info_item = table.item(row, info_col)
+            if info_item is None:
+                info_item = QTableWidgetItem()
+                table.setItem(row, info_col, info_item)
+            info_item.setText(str(getattr(record, 'info', '') or ''))
+
+    def _fit_custom_column_width(self, column: int):
+        cv = self.capture_view
+        if not cv:
+            return
+        table = cv.table
+        if column < 0 or column >= table.columnCount():
+            return
+        info_col = 6 + len(self._analyze_custom_columns)
+        if info_col < 0 or info_col >= table.columnCount():
+            info_col = table.columnCount() - 1
+        min_info_width = 360
+        min_custom_width = 72
+        max_custom_width = 180
+
+        table.resizeColumnToContents(column)
+        width = table.columnWidth(column)
+        if width <= 0:
+            width = 120
+        desired = max(min_custom_width, min(width + 10, max_custom_width))
+
+        viewport_width = table.viewport().width() if table.viewport() is not None else table.width()
+        if viewport_width <= 0:
+            viewport_width = table.width()
+
+        if viewport_width > 0 and info_col != column:
+            occupied = 0
+            for idx in range(table.columnCount()):
+                if idx == column or table.isColumnHidden(idx):
+                    continue
+                cur_width = int(table.columnWidth(idx) or 0)
+                if idx == info_col:
+                    cur_width = max(min_info_width, cur_width)
+                occupied += max(0, cur_width)
+            # Keep a small buffer for scrollbar/padding.
+            budget = max(min_custom_width, viewport_width - occupied - 24)
+            desired = min(desired, budget)
+
+        table.setColumnWidth(column, max(min_custom_width, int(desired)))
+        if info_col >= 0 and info_col < table.columnCount():
+            table.setColumnWidth(info_col, max(min_info_width, table.columnWidth(info_col) or min_info_width))
+
+    def _load_display_filter_macros(self) -> list[dict]:
+        settings = QSettings('Packetra', 'Packetra')
+        try:
+            raw = str(settings.value('analyze/display_filter_macros', '[]', str) or '[]')
+            payload = json.loads(raw)
+        except Exception:
+            payload = []
+        result = []
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get('name', '') or '').strip()
+                expression = str(item.get('expression', '') or '').strip()
+                comment = str(item.get('comment', '') or '').strip()
+                if name and expression:
+                    result.append({'name': name, 'expression': expression, 'comment': comment})
+        return result
+
+    def _save_display_filter_macros(self, macros: list[dict]):
+        normalized = []
+        for item in macros or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '') or '').strip()
+            expression = str(item.get('expression', '') or '').strip()
+            comment = str(item.get('comment', '') or '').strip()
+            if name and expression:
+                normalized.append({'name': name, 'expression': expression, 'comment': comment})
+        settings = QSettings('Packetra', 'Packetra')
+        settings.setValue('analyze/display_filter_macros', json.dumps(normalized, ensure_ascii=True))
+
+    def _on_display_filter_macros(self):
+        macros = self._load_display_filter_macros()
+        dialog = CaptureFiltersDialog(self, macros, lambda expr, iface=None: (True, ''))
+        dialog.setWindowTitle('Display Filter Macros')
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        normalized = []
+        seen = set()
+        for item in dialog.presets():
+            name = str(item.get('name', '') or '').strip()
+            expression = str(item.get('expression', '') or '').strip()
+            comment = str(item.get('comment', '') or '').strip()
+            if not name or not expression:
+                QMessageBox.warning(self, 'Display Filter Macros', 'Macro name and expression are required.')
+                return
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
+                QMessageBox.warning(self, 'Display Filter Macros', f'Invalid macro name: {name}')
+                return
+            key = name.casefold()
+            if key in seen:
+                QMessageBox.warning(self, 'Display Filter Macros', f'Duplicate macro name: {name}')
+                return
+            seen.add(key)
+            normalized.append({'name': name, 'expression': expression, 'comment': comment})
+
+        self._save_display_filter_macros(normalized)
+        if self.capture_view:
+            try:
+                self.capture_view.refresh_preferences_from_settings()
+            except Exception:
+                pass
+
+    def _display_filter_field_catalog(self) -> list[str]:
+        catalog = [
+            'frame.number', 'frame.len', 'frame.time_delta',
+            'eth.src', 'eth.dst', 'eth.addr', 'eth.type',
+            'ip.src', 'ip.dst', 'ip.addr', 'ip.proto', 'ip.ttl',
+            'ipv6.src', 'ipv6.dst', 'ipv6.addr',
+            'tcp.stream', 'tcp.port', 'tcp.srcport', 'tcp.dstport', 'tcp.flags.syn', 'tcp.flags.ack',
+            'udp.stream', 'udp.port', 'udp.srcport', 'udp.dstport',
+            'dns.qry.name', 'dns.qry.type', 'dns.flags.response',
+            'http.host', 'http.request.method', 'http.request.uri',
+            'tls.handshake', 'tls.handshake.type', 'tls.handshake.extensions_server_name',
+            'detail', 'detail.title', 'detail.key', 'detail.value', 'detail.pair', 'detail.path',
+        ]
+        field_pattern = re.compile(r'^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$', re.IGNORECASE)
+        if self.capture_view:
+            try:
+                for token in self.capture_view._filter_autocomplete_tokens():
+                    text = str(token or '').strip()
+                    if field_pattern.fullmatch(text) and text not in catalog:
+                        catalog.append(text)
+            except Exception:
+                pass
+        return sorted(catalog)
+
+    def _on_display_filter_expression(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Display Filter Expression')
+        layout = QVBoxLayout(dialog)
+
+        form = QGridLayout()
+        form.addWidget(QLabel('Field:'), 0, 0)
+        field_combo = QComboBox(dialog)
+        field_combo.setEditable(True)
+        field_combo.addItems(self._display_filter_field_catalog())
+        form.addWidget(field_combo, 0, 1)
+
+        form.addWidget(QLabel('Relation:'), 1, 0)
+        relation_combo = QComboBox(dialog)
+        relation_combo.addItems(['==', '!=', 'contains', '>=', '<=', '>', '<'])
+        form.addWidget(relation_combo, 1, 1)
+
+        form.addWidget(QLabel('Value:'), 2, 0)
+        value_input = QLineEdit(dialog)
+        form.addWidget(value_input, 2, 1)
+
+        form.addWidget(QLabel('Combine with next filter:'), 3, 0)
+        combine_combo = QComboBox(dialog)
+        combine_combo.addItems([
+            'Replace next filter',
+            'AND with next filter',
+            'OR with next filter',
+            'AND NOT with next filter',
+            'OR NOT with next filter',
+        ])
+        form.addWidget(combine_combo, 3, 1)
+        layout.addLayout(form)
+
+        preview_label = QLabel('Preview: ', dialog)
+        layout.addWidget(preview_label)
+
+        button_row = QHBoxLayout()
+        copy_btn = QPushButton('Copy', dialog)
+        insert_btn = QPushButton('Insert into Filter Bar', dialog)
+        apply_btn = QPushButton('Apply', dialog)
+        ok_btn = QPushButton('OK', dialog)
+        cancel_btn = QPushButton('Cancel', dialog)
+        for btn in (copy_btn, insert_btn, apply_btn, ok_btn, cancel_btn):
+            button_row.addWidget(btn)
+        layout.addLayout(button_row)
+
+        def _needs_quotes(field: str, value: str) -> bool:
+            if not value:
+                return False
+            text = str(value)
+            if re.fullmatch(r'-?\d+(\.\d+)?', text):
+                return False
+            if field in {'ip.src', 'ip.dst', 'ip.addr', 'ipv6.src', 'ipv6.dst', 'ipv6.addr'}:
+                return False
+            return True
+
+        def _expression() -> str:
+            field = str(field_combo.currentText() or '').strip()
+            relation = str(relation_combo.currentText() or '==').strip()
+            value = str(value_input.text() or '').strip()
+            if not field:
+                return ''
+            if not value:
+                return field
+            right = f'"{value}"' if _needs_quotes(field, value) else value
+            return f'{field} {relation} {right}'
+
+        def _combined_expression() -> str:
+            base = _expression()
+            mode = str(combine_combo.currentText() or '')
+            if mode.startswith('AND NOT'):
+                return self._build_combined_filter(base, 'and_not_selected')
+            if mode.startswith('OR NOT'):
+                return self._build_combined_filter(base, 'or_not_selected')
+            if mode.startswith('AND'):
+                return self._build_combined_filter(base, 'and_selected')
+            if mode.startswith('OR'):
+                return self._build_combined_filter(base, 'or_selected')
+            return self._build_combined_filter(base, 'selected')
+
+        def _refresh_preview():
+            preview_label.setText(f'Preview: {_combined_expression()}')
+
+        field_combo.currentTextChanged.connect(lambda _text: _refresh_preview())
+        relation_combo.currentTextChanged.connect(lambda _text: _refresh_preview())
+        value_input.textChanged.connect(lambda _text: _refresh_preview())
+        combine_combo.currentTextChanged.connect(lambda _text: _refresh_preview())
+        _refresh_preview()
+
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(_combined_expression()))
+        insert_btn.clicked.connect(lambda: self._set_display_filter_text(_combined_expression(), apply_now=False))
+        def _apply_and_prepare_next():
+            self._set_display_filter_text(_combined_expression(), apply_now=True)
+            value_input.clear()
+
+        apply_btn.clicked.connect(_apply_and_prepare_next)
+
+        def _on_ok():
+            self._set_display_filter_text(_combined_expression(), apply_now=False)
+            dialog.accept()
+
+        ok_btn.clicked.connect(_on_ok)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.resize(820, 280)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _selected_field_filter_expression(self) -> tuple[str, str]:
+        cv = self.capture_view
+        if not cv:
+            return '', ''
+        item = self._selected_detail_item()
+        record = cv.get_current_record()
+        if item is None or record is None:
+            return '', ''
+
+        def _parse_title_parts(text: str) -> tuple[str, str]:
+            raw = str(text or '').strip()
+            if ': ' in raw:
+                left, right = raw.split(': ', 1)
+                return left.strip(), right.strip()
+            if ' = ' in raw:
+                left, right = raw.split(' = ', 1)
+                return left.strip(), right.strip()
+            return raw, ''
+
+        def _strip_bracket_suffix(value: str) -> str:
+            text = str(value or '').strip()
+            if not text:
+                return ''
+            # Wireshark-like tails such as "[unverified] [in ICMP error packet]" are annotations,
+            # not the core value selected by user.
+            text = re.split(r'\s+\[[^\]]*\]', text, 1)[0].strip()
+            return text
+
+        def _contains_expr(field: str, value: str) -> str:
+            fld = str(field or '').strip()
+            val = str(value or '').strip()
+            if not fld or not val:
+                return ''
+            escaped = val.replace('"', '\\"')
+            return f'{fld} contains "{escaped}"'
+
+        title = str(item.text(0) or '').strip()
+        key, value = _parse_title_parts(title)
+        key = str(key or '').strip()
+        value = _strip_bracket_suffix(value)
+
+        # Strict behavior requested: filter exactly the selected detail component,
+        # not parent protocol and not sibling components.
+        if key and value:
+            pair_expr = _contains_expr('detail.pair', f'{key}: {value}')
+            return pair_expr, 'detail.pair'
+        if key:
+            return _contains_expr('detail.key', key), 'detail.key'
+        if title:
+            return _contains_expr('detail.title', title), 'detail.title'
+        return '', ''
+
+    def _on_apply_as_filter(self):
+        if not self._has_capture_document():
+            QMessageBox.information(self, 'Apply as Filter', 'No capture is loaded.')
+            return
+        base_expr, _field_name = self._selected_field_filter_expression()
+        if not base_expr:
+            QMessageBox.information(self, 'Apply as Filter', 'Cannot create display filter from selected field.')
+            return
+
+        options = [
+            'Selected',
+            'Not Selected',
+            'And Selected',
+            'Or Selected',
+            'And Not Selected',
+            'Or Not Selected',
+        ]
+        choice, ok = QInputDialog.getItem(self, 'Apply as Filter', 'Mode:', options, 0, False)
+        if not ok:
+            return
+        map_mode = {
+            'Selected': 'selected',
+            'Not Selected': 'not_selected',
+            'And Selected': 'and_selected',
+            'Or Selected': 'or_selected',
+            'And Not Selected': 'and_not_selected',
+            'Or Not Selected': 'or_not_selected',
+        }
+        merged = self._build_combined_filter(base_expr, map_mode.get(str(choice), 'selected'))
+        self._set_display_filter_text(merged, apply_now=True)
+
+    def _on_apply_as_column(self):
+        if not self._has_capture_document():
+            QMessageBox.information(self, 'Apply as Column', 'No capture is loaded.')
+            return
+        item = self._selected_detail_item()
+        expr, field_name = self._selected_field_filter_expression()
+        field = str(field_name or '').strip()
+        detail_query = ''
+        detail_key = ''
+        detail_path = []
+        title = ''
+        if item is not None:
+            title = str(item.text(0) or '').strip()
+            detail_query = re.split(r'[:=]', title, 1)[0].strip().casefold()
+            detail_key = self._normalize_detail_key(title)
+
+            chain = []
+            cur = item
+            while cur is not None:
+                chain.append(self._normalize_detail_key(str(cur.text(0) or '').strip()))
+                cur = cur.parent()
+            chain = [v for v in reversed(chain) if v]
+            detail_path = self._stable_detail_path(chain)
+
+            # For Detail-driven custom columns, always extract displayed values from detail tree
+            # instead of protocol boolean fields (e.g. ipv6 -> True/False).
+            field = ''
+
+        if detail_query:
+            title = detail_query
+
+        if not title:
+            title = str(field or expr or 'Custom Field').strip()
+
+        for cfg in self._analyze_custom_columns:
+            cfg_field = str(cfg.get('field', '') or '').strip().casefold()
+            cfg_detail = str(cfg.get('detail_query', '') or '').strip().casefold()
+            cfg_path = [str(v).strip().casefold() for v in (cfg.get('detail_path', []) or []) if str(v).strip()]
+            if (field and cfg_field == field.casefold()) or (detail_query and cfg_detail == detail_query and cfg_path == [str(v).casefold() for v in self._stable_detail_path(detail_path)]):
+                QMessageBox.information(self, 'Apply as Column', 'This field is already added as a custom column.')
+                return
+
+        if not field:
+            field = ''
+        self._analyze_custom_columns.append({
+            'title': title,
+            'field': field,
+            'detail_query': detail_query,
+            'detail_key': detail_key,
+            'detail_path': detail_path,
+            'occurrence': 0,
+            'alignment': 'Right',
+            'displayed': True,
+        })
+        self._save_analyze_custom_columns()
+        self._apply_edit_preferences(self._load_edit_preferences())
+        self._ensure_analyze_custom_columns_applied()
+        if self.capture_view:
+            self.capture_view.apply_display_filter()
+            new_col = 6 + len(self._analyze_custom_columns) - 1
+
+            def _finalize_custom_column_render():
+                self._refresh_analyze_custom_column_cells()
+                self._fit_custom_column_width(new_col)
+
+            # Re-render current visible rows immediately so values appear without re-selecting packets.
+            _finalize_custom_column_render()
+            QTimer.singleShot(0, _finalize_custom_column_render)
+
+    def _conversation_filter_expression_for_mode(self, mode: str):
+        cv = self.capture_view
+        record = cv.get_current_record() if cv else None
+        if record is None:
+            return ''
+        metadata = getattr(record, 'metadata', {}) or {}
+        src = str(getattr(record, 'src', '') or '')
+        dst = str(getattr(record, 'dst', '') or '')
+
+        mode = str(mode or '').strip().lower()
+        if mode == 'tcp':
+            stream = metadata.get('tcp_stream_index')
+            if stream is not None:
+                return f'tcp.stream == {int(stream)}'
+            if src and dst and record.sport is not None and record.dport is not None:
+                return f'ip.addr == {src} && ip.addr == {dst} && tcp.port == {int(record.sport)} && tcp.port == {int(record.dport)}'
+        if mode == 'udp':
+            stream = metadata.get('udp_stream_index')
+            if stream is not None:
+                return f'udp.stream == {int(stream)}'
+            if src and dst and record.sport is not None and record.dport is not None:
+                return f'ip.addr == {src} && ip.addr == {dst} && udp.port == {int(record.sport)} && udp.port == {int(record.dport)}'
+        if mode == 'ipv4' and src and dst:
+            return f'ip.addr == {src} && ip.addr == {dst}'
+        if mode == 'ipv6' and src and dst:
+            return f'ipv6.addr == {src} && ipv6.addr == {dst}'
+        if mode == 'ethernet':
+            return f'eth.addr == {src} && eth.addr == {dst}' if src and dst else ''
+        return ''
+
+    def _on_conversation_filter(self):
+        if not self._has_capture_document():
+            QMessageBox.information(self, 'Conversation Filter', 'No capture is loaded.')
+            return
+        cv = self.capture_view
+        record = cv.get_current_record()
+        if record is None:
+            QMessageBox.information(self, 'Conversation Filter', 'Select a packet first.')
+            return
+
+        candidates = []
+        raw = getattr(record, 'raw', None)
+        protocol = str(getattr(record, 'protocol', '') or '').upper()
+        metadata = getattr(record, 'metadata', {}) or {}
+        if metadata.get('tcp_stream_index') is not None or protocol == 'TCP':
+            candidates.append('TCP')
+        if metadata.get('udp_stream_index') is not None or protocol == 'UDP':
+            candidates.append('UDP')
+        if raw is not None and raw.haslayer(IP):
+            candidates.append('IPv4')
+        if raw is not None and raw.haslayer(IPv6):
+            candidates.append('IPv6')
+        candidates.append('Ethernet')
+        candidates = [c for i, c in enumerate(candidates) if c not in candidates[:i]]
+
+        choice, ok = QInputDialog.getItem(self, 'Conversation Filter', 'Conversation type:', candidates, 0, False)
+        if not ok:
+            return
+        expr = self._conversation_filter_expression_for_mode(str(choice))
+        if not expr:
+            QMessageBox.information(self, 'Conversation Filter', 'Cannot determine conversation for selected packet.')
+            return
+        self._set_display_filter_text(expr, apply_now=True)
+
+    def _follow_stream_records(self, mode: str):
+        cv = self.capture_view
+        record = cv.get_current_record() if cv else None
+        if record is None:
+            return [], ''
+        metadata = getattr(record, 'metadata', {}) or {}
+        mode = str(mode or '').strip().lower()
+
+        if mode == 'tcp':
+            stream = metadata.get('tcp_stream_index')
+            if stream is not None:
+                rows = [r for r in cv.records if (getattr(r, 'metadata', {}) or {}).get('tcp_stream_index') == stream]
+                return rows, f'tcp.stream == {int(stream)}'
+        if mode == 'udp':
+            stream = metadata.get('udp_stream_index')
+            if stream is not None:
+                rows = [r for r in cv.records if (getattr(r, 'metadata', {}) or {}).get('udp_stream_index') == stream]
+                return rows, f'udp.stream == {int(stream)}'
+
+        key = cv._conversation_key_for_record(record)
+        if key is None:
+            return [], ''
+        rows = [r for r in cv.records if cv._conversation_key_for_record(r) == key]
+        fallback_mode = 'ipv6' if getattr(record, 'raw', None) is not None and record.raw.haslayer(IPv6) else 'ipv4'
+        return rows, self._conversation_filter_expression_for_mode(fallback_mode)
+
+    def _packet_payload_bytes(self, record, mode: str) -> bytes:
+        raw = getattr(record, 'raw', None)
+        if raw is None:
+            return b''
+        try:
+            if mode == 'tcp' and raw.haslayer(TCP):
+                return bytes(raw[TCP].payload)
+            if mode == 'udp' and raw.haslayer(UDP):
+                return bytes(raw[UDP].payload)
+        except Exception:
+            return b''
+        return b''
+
+    def _format_follow_payload(self, payload: bytes, fmt: str) -> str:
+        data = bytes(payload or b'')
+        if not data:
+            return ''
+        kind = str(fmt or 'ASCII').strip().lower()
+        if kind == 'hex dump':
+            lines = []
+            for i in range(0, len(data), 16):
+                chunk = data[i:i + 16]
+                left = chunk[:8]
+                right = chunk[8:16]
+                left_hex = ' '.join(f'{b:02x}' for b in left)
+                right_hex = ' '.join(f'{b:02x}' for b in right)
+                hex_part = f'{left_hex:<23}  {right_hex:<23}'
+                ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
+                lines.append(f'{i:08x}  {hex_part}  {ascii_part}')
+            return '\n'.join(lines)
+        if kind == 'raw (base64)':
+            return base64.b64encode(data).decode('ascii', errors='ignore')
+        lines = []
+        for i in range(0, len(data), 32):
+            chunk = data[i:i + 32]
+            ascii_part = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
+            lines.append(f'{i:08x}  {ascii_part}')
+        return '\n'.join(lines)
+
+    def _on_follow_stream(self):
+        if not self._has_capture_document():
+            QMessageBox.information(self, 'Follow', 'No capture is loaded.')
+            return
+        record = self.capture_view.get_current_record() if self.capture_view else None
+        if record is None:
+            QMessageBox.information(self, 'Follow', 'Select a packet first.')
+            return
+
+        metadata = getattr(record, 'metadata', {}) or {}
+        choices = []
+        if metadata.get('tcp_stream_index') is not None or str(record.protocol).upper() == 'TCP':
+            choices.append('TCP')
+        if metadata.get('udp_stream_index') is not None or str(record.protocol).upper() == 'UDP':
+            choices.append('UDP')
+        choices.append('Conversation')
+        stream_choice, ok = QInputDialog.getItem(self, 'Follow', 'Follow type:', choices, 0, False)
+        if not ok:
+            return
+
+        mode = str(stream_choice or 'Conversation').strip().lower()
+        records, stream_filter = self._follow_stream_records(mode)
+        if not records:
+            QMessageBox.information(self, 'Follow', 'No stream data found for selected packet.')
+            return
+
+        first = records[0]
+        client_key = (str(getattr(first, 'src', '') or ''), str(getattr(first, 'sport', '') or ''))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f'Follow {str(stream_choice).upper()} Stream')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel('Show data as:'))
+        format_combo = QComboBox(dialog)
+        format_combo.addItems(['ASCII', 'Hex Dump', 'Raw (Base64)'])
+        top.addWidget(format_combo)
+        top.addWidget(QLabel('Direction:'))
+        direction_combo = QComboBox(dialog)
+        direction_combo.addItems(['Entire conversation', 'Client to server', 'Server to client'])
+        top.addWidget(direction_combo)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        text = QTextEdit(dialog)
+        text.setReadOnly(True)
+        if self.capture_view:
+            text.setFont(self.capture_view.hex_view.font())
+        layout.addWidget(text, 1)
+
+        status_label = QLabel('', dialog)
+        layout.addWidget(status_label)
+
+        buttons = QHBoxLayout()
+        filter_this_btn = QPushButton('Filter This Stream', dialog)
+        filter_out_btn = QPushButton('Filter Out This Stream', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        save_btn = QPushButton('Save As', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (filter_this_btn, filter_out_btn, copy_btn, save_btn, close_btn):
+            buttons.addWidget(btn)
+        layout.addLayout(buttons)
+
+        def _refresh_text():
+            fmt = str(format_combo.currentText() or 'ASCII')
+            direction = str(direction_combo.currentText() or 'Entire conversation')
+            lines = []
+            total_bytes = 0
+            client_bytes = 0
+            server_bytes = 0
+            packet_count = 0
+            for rec in records:
+                payload = self._packet_payload_bytes(rec, mode)
+                if not payload:
+                    continue
+                packet_count += 1
+                total_bytes += len(payload)
+                is_client = (str(getattr(rec, 'src', '') or ''), str(getattr(rec, 'sport', '') or '')) == client_key
+                if is_client:
+                    client_bytes += len(payload)
+                else:
+                    server_bytes += len(payload)
+
+                if direction == 'Client to server' and not is_client:
+                    continue
+                if direction == 'Server to client' and is_client:
+                    continue
+
+                prefix = 'Client -> Server' if is_client else 'Server -> Client'
+                body = self._format_follow_payload(payload, fmt)
+                if not body:
+                    continue
+                frame_no = int(getattr(rec, 'number', 0) or 0)
+                lines.append(f'{prefix:<18} Frame {frame_no:>6}  Bytes {len(payload):>6}')
+                for body_line in str(body).splitlines():
+                    lines.append(f'    {body_line}')
+                lines.append('')
+
+            text.setPlainText('\n'.join(lines).strip())
+            status_label.setText(f'Status: {packet_count} packets, {client_bytes} bytes client, {server_bytes} bytes server, {total_bytes} bytes total')
+
+        format_combo.currentTextChanged.connect(lambda _text: _refresh_text())
+        direction_combo.currentTextChanged.connect(lambda _text: _refresh_text())
+        _refresh_text()
+
+        filter_this_btn.clicked.connect(lambda: self._set_display_filter_text(stream_filter, apply_now=True))
+        filter_out_btn.clicked.connect(lambda: self._set_display_filter_text(f'!({stream_filter})' if stream_filter else '', apply_now=True))
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text.toPlainText()))
+
+        def _save_text():
+            path, _ = QFileDialog.getSaveFileName(self, 'Save Follow Stream', str(Path.cwd() / 'follow_stream.txt'), 'Text Files (*.txt);;All Files (*)')
+            if not path:
+                return
+            try:
+                Path(path).write_text(text.toPlainText(), encoding='utf-8')
+            except Exception as exc:
+                QMessageBox.critical(self, 'Follow', f'Cannot save file:\n{exc}')
+
+        save_btn.clicked.connect(_save_text)
+        close_btn.clicked.connect(dialog.accept)
+        dialog.resize(960, 620)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
     def _on_menu_feature_placeholder(self, feature_name: str):
         QMessageBox.information(
             self,
@@ -6255,9 +7245,11 @@ class ApplicationWindow(QMainWindow):
     def _on_capture_status_changed(self, status):
         """Cap nhat trang thai capture/statusbar."""
         status_text = str(status or '')
+        self._refresh_analyze_custom_column_cells()
         self._refresh_status_metrics()
         self._sync_capture_buttons()
         self._refresh_go_menu_state()
+        self._refresh_analyze_menu_state()
         self._update_capture_window_title()
         match = re.search(r'Selected frame\s+(\d+)', status_text)
         if match:
@@ -6276,6 +7268,10 @@ class ApplicationWindow(QMainWindow):
             self._update_packet_status_label()
         if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view:
             self._update_toolbar_state('capture')
+
+    def _on_display_filter_applied(self):
+        self._refresh_analyze_custom_column_cells()
+        self._fit_all_custom_columns()
 
     def _refresh_status_metrics(self):
         dropped = 0
@@ -6327,8 +7323,10 @@ class ApplicationWindow(QMainWindow):
     def _on_detail_status_changed(self, field_name: str, byte_count: int):
         if field_name and byte_count > 0:
             self.detail_field_label.setText(f'Field: {field_name} | Byte: {byte_count}')
+            self._refresh_analyze_menu_state()
             return
         self.detail_field_label.setText('Field: - | Byte: 0')
+        self._refresh_analyze_menu_state()
 
     def _on_open_expert_information(self):
         if not self.capture_view:
@@ -6687,5 +7685,3 @@ class ApplicationWindow(QMainWindow):
                      'stop_duration_enabled', 'stop_duration_value', 'stop_duration_unit']
         for key in stop_keys:
             settings.remove(f'options/{key}')
-
-

@@ -1,6 +1,7 @@
 ﻿import logging
 import re
 import os
+import json
 import hashlib
 import time
 import threading
@@ -194,6 +195,8 @@ class CaptureView(QWidget):
     capture_state_changed = Signal(bool)
     find_panel_visibility_changed = Signal(bool)
     detail_status_changed = Signal(str, int)
+    display_filter_applied = Signal()
+    records_refined = Signal()
     open_packet_window_requested = Signal()
     go_state_changed = Signal(dict)
 
@@ -302,6 +305,64 @@ class CaptureView(QWidget):
         self._save_filter_history()
         self._update_filter_autocomplete_model()
         self._refresh_filter_history_menu()
+
+    def _load_display_filter_macros(self) -> list[dict]:
+        try:
+            raw = str(self._settings().value('analyze/display_filter_macros', '[]', str) or '[]')
+            payload = json.loads(raw)
+        except Exception:
+            return []
+        if not isinstance(payload, list):
+            return []
+        result = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '') or '').strip()
+            expression = str(item.get('expression', '') or '').strip()
+            if name and expression:
+                result.append({'name': name, 'expression': expression})
+        return result
+
+    def _expand_display_filter_macros(self, expression: str) -> str:
+        expr = str(expression or '').strip()
+        if not expr:
+            return ''
+
+        macros = {}
+        for item in self._load_display_filter_macros():
+            name = str(item.get('name', '') or '').strip()
+            macro_expr = str(item.get('expression', '') or '').strip()
+            if name and macro_expr:
+                macros[name.casefold()] = macro_expr
+
+        if not macros:
+            return expr
+
+        pattern = re.compile(r'\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::([^}]*))?\}')
+        expanded = expr
+        for _ in range(10):
+            changed = False
+
+            def repl(match):
+                nonlocal changed
+                macro_name = str(match.group(1) or '').strip()
+                params_blob = str(match.group(2) or '')
+                template = macros.get(macro_name.casefold())
+                if not template:
+                    return match.group(0)
+                params = [part.strip() for part in params_blob.split(';')] if params_blob != '' else []
+                resolved = template
+                for idx, value in enumerate(params, start=1):
+                    resolved = resolved.replace(f'${idx}', value)
+                changed = True
+                return resolved
+
+            updated = pattern.sub(repl, expanded)
+            expanded = updated
+            if not changed:
+                break
+        return expanded
 
     def _load_recent_files(self):
         try:
@@ -980,6 +1041,7 @@ class CaptureView(QWidget):
             'udp.port', 'udp.srcport', 'udp.dstport',
             'icmp.type', 'icmp.code',
             'dns.id', 'dns.qry.name',
+            'detail', 'detail.title', 'detail.key', 'detail.value', 'detail.pair', 'detail.path',
         ]
         keywords = ['and', 'or', 'not', 'contains', '==', '!=', '>=', '<=', '>', '<', '(', ')']
         values = list(self._filter_history) + protocol_tokens + field_tokens + keywords
@@ -1828,11 +1890,14 @@ class CaptureView(QWidget):
         self._refine_timer.start()
 
     def _update_table_row_from_record(self, row: int, record):
-        values = self.table.display_values(record)
-        for col, value in enumerate(values):
-            item = self.table.item(row, col)
-            if item is not None:
-                item.setText(value)
+        if hasattr(self.table, '_populate_row_from_record'):
+            self.table._populate_row_from_record(row, record, clear_extra_columns=False)
+        else:
+            values = self.table.display_values(record)
+            for col, value in enumerate(values):
+                item = self.table.item(row, col)
+                if item is not None:
+                    item.setText(value)
         self.table._store_row_state(row, record)
         self.table._paint_row(row, record)
         self._apply_conversation_highlight_to_row(row)
@@ -1861,6 +1926,8 @@ class CaptureView(QWidget):
                 self.details_tree.show_packet(applied)
                 self.hex_view.show_packet(applied)
             processed += 1
+        if processed > 0:
+            self.records_refined.emit()
 
     def _rollover_live_output_if_needed(self):
         output = self.output_settings or {}
@@ -1996,10 +2063,13 @@ class CaptureView(QWidget):
         if self._show_file_format_view and self._file_format_record is not None:
             self.table.replace_records([self._file_format_record])
             self._update_status('File format mode is active')
+            self.display_filter_applied.emit()
             self._emit_go_state_changed()
             return
         self.visible_indices.clear()
-        expr = self.display_filter_input.text()
+        expr = self._expand_display_filter_macros(self.display_filter_input.text())
+        if expr != str(self.display_filter_input.text() or ''):
+            self.display_filter_input.setText(expr)
         self._remember_filter(expr)
         visible_records = []
         for idx, record in enumerate(self.records):
@@ -2010,6 +2080,7 @@ class CaptureView(QWidget):
         self.table.set_color_rules_enabled(self.color_rules_enabled)
         self._refresh_all_visible_row_styles()
         self._update_status('Display filter applied')
+        self.display_filter_applied.emit()
         self._emit_go_state_changed()
 
     def get_selected_records(self):
@@ -2225,6 +2296,7 @@ class CaptureView(QWidget):
                 self.table.setCurrentCell(0, 0)
                 self.table.setFocus()
             self._start_refine_thread()
+            self.display_filter_applied.emit()
             self._remember_recent_file(self.loaded_file_path)
             self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')
         finally:
