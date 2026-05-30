@@ -1759,27 +1759,36 @@ class ApplicationWindow(QMainWindow):
         # Go menu
         go_menu = menubar.addMenu('&Go')
         self.action_go_back = QAction('&Back', self)
+        self.action_go_back.setShortcut(QKeySequence('Alt+Left'))
         go_menu.addAction(self.action_go_back)
         self.action_go_forward = QAction('&Forward', self)
+        self.action_go_forward.setShortcut(QKeySequence('Alt+Right'))
         go_menu.addAction(self.action_go_forward)
         go_menu.addSeparator()
         self.action_go_to_packet = QAction('Go to &Packet...', self)
+        self.action_go_to_packet.setShortcut(QKeySequence('Ctrl+G'))
         go_menu.addAction(self.action_go_to_packet)
         self.action_go_to_corresponding_packet = QAction('Go to C&orresponding Packet', self)
         go_menu.addAction(self.action_go_to_corresponding_packet)
         go_menu.addSeparator()
         self.action_go_previous_packet = QAction('&Previous Packet', self)
+        self.action_go_previous_packet.setShortcut(QKeySequence('Ctrl+Up'))
         go_menu.addAction(self.action_go_previous_packet)
         self.action_go_next_packet = QAction('&Next Packet', self)
+        self.action_go_next_packet.setShortcut(QKeySequence('Ctrl+Down'))
         go_menu.addAction(self.action_go_next_packet)
         self.action_go_first_packet = QAction('&First Packet', self)
+        self.action_go_first_packet.setShortcut(QKeySequence('Ctrl+Home'))
         go_menu.addAction(self.action_go_first_packet)
         self.action_go_last_packet = QAction('&Last Packet', self)
+        self.action_go_last_packet.setShortcut(QKeySequence('Ctrl+End'))
         go_menu.addAction(self.action_go_last_packet)
         go_menu.addSeparator()
         self.action_go_previous_packet_conversation = QAction('Previous Packet in C&onversation', self)
+        self.action_go_previous_packet_conversation.setShortcut(QKeySequence('Ctrl+,'))
         go_menu.addAction(self.action_go_previous_packet_conversation)
         self.action_go_next_packet_conversation = QAction('Next Packet in Con&versation', self)
+        self.action_go_next_packet_conversation.setShortcut(QKeySequence('Ctrl+.'))
         go_menu.addAction(self.action_go_next_packet_conversation)
         go_menu.addSeparator()
         self.action_go_auto_scroll_live_capture = QAction('&Auto Scroll in Live Capture', self)
@@ -2052,16 +2061,16 @@ class ApplicationWindow(QMainWindow):
         self.action_view_reload.triggered.connect(self._on_reload_file)
 
         # Go menu
-        self.action_go_back.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Back'))
-        self.action_go_forward.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Forward'))
+        self.action_go_back.triggered.connect(self._on_go_back)
+        self.action_go_forward.triggered.connect(self._on_go_forward)
         self.action_go_to_packet.triggered.connect(self._on_toggle_go_to_packet)
-        self.action_go_to_corresponding_packet.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Go to Corresponding Packet'))
+        self.action_go_to_corresponding_packet.triggered.connect(self._on_go_to_corresponding_packet)
         self.action_go_previous_packet.triggered.connect(self._on_go_previous_packet)
         self.action_go_next_packet.triggered.connect(self._on_go_next_packet)
         self.action_go_first_packet.triggered.connect(self._on_go_first_packet)
         self.action_go_last_packet.triggered.connect(self._on_go_last_packet)
-        self.action_go_previous_packet_conversation.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Previous Packet In Conversation'))
-        self.action_go_next_packet_conversation.triggered.connect(lambda: self._on_menu_feature_placeholder('Go > Next Packet In Conversation'))
+        self.action_go_previous_packet_conversation.triggered.connect(self._on_go_previous_packet_conversation)
+        self.action_go_next_packet_conversation.triggered.connect(self._on_go_next_packet_conversation)
         self.action_go_auto_scroll_live_capture.triggered.connect(self._on_toggle_auto_scroll)
 
         # Capture menu
@@ -2695,6 +2704,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.find_panel_visibility_changed.connect(self._on_find_panel_visibility_changed)
             self.capture_view.detail_status_changed.connect(self._on_detail_status_changed)
             self.capture_view.open_packet_window_requested.connect(self._on_show_packet_new_window)
+            self.capture_view.go_state_changed.connect(lambda _state: self._refresh_go_menu_state())
             self.stacked_widget.addWidget(self.capture_view)
 
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
@@ -2720,6 +2730,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._refresh_status_metrics()
+        self._refresh_go_menu_state()
 
     def _update_capture_window_title(self):
         if not self.capture_view:
@@ -2876,6 +2887,7 @@ class ApplicationWindow(QMainWindow):
             self.action_search_btn.setEnabled(has_capture)
             self.action_color_btn.setEnabled(has_capture)
         self._refresh_file_menu_state()
+        self._refresh_go_menu_state()
 
     def _refresh_file_menu_state(self):
         active_capture = bool(
@@ -2902,6 +2914,7 @@ class ApplicationWindow(QMainWindow):
         if hasattr(self, 'action_exit'):
             self.action_exit.setEnabled(True)
         self._refresh_edit_menu_state()
+        self._refresh_go_menu_state()
 
     def _refresh_edit_menu_state(self):
         active_capture = bool(
@@ -2935,6 +2948,60 @@ class ApplicationWindow(QMainWindow):
             self.action_delete_all_packet_comments.setEnabled(has_packets)
         if hasattr(self, 'action_preferences'):
             self.action_preferences.setEnabled(True)
+
+    def _refresh_go_menu_state(self):
+        active_capture = bool(
+            self.capture_view
+            and self.stacked_widget.currentWidget() is self.capture_view
+        )
+        default_state = {
+            'can_go_back': False,
+            'can_go_forward': False,
+            'can_go_to_packet': False,
+            'can_corresponding': False,
+            'can_previous_packet': False,
+            'can_next_packet': False,
+            'can_first_packet': False,
+            'can_last_packet': False,
+            'can_previous_conversation': False,
+            'can_next_conversation': False,
+            'auto_scroll_enabled': True,
+        }
+
+        state = dict(default_state)
+        if active_capture:
+            try:
+                state.update(self.capture_view.get_go_state())
+            except Exception:
+                pass
+
+        mapping = [
+            ('action_go_back', 'can_go_back'),
+            ('action_go_forward', 'can_go_forward'),
+            ('action_go_to_packet', 'can_go_to_packet'),
+            ('action_go_to_corresponding_packet', 'can_corresponding'),
+            ('action_go_previous_packet', 'can_previous_packet'),
+            ('action_go_next_packet', 'can_next_packet'),
+            ('action_go_first_packet', 'can_first_packet'),
+            ('action_go_last_packet', 'can_last_packet'),
+            ('action_go_previous_packet_conversation', 'can_previous_conversation'),
+            ('action_go_next_packet_conversation', 'can_next_conversation'),
+        ]
+        for action_name, key in mapping:
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(bool(state.get(key, False)))
+
+        if hasattr(self, 'action_go_auto_scroll_live_capture'):
+            self.action_go_auto_scroll_live_capture.setEnabled(True)
+            self.action_go_auto_scroll_live_capture.blockSignals(True)
+            self.action_go_auto_scroll_live_capture.setChecked(bool(state.get('auto_scroll_enabled', True)))
+            self.action_go_auto_scroll_live_capture.blockSignals(False)
+        if hasattr(self, 'action_stay_last_btn'):
+            self.action_stay_last_btn.setEnabled(active_capture)
+            self.action_stay_last_btn.blockSignals(True)
+            self.action_stay_last_btn.setChecked(bool(state.get('auto_scroll_enabled', True)))
+            self.action_stay_last_btn.blockSignals(False)
 
     def _sync_capture_buttons(self):
         is_running = bool(self.capture_view and self.capture_view.is_capturing())
@@ -5601,23 +5668,53 @@ class ApplicationWindow(QMainWindow):
     def _on_go_previous_packet(self):
         if self.capture_view:
             self.capture_view.goto_previous_packet()
+        self._refresh_go_menu_state()
 
     def _on_go_next_packet(self):
         if self.capture_view:
             self.capture_view.goto_next_packet()
+        self._refresh_go_menu_state()
 
     def _on_go_first_packet(self):
         if self.capture_view:
             self.capture_view.goto_first_packet()
+        self._refresh_go_menu_state()
 
     def _on_go_last_packet(self):
         if self.capture_view:
             self.capture_view.goto_last_packet()
+        self._refresh_go_menu_state()
+
+    def _on_go_back(self):
+        if self.capture_view:
+            self.capture_view.go_back()
+        self._refresh_go_menu_state()
+
+    def _on_go_forward(self):
+        if self.capture_view:
+            self.capture_view.go_forward()
+        self._refresh_go_menu_state()
+
+    def _on_go_to_corresponding_packet(self):
+        if self.capture_view:
+            self.capture_view.goto_corresponding_packet()
+        self._refresh_go_menu_state()
+
+    def _on_go_previous_packet_conversation(self):
+        if self.capture_view:
+            self.capture_view.goto_previous_packet_in_conversation()
+        self._refresh_go_menu_state()
+
+    def _on_go_next_packet_conversation(self):
+        if self.capture_view:
+            self.capture_view.goto_next_packet_in_conversation()
+        self._refresh_go_menu_state()
 
     def _on_toggle_go_to_packet(self):
         if not self.capture_view or not self.capture_view.has_packets():
             return
         self.capture_view.toggle_go_to_packet_row()
+        self._refresh_go_menu_state()
 
     def _on_toggle_auto_scroll(self, enabled: bool):
         checked = bool(enabled)
@@ -5631,6 +5728,7 @@ class ApplicationWindow(QMainWindow):
             self.action_go_auto_scroll_live_capture.blockSignals(False)
         if self.capture_view:
             self.capture_view.set_auto_scroll_enabled(checked)
+        self._refresh_go_menu_state()
 
     def _on_toggle_color_rules(self, enabled: bool):
         checked = bool(enabled)
@@ -5765,6 +5863,7 @@ class ApplicationWindow(QMainWindow):
         status_text = str(status or '')
         self._refresh_status_metrics()
         self._sync_capture_buttons()
+        self._refresh_go_menu_state()
         self._update_capture_window_title()
         match = re.search(r'Selected frame\s+(\d+)', status_text)
         if match:

@@ -195,6 +195,7 @@ class CaptureView(QWidget):
     find_panel_visibility_changed = Signal(bool)
     detail_status_changed = Signal(str, int)
     open_packet_window_requested = Signal()
+    go_state_changed = Signal(dict)
 
     def __init__(self, iface: str = '', iface_display_name: str = '', capture_filter: str = ''):
         super().__init__()
@@ -239,6 +240,8 @@ class CaptureView(QWidget):
         self._last_find_offset = None
         self._last_find_detail_index = None
         self._selected_record_index = -1
+        self._packet_history: list[int] = []
+        self._history_index = -1
         self._conversation_highlight_indexes = set()
         self._conversation_highlight_color = QColor('#FFF2A8')
         self._filter_history = self._load_filter_history()
@@ -1727,6 +1730,8 @@ class CaptureView(QWidget):
         self.records.clear()
         self.visible_indices.clear()
         self._selected_record_index = -1
+        self._packet_history = []
+        self._history_index = -1
         self.table.setRowCount(0)
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
@@ -1744,6 +1749,7 @@ class CaptureView(QWidget):
         self._set_dirty(False)
         if reset_file_path:
             self.loaded_file_path = None
+        self._emit_go_state_changed()
 
     def _stop_refine_thread(self):
         self._refine_stop.set()
@@ -1928,6 +1934,8 @@ class CaptureView(QWidget):
         if self._should_stop_capture():
             self.stop_capture()
 
+        self._emit_go_state_changed()
+
     def _should_stop_capture(self) -> bool:
         """Evaluate stop conditions from Options tab settings"""
         opts = self.options_settings or {}
@@ -1965,6 +1973,7 @@ class CaptureView(QWidget):
         if self._show_file_format_view and self._file_format_record is not None:
             self.table.replace_records([self._file_format_record])
             self._update_status('File format mode is active')
+            self._emit_go_state_changed()
             return
         self.visible_indices.clear()
         expr = self.display_filter_input.text()
@@ -1978,6 +1987,7 @@ class CaptureView(QWidget):
         self.table.set_color_rules_enabled(self.color_rules_enabled)
         self._refresh_all_visible_row_styles()
         self._update_status('Display filter applied')
+        self._emit_go_state_changed()
 
     def get_selected_records(self):
         selected_rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()}) if self.table.selectionModel() else []
@@ -2001,7 +2011,7 @@ class CaptureView(QWidget):
         self.display_filter_input.clear()
         self.apply_display_filter()
 
-    def show_details(self, row, _col):
+    def show_details(self, row, _col, add_to_history: bool = True):
         if self._show_file_format_view and self._file_format_record is not None:
             if row != 0:
                 return
@@ -2010,16 +2020,20 @@ class CaptureView(QWidget):
             self.hex_view.show_packet(self._file_format_record)
             self.detail_status_changed.emit('', 0)
             self._update_status('Selected file format frame')
+            self._emit_go_state_changed()
             return
         if row < 0 or row >= len(self.visible_indices):
             return
         record_index = self.visible_indices[row]
         self._selected_record_index = record_index
         record = self.records[record_index]
+        if add_to_history:
+            self._add_packet_to_history(int(getattr(record, 'number', 0) or 0))
         self.details_tree.show_packet(record)
         self.hex_view.show_packet(record)
         self.detail_status_changed.emit('', 0)
         self._update_status(f'Selected frame {record.number}')
+        self._emit_go_state_changed()
 
     def _on_detail_field_selected(self, field_name: str, byte_count: int):
         self.detail_status_changed.emit(str(field_name or ''), int(byte_count or 0))
@@ -2242,60 +2256,288 @@ class CaptureView(QWidget):
 
     def set_auto_scroll_enabled(self, enabled: bool):
         self.auto_scroll_enabled = bool(enabled)
+        self._emit_go_state_changed()
 
     def set_color_rules_enabled(self, enabled: bool):
         self.color_rules_enabled = bool(enabled)
         self.table.set_color_rules_enabled(self.color_rules_enabled)
 
-    def goto_row(self, row: int) -> bool:
+    def _navigate_to_row(self, row: int, add_to_history: bool = True) -> bool:
         if row < 0 or row >= len(self.visible_indices):
             return False
         self.table.selectRow(row)
         self.table.setCurrentCell(row, 0)
         self.table.setFocus()
         self.table.scrollToItem(self.table.item(row, 0), self.table.ScrollHint.PositionAtCenter)
-        self.show_details(row, 0)
+        self.show_details(row, 0, add_to_history=add_to_history)
         return True
+
+    def goto_row(self, row: int) -> bool:
+        return self._navigate_to_row(row, add_to_history=True)
 
     def goto_previous_packet(self) -> bool:
         row = self.table.currentRow()
         if row <= 0:
             return False
-        return self.goto_row(row - 1)
+        return self._navigate_to_row(row - 1, add_to_history=True)
 
     def goto_next_packet(self) -> bool:
         row = self.table.currentRow()
         if row < 0 and len(self.visible_indices) > 0:
-            return self.goto_row(0)
+            return self._navigate_to_row(0, add_to_history=True)
         if row < 0 or row >= len(self.visible_indices) - 1:
             return False
-        return self.goto_row(row + 1)
+        return self._navigate_to_row(row + 1, add_to_history=True)
 
     def goto_first_packet(self) -> bool:
         if not self.visible_indices:
             return False
-        return self.goto_row(0)
+        return self._navigate_to_row(0, add_to_history=True)
 
     def goto_last_packet(self) -> bool:
         if not self.visible_indices:
             return False
-        return self.goto_row(len(self.visible_indices) - 1)
+        return self._navigate_to_row(len(self.visible_indices) - 1, add_to_history=True)
 
     def goto_packet_number(self, packet_number: int) -> bool:
         target = int(packet_number)
         for row, rec_idx in enumerate(self.visible_indices):
             if int(self.records[rec_idx].number) == target:
-                return self.goto_row(row)
-
-        # If packet exists but is currently filtered out, clear filter and retry.
-        exists_in_all = any(int(r.number) == target for r in self.records)
-        if exists_in_all:
-            self.display_filter_input.clear()
-            self.apply_display_filter()
-            for row, rec_idx in enumerate(self.visible_indices):
-                if int(self.records[rec_idx].number) == target:
-                    return self.goto_row(row)
+                return self._navigate_to_row(row, add_to_history=True)
         return False
+
+    def _record_exists_by_number(self, packet_number: int) -> bool:
+        target = int(packet_number)
+        return any(int(getattr(r, 'number', 0) or 0) == target for r in self.records)
+
+    def _add_packet_to_history(self, packet_number: int):
+        packet_number = int(packet_number or 0)
+        if packet_number <= 0:
+            return
+        if self._history_index >= 0 and self._history_index < len(self._packet_history):
+            if int(self._packet_history[self._history_index]) == packet_number:
+                return
+        if self._history_index < len(self._packet_history) - 1:
+            self._packet_history = self._packet_history[: self._history_index + 1]
+        self._packet_history.append(packet_number)
+        self._history_index = len(self._packet_history) - 1
+
+    def can_go_back(self) -> bool:
+        return self._history_index > 0
+
+    def can_go_forward(self) -> bool:
+        return 0 <= self._history_index < len(self._packet_history) - 1
+
+    def go_back(self) -> bool:
+        if not self.can_go_back():
+            return False
+        target_index = self._history_index - 1
+        target_packet = int(self._packet_history[target_index])
+        if not self._record_exists_by_number(target_packet):
+            self._prune_invalid_history_entries()
+            self._emit_go_state_changed()
+            return False
+        row = self._visible_row_for_packet_number(target_packet)
+        if row < 0:
+            self._history_index = target_index
+            self._update_status(f'Frame {target_packet} is hidden by the current display filter')
+            self._emit_go_state_changed()
+            return False
+        self._history_index = target_index
+        return self._navigate_to_row(row, add_to_history=False)
+
+    def go_forward(self) -> bool:
+        if not self.can_go_forward():
+            return False
+        target_index = self._history_index + 1
+        target_packet = int(self._packet_history[target_index])
+        if not self._record_exists_by_number(target_packet):
+            self._prune_invalid_history_entries()
+            self._emit_go_state_changed()
+            return False
+        row = self._visible_row_for_packet_number(target_packet)
+        if row < 0:
+            self._history_index = target_index
+            self._update_status(f'Frame {target_packet} is hidden by the current display filter')
+            self._emit_go_state_changed()
+            return False
+        self._history_index = target_index
+        return self._navigate_to_row(row, add_to_history=False)
+
+    def _prune_invalid_history_entries(self):
+        valid_numbers = {int(getattr(r, 'number', 0) or 0) for r in self.records}
+        if not valid_numbers:
+            self._packet_history = []
+            self._history_index = -1
+            return
+        old_selected = None
+        if 0 <= self._history_index < len(self._packet_history):
+            old_selected = int(self._packet_history[self._history_index])
+        self._packet_history = [n for n in self._packet_history if int(n) in valid_numbers]
+        if not self._packet_history:
+            self._history_index = -1
+            return
+        if old_selected is not None and old_selected in self._packet_history:
+            self._history_index = self._packet_history.index(old_selected)
+        else:
+            self._history_index = len(self._packet_history) - 1
+
+    def _visible_row_for_packet_number(self, packet_number: int) -> int:
+        target = int(packet_number)
+        for row, rec_idx in enumerate(self.visible_indices):
+            if int(getattr(self.records[rec_idx], 'number', 0) or 0) == target:
+                return row
+        return -1
+
+    def _conversation_key_for_record(self, record):
+        if record is None:
+            return None
+        metadata = getattr(record, 'metadata', {}) or {}
+        tcp_stream = metadata.get('tcp_stream_index')
+        if isinstance(tcp_stream, int) and tcp_stream >= 0:
+            return ('tcp_stream', int(tcp_stream))
+        udp_stream = metadata.get('udp_stream_index')
+        if isinstance(udp_stream, int) and udp_stream >= 0:
+            return ('udp_stream', int(udp_stream))
+        src = str(getattr(record, 'src', '') or '')
+        dst = str(getattr(record, 'dst', '') or '')
+        sport = str(getattr(record, 'sport', '') or '')
+        dport = str(getattr(record, 'dport', '') or '')
+        proto = str(getattr(record, 'protocol', '') or '').upper()
+        if not src and not dst:
+            return None
+        endpoints = tuple(sorted([(src, sport), (dst, dport)]))
+        return (proto, endpoints)
+
+    def _conversation_rows_for_current(self) -> list[int]:
+        row = self.get_current_visible_row()
+        if row < 0 or row >= len(self.visible_indices):
+            return []
+        current_rec_idx = self.visible_indices[row]
+        if current_rec_idx < 0 or current_rec_idx >= len(self.records):
+            return []
+        current_key = self._conversation_key_for_record(self.records[current_rec_idx])
+        if current_key is None:
+            return []
+        rows = []
+        for visible_row, rec_idx in enumerate(self.visible_indices):
+            if 0 <= rec_idx < len(self.records) and self._conversation_key_for_record(self.records[rec_idx]) == current_key:
+                rows.append(visible_row)
+        return rows
+
+    def has_previous_packet_in_conversation(self) -> bool:
+        rows = self._conversation_rows_for_current()
+        if not rows:
+            return False
+        current = self.get_current_visible_row()
+        return current in rows and rows.index(current) > 0
+
+    def has_next_packet_in_conversation(self) -> bool:
+        rows = self._conversation_rows_for_current()
+        if not rows:
+            return False
+        current = self.get_current_visible_row()
+        return current in rows and rows.index(current) < len(rows) - 1
+
+    def goto_previous_packet_in_conversation(self) -> bool:
+        rows = self._conversation_rows_for_current()
+        current = self.get_current_visible_row()
+        if current not in rows:
+            return False
+        idx = rows.index(current)
+        if idx <= 0:
+            self._update_status('No previous packet in this conversation')
+            return False
+        return self._navigate_to_row(rows[idx - 1], add_to_history=True)
+
+    def goto_next_packet_in_conversation(self) -> bool:
+        rows = self._conversation_rows_for_current()
+        current = self.get_current_visible_row()
+        if current not in rows:
+            return False
+        idx = rows.index(current)
+        if idx >= len(rows) - 1:
+            self._update_status('No next packet in this conversation')
+            return False
+        return self._navigate_to_row(rows[idx + 1], add_to_history=True)
+
+    def _first_corresponding_frame(self, record) -> int | None:
+        if record is None:
+            return None
+        metadata = getattr(record, 'metadata', {}) or {}
+        current_number = int(getattr(record, 'number', 0) or 0)
+        candidate_keys = [
+            'http_response_frame', 'http_request_frame',
+            'dns_response_frame', 'dns_request_frame',
+            'icmp_response_frame', 'icmp_request_frame',
+            'icmpv6_response_frame', 'icmpv6_request_frame',
+            'smtp_response_frame', 'smtp_request_frame',
+            'imap_response_frame', 'imap_request_frame',
+            'sip_response_frame', 'sip_request_frame',
+            'snmp_response_frame', 'snmp_request_frame',
+            'whois_answer_frame', 'whois_query_frame',
+            'radius_response_frame', 'radius_request_frame',
+            'ntp_response_frame', 'ntp_request_frame',
+            'zabbix_response_frame', 'zabbix_request_frame',
+            'ldap_response_to_frame', 'dcerpc_request_frame',
+            'tftp_request_frame',
+            'tcp_ack_frame_number', 'tcp_duplicate_ack_frame_number',
+            'ip_reassembled_in_frame',
+            'tcp_reassembled_pdu_in_frame', 'tls_reassembled_pdu_in_frame',
+            'smtp_reassembled_data_in_frame', 'rtp_setup_frame',
+        ]
+        for key in candidate_keys:
+            value = metadata.get(key)
+            try:
+                frame = int(value)
+            except Exception:
+                continue
+            if frame > 0 and frame != current_number:
+                return frame
+        return None
+
+    def has_corresponding_packet(self) -> bool:
+        record = self.get_current_record()
+        frame = self._first_corresponding_frame(record)
+        return frame is not None and self._record_exists_by_number(int(frame))
+
+    def goto_corresponding_packet(self) -> bool:
+        record = self.get_current_record()
+        frame = self._first_corresponding_frame(record)
+        if frame is None:
+            return False
+        row = self._visible_row_for_packet_number(int(frame))
+        if row < 0:
+            self._update_status(f'Corresponding frame {frame} is hidden by the current display filter')
+            return False
+        return self._navigate_to_row(row, add_to_history=True)
+
+    def get_go_state(self) -> dict:
+        row = self.get_current_visible_row()
+        has_visible = len(self.visible_indices) > 0
+        return {
+            'has_packets': self.has_packets(),
+            'has_visible_packets': has_visible,
+            'has_selection': row >= 0,
+            'is_file_format_mode': self.is_file_format_view_mode(),
+            'can_go_back': self.can_go_back(),
+            'can_go_forward': self.can_go_forward(),
+            'can_go_to_packet': self.has_packets() and not self.is_file_format_view_mode(),
+            'can_previous_packet': row > 0,
+            'can_next_packet': has_visible and row >= 0 and row < len(self.visible_indices) - 1,
+            'can_first_packet': has_visible and row != 0,
+            'can_last_packet': has_visible and row != len(self.visible_indices) - 1,
+            'can_previous_conversation': self.has_previous_packet_in_conversation(),
+            'can_next_conversation': self.has_next_packet_in_conversation(),
+            'can_corresponding': self.has_corresponding_packet(),
+            'auto_scroll_enabled': bool(self.auto_scroll_enabled),
+        }
+
+    def _emit_go_state_changed(self):
+        try:
+            self.go_state_changed.emit(self.get_go_state())
+        except Exception:
+            pass
 
     def get_current_visible_row(self) -> int:
         row = int(self.table.currentRow())
@@ -3108,8 +3350,12 @@ class CaptureView(QWidget):
         if not text.isdigit():
             QMessageBox.warning(self, 'Invalid packet', 'Vui lòng nhập số packet hợp lệ.')
             return
-        if not self.goto_packet_number(int(text)):
-            QMessageBox.information(self, 'Not found', f'Không tìm thấy packet số {text}.')
+        target = int(text)
+        if not self.goto_packet_number(target):
+            if self._record_exists_by_number(target):
+                QMessageBox.information(self, 'Hidden by filter', f'Packet {text} tồn tại nhưng đang bị ẩn bởi display filter hiện tại.')
+            else:
+                QMessageBox.information(self, 'Not found', f'Không tìm thấy packet số {text}.')
             return
         self.goto_packet_widget.setVisible(False)
 
