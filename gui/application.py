@@ -8,7 +8,7 @@ import csv
 import os
 import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QSettings
@@ -1777,6 +1777,9 @@ class ApplicationWindow(QMainWindow):
         self._last_capture_seconds = None
         self._display_filter_helper = DisplayFilter()
         self._analyze_custom_columns = []
+        self._custom_column_refresh_generation = 0
+        self._custom_column_refresh_pending_rows = deque()
+        self._custom_column_fit_timer = None
 
         # Build UI
         self._build_ui()
@@ -2966,11 +2969,14 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.find_panel_visibility_changed.connect(self._on_find_panel_visibility_changed)
             self.capture_view.detail_status_changed.connect(self._on_detail_status_changed)
             self.capture_view.display_filter_applied.connect(self._on_display_filter_applied)
-            self.capture_view.records_refined.connect(self._refresh_analyze_custom_column_cells)
+            self.capture_view.records_refined.connect(self._on_records_refined_rows)
             self.capture_view.open_packet_window_requested.connect(self._on_show_packet_new_window)
             self.capture_view.go_state_changed.connect(lambda _state: self._refresh_go_menu_state())
             self.capture_view.table.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
             self.capture_view.details_tree.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
+            self.capture_view.table.verticalScrollBar().valueChanged.connect(
+                lambda _value: self._refresh_analyze_custom_column_cells()
+            )
             self.stacked_widget.addWidget(self.capture_view)
 
         self.capture_view.set_interface(iface, iface_display_name, capture_filter)
@@ -5109,7 +5115,7 @@ class ApplicationWindow(QMainWindow):
                 return 'Right'
             if text == 'center':
                 return 'Center'
-            return 'Right' if text == '' else 'Left'
+            return 'Left'
 
         def _set_column_row(row: int, spec: dict):
             logical_index = int(spec.get('index', row) or row)
@@ -5120,7 +5126,7 @@ class ApplicationWindow(QMainWindow):
                 occurrence = max(1, int(spec.get('occurrence', 1) or 1))
             except Exception:
                 occurrence = 1
-            alignment = _normalize_alignment(str(spec.get('alignment', 'Right') or 'Right'))
+            alignment = _normalize_alignment(str(spec.get('alignment', 'Left') or 'Left'))
 
             displayed_item = QTableWidgetItem('')
             displayed_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
@@ -5131,7 +5137,7 @@ class ApplicationWindow(QMainWindow):
             columns_table.setItem(row, 2, QTableWidgetItem(field))
             columns_table.setItem(row, 3, QTableWidgetItem(str(occurrence)))
             align_combo = QComboBox(columns_table)
-            align_combo.addItems(['Right', 'Left', 'Center'])
+            align_combo.addItems(['Left', 'Center', 'Right'])
             align_combo.setCurrentText(alignment)
             columns_table.setCellWidget(row, 4, align_combo)
 
@@ -5151,7 +5157,7 @@ class ApplicationWindow(QMainWindow):
                 'title': str(title_item.text() if title_item is not None else '').strip(),
                 'field': str(field_item.text() if field_item is not None else '').strip(),
                 'occurrence': occurrence,
-                'alignment': _normalize_alignment(str(alignment_combo.currentText() if isinstance(alignment_combo, QComboBox) else 'Right')),
+                'alignment': _normalize_alignment(str(alignment_combo.currentText() if isinstance(alignment_combo, QComboBox) else 'Left')),
             }
 
         def _load_columns_rows(specs: list[dict]):
@@ -5197,7 +5203,7 @@ class ApplicationWindow(QMainWindow):
                     'title': f'New Column {row + 1}',
                     'field': 'frame.number',
                     'occurrence': 1,
-                    'alignment': 'Right',
+                    'alignment': 'Left',
                 },
             )
             columns_table.setCurrentCell(row, 1)
@@ -6132,7 +6138,7 @@ class ApplicationWindow(QMainWindow):
                 'detail_key': detail_key,
                 'detail_path': detail_path,
                 'occurrence': max(0, occurrence),
-                'alignment': str(item.get('alignment', 'Right') or 'Right'),
+                'alignment': str(item.get('alignment', 'Left') or 'Left'),
                 'displayed': bool(item.get('displayed', True)),
             })
         return result
@@ -6182,7 +6188,7 @@ class ApplicationWindow(QMainWindow):
                 'detail_key': detail_key,
                 'detail_path': detail_path,
                 'occurrence': int(item.get('occurrence', 0) or 0),
-                'alignment': str(item.get('alignment', 'Right') or 'Right'),
+                'alignment': str(item.get('alignment', 'Left') or 'Left'),
             })
 
         info_col['index'] = len(new_columns)
@@ -6200,27 +6206,33 @@ class ApplicationWindow(QMainWindow):
         headers = base_headers + extra_headers + ['Info']
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
+        custom_width = self._custom_column_default_width(table)
         for idx in range(6, len(headers) - 1):
-            if table.columnWidth(idx) <= 0:
-                table.setColumnWidth(idx, 72)
+            table.setColumnWidth(idx, custom_width)
         info_col = len(headers) - 1
-        table.setColumnWidth(info_col, max(360, table.columnWidth(info_col) or 360))
+        table.setColumnWidth(info_col, max(320, table.columnWidth(info_col) or 320))
         if hasattr(table, 'apply_content_resize_layout'):
             table.apply_content_resize_layout()
         self._refresh_analyze_custom_column_cells()
-        self._fit_all_custom_columns()
+
+    def _custom_column_default_width(self, table) -> int:
+        if table is None:
+            return 72
+        viewport_w = table.viewport().width() if table.viewport() is not None else table.width()
+        if viewport_w <= 0:
+            viewport_w = table.width()
+        return max(72, int((float(viewport_w) * 2.0) / 15.0))
 
     def _fit_all_custom_columns(self):
         cv = self.capture_view
         if not cv or not self._analyze_custom_columns:
             return
         table = cv.table
+        custom_width = self._custom_column_default_width(table)
         for extra_idx, _cfg in enumerate(self._analyze_custom_columns):
             col = 6 + extra_idx
             if 0 <= col < table.columnCount():
-                table.setColumnWidth(col, 72)
-        for extra_idx, _cfg in enumerate(self._analyze_custom_columns):
-            self._fit_custom_column_width(6 + extra_idx)
+                table.setColumnWidth(col, custom_width)
 
     def _extract_field_value_for_column(self, record, field: str, occurrence: int = 0) -> str:
         try:
@@ -6269,54 +6281,55 @@ class ApplicationWindow(QMainWindow):
             return ''
 
         metadata = getattr(record, 'metadata', {}) if record else {}
-        tree = metadata.get('_detail_tree_cache') if isinstance(metadata, dict) else None
-        if not isinstance(tree, list):
-            try:
-                tree = packet_summary_tree(record.raw, record)
-                if isinstance(metadata, dict):
-                    metadata['_detail_tree_cache'] = tree
-            except Exception:
-                tree = []
+        cache_key = (query, key, tuple(target_path))
+        if isinstance(metadata, dict):
+            detail_cache = metadata.setdefault('_custom_detail_value_cache', {})
+            if isinstance(detail_cache, dict) and cache_key in detail_cache:
+                return str(detail_cache.get(cache_key, '') or '')
 
-        def _walk(nodes, path):
-            for node in nodes or []:
-                if not isinstance(node, dict):
-                    continue
-                title = str(node.get('title', '') or '').strip()
-                if title:
-                    node_key = self._normalize_detail_key(title)
-                    node_path = list(path)
-                    if node_key:
-                        node_path.append(node_key)
-                    yield title, node_key, node_path
-                    yield from _walk(node.get('children', []), node_path)
+        try:
+            nodes = self._display_filter_helper._detail_nodes(record)
+        except Exception:
+            nodes = []
 
         def _collect_values(require_path: bool) -> list[str]:
             values = []
-            for title, node_key, node_path in _walk(tree, []):
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                node_key = str(node.get('key', '') or '').strip().casefold()
+                title = str(node.get('title', '') or '').strip()
                 low = title.casefold()
                 if key and node_key != key:
                     continue
-                if require_path and target_path and (len(node_path) < len(target_path) or node_path[-len(target_path):] != target_path):
+                if require_path and target_path:
+                    node_path = str(node.get('path', '') or '').strip().casefold()
+                    target_text = ' / '.join(target_path).casefold()
+                    if not node_path or not node_path.endswith(target_text):
+                        continue
+                if query and query not in low and query != node_key:
                     continue
-                if query and query not in low and (not node_key or query != node_key):
-                    continue
-                if ': ' in title:
-                    value = title.split(': ', 1)[1].strip()
-                elif ' = ' in title:
-                    value = title.split(' = ', 1)[1].strip()
-                else:
-                    value = title
+                value = str(node.get('value', '') or '').strip()
+                if not value:
+                    if ': ' in title:
+                        value = title.split(': ', 1)[1].strip()
+                    elif ' = ' in title:
+                        value = title.split(' = ', 1)[1].strip()
+                    else:
+                        value = title
                 if value and value not in values:
                     values.append(value)
             return values
 
-        # Pass 1: strict match by full stable path.
         found = _collect_values(require_path=True)
-        # Pass 2: fallback by key/query only (helps across packets where detail hierarchy differs).
         if not found and target_path:
             found = _collect_values(require_path=False)
-        return ', '.join(found)
+        result = ', '.join(found)
+        if isinstance(metadata, dict):
+            detail_cache = metadata.setdefault('_custom_detail_value_cache', {})
+            if isinstance(detail_cache, dict):
+                detail_cache[cache_key] = result
+        return result
 
     def _refresh_analyze_custom_column_cells(self):
         cv = self.capture_view
@@ -6330,53 +6343,190 @@ class ApplicationWindow(QMainWindow):
         visible_count = len(cv.visible_indices)
         if row_count <= 0 or visible_count <= 0:
             return
+        if row_count <= 50:
+            self._schedule_custom_column_refresh(list(range(row_count)), replace=True)
+            return
+        start, end = self._visible_table_row_range()
+        if start < 0 or end < start:
+            return
+        self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
+
+    def _visible_table_row_range(self) -> tuple[int, int]:
+        cv = self.capture_view
+        if not cv:
+            return -1, -1
+        table = cv.table
+        row_count = int(table.rowCount() or 0)
+        if row_count <= 0:
+            return -1, -1
+        top = int(table.rowAt(0))
+        bottom = int(table.rowAt(max(0, table.viewport().height() - 1)))
+        if top < 0:
+            top = 0
+        if bottom < 0:
+            bottom = min(row_count - 1, top + 64)
+        # Add a small margin to avoid blank cells right after a scroll.
+        top = max(0, top - 20)
+        bottom = min(row_count - 1, bottom + 20)
+        return top, bottom
+
+    def _schedule_custom_column_refresh(self, rows, replace: bool):
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        table = cv.table
+        if replace:
+            seen = set()
+            normalized = []
+            for row in rows or []:
+                try:
+                    idx = int(row)
+                except Exception:
+                    continue
+                if idx < 0 or idx >= table.rowCount():
+                    continue
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                normalized.append(idx)
+            self._custom_column_refresh_pending_rows = deque(normalized)
+            self._custom_column_refresh_generation += 1
+        else:
+            pending = list(self._custom_column_refresh_pending_rows)
+            seen = set(pending)
+            for row in rows or []:
+                try:
+                    idx = int(row)
+                except Exception:
+                    continue
+                if idx < 0 or idx >= table.rowCount():
+                    continue
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                pending.append(idx)
+            self._custom_column_refresh_pending_rows = deque(pending)
+            self._custom_column_refresh_generation += 1
+        generation = int(self._custom_column_refresh_generation)
+        QTimer.singleShot(0, lambda gen=generation: self._drain_custom_column_refresh(gen))
+
+    def _drain_custom_column_refresh(self, generation: int):
+        if int(generation) != int(self._custom_column_refresh_generation):
+            return
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            self._custom_column_refresh_pending_rows = deque()
+            return
+        table = cv.table
+        pending = self._custom_column_refresh_pending_rows
+        if not pending:
+            return
+
+        started = time.perf_counter()
+        processed = 0
+        max_rows_per_tick = 120
+        max_tick_seconds = 0.008
+        table.setUpdatesEnabled(False)
+        try:
+            while pending and processed < max_rows_per_tick and (time.perf_counter() - started) < max_tick_seconds:
+                row = pending.popleft()
+                self._refresh_analyze_custom_columns_for_row(int(row))
+                processed += 1
+        finally:
+            table.setUpdatesEnabled(True)
+
+        if pending and int(generation) == int(self._custom_column_refresh_generation):
+            QTimer.singleShot(0, lambda gen=generation: self._drain_custom_column_refresh(gen))
+
+    def _refresh_analyze_custom_columns_for_row(self, row: int):
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        table = cv.table
+        if row < 0 or row >= table.rowCount() or row >= len(cv.visible_indices):
+            return
+        rec_idx = cv.visible_indices[row]
+        if rec_idx < 0 or rec_idx >= len(cv.records):
+            return
+        record = cv.records[rec_idx]
         info_col = 6 + len(self._analyze_custom_columns)
-        max_rows = min(row_count, visible_count)
-        for row in range(max_rows):
-            rec_idx = cv.visible_indices[row]
-            if rec_idx < 0 or rec_idx >= len(cv.records):
-                continue
-            record = cv.records[rec_idx]
-            for extra_idx, cfg in enumerate(self._analyze_custom_columns):
-                col = 6 + extra_idx
-                item = table.item(row, col)
-                if item is None:
-                    item = QTableWidgetItem()
-                    table.setItem(row, col, item)
-                field = str(cfg.get('field', '') or '').strip()
-                detail_query = str(cfg.get('detail_query', '') or '').strip()
-                detail_key = str(cfg.get('detail_key', '') or '').strip()
-                detail_path = cfg.get('detail_path', []) if isinstance(cfg, dict) else []
-                occurrence = int(cfg.get('occurrence', 0) or 0)
+        for extra_idx, cfg in enumerate(self._analyze_custom_columns):
+            col = 6 + extra_idx
+            item = table.item(row, col)
+            if item is None:
+                item = QTableWidgetItem()
+                table.setItem(row, col, item)
+            field = str(cfg.get('field', '') or '').strip()
+            detail_query = str(cfg.get('detail_query', '') or '').strip()
+            detail_key = str(cfg.get('detail_key', '') or '').strip()
+            detail_path = cfg.get('detail_path', []) if isinstance(cfg, dict) else []
+            occurrence = int(cfg.get('occurrence', 0) or 0)
+            value_cache_key = (
+                field.casefold(),
+                int(occurrence),
+                detail_query.casefold(),
+                detail_key.casefold(),
+                tuple(self._stable_detail_path(detail_path)),
+            )
+            metadata = getattr(record, 'metadata', {}) if record else {}
+            cached_value = None
+            if isinstance(metadata, dict):
+                value_cache = metadata.setdefault('_custom_column_value_cache', {})
+                if isinstance(value_cache, dict):
+                    cached_value = value_cache.get(value_cache_key, None)
+
+            if cached_value is None:
                 value = self._extract_field_value_for_column(record, field, occurrence) if field else ''
                 if not value and detail_query:
                     value = self._extract_detail_values_for_column(record, detail_query, detail_key=detail_key, detail_path=detail_path)
-                if not value and (detail_key or detail_query):
-                    try:
-                        nodes = self._display_filter_helper._detail_nodes(record)
-                    except Exception:
-                        nodes = []
-                    dk = detail_key.casefold()
-                    dq = detail_query.casefold()
-                    for node in nodes:
-                        if not isinstance(node, dict):
-                            continue
-                        nkey = str(node.get('key', '') or '').strip().casefold()
-                        ntitle = str(node.get('title', '') or '').strip().casefold()
-                        nval = str(node.get('value', '') or '').strip()
-                        if dk and nkey != dk:
-                            continue
-                        if dq and dq not in nkey and dq not in ntitle:
-                            continue
-                        if nval:
-                            value = nval
-                            break
-                item.setText(str(value or ''))
-            info_item = table.item(row, info_col)
-            if info_item is None:
-                info_item = QTableWidgetItem()
-                table.setItem(row, info_col, info_item)
-            info_item.setText(str(getattr(record, 'info', '') or ''))
+                if isinstance(metadata, dict):
+                    value_cache = metadata.setdefault('_custom_column_value_cache', {})
+                    if isinstance(value_cache, dict):
+                        value_cache[value_cache_key] = str(value or '')
+            else:
+                value = str(cached_value or '')
+
+            text = str(value or '')
+            if item.text() != text:
+                item.setText(text)
+        info_item = table.item(row, info_col)
+        if info_item is None:
+            info_item = QTableWidgetItem()
+            table.setItem(row, info_col, info_item)
+        info_item.setText(str(getattr(record, 'info', '') or ''))
+
+    def _on_records_refined_rows(self, rows):
+        if not rows:
+            return
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        start, end = self._visible_table_row_range()
+        if start < 0 or end < start:
+            return
+        visible_rows = set(range(start, end + 1))
+        filtered = []
+        for row in rows:
+            try:
+                idx = int(row)
+            except Exception:
+                continue
+            if idx in visible_rows:
+                filtered.append(idx)
+        if filtered:
+            self._schedule_custom_column_refresh(filtered, replace=False)
+
+    def _schedule_custom_column_fit(self, delay_ms: int = 120):
+        if self._custom_column_fit_timer is not None:
+            try:
+                self._custom_column_fit_timer.stop()
+            except Exception:
+                pass
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._fit_all_custom_columns)
+        timer.start(max(0, int(delay_ms)))
+        self._custom_column_fit_timer = timer
 
     def _fit_custom_column_width(self, column: int):
         cv = self.capture_view
@@ -6385,39 +6535,7 @@ class ApplicationWindow(QMainWindow):
         table = cv.table
         if column < 0 or column >= table.columnCount():
             return
-        info_col = 6 + len(self._analyze_custom_columns)
-        if info_col < 0 or info_col >= table.columnCount():
-            info_col = table.columnCount() - 1
-        min_info_width = 360
-        min_custom_width = 72
-        max_custom_width = 180
-
-        table.resizeColumnToContents(column)
-        width = table.columnWidth(column)
-        if width <= 0:
-            width = 120
-        desired = max(min_custom_width, min(width + 10, max_custom_width))
-
-        viewport_width = table.viewport().width() if table.viewport() is not None else table.width()
-        if viewport_width <= 0:
-            viewport_width = table.width()
-
-        if viewport_width > 0 and info_col != column:
-            occupied = 0
-            for idx in range(table.columnCount()):
-                if idx == column or table.isColumnHidden(idx):
-                    continue
-                cur_width = int(table.columnWidth(idx) or 0)
-                if idx == info_col:
-                    cur_width = max(min_info_width, cur_width)
-                occupied += max(0, cur_width)
-            # Keep a small buffer for scrollbar/padding.
-            budget = max(min_custom_width, viewport_width - occupied - 24)
-            desired = min(desired, budget)
-
-        table.setColumnWidth(column, max(min_custom_width, int(desired)))
-        if info_col >= 0 and info_col < table.columnCount():
-            table.setColumnWidth(info_col, max(min_info_width, table.columnWidth(info_col) or min_info_width))
+        table.setColumnWidth(column, self._custom_column_default_width(table))
 
     def _load_display_filter_macros(self) -> list[dict]:
         settings = QSettings('Packetra', 'Packetra')
@@ -6749,7 +6867,7 @@ class ApplicationWindow(QMainWindow):
             'detail_key': detail_key,
             'detail_path': detail_path,
             'occurrence': 0,
-            'alignment': 'Right',
+            'alignment': 'Left',
             'displayed': True,
         })
         self._save_analyze_custom_columns()
@@ -6757,15 +6875,6 @@ class ApplicationWindow(QMainWindow):
         self._ensure_analyze_custom_columns_applied()
         if self.capture_view:
             self.capture_view.apply_display_filter()
-            new_col = 6 + len(self._analyze_custom_columns) - 1
-
-            def _finalize_custom_column_render():
-                self._refresh_analyze_custom_column_cells()
-                self._fit_custom_column_width(new_col)
-
-            # Re-render current visible rows immediately so values appear without re-selecting packets.
-            _finalize_custom_column_render()
-            QTimer.singleShot(0, _finalize_custom_column_render)
 
     def _conversation_filter_expression_for_mode(self, mode: str):
         cv = self.capture_view
@@ -7245,7 +7354,6 @@ class ApplicationWindow(QMainWindow):
     def _on_capture_status_changed(self, status):
         """Cap nhat trang thai capture/statusbar."""
         status_text = str(status or '')
-        self._refresh_analyze_custom_column_cells()
         self._refresh_status_metrics()
         self._sync_capture_buttons()
         self._refresh_go_menu_state()
@@ -7270,8 +7378,37 @@ class ApplicationWindow(QMainWindow):
             self._update_toolbar_state('capture')
 
     def _on_display_filter_applied(self):
+        cv = self.capture_view
+        if cv and hasattr(cv, 'is_bulk_loading') and cv.is_bulk_loading():
+            self._fit_all_custom_columns()
+            row_count = int(cv.table.rowCount() or 0) if hasattr(cv, 'table') else 0
+            if row_count > 0 and row_count <= 50:
+                self._refresh_analyze_custom_column_cells_blocking()
+                return
+            self._refresh_analyze_custom_column_cells()
+            return
         self._refresh_analyze_custom_column_cells()
-        self._fit_all_custom_columns()
+
+    def _refresh_analyze_custom_column_cells_blocking(self):
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        table = cv.table
+        if table.columnCount() < 7 + len(self._analyze_custom_columns):
+            return
+        row_count = int(table.rowCount() or 0)
+        visible_count = len(cv.visible_indices)
+        if row_count <= 0 or visible_count <= 0:
+            return
+        max_rows = min(row_count, visible_count)
+        self._custom_column_refresh_pending_rows = deque()
+        self._custom_column_refresh_generation += 1
+        table.setUpdatesEnabled(False)
+        try:
+            for row in range(max_rows):
+                self._refresh_analyze_custom_columns_for_row(row)
+        finally:
+            table.setUpdatesEnabled(True)
 
     def _refresh_status_metrics(self):
         dropped = 0

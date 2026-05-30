@@ -4,6 +4,7 @@ import os
 import json
 import hashlib
 import time
+import itertools
 import threading
 import queue
 from datetime import datetime
@@ -196,7 +197,7 @@ class CaptureView(QWidget):
     find_panel_visibility_changed = Signal(bool)
     detail_status_changed = Signal(str, int)
     display_filter_applied = Signal()
-    records_refined = Signal()
+    records_refined = Signal(object)
     open_packet_window_requested = Signal()
     go_state_changed = Signal(dict)
 
@@ -256,10 +257,25 @@ class CaptureView(QWidget):
         self._auto_output_base_path = ''
         self._rollover_file_counter = 0
         self._refine_thread = None
-        self._refine_queue = queue.Queue()
+        self._refine_queue = queue.Queue(maxsize=1024)
         self._refine_stop = threading.Event()
+        self._visible_row_lookup = {}
+        self._refine_max_rows_per_tick = 80
+        self._refine_max_tick_seconds = 0.006
+        self._is_bulk_loading = False
+        self._file_load_thread = None
+        self._file_load_queue = queue.Queue(maxsize=128)
+        self._file_load_stop = threading.Event()
+        self._file_load_timer = QTimer(self)
+        self._file_load_timer.setInterval(16)
+        self._file_load_timer.timeout.connect(self._drain_file_load_queue)
+        self._file_load_filter_expr = ''
+        self._file_load_requires_filter_rebuild = False
+        self._file_load_loaded_count = 0
+        self._file_load_last_status_count = 0
+        self._file_load_error_message = ''
         self._refine_timer = QTimer(self)
-        self._refine_timer.setInterval(30)
+        self._refine_timer.setInterval(16)
         self._refine_timer.timeout.connect(self._drain_refine_queue)
 
         self._build_ui()
@@ -268,6 +284,15 @@ class CaptureView(QWidget):
 
     def _settings(self):
         return QSettings('Packetra', 'Packetra')
+
+    def is_bulk_loading(self) -> bool:
+        return bool(self._is_bulk_loading)
+
+    def _reset_visible_row_lookup(self):
+        self._visible_row_lookup = {}
+
+    def _rebuild_visible_row_lookup(self):
+        self._visible_row_lookup = {int(rec_idx): int(row) for row, rec_idx in enumerate(self.visible_indices)}
 
     def _configure_parser_capture_context(self, parser: PacketParser, capture_path: str):
         if parser is None:
@@ -426,8 +451,11 @@ class CaptureView(QWidget):
         self.iface_display_name = iface_display_name
         self.capture_filter = capture_filter
         self.stop_capture()
+        self._stop_file_load_thread()
+        self._is_bulk_loading = False
         self.records.clear()
         self.visible_indices.clear()
+        self._reset_visible_row_lookup()
         self.table.setRowCount(0)
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
@@ -1808,12 +1836,15 @@ class CaptureView(QWidget):
 
 
     def clear_packets(self, reset_file_path: bool = False):
+        self._stop_file_load_thread()
+        self._is_bulk_loading = False
         self._stop_refine_thread()
         self._show_file_format_view = False
         self._file_format_record = None
         self._file_format_raw_bytes = b''
         self.records.clear()
         self.visible_indices.clear()
+        self._reset_visible_row_lookup()
         self._selected_record_index = -1
         self._packet_history = []
         self._history_index = -1
@@ -1852,6 +1883,171 @@ class CaptureView(QWidget):
             except Exception:
                 break
 
+    def _stop_file_load_thread(self):
+        self._file_load_stop.set()
+        self._file_load_timer.stop()
+        try:
+            if self._file_load_thread is not None and self._file_load_thread.is_alive():
+                self._file_load_thread.join(timeout=0.2)
+        except Exception:
+            pass
+        self._file_load_thread = None
+        self._file_load_stop = threading.Event()
+        self._file_load_filter_expr = ''
+        self._file_load_requires_filter_rebuild = False
+        self._file_load_loaded_count = 0
+        self._file_load_last_status_count = 0
+        self._file_load_error_message = ''
+        while True:
+            try:
+                self._file_load_queue.get_nowait()
+            except Exception:
+                break
+
+    def _enqueue_file_load_item(self, item, stop_event: threading.Event) -> bool:
+        while not stop_event.is_set():
+            try:
+                self._file_load_queue.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _start_background_file_load(self, packet_iter, start_index: int, display_expr: str, no_filter: bool):
+        self._stop_file_load_thread()
+        self._file_load_filter_expr = str(display_expr or '')
+        self._file_load_requires_filter_rebuild = False
+        self._file_load_loaded_count = max(0, int(start_index) - 1)
+        self._file_load_last_status_count = self._file_load_loaded_count
+        self._file_load_error_message = ''
+        self._is_bulk_loading = True
+        stop_event = self._file_load_stop
+
+        def worker():
+            parser = PacketParser()
+            self._configure_parser_capture_context(parser, str(self.loaded_file_path or ''))
+            matcher = DisplayFilter()
+            index = max(0, int(start_index) - 1)
+            batch = []
+            batch_size = 400
+            try:
+                for packet in packet_iter:
+                    if stop_event.is_set():
+                        break
+                    index += 1
+                    try:
+                        record = parser.parse_fast(packet, index)
+                    except Exception:
+                        continue
+                    matched = bool(no_filter) or bool(matcher.matches(record, display_expr))
+                    batch.append((record, matched))
+                    if len(batch) >= batch_size:
+                        payload = list(batch)
+                        batch.clear()
+                        if not self._enqueue_file_load_item(('batch', payload), stop_event):
+                            return
+                if batch and not stop_event.is_set():
+                    if not self._enqueue_file_load_item(('batch', list(batch)), stop_event):
+                        return
+                self._enqueue_file_load_item(('done', index), stop_event)
+            except Exception as exc:
+                self._enqueue_file_load_item(('error', str(exc or 'unknown load error')), stop_event)
+                self._enqueue_file_load_item(('done', index), stop_event)
+
+        self._file_load_thread = threading.Thread(target=worker, daemon=True)
+        self._file_load_thread.start()
+        self._file_load_timer.start()
+
+    def _consume_loaded_batch(self, batch):
+        if not batch:
+            return
+        current_expr = self._expand_display_filter_macros(self.display_filter_input.text())
+        filter_unchanged = current_expr == self._file_load_filter_expr
+        append_visible = []
+
+        for record, matched in batch:
+            applied = self._apply_capture_metadata_to_record(record, int(getattr(record, 'number', 0) or 0))
+            self.records.append(applied)
+            rec_idx = len(self.records) - 1
+            if filter_unchanged:
+                if bool(matched):
+                    self.visible_indices.append(rec_idx)
+                    append_visible.append(applied)
+            else:
+                self._file_load_requires_filter_rebuild = True
+
+        self._file_load_loaded_count = len(self.records)
+        if filter_unchanged and append_visible:
+            start_row = len(self.visible_indices) - len(append_visible)
+            self.table.setUpdatesEnabled(False)
+            try:
+                self.table.append_records(append_visible)
+            finally:
+                self.table.setUpdatesEnabled(True)
+            for rel, rec in enumerate(append_visible):
+                row = start_row + rel
+                rec_idx = self.visible_indices[row]
+                self._visible_row_lookup[int(rec_idx)] = int(row)
+        if self.table.rowCount() > 0 and self.table.currentRow() < 0:
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
+            self.table.setFocus()
+
+    def _finalize_background_file_load(self):
+        self._file_load_timer.stop()
+        self._file_load_thread = None
+        self._is_bulk_loading = False
+        self._set_dirty(False)
+        self._remember_recent_file(self.loaded_file_path)
+        self._rebuild_visible_row_lookup()
+        if self.table.rowCount() > 0 and self.table.currentRow() < 0:
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
+            self.table.setFocus()
+        if self._file_load_requires_filter_rebuild:
+            self.apply_display_filter()
+        else:
+            self.display_filter_applied.emit()
+            self._emit_go_state_changed()
+        self._start_refine_thread()
+        warning = str(self._file_load_error_message or '').strip()
+        if warning:
+            self._update_status(f'Loaded {len(self.records)} packets with warning: {warning}')
+        else:
+            self._update_status(f'Loaded {len(self.records)} packets from {self.loaded_file_path}')
+
+    def _drain_file_load_queue(self):
+        done = False
+        start = time.perf_counter()
+        max_batches = 4
+        processed_batches = 0
+        while processed_batches < max_batches and (time.perf_counter() - start) < 0.010:
+            try:
+                item = self._file_load_queue.get_nowait()
+            except Exception:
+                break
+            if not item:
+                continue
+            kind = str(item[0] or '')
+            if kind == 'batch':
+                self._consume_loaded_batch(item[1])
+                processed_batches += 1
+                continue
+            if kind == 'error':
+                self._file_load_error_message = str(item[1] or '')
+                continue
+            if kind == 'done':
+                done = True
+                break
+
+        loaded = int(self._file_load_loaded_count or len(self.records))
+        if loaded - int(self._file_load_last_status_count or 0) >= 500:
+            self._file_load_last_status_count = loaded
+            self._update_status(f'Loaded {loaded} packets...')
+
+        if done:
+            self._finalize_background_file_load()
+
     def _start_refine_thread(self):
         self._stop_refine_thread()
         if not self.records:
@@ -1866,15 +2062,29 @@ class CaptureView(QWidget):
             parser = PacketParser()
             self._configure_parser_capture_context(parser, str(self.loaded_file_path or ''))
             parsed_by_frame = {}
+
+            def _enqueue(item):
+                while not stop_event.is_set():
+                    try:
+                        out_q.put(item, timeout=0.05)
+                        return True
+                    except queue.Full:
+                        continue
+                return False
+
             for idx, fast_record in enumerate(snapshot):
                 if stop_event.is_set():
                     break
+                metadata = getattr(fast_record, 'metadata', {}) or {}
+                if bool(metadata.get('full_preloaded', False)):
+                    continue
                 try:
                     full_record = parser.parse(fast_record.raw, int(fast_record.number), fast_record.iface)
                 except Exception:
                     continue
                 parsed_by_frame[int(full_record.number)] = full_record
-                out_q.put((idx, full_record))
+                if not _enqueue((idx, full_record)):
+                    break
                 segments = list(full_record.metadata.get('tcp_reassembled_segments', []) or [])
                 if len(segments) > 1:
                     for segment in segments[:-1]:
@@ -1882,8 +2092,9 @@ class CaptureView(QWidget):
                         seg_idx = index_by_frame.get(seg_frame, -1)
                         seg_record = parsed_by_frame.get(seg_frame)
                         if seg_idx >= 0 and seg_record is not None:
-                            out_q.put((seg_idx, seg_record))
-            out_q.put((-1, None))
+                            if not _enqueue((seg_idx, seg_record)):
+                                break
+            _enqueue((-1, None))
 
         self._refine_thread = threading.Thread(target=worker, daemon=True)
         self._refine_thread.start()
@@ -1904,15 +2115,22 @@ class CaptureView(QWidget):
 
     def _drain_refine_queue(self):
         processed = 0
-        visible_row_by_index = {rec_idx: row for row, rec_idx in enumerate(self.visible_indices)}
-        while processed < 300:
+        started = time.perf_counter()
+        visible_row_by_index = self._visible_row_lookup
+        pending_row_updates = []
+        changed_rows = set()
+        selected_refresh_record = None
+        reached_end = False
+        while processed < int(self._refine_max_rows_per_tick):
+            if (time.perf_counter() - started) >= float(self._refine_max_tick_seconds):
+                break
             try:
                 idx, full_record = self._refine_queue.get_nowait()
             except Exception:
                 break
             if idx == -1:
-                self._refine_timer.stop()
-                return
+                reached_end = True
+                break
             if full_record is None or idx < 0 or idx >= len(self.records):
                 continue
             applied = self._apply_capture_metadata_to_record(full_record, int(full_record.number))
@@ -1920,14 +2138,26 @@ class CaptureView(QWidget):
             # Update row only if currently visible.
             row = visible_row_by_index.get(idx, -1)
             if row >= 0:
-                self._update_table_row_from_record(row, applied)
+                pending_row_updates.append((int(row), applied))
+                changed_rows.add(int(row))
             if idx == self._selected_record_index:
-                # Selected packet should refresh as soon as full parse is available.
-                self.details_tree.show_packet(applied)
-                self.hex_view.show_packet(applied)
+                selected_refresh_record = applied
             processed += 1
-        if processed > 0:
-            self.records_refined.emit()
+        if pending_row_updates:
+            self.table.setUpdatesEnabled(False)
+            try:
+                for row, record in pending_row_updates:
+                    self._update_table_row_from_record(row, record)
+            finally:
+                self.table.setUpdatesEnabled(True)
+        if selected_refresh_record is not None:
+            # Selected packet should refresh as soon as full parse is available.
+            self.details_tree.show_packet(selected_refresh_record)
+            self.hex_view.show_packet(selected_refresh_record)
+        if processed > 0 and changed_rows:
+            self.records_refined.emit(sorted(changed_rows))
+        if reached_end:
+            self._refine_timer.stop()
 
     def _rollover_live_output_if_needed(self):
         output = self.output_settings or {}
@@ -1953,6 +2183,7 @@ class CaptureView(QWidget):
         # Switch GUI packet list to the new active file: clear old file packets from table.
         self.records.clear()
         self.visible_indices.clear()
+        self._reset_visible_row_lookup()
         self.table.setRowCount(0)
         self.details_tree.show_packet(None)
         self.hex_view.show_packet(None)
@@ -2003,6 +2234,7 @@ class CaptureView(QWidget):
 
         if self.realtime_update_enabled and self.display_filter.matches(record, self.display_filter_input.text()):
             self.visible_indices.append(len(self.records) - 1)
+            self._visible_row_lookup[int(len(self.records) - 1)] = int(len(self.visible_indices) - 1)
             self.table.append_record(record)
             if self.auto_scroll_enabled:
                 self.table.scrollToBottom()
@@ -2062,6 +2294,7 @@ class CaptureView(QWidget):
     def apply_display_filter(self):
         if self._show_file_format_view and self._file_format_record is not None:
             self.table.replace_records([self._file_format_record])
+            self._reset_visible_row_lookup()
             self._update_status('File format mode is active')
             self.display_filter_applied.emit()
             self._emit_go_state_changed()
@@ -2076,6 +2309,7 @@ class CaptureView(QWidget):
             if self.display_filter.matches(record, expr):
                 self.visible_indices.append(idx)
                 visible_records.append(record)
+        self._rebuild_visible_row_lookup()
         self.table.replace_records(visible_records)
         self.table.set_color_rules_enabled(self.color_rules_enabled)
         self._refresh_all_visible_row_styles()
@@ -2247,21 +2481,31 @@ class CaptureView(QWidget):
         if not filename:
             return
         self.stop_capture()
-        self._set_packet_panes_visible(False)
-        self._set_packet_panes_updates_enabled(False)
+        self._stop_file_load_thread()
+        self._is_bulk_loading = True
         try:
             self.clear_packets(reset_file_path=False)
+            self._is_bulk_loading = True
             self.loaded_file_path = filename
             self._configure_parser_capture_context(self.parser, filename)
             self.capture_metadata = load_capture_metadata(filename)
-            display_expr = self.display_filter_input.text().strip()
+            display_expr = self._expand_display_filter_macros(self.display_filter_input.text())
+            if display_expr != str(self.display_filter_input.text() or ''):
+                self.display_filter_input.setText(display_expr)
             no_filter = (display_expr == '')
-            batch_size = 5000
+            full_preload_count = 50
             loaded = 0
             batch_new_visible = []
+            first_remaining_packet = None
+            packet_iter = iter_pcap_packets(filename)
 
-            for idx, packet in enumerate(iter_pcap_packets(filename), start=1):
-                record = self.parser.parse_fast(packet, idx)
+            for idx, packet in enumerate(packet_iter, start=1):
+                if idx > full_preload_count:
+                    first_remaining_packet = packet
+                    break
+                record = self.parser.parse(packet, idx)
+                if isinstance(getattr(record, 'metadata', None), dict):
+                    record.metadata['full_preloaded'] = True
                 record = self._apply_capture_metadata_to_record(record, idx)
                 self.records.append(record)
                 loaded = idx
@@ -2273,39 +2517,45 @@ class CaptureView(QWidget):
                     self.visible_indices.append(idx - 1)
                     batch_new_visible.append(record)
 
-                if loaded % batch_size == 0:
-                    if batch_new_visible:
-                        self.table.setUpdatesEnabled(False)
-                        self.table.append_records(batch_new_visible)
-                        self.table.setUpdatesEnabled(True)
-                        batch_new_visible.clear()
-                    self._update_status(f'Loaded {loaded} packets...')
-                    QApplication.processEvents()
-
             if batch_new_visible:
                 self.table.setUpdatesEnabled(False)
-                self.table.append_records(batch_new_visible)
-                self.table.setUpdatesEnabled(True)
-                batch_new_visible.clear()
+                try:
+                    self.table.append_records(batch_new_visible)
+                finally:
+                    self.table.setUpdatesEnabled(True)
+            batch_new_visible.clear()
 
-            self._set_dirty(False)
-            if not no_filter:
-                self.apply_display_filter()
+            self._rebuild_visible_row_lookup()
             if self.visible_indices:
                 self.table.selectRow(0)
                 self.table.setCurrentCell(0, 0)
                 self.table.setFocus()
-            self._start_refine_thread()
             self.display_filter_applied.emit()
-            self._remember_recent_file(self.loaded_file_path)
-            self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')
+            self._emit_go_state_changed()
+            self._update_status(f'Loaded {loaded} packets...')
+            QApplication.processEvents()
+
+            if first_remaining_packet is None:
+                self._set_dirty(False)
+                self._start_refine_thread()
+                self._remember_recent_file(self.loaded_file_path)
+                self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')
+                return
+
+            remaining_packets = itertools.chain([first_remaining_packet], packet_iter)
+            self._start_background_file_load(
+                packet_iter=remaining_packets,
+                start_index=loaded + 1,
+                display_expr=display_expr,
+                no_filter=no_filter,
+            )
         finally:
-            self._set_packet_panes_updates_enabled(True)
-            self._set_packet_panes_visible(True)
+            if self._file_load_thread is None or not self._file_load_thread.is_alive():
+                self._is_bulk_loading = False
 
     def _parse_next_batch(self, initial=False):
         # Legacy incremental loader kept for compatibility.
-        # File loading now uses 1000-packet batches in _load_capture_from_path.
+        # File loading now uses foreground preload + background worker.
         return
 
     def load_file(self, file_path: str = ''):
