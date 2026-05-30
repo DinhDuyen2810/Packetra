@@ -104,9 +104,9 @@ class ConversationsDialog(QDialog):
 
         for record in self.packets:
             try:
-                packet = record.raw
-                pkt_len = int(record.length)
-                pkt_time = float(record.epoch_time)
+                packet = getattr(record, "raw", None)
+                pkt_len = int(getattr(record, "length", 0) or 0)
+                pkt_time = float(getattr(record, "epoch_time", 0.0) or 0.0)
 
                 if packet is None:
                     continue
@@ -178,8 +178,8 @@ class ConversationsDialog(QDialog):
                     )
 
                 if packet.haslayer(TCP):
-                    src = ip_src or record.src
-                    dst = ip_dst or record.dst
+                    src = ip_src or str(getattr(record, "src", "") or "")
+                    dst = ip_dst or str(getattr(record, "dst", "") or "")
                     sport = int(packet[TCP].sport)
                     dport = int(packet[TCP].dport)
                     self._accumulate_entry(
@@ -199,8 +199,8 @@ class ConversationsDialog(QDialog):
                     )
 
                 if packet.haslayer(UDP):
-                    src = ip_src or record.src
-                    dst = ip_dst or record.dst
+                    src = ip_src or str(getattr(record, "src", "") or "")
+                    dst = ip_dst or str(getattr(record, "dst", "") or "")
                     sport = int(packet[UDP].sport)
                     dport = int(packet[UDP].dport)
                     self._accumulate_entry(

@@ -11,7 +11,7 @@ import time
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QSettings
+from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QMenuBar, QToolBar, QLabel, QMenu, QMessageBox, QFileDialog,
@@ -19,13 +19,14 @@ from PySide6.QtWidgets import (
     QHeaderView, QPushButton, QTextEdit, QInputDialog, QGridLayout, QScrollArea,
     QFrame, QTextBrowser, QTabWidget, QCheckBox, QSpinBox, QLineEdit, QComboBox,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup,
-    QListWidget, QSplitter
+    QListWidget, QSplitter, QGraphicsView, QGraphicsScene
 )
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont
+from PySide6.QtGui import QAction, QCursor, QFontMetrics, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QColorDialog, QFontDialog
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
-from scapy.all import IP, IPv6, TCP, UDP
+from scapy.all import ARP, DNS, Ether, IP, IPv6, TCP, UDP
 from core.filtering import DisplayFilter
+from core.formatters import get_mac_vendor
 
 from gui.interface_selector_view import InterfaceSelectorView
 from gui.capture_view import CaptureView
@@ -2355,15 +2356,15 @@ class ApplicationWindow(QMainWindow):
 
         # Statistics menu
         self.action_capture_file_properties.triggered.connect(self._on_open_capture_properties)
-        self.action_resolved_addresses.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Resolved Addresses'))
-        self.action_protocol_hierarchy.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Protocol Hierarchy'))
+        self.action_resolved_addresses.triggered.connect(self._on_statistics_resolved_addresses)
+        self.action_protocol_hierarchy.triggered.connect(self._on_statistics_protocol_hierarchy)
         self.action_conversations.triggered.connect(self._on_conversations)
-        self.action_endpoints.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Endpoints'))
-        self.action_packet_lengths.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Packet Lengths'))
-        self.action_flow_graph.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > Flow Graph'))
-        self.action_http_statistics.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > HTTP'))
-        self.action_ipv4_statistics.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > IPv4 Statistics'))
-        self.action_ipv6_statistics.triggered.connect(lambda: self._on_menu_feature_placeholder('Statistics > IPv6 Statistics'))
+        self.action_endpoints.triggered.connect(self._on_statistics_endpoints)
+        self.action_packet_lengths.triggered.connect(self._on_statistics_packet_lengths)
+        self.action_flow_graph.triggered.connect(self._on_statistics_flow_graph)
+        self.action_http_statistics.triggered.connect(self._on_statistics_http)
+        self.action_ipv4_statistics.triggered.connect(self._on_statistics_ipv4)
+        self.action_ipv6_statistics.triggered.connect(self._on_statistics_ipv6)
 
         # Advanced Analysis
         self.action_advanced_dashboard.triggered.connect(lambda: self._on_advanced_analysis_action('Dashboard'))
@@ -7299,6 +7300,1735 @@ class ApplicationWindow(QMainWindow):
         if self.capture_view:
             self.capture_view.show_summary()
 
+    def _statistics_scope_records(self, limit_to_display_filter: bool) -> list:
+        cv = self.capture_view
+        if not cv:
+            return []
+        if not bool(limit_to_display_filter):
+            return list(cv.records)
+        rows = []
+        for idx in cv.visible_indices:
+            if 0 <= idx < len(cv.records):
+                rows.append(cv.records[idx])
+        return rows
+
+    def _statistics_make_table(self, columns: list[str], rows: list[dict]) -> QTableWidget:
+        table = QTableWidget()
+        table.setColumnCount(len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._statistics_fill_table(table, columns, rows)
+        return table
+
+    def _statistics_fill_table(self, table: QTableWidget, columns: list[str], rows: list[dict]):
+        table.setRowCount(len(rows))
+        table._stats_rows = list(rows)
+        for r, row in enumerate(rows):
+            for c, col in enumerate(columns):
+                val = row.get(col, '') if isinstance(row, dict) else ''
+                item = QTableWidgetItem(str(val))
+                table.setItem(r, c, item)
+
+    def _statistics_copy_rows(self, columns: list[str], rows: list[dict]):
+        lines = ['\t'.join(columns)]
+        for row in rows:
+            lines.append('\t'.join(str(row.get(col, '')) for col in columns))
+        QApplication.clipboard().setText('\n'.join(lines))
+
+    def _statistics_export_rows_csv(self, title: str, columns: list[str], rows: list[dict]):
+        base_name = re.sub(r'[^A-Za-z0-9]+', '_', str(title or 'statistics').strip()).strip('_').lower() or 'statistics'
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            f'Export {title}',
+            str(Path.cwd() / f'{base_name}.csv'),
+            'CSV Files (*.csv);;All Files (*)',
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as fh:
+                writer = csv.DictWriter(fh, fieldnames=columns)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({col: row.get(col, '') for col in columns})
+        except Exception as exc:
+            QMessageBox.critical(self, title, f'Cannot export CSV:\n{exc}')
+
+    def _statistics_current_row(self, table: QTableWidget) -> dict:
+        row = int(table.currentRow())
+        rows = getattr(table, '_stats_rows', [])
+        if 0 <= row < len(rows):
+            return rows[row]
+        return {}
+
+    def _protocol_filter_token(self, protocol_name: str) -> str:
+        raw = str(protocol_name or '').strip().casefold()
+        if not raw:
+            return ''
+        mapping = {
+            'ipv4': 'ip',
+            'ipv6': 'ipv6',
+            'ethernet': 'eth',
+            'frame': 'frame',
+        }
+        if raw in mapping:
+            return mapping[raw]
+        token = raw.replace(' ', '').replace('/', '').replace('-', '')
+        aliases = {str(v).casefold() for v in getattr(DisplayFilter, 'PROTOCOL_ALIASES', set())}
+        return token if token in aliases else ''
+
+    def _stats_rate_ms(self, count: int, duration_sec: float) -> float:
+        if duration_sec <= 0:
+            return 0.0
+        return float(count) / (duration_sec * 1000.0)
+
+    def _stats_burst_rate(self, times: list[float], window_sec: float = 0.1) -> tuple[float, float]:
+        if not times:
+            return 0.0, 0.0
+        series = sorted(float(t) for t in times)
+        best = 0
+        best_start = series[0]
+        left = 0
+        for right, ts in enumerate(series):
+            while left <= right and ts - series[left] > window_sec:
+                left += 1
+            size = right - left + 1
+            if size > best:
+                best = size
+                best_start = series[left]
+        if window_sec <= 0:
+            return 0.0, best_start
+        return float(best) / (window_sec * 1000.0), best_start
+
+    def _on_statistics_resolved_addresses(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'Resolved Addresses', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Resolved Addresses')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        search_input = QLineEdit(dialog)
+        search_input.setPlaceholderText('Search MAC or vendor name')
+        top.addWidget(search_input, 1)
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        top.addWidget(limit_check)
+        layout.addLayout(top)
+
+        columns = ['Address', 'Name']
+        table = self._statistics_make_table(columns, [])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table, 1)
+
+        actions = QHBoxLayout()
+        refresh_btn = QPushButton('Refresh', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (refresh_btn, copy_btn, export_btn, close_btn):
+            actions.addWidget(btn)
+        layout.addLayout(actions)
+
+        def _build_rows() -> list[dict]:
+            records = self._statistics_scope_records(limit_check.isChecked())
+            by_oui = {}
+
+            def _ensure_vendor_bucket(mac_addr: str):
+                parts = [p for p in str(mac_addr or '').lower().split(':') if p]
+                if len(parts) < 6:
+                    return None, None, None
+                oui = ':'.join(parts[:3])
+                suffix = ':'.join(parts[3:])
+                vendor = str(get_mac_vendor(mac_addr) or '').strip()
+                if not vendor:
+                    return None, None, None
+                bucket = by_oui.get(oui)
+                if bucket is None:
+                    bucket = {'vendor': vendor, 'macs': set()}
+                    by_oui[oui] = bucket
+                bucket['macs'].add(':'.join(parts[:6]))
+                return oui, vendor, suffix
+
+            for rec in records:
+                raw = getattr(rec, 'raw', None)
+                if raw is not None and raw.haslayer(Ether):
+                    eth = raw[Ether]
+                    src_mac = str(getattr(eth, 'src', '') or '').lower()
+                    dst_mac = str(getattr(eth, 'dst', '') or '').lower()
+                    _ensure_vendor_bucket(src_mac)
+                    _ensure_vendor_bucket(dst_mac)
+
+            rows = []
+            for oui in sorted(by_oui.keys()):
+                bucket = by_oui[oui]
+                vendor = str(bucket.get('vendor', '') or '').strip()
+                if not vendor:
+                    continue
+                rows.append({'Address': oui, 'Name': vendor})
+                for mac_addr in sorted(bucket.get('macs', set())):
+                    parts = mac_addr.split(':')
+                    suffix = ':'.join(parts[3:6]) if len(parts) >= 6 else ''
+                    rows.append({'Address': mac_addr, 'Name': f'{vendor}_{suffix}' if suffix else vendor})
+
+            search_text = str(search_input.text() or '').strip().casefold()
+            if search_text:
+                rows = [
+                    r for r in rows
+                    if search_text in (f"{r.get('Address', '')} {r.get('Name', '')}").casefold()
+                ]
+            return rows
+
+        _scene_state = {'row_area_width': left_margin + lane_w + 90}
+
+        def _refresh():
+            rows = _build_rows()
+            self._statistics_fill_table(table, columns, rows)
+
+        refresh_btn.clicked.connect(_refresh)
+        search_input.textChanged.connect(lambda _v: _refresh())
+        limit_check.toggled.connect(lambda _v: _refresh())
+
+        def _copy_current():
+            self._statistics_copy_rows(columns, getattr(table, '_stats_rows', []))
+
+        def _export_current():
+            self._statistics_export_rows_csv('Resolved Addresses', columns, getattr(table, '_stats_rows', []))
+
+        copy_btn.clicked.connect(_copy_current)
+        export_btn.clicked.connect(_export_current)
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(860, 620)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_protocol_hierarchy(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'Protocol Hierarchy', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Protocol Hierarchy Statistics')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        top.addWidget(limit_check)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(refresh_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        tree = QTreeWidget(dialog)
+        tree.setColumnCount(10)
+        tree.setHeaderLabels([
+            'Protocol', 'Percent Packets', 'Packets', 'Percent Bytes', 'Bytes',
+            'Bits/s', 'End Packets', 'End Bytes', 'End Bits/s', 'PDUs'
+        ])
+        header = tree.header()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        tree.setColumnWidth(0, 560)
+        for col in range(1, 10):
+            tree.setColumnWidth(col, 88)
+        layout.addWidget(tree, 1)
+
+        filter_label = QLabel('Display filter: (none)', dialog)
+        layout.addWidget(filter_label)
+
+        bottom = QHBoxLayout()
+        apply_btn = QPushButton('Apply as Filter', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        bottom.addWidget(apply_btn)
+        bottom.addWidget(copy_btn)
+        bottom.addWidget(export_btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        layout.addLayout(bottom)
+
+        canonical = {
+            'frame': ('Frame', 'frame'),
+            'ether': ('Ethernet', 'eth'),
+            'ethernet': ('Ethernet', 'eth'),
+            'arp': ('Address Resolution Protocol', 'arp'),
+            'ip': ('Internet Protocol Version 4', 'ip'),
+            'ipv4': ('Internet Protocol Version 4', 'ip'),
+            'ipv6': ('Internet Protocol Version 6', 'ipv6'),
+            'tcp': ('Transmission Control Protocol', 'tcp'),
+            'udp': ('User Datagram Protocol', 'udp'),
+            'dns': ('Domain Name System', 'dns'),
+            'icmp': ('Internet Control Message Protocol', 'icmp'),
+            'icmpv6': ('Internet Control Message Protocol v6', 'icmpv6'),
+            'tls': ('Transport Layer Security', 'tls'),
+            'ssl': ('Transport Layer Security', 'tls'),
+            'http': ('Hypertext Transfer Protocol', 'http'),
+            'quic': ('QUIC', 'quic'),
+            'dhcp': ('Dynamic Host Configuration Protocol', 'dhcp'),
+        }
+
+        def _normalize_layer(layer_name: str) -> tuple[str, str]:
+            raw = str(layer_name or '').strip()
+            if not raw:
+                return 'Unknown', ''
+            key = raw.casefold()
+            if key in canonical:
+                return canonical[key]
+            if key.startswith('dns'):
+                return canonical['dns']
+            if key.startswith('http'):
+                return canonical['http']
+            token = re.sub(r'[^a-z0-9]+', '', key)
+            return raw, token
+
+        def _packet_layers(rec) -> list[tuple[str, str]]:
+            raw = getattr(rec, 'raw', None)
+            out = []
+            if raw is not None:
+                layer = raw
+                guard = 0
+                while layer is not None and guard < 64:
+                    guard += 1
+                    cls_name = str(layer.__class__.__name__ or '').strip()
+                    if not cls_name or cls_name == 'NoPayload':
+                        break
+                    out.append(_normalize_layer(cls_name))
+                    nxt = getattr(layer, 'payload', None)
+                    if nxt is None or nxt is layer:
+                        break
+                    layer = nxt
+            if not out:
+                for name in list(getattr(rec, 'layers', []) or []):
+                    out.append(_normalize_layer(name))
+            if not out:
+                out.append(_normalize_layer(str(getattr(rec, 'protocol', '') or 'Unknown')))
+            return out
+
+        def _iter_rows(root_item: QTreeWidgetItem):
+            rows = []
+
+            def _walk(item: QTreeWidgetItem, depth: int):
+                rows.append({
+                    'Protocol': ('  ' * depth) + item.text(0),
+                    'Percent Packets': item.text(1),
+                    'Packets': item.text(2),
+                    'Percent Bytes': item.text(3),
+                    'Bytes': item.text(4),
+                    'Bits/s': item.text(5),
+                    'End Packets': item.text(6),
+                    'End Bytes': item.text(7),
+                    'End Bits/s': item.text(8),
+                    'PDUs': item.text(9),
+                })
+                for idx in range(item.childCount()):
+                    _walk(item.child(idx), depth + 1)
+
+            _walk(root_item, 0)
+            return rows
+
+        def _refresh_tree():
+            records = self._statistics_scope_records(limit_check.isChecked())
+            tree.clear()
+            expr = ''
+            if self.capture_view and hasattr(self.capture_view, 'display_filter_input'):
+                expr = str(self.capture_view.display_filter_input.text() or '').strip()
+            filter_label.setText(f'Display filter: {expr or "(none)"}')
+            if not records:
+                return
+            total_packets = len(records)
+            total_bytes = max(1, sum(int(getattr(r, 'length', 0) or 0) for r in records))
+            duration = 0.0
+            if len(records) >= 2:
+                duration = max(0.0, float(records[-1].epoch_time) - float(records[0].epoch_time))
+
+            root = {
+                'children': {},
+                'packets': 0,
+                'bytes': 0,
+                'end_packets': 0,
+                'end_bytes': 0,
+                'pdus': 0,
+                'name': 'Frame',
+                'token': 'frame',
+            }
+
+            for rec in records:
+                pkt_len = int(getattr(rec, 'length', 0) or 0)
+                path = [('Frame', 'frame')] + _packet_layers(rec)
+                node = root
+                node['packets'] += 1
+                node['bytes'] += pkt_len
+                node['pdus'] += 1
+                seen_nodes = {id(node)}
+                for name, token in path[1:]:
+                    key = f'{name}|{token}'
+                    child = node['children'].get(key)
+                    if child is None:
+                        child = {
+                            'children': {},
+                            'packets': 0,
+                            'bytes': 0,
+                            'end_packets': 0,
+                            'end_bytes': 0,
+                            'pdus': 0,
+                            'name': name,
+                            'token': token,
+                        }
+                        node['children'][key] = child
+                    child['pdus'] += 1
+                    if id(child) not in seen_nodes:
+                        child['packets'] += 1
+                        child['bytes'] += pkt_len
+                        seen_nodes.add(id(child))
+                    node = child
+
+                node['end_packets'] += 1
+                node['end_bytes'] += pkt_len
+
+            def _append(parent_item, node):
+                item = QTreeWidgetItem(parent_item)
+                packets = int(node.get('packets', 0) or 0)
+                bytes_count = int(node.get('bytes', 0) or 0)
+                end_packets = int(node.get('end_packets', 0) or 0)
+                end_bytes = int(node.get('end_bytes', 0) or 0)
+                p_pct = (packets * 100.0 / total_packets) if total_packets > 0 else 0.0
+                b_pct = (bytes_count * 100.0 / total_bytes) if total_bytes > 0 else 0.0
+                bits_s = int((bytes_count * 8.0) / duration) if duration > 0 else 0
+                end_bits_s = int((end_bytes * 8.0) / duration) if duration > 0 else 0
+                item.setText(0, str(node.get('name', '') or 'Unknown'))
+                item.setText(1, f'{p_pct:.2f}')
+                item.setText(2, str(packets))
+                item.setText(3, f'{b_pct:.2f}')
+                item.setText(4, str(bytes_count))
+                item.setText(5, str(bits_s))
+                item.setText(6, str(end_packets))
+                item.setText(7, str(end_bytes))
+                item.setText(8, str(end_bits_s))
+                item.setText(9, str(int(node.get('pdus', 0) or 0)))
+                item.setData(0, Qt.UserRole, str(node.get('token', '') or ''))
+                for child_key in sorted(node.get('children', {}).keys(), key=lambda k: str(node['children'][k].get('name', '') or '')):
+                    _append(item, node['children'][child_key])
+
+            _append(tree, root)
+            tree.expandToDepth(1)
+
+        def _apply_selected_filter():
+            item = tree.currentItem()
+            if item is None:
+                return
+            token = str(item.data(0, Qt.UserRole) or '').strip() or self._protocol_filter_token(item.text(0))
+            if not token:
+                QMessageBox.information(dialog, 'Protocol Hierarchy', 'No display-filter token for selected protocol.')
+                return
+            self._set_display_filter_text(token, apply_now=True)
+
+        def _copy_tree():
+            root_item = tree.topLevelItem(0)
+            if root_item is None:
+                QApplication.clipboard().setText('')
+                return
+            rows = _iter_rows(root_item)
+            menu = QMenu(dialog)
+            action_csv = menu.addAction('Copy as CSV')
+            action_yaml = menu.addAction('Copy as YAML')
+            chosen = menu.exec(QCursor.pos())
+            if chosen is action_yaml:
+                lines = ['protocol_hierarchy:']
+                for row in rows:
+                    lines.append('  - protocol: "' + str(row['Protocol']).replace('"', '\\"') + '"')
+                    lines.append('    percent_packets: ' + str(row['Percent Packets']))
+                    lines.append('    packets: ' + str(row['Packets']))
+                    lines.append('    percent_bytes: ' + str(row['Percent Bytes']))
+                    lines.append('    bytes: ' + str(row['Bytes']))
+                    lines.append('    bits_per_s: ' + str(row['Bits/s']))
+                    lines.append('    end_packets: ' + str(row['End Packets']))
+                    lines.append('    end_bytes: ' + str(row['End Bytes']))
+                    lines.append('    end_bits_per_s: ' + str(row['End Bits/s']))
+                    lines.append('    pdus: ' + str(row['PDUs']))
+                QApplication.clipboard().setText('\n'.join(lines))
+                return
+
+            headers = ['Protocol', 'Percent Packets', 'Packets', 'Percent Bytes', 'Bytes', 'Bits/s', 'End Packets', 'End Bytes', 'End Bits/s', 'PDUs']
+            lines = [','.join(headers)]
+            for row in rows:
+                vals = [str(row[h]).replace('"', '""') for h in headers]
+                lines.append(','.join(f'"{v}"' for v in vals))
+            QApplication.clipboard().setText('\n'.join(lines))
+
+        refresh_btn.clicked.connect(_refresh_tree)
+        limit_check.toggled.connect(lambda _v: _refresh_tree())
+        apply_btn.clicked.connect(_apply_selected_filter)
+        copy_btn.clicked.connect(_copy_tree)
+        export_btn.clicked.connect(lambda: self._statistics_export_rows_csv(
+            'Protocol Hierarchy',
+            ['Protocol', 'Percent Packets', 'Packets', 'Percent Bytes', 'Bytes', 'Bits/s', 'End Packets', 'End Bytes', 'End Bits/s', 'PDUs'],
+            _iter_rows(tree.topLevelItem(0)) if tree.topLevelItem(0) is not None else [],
+        ))
+        close_btn.clicked.connect(dialog.accept)
+        _refresh_tree()
+        dialog.resize(1020, 640)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_endpoints(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'Endpoints', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Endpoints')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(limit_check)
+        top.addWidget(refresh_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        tabs = QTabWidget(dialog)
+        layout.addWidget(tabs, 1)
+
+        table_defs = {
+            'Ethernet': ['Address', 'Packets', 'Bytes', 'Tx Packets', 'Tx Bytes', 'Rx Packets', 'Rx Bytes'],
+            'IPv4': ['Address', 'Packets', 'Bytes', 'Tx Packets', 'Tx Bytes', 'Rx Packets', 'Rx Bytes'],
+            'IPv6': ['Address', 'Packets', 'Bytes', 'Tx Packets', 'Tx Bytes', 'Rx Packets', 'Rx Bytes'],
+            'TCP': ['Address', 'Port', 'Packets', 'Bytes', 'Tx Packets', 'Tx Bytes', 'Rx Packets', 'Rx Bytes'],
+            'UDP': ['Address', 'Port', 'Packets', 'Bytes', 'Tx Packets', 'Tx Bytes', 'Rx Packets', 'Rx Bytes'],
+        }
+        tables = {}
+        for name, cols in table_defs.items():
+            table = self._statistics_make_table(cols, [])
+            tabs.addTab(table, name)
+            tables[name] = table
+
+        bottom = QHBoxLayout()
+        apply_btn = QPushButton('Apply as Filter', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (apply_btn, copy_btn, export_btn):
+            bottom.addWidget(btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        layout.addLayout(bottom)
+
+        def _accumulate(stats_map, key, pkt_len, direction):
+            item = stats_map.get(key)
+            if item is None:
+                item = {'Packets': 0, 'Bytes': 0, 'Tx Packets': 0, 'Tx Bytes': 0, 'Rx Packets': 0, 'Rx Bytes': 0}
+                stats_map[key] = item
+            item['Packets'] += 1
+            item['Bytes'] += pkt_len
+            if direction == 'tx':
+                item['Tx Packets'] += 1
+                item['Tx Bytes'] += pkt_len
+            else:
+                item['Rx Packets'] += 1
+                item['Rx Bytes'] += pkt_len
+
+        def _refresh():
+            records = self._statistics_scope_records(limit_check.isChecked())
+            maps = {name: {} for name in table_defs.keys()}
+            for rec in records:
+                raw = getattr(rec, 'raw', None)
+                pkt_len = int(getattr(rec, 'length', 0) or 0)
+
+                if raw is not None and raw.haslayer(Ether):
+                    src = str(raw[Ether].src).lower()
+                    dst = str(raw[Ether].dst).lower()
+                    _accumulate(maps['Ethernet'], (src,), pkt_len, 'tx')
+                    _accumulate(maps['Ethernet'], (dst,), pkt_len, 'rx')
+                if raw is not None and raw.haslayer(IP):
+                    src = str(raw[IP].src)
+                    dst = str(raw[IP].dst)
+                    _accumulate(maps['IPv4'], (src,), pkt_len, 'tx')
+                    _accumulate(maps['IPv4'], (dst,), pkt_len, 'rx')
+                if raw is not None and raw.haslayer(IPv6):
+                    src = str(raw[IPv6].src)
+                    dst = str(raw[IPv6].dst)
+                    _accumulate(maps['IPv6'], (src,), pkt_len, 'tx')
+                    _accumulate(maps['IPv6'], (dst,), pkt_len, 'rx')
+
+                if raw is not None and raw.haslayer(TCP):
+                    if raw.haslayer(IP):
+                        src = str(raw[IP].src)
+                        dst = str(raw[IP].dst)
+                    elif raw.haslayer(IPv6):
+                        src = str(raw[IPv6].src)
+                        dst = str(raw[IPv6].dst)
+                    else:
+                        src = str(getattr(rec, 'src', '') or '')
+                        dst = str(getattr(rec, 'dst', '') or '')
+                    sport = int(getattr(raw[TCP], 'sport', 0) or 0)
+                    dport = int(getattr(raw[TCP], 'dport', 0) or 0)
+                    _accumulate(maps['TCP'], (src, sport), pkt_len, 'tx')
+                    _accumulate(maps['TCP'], (dst, dport), pkt_len, 'rx')
+
+                if raw is not None and raw.haslayer(UDP):
+                    if raw.haslayer(IP):
+                        src = str(raw[IP].src)
+                        dst = str(raw[IP].dst)
+                    elif raw.haslayer(IPv6):
+                        src = str(raw[IPv6].src)
+                        dst = str(raw[IPv6].dst)
+                    else:
+                        src = str(getattr(rec, 'src', '') or '')
+                        dst = str(getattr(rec, 'dst', '') or '')
+                    sport = int(getattr(raw[UDP], 'sport', 0) or 0)
+                    dport = int(getattr(raw[UDP], 'dport', 0) or 0)
+                    _accumulate(maps['UDP'], (src, sport), pkt_len, 'tx')
+                    _accumulate(maps['UDP'], (dst, dport), pkt_len, 'rx')
+
+            for tab_name, cols in table_defs.items():
+                rows = []
+                for key, vals in maps[tab_name].items():
+                    if tab_name in {'TCP', 'UDP'}:
+                        rows.append({'Address': key[0], 'Port': key[1], **vals})
+                    else:
+                        rows.append({'Address': key[0], **vals})
+                rows.sort(key=lambda r: (str(r.get('Address', '')), int(r.get('Port', 0) or 0)))
+                self._statistics_fill_table(tables[tab_name], cols, rows)
+
+        def _selected_table_and_columns():
+            name = tabs.tabText(tabs.currentIndex())
+            return name, tables[name], table_defs[name]
+
+        def _apply_as_filter():
+            tab_name, table, _cols = _selected_table_and_columns()
+            row = self._statistics_current_row(table)
+            if not row:
+                return
+            address = str(row.get('Address', '') or '').strip()
+            port = row.get('Port', None)
+            expr = ''
+            if tab_name == 'Ethernet':
+                expr = f'eth.addr == {address}'
+            elif tab_name == 'IPv4':
+                expr = f'ip.addr == {address}'
+            elif tab_name == 'IPv6':
+                expr = f'ipv6.addr == {address}'
+            elif tab_name == 'TCP' and port is not None:
+                expr = f'ip.addr == {address} && tcp.port == {int(port)}'
+            elif tab_name == 'UDP' and port is not None:
+                expr = f'ip.addr == {address} && udp.port == {int(port)}'
+            if expr:
+                self._set_display_filter_text(expr, apply_now=True)
+
+        def _copy_current():
+            _tab_name, table, cols = _selected_table_and_columns()
+            self._statistics_copy_rows(cols, getattr(table, '_stats_rows', []))
+
+        def _export_current():
+            tab_name, table, cols = _selected_table_and_columns()
+            self._statistics_export_rows_csv(f'Endpoints {tab_name}', cols, getattr(table, '_stats_rows', []))
+
+        refresh_btn.clicked.connect(_refresh)
+        limit_check.toggled.connect(lambda _v: _refresh())
+        apply_btn.clicked.connect(_apply_as_filter)
+        copy_btn.clicked.connect(_copy_current)
+        export_btn.clicked.connect(_export_current)
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(1180, 700)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_packet_lengths(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'Packet Lengths', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Packet Lengths')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(limit_check)
+        top.addWidget(refresh_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        tree = QTreeWidget(dialog)
+        tree.setColumnCount(9)
+        tree.setHeaderLabels(['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'])
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(tree, 1)
+
+        bottom = QHBoxLayout()
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        bottom.addWidget(copy_btn)
+        bottom.addWidget(export_btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        layout.addLayout(bottom)
+
+        buckets = [
+            (0, 19), (20, 39), (40, 79), (80, 159), (160, 319),
+            (320, 639), (640, 1279), (1280, 2559), (2560, 5119), (5120, None),
+        ]
+
+        def _bucket_label(lo: int, hi):
+            if hi is None:
+                return '5120 and greater'
+            return f'{lo}-{hi}'
+
+        def _set_stat_cells(item: QTreeWidgetItem, values: list[str]):
+            for idx, text in enumerate(values, start=1):
+                item.setText(idx, text)
+
+        def _refresh():
+            records = self._statistics_scope_records(limit_check.isChecked())
+            total_packets = len(records)
+            tree.clear()
+            lengths = [int(getattr(r, 'length', 0) or 0) for r in records]
+            times = [float(getattr(r, 'epoch_time', 0.0) or 0.0) for r in records]
+            duration = max(0.0, (max(times) - min(times))) if len(times) >= 2 else 0.0
+
+            root = QTreeWidgetItem(tree)
+            root.setText(0, 'Packet lengths')
+
+            total_avg = (sum(lengths) / len(lengths)) if lengths else 0.0
+            total_min = min(lengths) if lengths else 0
+            total_max = max(lengths) if lengths else 0
+            total_rate = self._stats_rate_ms(total_packets, duration)
+            total_burst, total_burst_start = self._stats_burst_rate(times)
+            _set_stat_cells(root, [
+                str(total_packets),
+                f'{total_avg:.2f}' if total_packets else '-',
+                str(total_min) if total_packets else '-',
+                str(total_max) if total_packets else '-',
+                f'{total_rate:.4f}',
+                '100%' if total_packets else '0%',
+                f'{total_burst:.4f}' if total_packets else '-',
+                f'{total_burst_start:.3f}' if total_packets else '-',
+            ])
+
+            for lo, hi in buckets:
+                if hi is None:
+                    vals = [v for v in lengths if v >= lo]
+                    tvals = [times[idx] for idx, v in enumerate(lengths) if v >= lo]
+                else:
+                    vals = [v for v in lengths if lo <= v <= hi]
+                    tvals = [times[idx] for idx, v in enumerate(lengths) if lo <= v <= hi]
+                count = len(vals)
+                avg = (float(sum(vals)) / count) if count > 0 else 0.0
+                mn = min(vals) if vals else 0
+                mx = max(vals) if vals else 0
+                rate = self._stats_rate_ms(count, duration)
+                pct = (count * 100.0 / total_packets) if total_packets > 0 else 0.0
+                burst_rate, burst_start = self._stats_burst_rate(tvals)
+                child = QTreeWidgetItem(root)
+                child.setText(0, _bucket_label(lo, hi))
+                _set_stat_cells(child, [
+                    str(count),
+                    f'{avg:.2f}' if count else '-',
+                    str(mn) if count else '-',
+                    str(mx) if count else '-',
+                    f'{rate:.4f}',
+                    f'{pct:.2f}%',
+                    f'{burst_rate:.4f}' if count else '-',
+                    f'{burst_start:.3f}' if count else '-',
+                ])
+
+            tree.expandAll()
+
+        refresh_btn.clicked.connect(_refresh)
+        limit_check.toggled.connect(lambda _v: _refresh())
+
+        def _copy_tree():
+            lines = ['Topic / Item\tCount\tAverage\tMin Val\tMax Val\tRate (ms)\tPercent\tBurst Rate\tBurst Start']
+
+            def _walk(item, depth=0):
+                indent = '  ' * depth
+                row = [f'{indent}{item.text(0)}'] + [item.text(i) for i in range(1, 9)]
+                lines.append('\t'.join(row))
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            QApplication.clipboard().setText('\n'.join(lines))
+
+        def _export_tree():
+            rows = []
+
+            def _walk(item, depth=0):
+                rows.append({
+                    'Topic / Item': ('  ' * depth) + item.text(0),
+                    'Count': item.text(1),
+                    'Average': item.text(2),
+                    'Min Val': item.text(3),
+                    'Max Val': item.text(4),
+                    'Rate (ms)': item.text(5),
+                    'Percent': item.text(6),
+                    'Burst Rate': item.text(7),
+                    'Burst Start': item.text(8),
+                })
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            self._statistics_export_rows_csv('Packet Lengths', ['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'], rows)
+
+        copy_btn.clicked.connect(_copy_tree)
+        export_btn.clicked.connect(_export_tree)
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(980, 620)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_flow_graph(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'Flow Graph', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Flow Graph')
+        layout = QVBoxLayout(dialog)
+        top_margin = 40
+        row_h = 24
+        left_margin = 120
+        lane_w = 200
+
+        graph_split = QSplitter(Qt.Orientation.Horizontal, dialog)
+        scene = QGraphicsScene(dialog)
+        view = QGraphicsView(scene, dialog)
+        view.setRenderHint(QPainter.Antialiasing, True)
+        graph_split.addWidget(view)
+
+        columns = ['Comment']
+        table = self._statistics_make_table(columns, [])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(row_h)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        small_font = QFont(table.font())
+        small_font.setPointSizeF(max(6.0, small_font.pointSizeF() * 0.78))
+        table.setFont(small_font)
+        table.setStyleSheet('QTableWidget::item:selected { background-color: #2b78d4; color: white; }')
+        graph_split.addWidget(table)
+        graph_split.setSizes([1130, 260])
+        graph_split.setHandleWidth(2)
+        graph_split.setStyleSheet('QSplitter::handle { background-color: #8e8e8e; }')
+        graph_split.setChildrenCollapsible(False)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(graph_split, 1)
+        table.verticalScrollBar().setSingleStep(row_h)
+        table.verticalScrollBar().setPageStep(row_h * 8)
+
+        bottom = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        bottom.addWidget(limit_check)
+        bottom.addStretch(1)
+        bottom.addWidget(QLabel('Flow type:', dialog))
+        flow_combo = QComboBox(dialog)
+        flow_combo.addItems(['All Flows', 'TCP Flows', 'UDP Flows', 'Selected Conversation'])
+        bottom.addWidget(flow_combo)
+        bottom.addStretch(1)
+        bottom.addWidget(QLabel('Addresses:', dialog))
+        addr_combo = QComboBox(dialog)
+        addr_combo.addItems(['Any', 'IPv4 only', 'IPv6 only'])
+        bottom.addWidget(addr_combo)
+        refresh_btn = QPushButton('Refresh', dialog)
+        reset_btn = QPushButton('Reset Diagram', dialog)
+        go_btn = QPushButton('Go to Packet', dialog)
+        apply_btn = QPushButton('Apply as Filter', dialog)
+        export_btn = QPushButton('Export', dialog)
+        help_btn = QPushButton('Help', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (refresh_btn, reset_btn, go_btn, apply_btn, export_btn, close_btn, help_btn):
+            bottom.addWidget(btn)
+        layout.addLayout(bottom)
+
+        def _scope_records() -> list:
+            mode = str(flow_combo.currentText() or '')
+            records = self._statistics_scope_records(limit_check.isChecked())
+            if mode == 'Selected Conversation':
+                cv = self.capture_view
+                rec = cv.get_current_record() if cv else None
+                if rec is None:
+                    return []
+                key = cv._conversation_key_for_record(rec)
+                if key is None:
+                    return []
+                out = []
+                for r in records:
+                    if cv._conversation_key_for_record(r) == key:
+                        out.append(r)
+                return out
+            if mode == 'TCP Flows':
+                records = [r for r in records if str(getattr(r, 'protocol', '') or '').upper() == 'TCP']
+            elif mode == 'UDP Flows':
+                records = [r for r in records if str(getattr(r, 'protocol', '') or '').upper() == 'UDP']
+
+            addr_mode = str(addr_combo.currentText() or 'Any')
+            if addr_mode == 'IPv4 only':
+                records = [r for r in records if '.' in str(getattr(r, 'src', '') or '') or '.' in str(getattr(r, 'dst', '') or '')]
+            elif addr_mode == 'IPv6 only':
+                records = [r for r in records if ':' in str(getattr(r, 'src', '') or '') or ':' in str(getattr(r, 'dst', '') or '')]
+            return records
+
+        def _conv_expr(rec) -> str:
+            src = str(getattr(rec, 'src', '') or '')
+            dst = str(getattr(rec, 'dst', '') or '')
+            proto = str(getattr(rec, 'protocol', '') or '').upper()
+            if not src or not dst:
+                return ''
+            if proto == 'TCP' and rec.sport is not None and rec.dport is not None:
+                return f'ip.addr == {src} && ip.addr == {dst} && tcp.port == {int(rec.sport)} && tcp.port == {int(rec.dport)}'
+            if proto == 'UDP' and rec.sport is not None and rec.dport is not None:
+                return f'ip.addr == {src} && ip.addr == {dst} && udp.port == {int(rec.sport)} && udp.port == {int(rec.dport)}'
+            if ':' in src or ':' in dst:
+                return f'ipv6.addr == {src} && ipv6.addr == {dst}'
+            return f'ip.addr == {src} && ip.addr == {dst}'
+
+        _scene_state = {
+            'row_area_width': left_margin + lane_w + 90,
+            'header_items': [],
+            'header_base_y': 4.0,
+            'time_header': None,
+            'header_bg': None,
+            'header_height': 24,
+            'top_margin': top_margin,
+        }
+
+        def _refresh():
+            recs = sorted(_scope_records(), key=lambda r: int(getattr(r, 'number', 0) or 0))
+            scene.clear()
+            _scene_state['header_items'] = []
+            _scene_state['time_header'] = None
+            _scene_state['header_bg'] = None
+            rows = []
+            prev_scroll = int(table.verticalScrollBar().value() or 0)
+            if not recs:
+                self._statistics_fill_table(table, columns, rows)
+                return
+
+            prev_selected_no = int(self._statistics_current_row(table).get('__packet_no__', 0) or 0)
+
+            first_time = float(getattr(recs[0], 'epoch_time', 0.0) or 0.0)
+            endpoints = []
+            endpoint_set = set()
+            for rec in recs:
+                src = str(getattr(rec, 'src', '') or '')
+                dst = str(getattr(rec, 'dst', '') or '')
+                for ep in (src, dst):
+                    if ep and ep not in endpoint_set:
+                        endpoint_set.add(ep)
+                        endpoints.append(ep)
+            if not endpoints:
+                endpoints = ['Unknown']
+
+            header_h = int(table.horizontalHeader().height() or 24)
+            top_margin = max(24, header_h)
+            _scene_state['top_margin'] = top_margin
+            _scene_state['header_height'] = top_margin
+
+            max_rows = min(len(recs), 1200)
+            pen_axis = QPen(QColor(120, 120, 120))
+            pen_arrow = QPen(QColor(20, 20, 20))
+            pen_arrow.setWidth(1)
+            info_font = QFont(small_font)
+            port_font = QFont(info_font)
+            port_font.setPointSizeF(max(5.0, info_font.pointSizeF() * 0.82))
+            metrics = QFontMetrics(info_font)
+            port_metrics = QFontMetrics(port_font)
+            ep_font = QFont(info_font)
+            ep_font.setBold(True)
+            ep_metrics = QFontMetrics(ep_font)
+
+            cv = self.capture_view
+            cv_table = getattr(cv, 'table', None)
+
+            def _row_palette(rec):
+                if cv_table is None:
+                    return QColor(255, 255, 255), QColor(0, 0, 0)
+                try:
+                    if not bool(getattr(cv_table, '_color_rules_enabled', True)):
+                        return QColor(255, 255, 255), QColor(0, 0, 0)
+                    if bool(getattr(rec, 'ignored', False)):
+                        color = getattr(cv_table, '_ignored_color', QColor(230, 230, 230))
+                        return QColor(color), QColor(100, 100, 100)
+                    if bool(getattr(rec, 'marked', False)):
+                        color = getattr(cv_table, '_marked_color', QColor(255, 255, 180))
+                        return QColor(color), QColor(0, 0, 0)
+                    if hasattr(cv_table, '_match_wireshark_style'):
+                        color, text = cv_table._match_wireshark_style(rec)
+                        if isinstance(color, QColor) and color.isValid():
+                            if isinstance(text, QColor) and text.isValid():
+                                return QColor(color), QColor(text)
+                            return QColor(color), QColor(0, 0, 0)
+                except Exception:
+                    pass
+                return QColor(255, 255, 255), QColor(0, 0, 0)
+
+            def _fg_for_bg(bg: QColor) -> QColor:
+                try:
+                    if int(bg.lightness()) <= 95:
+                        return QColor(255, 255, 255)
+                except Exception:
+                    pass
+                return QColor(0, 0, 0)
+
+            x_for = {}
+            _scene_state['row_area_width'] = left_margin + max(1, len(endpoints)) * lane_w + 90
+            header_bg = scene.addRect(
+                0,
+                0,
+                int(_scene_state['row_area_width']),
+                int(_scene_state['header_height']),
+                QPen(Qt.PenStyle.NoPen),
+                QColor(245, 245, 245),
+            )
+            header_bg.setZValue(20)
+            _scene_state['header_bg'] = header_bg
+
+            for idx, ep in enumerate(endpoints):
+                x = left_margin + (idx * lane_w)
+                x_for[ep] = x
+                ep_text = ep_metrics.elidedText(ep, Qt.TextElideMode.ElideMiddle, max(32, lane_w - 16))
+                ep_item = scene.addText(ep_text, ep_font)
+                ep_item.setDefaultTextColor(QColor(20, 20, 20))
+                ep_y = float(max(2, int((_scene_state['header_height'] - ep_metrics.height()) / 2)))
+                ep_item.setPos(x - (ep_metrics.horizontalAdvance(ep_text) / 2.0), ep_y)
+                ep_item.setZValue(30)
+                _scene_state['header_items'].append(ep_item)
+                axis = scene.addLine(x, top_margin - 8, x, top_margin + (max_rows + 2) * row_h, pen_axis)
+                axis.setZValue(8)
+
+            time_header = scene.addText('Time')
+            _scene_state['header_base_y'] = float(max(2, int((_scene_state['header_height'] - metrics.height()) / 2)))
+            time_header.setPos(12, _scene_state['header_base_y'])
+            time_header.setZValue(30)
+            _scene_state['time_header'] = time_header
+
+            for ridx, rec in enumerate(recs[:max_rows]):
+                row_top = top_margin + (ridx * row_h)
+                row_center = row_top + (row_h / 2.0)
+                t = float(getattr(rec, 'epoch_time', 0.0) or 0.0)
+                src = str(getattr(rec, 'src', '') or '')
+                dst = str(getattr(rec, 'dst', '') or '')
+                proto = str(getattr(rec, 'protocol', '') or '')
+                info = str(getattr(rec, 'info', '') or '')
+                number = int(getattr(rec, 'number', 0) or 0)
+                sport = getattr(rec, 'sport', None)
+                dport = getattr(rec, 'dport', None)
+
+                bg, fg = _row_palette(rec)
+                row_pen = QPen(fg)
+                row_pen.setWidth(1)
+                scene.addRect(0, row_top, int(_scene_state['row_area_width']), row_h, QPen(Qt.PenStyle.NoPen), bg)
+
+                rel_t = t - first_time
+                t_item = scene.addText(f'{rel_t:.6f}')
+                t_item.setDefaultTextColor(fg)
+                t_item.setPos(12, row_top + 2)
+                x1 = x_for.get(src, left_margin)
+                x2 = x_for.get(dst, left_margin)
+
+                text_start = min(x1, x2) + 24
+                text_end = max(x1, x2) - 24
+                available = max(20, int(text_end - text_start))
+                info_text = metrics.elidedText(info, Qt.TextElideMode.ElideRight, available)
+                text_w = metrics.horizontalAdvance(info_text)
+                center_x = (x1 + x2) / 2.0
+                text_x = max(text_start, min(center_x - (text_w / 2.0), text_end - text_w))
+                gap_l = max(min(x1, x2), text_x - 5)
+                gap_r = min(max(x1, x2), text_x + text_w + 5)
+
+                if x1 <= x2:
+                    if gap_l > x1:
+                        scene.addLine(x1, row_center, gap_l, row_center, row_pen)
+                    if x2 > gap_r:
+                        scene.addLine(gap_r, row_center, x2, row_center, row_pen)
+                else:
+                    if x1 > gap_r:
+                        scene.addLine(x1, row_center, gap_r, row_center, row_pen)
+                    if gap_l > x2:
+                        scene.addLine(gap_l, row_center, x2, row_center, row_pen)
+                if x2 >= x1:
+                    scene.addLine(x2 - 6, row_center - 3, x2, row_center, row_pen)
+                    scene.addLine(x2 - 6, row_center + 3, x2, row_center, row_pen)
+                else:
+                    scene.addLine(x2 + 6, row_center - 3, x2, row_center, row_pen)
+                    scene.addLine(x2 + 6, row_center + 3, x2, row_center, row_pen)
+
+                left_port = str(int(sport)) if sport is not None else ''
+                right_port = str(int(dport)) if dport is not None else ''
+                if left_port:
+                    left_item = scene.addText(left_port, port_font)
+                    left_item.setDefaultTextColor(fg)
+                    if x1 <= x2:
+                        left_item.setPos(x1 - port_metrics.horizontalAdvance(left_port) - 6, row_top + 3)
+                    else:
+                        left_item.setPos(x1 + 6, row_top + 3)
+                if right_port:
+                    right_item = scene.addText(right_port, port_font)
+                    right_item.setDefaultTextColor(fg)
+                    if x2 >= x1:
+                        right_item.setPos(x2 + 6, row_top + 3)
+                    else:
+                        right_item.setPos(x2 - port_metrics.horizontalAdvance(right_port) - 6, row_top + 3)
+
+                info_item = scene.addText(info_text, info_font)
+                info_item.setDefaultTextColor(fg)
+                info_item.setPos(text_x, row_top + 1)
+
+                comment = f'{proto}: {info}'.strip(': ')
+                rows.append({
+                    'Comment': comment,
+                    '__packet_no__': number,
+                    '__filter__': _conv_expr(rec),
+                    '__row_color__': bg,
+                    '__row_fg__': fg,
+                })
+
+            scene.setSceneRect(0, 0, left_margin + max(1, len(endpoints)) * lane_w + 120, top_margin + (max_rows + 3) * row_h)
+            self._statistics_fill_table(table, columns, rows)
+            for row_idx, row in enumerate(rows):
+                color = row.get('__row_color__')
+                if not isinstance(color, QColor):
+                    continue
+                fg = row.get('__row_fg__')
+                if not isinstance(fg, QColor):
+                    fg = _fg_for_bg(color)
+                for col in range(table.columnCount()):
+                    item = table.item(row_idx, col)
+                    if item is not None:
+                        item.setBackground(color)
+                        item.setForeground(fg)
+
+            table.setRowCount(len(rows))
+            for row_idx in range(len(rows)):
+                table.setRowHeight(row_idx, row_h)
+
+            if prev_selected_no > 0:
+                for row_idx, row in enumerate(rows):
+                    if int(row.get('__packet_no__', 0) or 0) == prev_selected_no:
+                        table.selectRow(row_idx)
+                        break
+
+            table.verticalScrollBar().setValue(prev_scroll)
+            _sync_scroll_from_table(table.verticalScrollBar().value())
+            _update_scene_selection()
+
+        _selection_rect = {'item': None}
+
+        def _update_scene_selection():
+            prev = _selection_rect.get('item')
+            if prev is not None:
+                scene.removeItem(prev)
+                _selection_rect['item'] = None
+            row = int(table.currentRow())
+            if row < 0:
+                return
+            tm = int(_scene_state.get('top_margin', top_margin))
+            y = tm + (row * row_h)
+            width = int(_scene_state.get('row_area_width', left_margin + lane_w + 90))
+            rect = scene.addRect(0, y, width, row_h, QPen(QColor('#1e90ff')), QColor(30, 144, 255, 70))
+            rect.setZValue(1000)
+            _selection_rect['item'] = rect
+
+        def _sync_scroll_from_table(val: int):
+            vbar = view.verticalScrollBar()
+            target = max(0, int(val))
+            if vbar.value() != target:
+                vbar.setValue(target)
+            bg = _scene_state.get('header_bg')
+            if bg is not None:
+                try:
+                    r = bg.rect()
+                    bg.setRect(r.x(), float(vbar.value()), r.width(), r.height())
+                except Exception:
+                    pass
+            y = float(vbar.value()) + float(_scene_state.get('header_base_y', 4.0))
+            for item in _scene_state.get('header_items', []):
+                try:
+                    p = item.pos()
+                    item.setPos(p.x(), y)
+                except Exception:
+                    pass
+            t_item = _scene_state.get('time_header')
+            if t_item is not None:
+                try:
+                    p = t_item.pos()
+                    t_item.setPos(p.x(), y)
+                except Exception:
+                    pass
+
+        original_wheel = view.wheelEvent
+
+        def _wheel(event):
+            try:
+                delta = int(event.angleDelta().y() or 0)
+                if delta != 0:
+                    bar = table.verticalScrollBar()
+                    step = bar.singleStep() or 1
+                    bar.setValue(bar.value() - (step if delta > 0 else -step))
+                    event.accept()
+                    return
+            except Exception:
+                pass
+            original_wheel(event)
+
+        original_mouse_press = view.mousePressEvent
+
+        def _mouse_press(event):
+            try:
+                pt = view.mapToScene(event.pos())
+                y = float(pt.y())
+                tm = float(_scene_state.get('top_margin', top_margin))
+                row = int((y - tm) // row_h)
+                if 0 <= row < table.rowCount():
+                    table.selectRow(row)
+                    _go_to_packet()
+            except Exception:
+                pass
+            original_mouse_press(event)
+
+        def _go_to_packet():
+            row = self._statistics_current_row(table)
+            if not row:
+                return
+            try:
+                self.capture_view.goto_packet_number(int(row.get('__packet_no__', 0) or 0))
+            except Exception:
+                pass
+
+        def _apply_filter():
+            row = self._statistics_current_row(table)
+            expr = str(row.get('__filter__', '') or '').strip()
+            if expr:
+                self._set_display_filter_text(expr, apply_now=True)
+
+        refresh_btn.clicked.connect(_refresh)
+        flow_combo.currentTextChanged.connect(lambda _v: _refresh())
+        addr_combo.currentTextChanged.connect(lambda _v: _refresh())
+        limit_check.toggled.connect(lambda _v: _refresh())
+        reset_btn.clicked.connect(lambda: _refresh())
+        go_btn.clicked.connect(_go_to_packet)
+        apply_btn.clicked.connect(_apply_filter)
+        export_btn.clicked.connect(lambda: self._statistics_export_rows_csv('Flow Graph', columns, getattr(table, '_stats_rows', [])))
+        help_btn.clicked.connect(lambda: QMessageBox.information(dialog, 'Flow Graph', 'Select a row then use Go to Packet.\nUse Flow type and Addresses to narrow the sequence diagram.'))
+        table.verticalScrollBar().valueChanged.connect(_sync_scroll_from_table)
+        view.mousePressEvent = _mouse_press
+        view.wheelEvent = _wheel
+        table.itemSelectionChanged.connect(_update_scene_selection)
+        table.cellClicked.connect(lambda _r, _c: _go_to_packet())
+        table.cellDoubleClicked.connect(lambda _r, _c: _go_to_packet())
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(1420, 790)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_http(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'HTTP Statistics', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('HTTP / Packet Counter')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(limit_check)
+        top.addWidget(refresh_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        tree = QTreeWidget(dialog)
+        tree.setColumnCount(8)
+        tree.setHeaderLabels(['Packet Type', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate'])
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(tree, 1)
+
+        bottom = QHBoxLayout()
+        apply_btn = QPushButton('Apply as Filter', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (apply_btn, copy_btn, export_btn):
+            bottom.addWidget(btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        layout.addLayout(bottom)
+
+        def _http_request_method(rec) -> str:
+            info = str(getattr(rec, 'info', '') or '').strip()
+            m = re.match(r'^([A-Z]+)\s+\S+', info)
+            return str(m.group(1)) if m else ''
+
+        def _http_response_code(rec) -> str:
+            info = str(getattr(rec, 'info', '') or '').strip()
+            m = re.match(r'^HTTP/\d(?:\.\d)?\s+(\d{3})', info)
+            return str(m.group(1)) if m else ''
+
+        def _http_host(rec) -> str:
+            try:
+                helper = DisplayFilter()
+                host = helper._http_host(rec)
+                return str(host or '').strip()
+            except Exception:
+                return ''
+
+        def _refresh():
+            records = self._statistics_scope_records(limit_check.isChecked())
+            tree.clear()
+            req_counter = Counter()
+            rsp_counter = Counter()
+            broken = 0
+            http_times = []
+
+            for rec in records:
+                metadata = getattr(rec, 'metadata', {}) or {}
+                kind = str(metadata.get('http_kind', '') or '').strip().lower()
+                if not kind and str(getattr(rec, 'protocol', '') or '').upper() == 'HTTP':
+                    info = str(getattr(rec, 'info', '') or '').strip()
+                    kind = 'response' if info.startswith('HTTP/') else 'request'
+                if kind not in {'request', 'response'}:
+                    continue
+                http_times.append(float(getattr(rec, 'epoch_time', 0.0) or 0.0))
+                if kind == 'request':
+                    method = _http_request_method(rec)
+                    req_counter[method or 'Unknown'] += 1
+                else:
+                    code = _http_response_code(rec)
+                    if code:
+                        rsp_counter[code] += 1
+                    else:
+                        broken += 1
+
+            total_http = sum(req_counter.values()) + sum(rsp_counter.values()) + int(broken)
+            duration = max(0.0, (max(http_times) - min(http_times))) if len(http_times) >= 2 else 0.0
+            rate = self._stats_rate_ms(total_http, duration)
+            burst_rate, _burst_start = self._stats_burst_rate(http_times)
+
+            def _set_metrics(item: QTreeWidgetItem, count: int, percent: float):
+                item.setText(1, str(int(count)))
+                item.setText(2, '-')
+                item.setText(3, '-')
+                item.setText(4, '-')
+                item.setText(5, f'{self._stats_rate_ms(count, duration):.4f}')
+                item.setText(6, f'{percent:.0f}%' if percent in {0.0, 100.0} else f'{percent:.2f}%')
+                item.setText(7, f'{burst_rate:.4f}' if count > 0 else '-')
+
+            root = QTreeWidgetItem(tree)
+            root.setText(0, 'Total HTTP Packets')
+            _set_metrics(root, total_http, 100.0 if total_http > 0 else 0.0)
+
+            other_http = 0
+            other = QTreeWidgetItem(root)
+            other.setText(0, 'Other HTTP packets')
+            _set_metrics(other, other_http, (other_http * 100.0 / total_http) if total_http else 0.0)
+
+            responses_total = sum(rsp_counter.values()) + int(broken)
+            response_parent = QTreeWidgetItem(root)
+            response_parent.setText(0, 'HTTP Response Packets')
+            _set_metrics(response_parent, responses_total, (responses_total * 100.0 / total_http) if total_http else 0.0)
+
+            broken_item = QTreeWidgetItem(response_parent)
+            broken_item.setText(0, '???: broken')
+            _set_metrics(broken_item, int(broken), (int(broken) * 100.0 / total_http) if total_http else 0.0)
+
+            class_map = [('5xx: Server Error', '5'), ('4xx: Client Error', '4'), ('3xx: Redirection', '3'), ('2xx: Success', '2'), ('1xx: Informational', '1')]
+            for label, prefix in class_map:
+                cnt = sum(v for code, v in rsp_counter.items() if str(code).startswith(prefix))
+                child = QTreeWidgetItem(response_parent)
+                child.setText(0, label)
+                _set_metrics(child, cnt, (cnt * 100.0 / total_http) if total_http else 0.0)
+
+            request_parent = QTreeWidgetItem(root)
+            request_parent.setText(0, 'HTTP Request Packets')
+            request_total = sum(req_counter.values())
+            _set_metrics(request_parent, request_total, (request_total * 100.0 / total_http) if total_http else 0.0)
+
+            tree.expandAll()
+
+        def _apply_filter():
+            item = tree.currentItem()
+            if item is None:
+                return
+            title = str(item.text(0) or '')
+            expr = ''
+            if title.startswith('1xx'):
+                expr = 'detail.pair contains "Status Code: 1"'
+            elif title.startswith('2xx'):
+                expr = 'detail.pair contains "Status Code: 2"'
+            elif title.startswith('3xx'):
+                expr = 'detail.pair contains "Status Code: 3"'
+            elif title.startswith('4xx'):
+                expr = 'detail.pair contains "Status Code: 4"'
+            elif title.startswith('5xx'):
+                expr = 'detail.pair contains "Status Code: 5"'
+            elif 'Request' in title:
+                expr = 'detail.key contains "request"'
+            elif 'Response' in title:
+                expr = 'detail.key contains "response"'
+            if expr:
+                self._set_display_filter_text(expr, apply_now=True)
+
+        refresh_btn.clicked.connect(_refresh)
+        limit_check.toggled.connect(lambda _v: _refresh())
+        apply_btn.clicked.connect(_apply_filter)
+
+        def _copy_tree():
+            lines = ['Packet Type\tCount\tAverage\tMin Val\tMax Val\tRate (ms)\tPercent\tBurst Rate']
+
+            def _walk(item, depth=0):
+                indent = '  ' * depth
+                row = [f'{indent}{item.text(0)}'] + [item.text(i) for i in range(1, 8)]
+                lines.append('\t'.join(row))
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            QApplication.clipboard().setText('\n'.join(lines))
+
+        def _export_tree():
+            rows = []
+
+            def _walk(item, depth=0):
+                rows.append({
+                    'Packet Type': ('  ' * depth) + item.text(0),
+                    'Count': item.text(1),
+                    'Average': item.text(2),
+                    'Min Val': item.text(3),
+                    'Max Val': item.text(4),
+                    'Rate (ms)': item.text(5),
+                    'Percent': item.text(6),
+                    'Burst Rate': item.text(7),
+                })
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            self._statistics_export_rows_csv('HTTP Packet Counter', ['Packet Type', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate'], rows)
+
+        copy_btn.clicked.connect(_copy_tree)
+        export_btn.clicked.connect(_export_tree)
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(1020, 620)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_ipv4(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'IPv4 Statistics', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('IPv4 Statistics')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(limit_check)
+        top.addWidget(refresh_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        tree = QTreeWidget(dialog)
+        tree.setColumnCount(9)
+        tree.setHeaderLabels(['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'])
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(tree, 1)
+
+        bottom = QHBoxLayout()
+        apply_btn = QPushButton('Apply as Filter', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (apply_btn, copy_btn, export_btn):
+            bottom.addWidget(btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        layout.addLayout(bottom)
+
+        def _refresh():
+            records = self._statistics_scope_records(limit_check.isChecked())
+            tree.clear()
+            addr_packets = Counter()
+            addr_bytes = Counter()
+            addr_times = defaultdict(list)
+            ip_packet_count = 0
+            all_times = []
+            for rec in records:
+                raw = getattr(rec, 'raw', None)
+                if raw is None or not raw.haslayer(IP):
+                    continue
+                ip = raw[IP]
+                ip_packet_count += 1
+                ts = float(getattr(rec, 'epoch_time', 0.0) or 0.0)
+                all_times.append(ts)
+                pkt_len = int(getattr(rec, 'length', 0) or 0)
+                for addr in (str(getattr(ip, 'src', '') or ''), str(getattr(ip, 'dst', '') or '')):
+                    if not addr:
+                        continue
+                    addr_packets[addr] += 1
+                    addr_bytes[addr] += pkt_len
+                    addr_times[addr].append(ts)
+
+            duration = max(0.0, (max(all_times) - min(all_times))) if len(all_times) >= 2 else 0.0
+            root = QTreeWidgetItem(tree)
+            root.setText(0, 'Ipv4 Statistics/All Addresses')
+            root.setText(1, str(ip_packet_count))
+            root.setText(2, '')
+            root.setText(3, '')
+            root.setText(4, '')
+            root.setText(5, f'{self._stats_rate_ms(ip_packet_count, duration):.4f}')
+            root.setText(6, '100%' if ip_packet_count > 0 else '0%')
+            burst_rate, burst_start = self._stats_burst_rate(all_times)
+            root.setText(7, f'{burst_rate:.4f}' if ip_packet_count > 0 else '0.0000')
+            root.setText(8, f'{burst_start:.3f}' if ip_packet_count > 0 else '0.000')
+
+            denom = max(1, ip_packet_count)
+            for addr, cnt in sorted(addr_packets.items(), key=lambda kv: (-kv[1], kv[0])):
+                child = QTreeWidgetItem(root)
+                child.setText(0, str(addr))
+                child.setData(0, Qt.UserRole, f'ip.addr == {addr}')
+                child.setText(1, str(cnt))
+                child.setText(2, '')
+                child.setText(3, '')
+                child.setText(4, '')
+                child.setText(5, f'{self._stats_rate_ms(cnt, duration):.4f}')
+                child.setText(6, f'{(cnt * 100.0 / denom):.2f}%')
+                b_rate, b_start = self._stats_burst_rate(addr_times.get(addr, []))
+                child.setText(7, f'{b_rate:.4f}')
+                child.setText(8, f'{b_start:.3f}')
+
+            tree.expandAll()
+
+        def _apply_filter():
+            item = tree.currentItem()
+            if item is None:
+                return
+            expr = str(item.data(0, Qt.UserRole) or '').strip()
+            if expr:
+                self._set_display_filter_text(expr, apply_now=True)
+
+        refresh_btn.clicked.connect(_refresh)
+        limit_check.toggled.connect(lambda _v: _refresh())
+        apply_btn.clicked.connect(_apply_filter)
+
+        def _copy_tree():
+            lines = ['Topic / Item\tCount\tAverage\tMin Val\tMax Val\tRate (ms)\tPercent\tBurst Rate\tBurst Start']
+
+            def _walk(item: QTreeWidgetItem, depth=0):
+                lines.append('\t'.join([('  ' * depth) + item.text(0)] + [item.text(i) for i in range(1, 9)]))
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            QApplication.clipboard().setText('\n'.join(lines))
+
+        def _export_tree():
+            rows = []
+
+            def _walk(item: QTreeWidgetItem, depth=0):
+                rows.append({
+                    'Topic / Item': ('  ' * depth) + item.text(0),
+                    'Count': item.text(1),
+                    'Average': item.text(2),
+                    'Min Val': item.text(3),
+                    'Max Val': item.text(4),
+                    'Rate (ms)': item.text(5),
+                    'Percent': item.text(6),
+                    'Burst Rate': item.text(7),
+                    'Burst Start': item.text(8),
+                })
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            self._statistics_export_rows_csv('IPv4 Statistics', ['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'], rows)
+
+        copy_btn.clicked.connect(_copy_tree)
+        export_btn.clicked.connect(_export_tree)
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(980, 620)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _on_statistics_ipv6(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'IPv6 Statistics', 'No capture is loaded.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('IPv6 Statistics')
+        layout = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        limit_check = QCheckBox('Limit to display filter', dialog)
+        limit_check.setChecked(True)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(limit_check)
+        top.addWidget(refresh_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        tree = QTreeWidget(dialog)
+        tree.setColumnCount(9)
+        tree.setHeaderLabels(['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'])
+        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(tree, 1)
+
+        bottom = QHBoxLayout()
+        apply_btn = QPushButton('Apply as Filter', dialog)
+        copy_btn = QPushButton('Copy', dialog)
+        export_btn = QPushButton('Export CSV', dialog)
+        close_btn = QPushButton('Close', dialog)
+        for btn in (apply_btn, copy_btn, export_btn):
+            bottom.addWidget(btn)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        layout.addLayout(bottom)
+
+        def _refresh():
+            records = self._statistics_scope_records(limit_check.isChecked())
+            tree.clear()
+            addr_packets = Counter()
+            addr_bytes = Counter()
+            addr_times = defaultdict(list)
+            ip_packet_count = 0
+            all_times = []
+            for rec in records:
+                raw = getattr(rec, 'raw', None)
+                if raw is None or not raw.haslayer(IPv6):
+                    continue
+                ip6 = raw[IPv6]
+                ip_packet_count += 1
+                ts = float(getattr(rec, 'epoch_time', 0.0) or 0.0)
+                all_times.append(ts)
+                pkt_len = int(getattr(rec, 'length', 0) or 0)
+                for addr in (str(getattr(ip6, 'src', '') or ''), str(getattr(ip6, 'dst', '') or '')):
+                    if not addr:
+                        continue
+                    addr_packets[addr] += 1
+                    addr_bytes[addr] += pkt_len
+                    addr_times[addr].append(ts)
+
+            duration = max(0.0, (max(all_times) - min(all_times))) if len(all_times) >= 2 else 0.0
+            root = QTreeWidgetItem(tree)
+            root.setText(0, 'Ipv6 Statistics/All Addresses')
+            root.setText(1, str(ip_packet_count))
+            root.setText(2, '')
+            root.setText(3, '')
+            root.setText(4, '')
+            root.setText(5, f'{self._stats_rate_ms(ip_packet_count, duration):.4f}')
+            root.setText(6, '100%' if ip_packet_count > 0 else '0%')
+            burst_rate, burst_start = self._stats_burst_rate(all_times)
+            root.setText(7, f'{burst_rate:.4f}' if ip_packet_count > 0 else '0.0000')
+            root.setText(8, f'{burst_start:.3f}' if ip_packet_count > 0 else '0.000')
+
+            denom = max(1, ip_packet_count)
+            for addr, cnt in sorted(addr_packets.items(), key=lambda kv: (-kv[1], kv[0])):
+                child = QTreeWidgetItem(root)
+                child.setText(0, str(addr))
+                child.setData(0, Qt.UserRole, f'ipv6.addr == {addr}')
+                child.setText(1, str(cnt))
+                child.setText(2, '')
+                child.setText(3, '')
+                child.setText(4, '')
+                child.setText(5, f'{self._stats_rate_ms(cnt, duration):.4f}')
+                child.setText(6, f'{(cnt * 100.0 / denom):.2f}%')
+                b_rate, b_start = self._stats_burst_rate(addr_times.get(addr, []))
+                child.setText(7, f'{b_rate:.4f}')
+                child.setText(8, f'{b_start:.3f}')
+
+            tree.expandAll()
+
+        def _apply_filter():
+            item = tree.currentItem()
+            if item is None:
+                return
+            expr = str(item.data(0, Qt.UserRole) or '').strip()
+            if expr:
+                self._set_display_filter_text(expr, apply_now=True)
+
+        refresh_btn.clicked.connect(_refresh)
+        limit_check.toggled.connect(lambda _v: _refresh())
+        apply_btn.clicked.connect(_apply_filter)
+
+        def _copy_tree():
+            lines = ['Topic / Item\tCount\tAverage\tMin Val\tMax Val\tRate (ms)\tPercent\tBurst Rate\tBurst Start']
+
+            def _walk(item: QTreeWidgetItem, depth=0):
+                lines.append('\t'.join([('  ' * depth) + item.text(0)] + [item.text(i) for i in range(1, 9)]))
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            QApplication.clipboard().setText('\n'.join(lines))
+
+        def _export_tree():
+            rows = []
+
+            def _walk(item: QTreeWidgetItem, depth=0):
+                rows.append({
+                    'Topic / Item': ('  ' * depth) + item.text(0),
+                    'Count': item.text(1),
+                    'Average': item.text(2),
+                    'Min Val': item.text(3),
+                    'Max Val': item.text(4),
+                    'Rate (ms)': item.text(5),
+                    'Percent': item.text(6),
+                    'Burst Rate': item.text(7),
+                    'Burst Start': item.text(8),
+                })
+                for i in range(item.childCount()):
+                    _walk(item.child(i), depth + 1)
+
+            for i in range(tree.topLevelItemCount()):
+                _walk(tree.topLevelItem(i), 0)
+            self._statistics_export_rows_csv('IPv6 Statistics', ['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'], rows)
+
+        copy_btn.clicked.connect(_copy_tree)
+        export_btn.clicked.connect(_export_tree)
+        close_btn.clicked.connect(dialog.accept)
+        _refresh()
+        dialog.resize(980, 620)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
     def _on_conversations(self):
         """Xem conversations"""
         if self.capture_view:
@@ -7567,18 +9297,20 @@ class ApplicationWindow(QMainWindow):
         button_row.setSpacing(8)
         refresh_btn = QPushButton('Refresh')
         copy_btn = QPushButton('Copy')
+        save_text_btn = QPushButton('Save As Text')
         edit_comment_btn = QPushButton('Edit Comments')
         close_btn = QPushButton('Close')
         help_btn = QPushButton('Help')
         button_row.addWidget(refresh_btn)
         button_row.addStretch()
         button_row.addWidget(copy_btn)
+        button_row.addWidget(save_text_btn)
         button_row.addWidget(edit_comment_btn)
         button_row.addWidget(close_btn)
         button_row.addWidget(help_btn)
         main_layout.addLayout(button_row)
 
-        for btn in (refresh_btn, copy_btn, edit_comment_btn, close_btn, help_btn):
+        for btn in (refresh_btn, copy_btn, save_text_btn, edit_comment_btn, close_btn, help_btn):
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.setFixedWidth(btn.fontMetrics().horizontalAdvance(btn.text()) + 24)
 
@@ -7721,6 +9453,20 @@ class ApplicationWindow(QMainWindow):
             QApplication.clipboard().setText(text)
             QMessageBox.information(dialog, 'Copy', 'Content copied to clipboard!')
 
+        def save_as_text():
+            path, _ = QFileDialog.getSaveFileName(
+                dialog,
+                'Save Capture File Properties',
+                str(Path.cwd() / 'capture_file_properties.txt'),
+                'Text Files (*.txt);;Markdown Files (*.md);;All Files (*)',
+            )
+            if not path:
+                return
+            try:
+                Path(path).write_text(content_browser.toPlainText(), encoding='utf-8')
+            except Exception as exc:
+                QMessageBox.critical(dialog, 'Save As Text', f'Cannot save file:\n{exc}')
+
         def edit_comment():
             props = self.capture_view.get_capture_properties()
             current = props.get('comment', '')
@@ -7748,6 +9494,7 @@ class ApplicationWindow(QMainWindow):
         fill_values()
         refresh_btn.clicked.connect(fill_values)
         copy_btn.clicked.connect(copy_to_clipboard)
+        save_text_btn.clicked.connect(save_as_text)
         edit_comment_btn.clicked.connect(edit_comment)
         close_btn.clicked.connect(dialog.accept)
         help_btn.clicked.connect(show_help)
