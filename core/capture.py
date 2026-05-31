@@ -3,15 +3,161 @@ import os
 import time
 import json
 import select
+import socket
 from urllib.parse import unquote
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtCore import QSettings
-from scapy.all import Ether, Raw, CookedLinux, sniff
+from scapy.all import Ether, Raw, CookedLinux, sniff, IP, IPv6, ARP
 from scapy.utils import RawPcapNgReader, RawPcapReader
 
 from core.remote_capture import SSHRemoteCapture
 
 log = logging.getLogger('capture')
+
+
+def _normalize_mac_text(value: str) -> str:
+    text = str(value or '').strip().lower().replace('-', ':')
+    if not text:
+        return ''
+    parts = [part.strip() for part in text.split(':') if part.strip()]
+    if len(parts) == 6 and all(0 < len(part) <= 2 for part in parts):
+        try:
+            return ':'.join(f'{int(part, 16):02x}' for part in parts)
+        except Exception:
+            return text
+    return text
+
+
+def _normalize_ip_text(value: str) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if '%' in text:
+        text = text.split('%', 1)[0].strip()
+    return text
+
+
+def _resolve_interface_identities(iface: str) -> dict[str, set[str]]:
+    identities = {'mac': set(), 'ip': set()}
+    iface_name = str(iface or '').strip()
+    if not iface_name:
+        return identities
+    if iface_name.lower().startswith('remote://') or iface_name.lower().startswith('\\\\.\\pipe\\'):
+        return identities
+
+    try:
+        import psutil
+    except Exception:
+        return identities
+
+    addrs_by_iface = psutil.net_if_addrs()
+    candidates = {iface_name.casefold()}
+
+    if os.name == 'nt':
+        try:
+            from scapy.arch.windows import get_windows_if_list
+            for entry in get_windows_if_list() or []:
+                if not isinstance(entry, dict):
+                    continue
+                dev_name = str(entry.get('name') or '').strip()
+                win_name = str(entry.get('win_name') or '').strip()
+                friendly = str(entry.get('friendly_name') or '').strip()
+                desc = str(entry.get('description') or '').strip()
+                token_set = {dev_name.casefold(), win_name.casefold(), friendly.casefold(), desc.casefold()}
+                if iface_name.casefold() in token_set:
+                    for token in (dev_name, win_name, friendly, desc):
+                        token = str(token or '').strip()
+                        if token:
+                            candidates.add(token.casefold())
+        except Exception:
+            pass
+
+    mac_families = {getattr(socket, 'AF_PACKET', object())}
+    try:
+        import psutil as _ps
+        mac_families.add(getattr(_ps, 'AF_LINK', object()))
+    except Exception:
+        pass
+
+    for if_name, addr_list in addrs_by_iface.items():
+        if str(if_name or '').casefold() not in candidates:
+            continue
+        for addr in addr_list or []:
+            family = getattr(addr, 'family', None)
+            addr_text = str(getattr(addr, 'address', '') or '').strip()
+            if not addr_text:
+                continue
+            if family in (socket.AF_INET, socket.AF_INET6):
+                ip_text = _normalize_ip_text(addr_text)
+                if ip_text:
+                    identities['ip'].add(ip_text)
+                continue
+            if family in mac_families or 'AF_LINK' in str(family):
+                mac_text = _normalize_mac_text(addr_text)
+                if mac_text:
+                    identities['mac'].add(mac_text)
+
+    return identities
+
+
+def _packet_matches_interface_identities(packet, identities: dict[str, set[str]]) -> bool:
+    mac_targets = set(identities.get('mac', set()) or set())
+    ip_targets = set(identities.get('ip', set()) or set())
+    if not mac_targets and not ip_targets:
+        return True
+
+    seen_macs = set()
+    seen_ips = set()
+
+    for attr in ('src', 'dst'):
+        text = _normalize_mac_text(getattr(packet, attr, ''))
+        if text:
+            seen_macs.add(text)
+        ip_text = _normalize_ip_text(getattr(packet, attr, ''))
+        if ip_text:
+            seen_ips.add(ip_text)
+
+    try:
+        if Ether in packet:
+            eth = packet[Ether]
+            seen_macs.add(_normalize_mac_text(getattr(eth, 'src', '')))
+            seen_macs.add(_normalize_mac_text(getattr(eth, 'dst', '')))
+    except Exception:
+        pass
+
+    try:
+        if ARP in packet:
+            arp = packet[ARP]
+            seen_macs.add(_normalize_mac_text(getattr(arp, 'hwsrc', '')))
+            seen_macs.add(_normalize_mac_text(getattr(arp, 'hwdst', '')))
+            seen_ips.add(_normalize_ip_text(getattr(arp, 'psrc', '')))
+            seen_ips.add(_normalize_ip_text(getattr(arp, 'pdst', '')))
+    except Exception:
+        pass
+
+    try:
+        if IP in packet:
+            ip4 = packet[IP]
+            seen_ips.add(_normalize_ip_text(getattr(ip4, 'src', '')))
+            seen_ips.add(_normalize_ip_text(getattr(ip4, 'dst', '')))
+    except Exception:
+        pass
+
+    try:
+        if IPv6 in packet:
+            ip6 = packet[IPv6]
+            seen_ips.add(_normalize_ip_text(getattr(ip6, 'src', '')))
+            seen_ips.add(_normalize_ip_text(getattr(ip6, 'dst', '')))
+    except Exception:
+        pass
+
+    seen_macs = {value for value in seen_macs if value}
+    seen_ips = {value for value in seen_ips if value}
+    if mac_targets.intersection(seen_macs):
+        return True
+    if ip_targets.intersection(seen_ips):
+        return True
+    return False
 
 
 def _decode_link_layer_packet(raw_bytes: bytes, linktype: int):
@@ -127,10 +273,11 @@ class RemotePacketSniffer(QThread):
     error_occurred = Signal(str)
     status_changed = Signal(str)
 
-    def __init__(self, iface: str, capture_filter: str = ''):
+    def __init__(self, iface: str, capture_filter: str = '', promiscuous: bool = True):
         super().__init__()
         self.iface = iface
         self.capture_filter = (capture_filter or '').strip()
+        self.promiscuous = bool(promiscuous)
         self.running = True
         self._reader = None
         self._ssh = None
@@ -164,7 +311,11 @@ class RemotePacketSniffer(QThread):
                 auth_type=auth_type,
             )
             target_iface = str(remote_cfg.get('target', iface)).strip() or iface
-            self._channel = self._ssh.start_capture(target_iface, self.capture_filter)
+            self._channel = self._ssh.start_capture(
+                target_iface,
+                self.capture_filter,
+                promiscuous=self.promiscuous,
+            )
             stream = _ChannelStream(self._channel, lambda: self.running)
             # Read first 4 bytes to detect PCAP/PCAPNG
             magic = stream.read(4)
@@ -336,10 +487,12 @@ class PacketSniffer(QThread):
     error_occurred = Signal(str)
     status_changed = Signal(str)
 
-    def __init__(self, iface: str, capture_filter: str = ''):
+    def __init__(self, iface: str, capture_filter: str = '', promiscuous: bool = True):
         super().__init__()
         self.iface = iface
         self.capture_filter = (capture_filter or '').strip()
+        self.promiscuous = bool(promiscuous)
+        self._interface_identities = _resolve_interface_identities(self.iface)
         self.running = True
         self._stream = None
         self._reader = None
@@ -357,6 +510,7 @@ class PacketSniffer(QThread):
                         store=False,
                         timeout=0.2,
                         filter=self.capture_filter or None,
+                        promisc=bool(self.promiscuous),
                     )
         except Exception as exc:
             msg = f'Capture failed on {self.iface}: {exc}'
@@ -468,6 +622,9 @@ class PacketSniffer(QThread):
     def handle_packet(self, packet):
 
         if not self.running:
+            return
+
+        if not self.promiscuous and not _packet_matches_interface_identities(packet, self._interface_identities):
             return
 
         # ---- preserve interface metadata ----

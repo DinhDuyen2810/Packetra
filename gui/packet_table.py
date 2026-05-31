@@ -42,6 +42,7 @@ class PacketTable(QTableWidget):
         self._ignored_color = QColor(self.DEFAULT_IGNORED_COLOR)
         self._rule_background_overrides = {}
         self._column_alignment_map = {}
+        self._related_indicators = {}
         self.setColumnCount(7)
         self.setHorizontalHeaderLabels(['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'])
         self.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -52,7 +53,13 @@ class PacketTable(QTableWidget):
         self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.setWordWrap(False)
         self.setTextElideMode(Qt.ElideRight)
-        self.verticalHeader().setVisible(False)
+        self.setStyleSheet(
+            'QTableWidget::item:selected { background-color: #2F80ED; color: #FFFFFF; } '
+            'QTableWidget::item:selected:!active { background-color: #2F80ED; color: #FFFFFF; }'
+        )
+        self.verticalHeader().setVisible(True)
+        self.verticalHeader().setFixedWidth(18)
+        self.verticalHeader().setDefaultAlignment(Qt.AlignCenter)
         self.verticalHeader().setDefaultSectionSize(20)
         self.verticalHeader().setMinimumSectionSize(18)
         self.setShowGrid(True)
@@ -294,6 +301,7 @@ class PacketTable(QTableWidget):
         ]
 
     def _populate_row_from_record(self, row: int, record, clear_extra_columns: bool = True):
+        self._ensure_related_indicator_cell(row)
         values = self.display_values(record)
         info_col = max(0, self.columnCount() - 1)
         for col in range(self.columnCount()):
@@ -313,6 +321,7 @@ class PacketTable(QTableWidget):
     def append_record(self, record):
         row = self.rowCount()
         self.insertRow(row)
+        self._ensure_related_indicator_cell(row)
         self._populate_row_from_record(row, record)
         self._store_row_state(row, record)
         self._paint_row(row, record)
@@ -326,6 +335,7 @@ class PacketTable(QTableWidget):
         self.setRowCount(start + len(records))
         for rel, record in enumerate(records):
             row = start + rel
+            self._ensure_related_indicator_cell(row)
             self._populate_row_from_record(row, record)
             self._store_row_state(row, record)
             self._paint_row(row, record)
@@ -335,6 +345,7 @@ class PacketTable(QTableWidget):
         self.setRowCount(len(records))
 
         for row, record in enumerate(records):
+            self._ensure_related_indicator_cell(row)
             self._populate_row_from_record(row, record)
             self._store_row_state(row, record)
             self._paint_row(row, record)
@@ -442,3 +453,42 @@ class PacketTable(QTableWidget):
         
         # Restore horizontal scroll position to prevent unwanted horizontal scrolling
         self.horizontalScrollBar().setValue(horizontal_value)
+
+    def _ensure_related_indicator_cell(self, row: int):
+        if row < 0 or row >= self.rowCount():
+            return
+        item = self.verticalHeaderItem(row)
+        if item is None:
+            item = QTableWidgetItem('')
+            self.setVerticalHeaderItem(row, item)
+        if item.text() and item.text().strip().isdigit():
+            item.setText('')
+        item.setTextAlignment(int(Qt.AlignCenter))
+
+    def set_related_indicators(self, indicators: dict | None):
+        normalized = {}
+        if isinstance(indicators, dict):
+            for key, value in indicators.items():
+                try:
+                    row = int(key)
+                except Exception:
+                    continue
+                if row < 0 or row >= self.rowCount():
+                    continue
+                text = str(value or '').strip()
+                if text:
+                    normalized[row] = text
+
+        changed_rows = set(self._related_indicators.keys()) | set(normalized.keys())
+        for row in changed_rows:
+            if row < 0 or row >= self.rowCount():
+                continue
+            item = self.verticalHeaderItem(row)
+            if item is None:
+                item = QTableWidgetItem()
+                self.setVerticalHeaderItem(row, item)
+            text = normalized.get(row, '')
+            item.setText(text)
+            item.setTextAlignment(int(Qt.AlignCenter))
+            item.setToolTip('Related packet indicator' if text else '')
+        self._related_indicators = normalized

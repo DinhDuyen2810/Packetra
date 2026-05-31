@@ -765,6 +765,7 @@ class CaptureOptionsDialog(QDialog):
         
         interfaces = get_interfaces()
         settings = QSettings('Packetra', 'Packetra')
+        default_promiscuous = bool(settings.value('capture/promiscuous_mode', True, bool))
         pipe_paths = [p.strip() for p in settings.value('pipes', '', str).splitlines() if p.strip()]
         for pipe_path in pipe_paths:
             interfaces[pipe_path] = pipe_path
@@ -838,7 +839,7 @@ class CaptureOptionsDialog(QDialog):
             iface_item.setData(2, Qt.UserRole, "Named pipe" if is_pipe else "Ethernet")
             # Column 3: Promiscuous (checkbox widget)
             promisc_cb = QCheckBox()
-            promisc_cb.setChecked(False if is_pipe else True)
+            promisc_cb.setChecked(False if is_pipe else default_promiscuous)
             promisc_cb.setEnabled(not is_pipe)
             self.promisc_checkboxes[iface_name] = promisc_cb
             promisc_cb.stateChanged.connect(lambda state, i=iface_name: self._on_promisc_changed(i, state))
@@ -862,6 +863,19 @@ class CaptureOptionsDialog(QDialog):
                 ip_item.setText(0, ip_text)
                 ip_item.setFlags(ip_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
                 ip_item.setFirstColumnSpanned(True)
+
+        if hasattr(self, 'promisc_all_cb'):
+            eligible = [cb for cb in self.promisc_checkboxes.values() if cb.isEnabled()]
+            total_count = len(eligible)
+            checked_count = sum(1 for cb in eligible if cb.isChecked())
+            self.promisc_all_cb.blockSignals(True)
+            if total_count > 0 and checked_count == total_count:
+                self.promisc_all_cb.setCheckState(Qt.CheckState.Checked)
+            elif checked_count <= 0:
+                self.promisc_all_cb.setCheckState(Qt.CheckState.Unchecked)
+            else:
+                self.promisc_all_cb.setCheckState(Qt.CheckState.PartiallyChecked)
+            self.promisc_all_cb.blockSignals(False)
 
     def _refresh_interface_traffic(self):
         """Refresh traffic sparkline for each interface row."""
@@ -894,8 +908,11 @@ class CaptureOptionsDialog(QDialog):
     
     def _on_promisc_changed(self, iface_name, state):
         """Handle individual promiscuous checkbox change"""
-        checked_count = sum(1 for cb in self.promisc_checkboxes.values() if cb.isChecked())
-        total_count = len(self.promisc_checkboxes)
+        eligible = [cb for cb in self.promisc_checkboxes.values() if cb.isEnabled()]
+        checked_count = sum(1 for cb in eligible if cb.isChecked())
+        total_count = len(eligible)
+        if total_count <= 0:
+            return
         if checked_count < total_count:
             self.promisc_all_cb.blockSignals(True)
             self.promisc_all_cb.setCheckState(Qt.CheckState.PartiallyChecked if checked_count > 0 else Qt.CheckState.Unchecked)
@@ -911,6 +928,8 @@ class CaptureOptionsDialog(QDialog):
             return
         checked = state == Qt.CheckState.Checked
         for cb in self.promisc_checkboxes.values():
+            if not cb.isEnabled():
+                continue
             cb.blockSignals(True)
             cb.setChecked(checked)
             cb.blockSignals(False)
@@ -1781,6 +1800,11 @@ class ApplicationWindow(QMainWindow):
         self._custom_column_refresh_generation = 0
         self._custom_column_refresh_pending_rows = deque()
         self._custom_column_fit_timer = None
+        self._custom_column_refresh_dispatch_timer = QTimer(self)
+        self._custom_column_refresh_dispatch_timer.setSingleShot(True)
+        self._custom_column_refresh_dispatch_timer.setInterval(12)
+        self._custom_column_refresh_dispatch_timer.timeout.connect(self._dispatch_custom_column_refresh)
+        self._custom_column_refresh_dispatch_generation = 0
 
         # Build UI
         self._build_ui()
@@ -2976,7 +3000,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.table.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
             self.capture_view.details_tree.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
             self.capture_view.table.verticalScrollBar().valueChanged.connect(
-                lambda _value: self._refresh_analyze_custom_column_cells()
+                lambda _value: self._schedule_visible_custom_column_refresh()
             )
             self.stacked_widget.addWidget(self.capture_view)
 
@@ -6352,6 +6376,22 @@ class ApplicationWindow(QMainWindow):
             return
         self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
 
+    def _schedule_visible_custom_column_refresh(self):
+        cv = self.capture_view
+        if not cv or not self._analyze_custom_columns:
+            return
+        table = cv.table
+        row_count = int(table.rowCount() or 0)
+        if row_count <= 0:
+            return
+        if row_count <= 50:
+            self._schedule_custom_column_refresh(list(range(row_count)), replace=True)
+            return
+        start, end = self._visible_table_row_range()
+        if start < 0 or end < start:
+            return
+        self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
+
     def _visible_table_row_range(self) -> tuple[int, int]:
         cv = self.capture_view
         if not cv:
@@ -6408,8 +6448,13 @@ class ApplicationWindow(QMainWindow):
                 pending.append(idx)
             self._custom_column_refresh_pending_rows = deque(pending)
             self._custom_column_refresh_generation += 1
-        generation = int(self._custom_column_refresh_generation)
-        QTimer.singleShot(0, lambda gen=generation: self._drain_custom_column_refresh(gen))
+        self._custom_column_refresh_dispatch_generation = int(self._custom_column_refresh_generation)
+        if not self._custom_column_refresh_dispatch_timer.isActive():
+            self._custom_column_refresh_dispatch_timer.start()
+
+    def _dispatch_custom_column_refresh(self):
+        generation = int(self._custom_column_refresh_dispatch_generation)
+        self._drain_custom_column_refresh(generation)
 
     def _drain_custom_column_refresh(self, generation: int):
         if int(generation) != int(self._custom_column_refresh_generation):
@@ -6425,8 +6470,8 @@ class ApplicationWindow(QMainWindow):
 
         started = time.perf_counter()
         processed = 0
-        max_rows_per_tick = 120
-        max_tick_seconds = 0.008
+        max_rows_per_tick = 32
+        max_tick_seconds = 0.0035
         table.setUpdatesEnabled(False)
         try:
             while pending and processed < max_rows_per_tick and (time.perf_counter() - started) < max_tick_seconds:
@@ -6437,7 +6482,7 @@ class ApplicationWindow(QMainWindow):
             table.setUpdatesEnabled(True)
 
         if pending and int(generation) == int(self._custom_column_refresh_generation):
-            QTimer.singleShot(0, lambda gen=generation: self._drain_custom_column_refresh(gen))
+            QTimer.singleShot(1, lambda gen=generation: self._drain_custom_column_refresh(gen))
 
     def _refresh_analyze_custom_columns_for_row(self, row: int):
         cv = self.capture_view

@@ -142,6 +142,8 @@ class SSHRemoteCapture:
         if self.os_type == 'linux':
             iface = str(iface or '').split(' [', 1)[0].strip()
             cmd = f"tcpdump -n -s 0 -i '{iface}' -U -w -"
+            if not bool(promiscuous):
+                cmd += ' -p'
             if bpf_filter:
                 cmd += f' {bpf_filter}'
         else:
