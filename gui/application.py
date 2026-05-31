@@ -8115,6 +8115,7 @@ class ApplicationWindow(QMainWindow):
         scene = QGraphicsScene(dialog)
         view = QGraphicsView(scene, dialog)
         view.setRenderHint(QPainter.Antialiasing, True)
+        view.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         graph_split.addWidget(view)
 
         columns = ['Comment']
@@ -8131,8 +8132,8 @@ class ApplicationWindow(QMainWindow):
         table.setStyleSheet('QTableWidget::item:selected { background-color: #2b78d4; color: white; }')
         graph_split.addWidget(table)
         graph_split.setSizes([1130, 260])
-        graph_split.setHandleWidth(2)
-        graph_split.setStyleSheet('QSplitter::handle { background-color: #8e8e8e; }')
+        graph_split.setHandleWidth(0)
+        graph_split.setStyleSheet('')
         graph_split.setChildrenCollapsible(False)
         view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -8258,9 +8259,9 @@ class ApplicationWindow(QMainWindow):
             port_font.setPointSizeF(max(5.0, info_font.pointSizeF() * 0.82))
             metrics = QFontMetrics(info_font)
             port_metrics = QFontMetrics(port_font)
-            ep_font = QFont(info_font)
-            ep_font.setBold(True)
-            ep_metrics = QFontMetrics(ep_font)
+            header_font = QFont(table.horizontalHeader().font())
+            header_font.setBold(True)
+            header_metrics = QFontMetrics(header_font)
 
             cv = self.capture_view
             cv_table = getattr(cv, 'table', None)
@@ -8296,7 +8297,16 @@ class ApplicationWindow(QMainWindow):
                 return QColor(0, 0, 0)
 
             x_for = {}
-            _scene_state['row_area_width'] = left_margin + max(1, len(endpoints)) * lane_w + 90
+            content_width = left_margin + max(1, len(endpoints)) * lane_w + 90
+            viewport_width = int(max(0, view.viewport().width()))
+            left_panel_width = 0
+            try:
+                split_sizes = graph_split.sizes()
+                if split_sizes:
+                    left_panel_width = int(max(0, split_sizes[0]))
+            except Exception:
+                left_panel_width = 0
+            _scene_state['row_area_width'] = max(content_width, viewport_width, left_panel_width)
             header_bg = scene.addRect(
                 0,
                 0,
@@ -8311,18 +8321,18 @@ class ApplicationWindow(QMainWindow):
             for idx, ep in enumerate(endpoints):
                 x = left_margin + (idx * lane_w)
                 x_for[ep] = x
-                ep_text = ep_metrics.elidedText(ep, Qt.TextElideMode.ElideMiddle, max(32, lane_w - 16))
-                ep_item = scene.addText(ep_text, ep_font)
+                ep_text = header_metrics.elidedText(ep, Qt.TextElideMode.ElideMiddle, max(32, lane_w - 16))
+                ep_item = scene.addText(ep_text, header_font)
                 ep_item.setDefaultTextColor(QColor(20, 20, 20))
-                ep_y = float(max(2, int((_scene_state['header_height'] - ep_metrics.height()) / 2)))
-                ep_item.setPos(x - (ep_metrics.horizontalAdvance(ep_text) / 2.0), ep_y)
+                ep_y = float(max(2, int((_scene_state['header_height'] - header_metrics.height()) / 2)))
+                ep_item.setPos(x - (header_metrics.horizontalAdvance(ep_text) / 2.0), ep_y)
                 ep_item.setZValue(30)
                 _scene_state['header_items'].append(ep_item)
                 axis = scene.addLine(x, top_margin - 8, x, top_margin + (max_rows + 2) * row_h, pen_axis)
                 axis.setZValue(8)
 
-            time_header = scene.addText('Time')
-            _scene_state['header_base_y'] = float(max(2, int((_scene_state['header_height'] - metrics.height()) / 2)))
+            time_header = scene.addText('Time', header_font)
+            _scene_state['header_base_y'] = float(max(2, int((_scene_state['header_height'] - header_metrics.height()) / 2)))
             time_header.setPos(12, _scene_state['header_base_y'])
             time_header.setZValue(30)
             _scene_state['time_header'] = time_header
@@ -8408,20 +8418,14 @@ class ApplicationWindow(QMainWindow):
                     '__row_fg__': fg,
                 })
 
-            scene.setSceneRect(0, 0, left_margin + max(1, len(endpoints)) * lane_w + 120, top_margin + (max_rows + 3) * row_h)
+            scene.setSceneRect(0, 0, int(_scene_state['row_area_width']), top_margin + (max_rows + 3) * row_h)
             self._statistics_fill_table(table, columns, rows)
-            for row_idx, row in enumerate(rows):
-                color = row.get('__row_color__')
-                if not isinstance(color, QColor):
-                    continue
-                fg = row.get('__row_fg__')
-                if not isinstance(fg, QColor):
-                    fg = _fg_for_bg(color)
+            for row_idx in range(len(rows)):
                 for col in range(table.columnCount()):
                     item = table.item(row_idx, col)
                     if item is not None:
-                        item.setBackground(color)
-                        item.setForeground(fg)
+                        item.setBackground(QColor(255, 255, 255))
+                        item.setForeground(QColor(0, 0, 0))
 
             table.setRowCount(len(rows))
             for row_idx in range(len(rows)):
@@ -8497,6 +8501,7 @@ class ApplicationWindow(QMainWindow):
             original_wheel(event)
 
         original_mouse_press = view.mousePressEvent
+        original_resize = view.resizeEvent
 
         def _mouse_press(event):
             try:
@@ -8510,6 +8515,10 @@ class ApplicationWindow(QMainWindow):
             except Exception:
                 pass
             original_mouse_press(event)
+
+        def _resize_event(event):
+            original_resize(event)
+            QTimer.singleShot(0, _refresh)
 
         def _go_to_packet():
             row = self._statistics_current_row(table)
@@ -8538,11 +8547,13 @@ class ApplicationWindow(QMainWindow):
         table.verticalScrollBar().valueChanged.connect(_sync_scroll_from_table)
         view.mousePressEvent = _mouse_press
         view.wheelEvent = _wheel
+        view.resizeEvent = _resize_event
         table.itemSelectionChanged.connect(_update_scene_selection)
         table.cellClicked.connect(lambda _r, _c: _go_to_packet())
         table.cellDoubleClicked.connect(lambda _r, _c: _go_to_packet())
         close_btn.clicked.connect(dialog.accept)
         _refresh()
+        QTimer.singleShot(0, _refresh)
         dialog.resize(1420, 790)
         self._fit_widget_90(dialog)
         dialog.exec()
