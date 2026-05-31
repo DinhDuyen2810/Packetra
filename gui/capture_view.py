@@ -2757,19 +2757,13 @@ class CaptureView(QWidget):
     def _force_visible_feedback_now(self, minimap_data_changed: bool = False):
         if minimap_data_changed:
             self._minimap_cache_dirty = True
-        self._set_selected_indicator_immediate()
-        # Keep immediate feedback lightweight; related-arrows are resolved asynchronously.
-        self._update_packet_minimap()
+        self._set_fast_related_indicators_visible()
         try:
             self.table.verticalHeader().viewport().repaint()
         except Exception:
             pass
-        minimap = getattr(self, 'packet_minimap', None)
-        if minimap is not None:
-            try:
-                minimap.repaint()
-            except Exception:
-                pass
+        # Prioritize left indicators first, then minimap on next tick.
+        QTimer.singleShot(0, self._update_packet_minimap)
 
     def _schedule_packet_list_aux_refresh(self, related: bool = False, minimap: bool = False, minimap_data_changed: bool = False):
         if bool(getattr(self, '_startup_priority_mode', False)) and (bool(related) or bool(minimap)):
@@ -2866,6 +2860,56 @@ class CaptureView(QWidget):
         self._last_related_indicator_signature = None
         self.table.set_related_indicators(indicators)
 
+    def _set_fast_related_indicators_visible(self):
+        if not hasattr(self.table, 'set_related_indicators'):
+            return
+        row_count = int(self.table.rowCount() or 0)
+        if row_count <= 0 or not self.visible_indices:
+            return
+        selected_row = self.get_current_visible_row()
+        if selected_row < 0 or selected_row >= len(self.visible_indices):
+            return
+        selected_record = self.get_current_record()
+        if selected_record is None:
+            return
+        selected_key = self._conversation_key_for_record(selected_record)
+        indicators = {int(selected_row): '◆'}
+        if selected_key is None:
+            self._related_indicator_rows = indicators
+            self._last_related_indicator_signature = None
+            self.table.set_related_indicators(indicators)
+            return
+
+        top = int(self.table.rowAt(0))
+        bottom = int(self.table.rowAt(max(0, self.table.viewport().height() - 1)))
+        if top < 0:
+            top = max(0, selected_row - 12)
+        if bottom < 0:
+            bottom = min(row_count - 1, selected_row + 12)
+        start = max(0, min(top, selected_row) - 12)
+        end = min(row_count - 1, max(bottom, selected_row) + 12)
+        if (end - start + 1) > 80:
+            half = 40
+            start = max(0, selected_row - half)
+            end = min(row_count - 1, selected_row + half)
+
+        for row in range(start, end + 1):
+            if row == selected_row:
+                continue
+            if row < 0 or row >= len(self.visible_indices):
+                continue
+            rec_idx = self.visible_indices[row]
+            if rec_idx < 0 or rec_idx >= len(self.records):
+                continue
+            candidate = self.records[rec_idx]
+            if self._conversation_key_for_record(candidate) != selected_key:
+                continue
+            indicators[int(row)] = self._relation_arrow_for_rows(selected_record, candidate)
+
+        self._related_indicator_rows = indicators
+        self._last_related_indicator_signature = None
+        self.table.set_related_indicators(indicators)
+
     def _relation_arrow_for_rows(self, selected_record, candidate_record) -> str:
         sel_src = str(getattr(selected_record, 'src', '') or '')
         sel_dst = str(getattr(selected_record, 'dst', '') or '')
@@ -2897,16 +2941,8 @@ class CaptureView(QWidget):
             self._clear_related_packet_indicators()
             return
         if bool(self._is_bulk_loading):
-            indicators = {int(selected_row): '◆'}
-            self._related_indicator_rows = indicators
-            self._last_related_indicator_signature = (
-                int(selected_row),
-                int(getattr(selected_record, 'number', 0) or 0),
-                int(len(self.visible_indices)),
-                int(self.table.rowCount() or 0),
-                'bulk_selected_only',
-            )
-            self.table.set_related_indicators(indicators)
+            # During bulk load, keep fast visible arrows instead of collapsing to selected-only.
+            self._set_fast_related_indicators_visible()
             return
         signature = (
             int(selected_row),
@@ -2955,11 +2991,8 @@ class CaptureView(QWidget):
         self.table.set_related_indicators(indicators)
 
     def _on_packet_table_selection_changed(self):
-        self._set_selected_indicator_immediate()
+        self._force_visible_feedback_now(minimap_data_changed=False)
         self._schedule_packet_list_aux_refresh(related=True, minimap=False)
-        minimap = getattr(self, 'packet_minimap', None)
-        if minimap is not None:
-            minimap.update()
 
     def get_selected_records(self):
         selected_rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()}) if self.table.selectionModel() else []
@@ -3007,11 +3040,8 @@ class CaptureView(QWidget):
         self.hex_view.show_packet(record)
         self.detail_status_changed.emit('', 0)
         self._update_status(f'Selected frame {record.number}')
-        self._set_selected_indicator_immediate()
+        self._force_visible_feedback_now(minimap_data_changed=False)
         self._schedule_packet_list_aux_refresh(related=True, minimap=False)
-        minimap = getattr(self, 'packet_minimap', None)
-        if minimap is not None:
-            minimap.update()
         self._emit_go_state_changed()
 
     def _on_detail_field_selected(self, field_name: str, byte_count: int):
@@ -3184,10 +3214,10 @@ class CaptureView(QWidget):
                 self.table.setCurrentCell(0, 0)
                 self.table.setFocus()
             self._force_visible_feedback_now(minimap_data_changed=True)
+            QApplication.processEvents()
             self.display_filter_applied.emit()
             self._emit_go_state_changed()
             self._update_status(f'Loaded {loaded} packets...')
-            QApplication.processEvents()
 
             if first_remaining_packet is None:
                 self._set_dirty(False)
