@@ -261,6 +261,17 @@ def generate_rules_bundle(
     action: str,
     direction: str,
 ) -> str:
+    mac_only = bool(snapshot.eth_src or snapshot.eth_dst) and not any(
+        [
+            bool(snapshot.ip_src),
+            bool(snapshot.ip_dst),
+            snapshot.tcp_src_port is not None,
+            snapshot.tcp_dst_port is not None,
+            snapshot.udp_src_port is not None,
+            snapshot.udp_dst_port is not None,
+        ]
+    )
+
     ordered = [
         RULE_SOURCE_IPV4,
         RULE_DESTINATION_IPV4,
@@ -275,6 +286,12 @@ def generate_rules_bundle(
         RULE_SOURCE_MAC,
         RULE_DESTINATION_MAC,
     ]
+    if mac_only:
+        if product in {PRODUCT_IPFW, PRODUCT_IPTABLES}:
+            ordered = [RULE_SOURCE_MAC, RULE_DESTINATION_MAC]
+        else:
+            ordered = []
+
     lines = [f"! {product} rules for packet {int(snapshot.frame_number)}"]
     any_rule = False
     for rule_type in ordered:
@@ -294,8 +311,122 @@ def generate_rules_bundle(
             body_lines = body_lines[1:]
         lines.extend([line for line in body_lines if line != ""])
     if not any_rule:
-        raise ValueError("No applicable rules can be generated from this packet for the selected product.")
+        lines.append("")
+        lines.append("! Fallback rule (best effort, limited packet fields)")
+        if mac_only:
+            lines.append(_generate_fallback_any_any(product, action, direction))
+        else:
+            lines.append(_generate_fallback_rule(snapshot, product, action, direction))
     return "\n".join(lines).strip()
+
+
+def _packet_proto_keyword(snapshot: PacketAclSnapshot) -> str:
+    if snapshot.tcp_src_port is not None or snapshot.tcp_dst_port is not None:
+        return "tcp"
+    if snapshot.udp_src_port is not None or snapshot.udp_dst_port is not None:
+        return "udp"
+    low = str(snapshot.protocol or "").strip().lower()
+    if "icmpv6" in low:
+        return "icmp6"
+    if "icmp" in low:
+        return "icmp"
+    if "arp" in low:
+        return "arp"
+    if "ipv6" in low:
+        return "ipv6"
+    if "ip" in low:
+        return "ip"
+    return "ip"
+
+
+def _generate_fallback_rule(snapshot: PacketAclSnapshot, product: str, action: str, direction: str) -> str:
+    proto = _packet_proto_keyword(snapshot)
+    if product == PRODUCT_CISCO:
+        action_kw = action_keyword(PRODUCT_CISCO, action)
+        p = "ip" if proto in {"arp", "ipv6"} else proto
+        return f"access-list NUMBER {action_kw} {p} any any"
+
+    if product == PRODUCT_IPFILTER:
+        action_kw = action_keyword(PRODUCT_IPFILTER, action)
+        iface = _interface_or(snapshot, "le0")
+        d = _ipf_direction(direction)
+        p = "ip" if proto in {"arp", "ipv6"} else proto
+        return f"{action_kw} {d} on {iface} proto {p} from any to any"
+
+    if product == PRODUCT_IPFW:
+        action_kw = action_keyword(PRODUCT_IPFW, action)
+        d = "in" if str(direction or DIRECTION_INBOUND).lower() == DIRECTION_INBOUND else "out"
+        p = "ip" if proto in {"arp", "ipv6"} else proto
+        return f"add {action_kw} {p} from any to any {d}"
+
+    if product == PRODUCT_IPTABLES:
+        action_kw = action_keyword(PRODUCT_IPTABLES, action)
+        chain = _iptables_chain(direction)
+        p = "all" if proto in {"arp", "ipv6"} else proto
+        return f"iptables --append {chain} --protocol {p} --jump {action_kw}"
+
+    if product == PRODUCT_PF:
+        action_kw = action_keyword(PRODUCT_PF, action)
+        d = _ipf_direction(direction)
+        p = "ip" if proto in {"arp", "ipv6"} else proto
+        return f"{action_kw} {d} quick on $ext_if proto {p} from any to any"
+
+    if product == PRODUCT_NETSH_OLD:
+        enabled = action_keyword(PRODUCT_NETSH_OLD, action)
+        p = "udp" if proto == "udp" else "tcp"
+        return (
+            f"! netsh old syntax needs a port; fallback uses port 1\n"
+            f"add portopening {p} 1 Wireshark {enabled}"
+        )
+
+    if product == PRODUCT_NETSH_NEW:
+        d = "in" if str(direction or DIRECTION_INBOUND).lower() == DIRECTION_INBOUND else "out"
+        action_kw = action_keyword(PRODUCT_NETSH_NEW, action)
+        p = "UDP" if proto == "udp" else ("ICMPv6" if proto == "icmp6" else ("ICMPv4" if proto == "icmp" else ("TCP" if proto == "tcp" else "ANY")))
+        return f'netsh advfirewall firewall add rule name="Wireshark Packet {int(snapshot.frame_number)}" dir={d} action={action_kw} protocol={p}'
+
+    raise ValueError("Unsupported firewall product.")
+
+
+def _generate_fallback_any_any(product: str, action: str, direction: str) -> str:
+    if product == PRODUCT_CISCO:
+        action_kw = action_keyword(PRODUCT_CISCO, action)
+        return f"access-list NUMBER {action_kw} ip any any"
+
+    if product == PRODUCT_IPFILTER:
+        action_kw = action_keyword(PRODUCT_IPFILTER, action)
+        iface = "le0"
+        d = _ipf_direction(direction)
+        return f"{action_kw} {d} on {iface} from any to any"
+
+    if product == PRODUCT_IPFW:
+        action_kw = action_keyword(PRODUCT_IPFW, action)
+        d = "in" if str(direction or DIRECTION_INBOUND).lower() == DIRECTION_INBOUND else "out"
+        return f"add {action_kw} ip from any to any {d}"
+
+    if product == PRODUCT_IPTABLES:
+        action_kw = action_keyword(PRODUCT_IPTABLES, action)
+        chain = _iptables_chain(direction)
+        return f"iptables --append {chain} --jump {action_kw}"
+
+    if product == PRODUCT_PF:
+        action_kw = action_keyword(PRODUCT_PF, action)
+        d = _ipf_direction(direction)
+        return f"{action_kw} {d} quick on $ext_if from any to any"
+
+    if product == PRODUCT_NETSH_OLD:
+        enabled = action_keyword(PRODUCT_NETSH_OLD, action)
+        return (
+            f"! netsh old syntax needs a port; fallback uses port 1\n"
+            f"add portopening tcp 1 Wireshark {enabled}"
+        )
+
+    if product == PRODUCT_NETSH_NEW:
+        d = "in" if str(direction or DIRECTION_INBOUND).lower() == DIRECTION_INBOUND else "out"
+        action_kw = action_keyword(PRODUCT_NETSH_NEW, action)
+        return f'netsh advfirewall firewall add rule name="Wireshark Packet" dir={d} action={action_kw} protocol=ANY'
+
+    return "any any"
 
 
 def _generate_cisco(snapshot: PacketAclSnapshot, action: str, direction: str, rule_type: str) -> str:

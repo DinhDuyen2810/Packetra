@@ -3,6 +3,7 @@ import socket
 import json
 import base64
 import math
+import ipaddress
 import pickle
 import csv
 import os
@@ -11,7 +12,7 @@ import time
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings
+from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings, QRectF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QMenuBar, QToolBar, QLabel, QMenu, QMessageBox, QFileDialog,
@@ -19,9 +20,9 @@ from PySide6.QtWidgets import (
     QHeaderView, QPushButton, QTextEdit, QInputDialog, QGridLayout, QScrollArea,
     QFrame, QTextBrowser, QTabWidget, QCheckBox, QSpinBox, QLineEdit, QComboBox,
     QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup,
-    QListWidget, QSplitter, QGraphicsView, QGraphicsScene
+    QListWidget, QSplitter, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsSimpleTextItem, QGraphicsItem, QGraphicsPixmapItem
 )
-from PySide6.QtGui import QAction, QCursor, QFontMetrics, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QAction, QCursor, QFontMetrics, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont, QPainter, QPen, QBrush
 from PySide6.QtWidgets import QColorDialog, QFontDialog
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from scapy.all import ARP, DNS, Ether, IP, IPv6, TCP, UDP
@@ -93,6 +94,112 @@ class InterfaceTreeWidget(QTreeWidget):
             self.tooltip_item = None
         super().mouseMoveEvent(event)
 
+
+class TopologyGraphView(QGraphicsView):
+    def __init__(self, scene: QGraphicsScene, parent=None):
+        super().__init__(scene, parent)
+        self._panning = False
+        self._pan_start = QPoint()
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+
+    def wheelEvent(self, event):
+        delta = int(event.angleDelta().y() or 0)
+        if delta == 0:
+            return super().wheelEvent(event)
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        self.scale(factor, factor)
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self._panning = True
+            self._pan_start = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.pos() - self._pan_start
+            self._pan_start = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton and self._panning:
+            self._panning = False
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class TopologyNodeItem(QGraphicsEllipseItem):
+    def __init__(self, node_id: str, label: str, radius: float, color: QColor, on_move, on_select, icon: QPixmap | None = None):
+        super().__init__(-radius, -radius, radius * 2.0, radius * 2.0)
+        self.node_id = str(node_id)
+        self._on_move = on_move
+        self._on_select = on_select
+        self._radius = float(radius)
+        self.setBrush(QBrush(color))
+        self.setPen(QPen(QColor(50, 50, 50), 1.1))
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setZValue(40)
+
+        if isinstance(icon, QPixmap) and not icon.isNull():
+            target = int(max(18, min(42, round(radius * 1.55))))
+            scaled = icon.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.icon_item = QGraphicsPixmapItem(scaled, self)
+            self.icon_item.setPos(-scaled.width() / 2.0, -scaled.height() / 2.0)
+            self.icon_item.setZValue(45)
+
+        self.label_item = QGraphicsSimpleTextItem(str(label), self)
+        self.label_item.setBrush(QBrush(QColor(20, 20, 20)))
+        metrics = QFontMetrics(self.label_item.font())
+        text_w = metrics.horizontalAdvance(str(label))
+        self.label_item.setPos(-text_w / 2.0, radius + 12.0)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and callable(self._on_move):
+            try:
+                self._on_move(self.node_id, QPointF(value))
+            except Exception:
+                pass
+        return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        if callable(self._on_select):
+            try:
+                self._on_select('node', self.node_id)
+            except Exception:
+                pass
+        super().mousePressEvent(event)
+
+
+class TopologyEdgeItem(QGraphicsLineItem):
+    def __init__(self, edge_id: str, on_select):
+        super().__init__()
+        self.edge_id = str(edge_id)
+        self._on_select = on_select
+        self.setZValue(10)
+
+    def mousePressEvent(self, event):
+        if callable(self._on_select):
+            try:
+                self._on_select('edge', self.edge_id)
+            except Exception:
+                pass
+        super().mousePressEvent(event)
 
 class CaptureFiltersDialog(QDialog):
     def __init__(self, parent, presets: list[dict], validator):
@@ -2178,7 +2285,7 @@ class ApplicationWindow(QMainWindow):
         # Advanced tools actions
         self.action_advanced_dashboard = QAction('&Dashboard', self)
         self.action_advanced_demo_packet = QAction('&Demo Packet', self)
-        self.action_advanced_draw_topo = QAction('&Draw Topo', self)
+        self.action_advanced_draw_topo = QAction('&Network Topology Graph', self)
         self.action_advanced_ai_analyst = QAction('&AI Analyst', self)
         self.action_advanced_fwrule = QAction('&Firewall ACL Rules', self)
 
@@ -2421,7 +2528,7 @@ class ApplicationWindow(QMainWindow):
         # Advanced Analysis
         self.action_advanced_dashboard.triggered.connect(lambda: self._on_advanced_analysis_action('Dashboard'))
         self.action_advanced_demo_packet.triggered.connect(lambda: self._on_advanced_analysis_action('Demo Packet'))
-        self.action_advanced_draw_topo.triggered.connect(lambda: self._on_advanced_analysis_action('Draw Topo'))
+        self.action_advanced_draw_topo.triggered.connect(lambda: self._on_advanced_analysis_action('Network Topology Graph'))
         self.action_advanced_ai_analyst.triggered.connect(lambda: self._on_advanced_analysis_action('AI Analyst'))
         self.action_advanced_fwrule.triggered.connect(lambda: self._on_advanced_analysis_action('Firewall ACL Rules'))
 
@@ -2459,6 +2566,9 @@ class ApplicationWindow(QMainWindow):
     def _on_advanced_analysis_action(self, feature_name: str):
         if str(feature_name) == 'AI Analyst':
             self._open_ai_analyst_dialog()
+            return
+        if str(feature_name) in {'Draw Topo', 'Network Topology Graph', 'Topo'}:
+            self._on_open_network_topology_graph()
             return
         if str(feature_name) in {'FWrule', 'Firewall ACL Rules'}:
             self._on_open_firewall_acl_rules()
@@ -6195,6 +6305,25 @@ class ApplicationWindow(QMainWindow):
         except Exception:
             pass
 
+        # Fallback from packet list endpoints so ACL tool can operate on every selected packet.
+        rec_src = str(getattr(record, 'src', '') or '').strip()
+        rec_dst = str(getattr(record, 'dst', '') or '').strip()
+        mac_pat = r'^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
+        try:
+            ipaddress.ip_address(rec_src)
+            if not ip_src:
+                ip_src = rec_src
+        except Exception:
+            if re.match(mac_pat, rec_src) and not eth_src:
+                eth_src = rec_src
+        try:
+            ipaddress.ip_address(rec_dst)
+            if not ip_dst:
+                ip_dst = rec_dst
+        except Exception:
+            if re.match(mac_pat, rec_dst) and not eth_dst:
+                eth_dst = rec_dst
+
         iface = str(metadata.get('frame_interface_name', '') or metadata.get('interface_name', '') or getattr(record, 'iface', '') or '').strip()
         return PacketAclSnapshot(
             frame_number=int(getattr(record, 'number', 0) or 0),
@@ -6221,8 +6350,7 @@ class ApplicationWindow(QMainWindow):
         selected_records = self._selected_records_from_packet_list()
         if len(selected_records) != 1:
             return False
-        snapshot = self._build_acl_snapshot_from_record(selected_records[0])
-        return bool(snapshot.has_acl_usable_fields())
+        return True
 
     def _on_open_firewall_acl_rules(self):
         if not self.capture_view or not self._has_capture_document():
@@ -6241,13 +6369,6 @@ class ApplicationWindow(QMainWindow):
             return
 
         snapshot = self._build_acl_snapshot_from_record(selected_records[0])
-        if not snapshot.has_acl_usable_fields():
-            QMessageBox.information(
-                self,
-                'Firewall ACL Rules',
-                'The selected packet does not contain Ethernet/IPv4/TCP/UDP fields required to generate ACL rules.',
-            )
-            return
         self._show_firewall_acl_dialog(snapshot)
 
     def _show_firewall_acl_dialog(self, snapshot: PacketAclSnapshot):
@@ -6433,6 +6554,1123 @@ class ApplicationWindow(QMainWindow):
         except Exception:
             pass
         self._fw_acl_dialog = None
+
+    def _topology_protocol_for_record(self, record) -> str:
+        proto_raw = str(getattr(record, 'protocol', '') or '').strip().upper()
+        low_info = str(getattr(record, 'info', '') or '').lower()
+
+        def _canon(token: str) -> str:
+            t = str(token or '').strip().upper()
+            if not t:
+                return ''
+            if t in {'OTHER', 'OTHERS', 'UNKNOWN'}:
+                return ''
+            if t in {'FRAME', 'RAW', 'PADDING', 'PAYLOAD', 'DATA'}:
+                return ''
+            if t in {'ETH', 'ETHERNET'}:
+                return 'Ethernet'
+            if t in {'IPV4', 'IP'}:
+                return 'IP'
+            if t == 'IPV6':
+                return 'IPv6'
+            if t in {'ICMPV4'}:
+                return 'ICMP'
+            if t in {'ICMPV6'}:
+                return 'ICMPv6'
+            if t.startswith('ISIS'):
+                return t
+            if re.match(r'^0X[0-9A-F]+$', t):
+                eth_map = {
+                    '0X0800': 'IP',
+                    '0X86DD': 'IPv6',
+                    '0X0806': 'ARP',
+                    '0X88CC': 'LLDP',
+                    '0X8100': 'VLAN',
+                }
+                return eth_map.get(t, '')
+            return t
+
+        tokens = []
+        p0 = _canon(proto_raw)
+        if p0:
+            tokens.append(p0)
+
+        layers = getattr(record, 'layers', [])
+        if isinstance(layers, str):
+            layers = [layers]
+        if isinstance(layers, (list, tuple, set)):
+            for item in layers:
+                ct = _canon(item)
+                if ct:
+                    tokens.append(ct)
+
+        # Payload heuristics
+        if 'dns' in low_info:
+            tokens.append('DNS')
+        if 'http' in low_info:
+            tokens.append('HTTP')
+        if 'tls' in low_info or 'ssl' in low_info:
+            tokens.append('TLS')
+        if 'whois' in low_info:
+            tokens.append('WHOIS')
+        if 'ftp' in low_info:
+            tokens.append('FTP')
+
+        priority = [
+            'DNS', 'HTTP', 'TLS', 'SMB', 'FTP', 'SSH', 'WHOIS', 'DHCP', 'MDNS', 'LLMNR',
+            'NTP', 'KERBEROS', 'LDAP', 'CDP', 'STP', 'LOOP', 'ICMPv6', 'ICMP',
+            'TCP', 'UDP', 'IPv6', 'IP', 'ARP', 'Ethernet',
+        ]
+        token_set = set(tokens)
+        for p in priority:
+            if p in token_set:
+                return p
+            # match variants like "ISIS HELLO", "ISIS CSNP"
+            if p.startswith('ISIS'):
+                for t in token_set:
+                    if t.startswith('ISIS'):
+                        return t
+
+        # Fallbacks: never expose OTHER/OTHERS in UI
+        if getattr(record, 'sport', None) is not None or getattr(record, 'dport', None) is not None:
+            return 'TCP' if 'tcp' in low_info or str(proto_raw).upper() == 'TCP' else 'UDP' if 'udp' in low_info or str(proto_raw).upper() == 'UDP' else 'IP'
+        src = str(getattr(record, 'src', '') or '').strip()
+        dst = str(getattr(record, 'dst', '') or '').strip()
+        if ':' in src or ':' in dst:
+            return 'IPv6'
+        if src or dst:
+            return 'IP'
+        return 'Ethernet'
+
+    def _topology_is_mac(self, text: str) -> bool:
+        return bool(re.match(r'^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$', str(text or '').strip()))
+
+    def _topology_addr_filter_expr(self, addr: str) -> str:
+        text = str(addr or '').strip()
+        if not text:
+            return ''
+        if self._topology_is_mac(text):
+            return f'eth.addr == {text}'
+        try:
+            ip_obj = ipaddress.ip_address(text)
+            if ip_obj.version == 6:
+                return f'ipv6.addr == {text}'
+            return f'ip.addr == {text}'
+        except Exception:
+            return f'frame contains "{text}"'
+
+    def _topology_node_type(self, addr: str) -> str:
+        text = str(addr or '').strip()
+        if not text:
+            return 'unknown'
+        mac_low = text.lower()
+        if mac_low == 'ff:ff:ff:ff:ff:ff' or text == '255.255.255.255':
+            return 'broadcast'
+        if mac_low.startswith('33:33') or mac_low.startswith('01:00:5e'):
+            return 'multicast'
+        try:
+            ip_obj = ipaddress.ip_address(text)
+            if ip_obj.is_multicast:
+                return 'multicast'
+            if ip_obj.is_private or ip_obj.is_link_local:
+                return 'internal'
+            return 'external'
+        except Exception:
+            return 'unknown'
+
+    def _on_open_network_topology_graph(self):
+        if not self.capture_view:
+            QMessageBox.information(self, 'Network Topology Graph', 'No capture is loaded.')
+            return
+        if bool(self.capture_view.is_file_format_view_mode()):
+            QMessageBox.information(
+                self,
+                'Network Topology Graph',
+                'Topology Graph is unavailable in File Format Mode.\nReload as Capture to view network topology.',
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Network Topology Graph')
+        root = QVBoxLayout(dialog)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel('Layout:', dialog))
+        layout_combo = QComboBox(dialog)
+        layout_combo.addItems(['Circular', 'Grid'])
+        top.addWidget(layout_combo)
+        top.addWidget(QLabel('Search endpoint:', dialog))
+        search_input = QLineEdit(dialog)
+        search_input.setPlaceholderText('IP / IPv6 / MAC / label')
+        top.addWidget(search_input, 1)
+        refresh_btn = QPushButton('Refresh', dialog)
+        top.addWidget(refresh_btn)
+        root.addLayout(top)
+
+        protocol_row = QHBoxLayout()
+        all_protocol_cb = QCheckBox('All Protocols', dialog)
+        all_protocol_cb.setChecked(True)
+        protocol_row.addWidget(all_protocol_cb)
+        fit_endpoints_btn = QPushButton('Fit Endpoints', dialog)
+        fit_btn = QPushButton('Fit View', dialog)
+        protocol_row.addWidget(fit_endpoints_btn)
+        protocol_row.addWidget(fit_btn)
+        protocol_row.addStretch(1)
+        root.addLayout(protocol_row)
+
+        protocol_scroll = QScrollArea(dialog)
+        protocol_scroll.setWidgetResizable(True)
+        protocol_scroll.setFixedHeight(74)
+        protocol_host = QWidget(protocol_scroll)
+        protocol_layout = QHBoxLayout(protocol_host)
+        protocol_layout.setContentsMargins(6, 4, 6, 4)
+        protocol_layout.setSpacing(8)
+        protocol_layout.addStretch(1)
+        protocol_scroll.setWidget(protocol_host)
+        root.addWidget(protocol_scroll)
+
+        split = QSplitter(Qt.Orientation.Horizontal, dialog)
+        scene = QGraphicsScene(dialog)
+        view = TopologyGraphView(scene, dialog)
+        split.addWidget(view)
+
+        right_panel = QWidget(dialog)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+        right_layout.addWidget(QLabel('Details', right_panel))
+        details = QTextEdit(right_panel)
+        details.setReadOnly(True)
+        details.setMinimumWidth(320)
+        right_layout.addWidget(details, 1)
+        actions = QHBoxLayout()
+        apply_filter_btn = QPushButton('Apply Filter', right_panel)
+        goto_packet_btn = QPushButton('Go to First Packet', right_panel)
+        copy_filter_btn = QPushButton('Copy Filter', right_panel)
+        actions.addWidget(apply_filter_btn)
+        actions.addWidget(goto_packet_btn)
+        actions.addWidget(copy_filter_btn)
+        right_layout.addLayout(actions)
+        split.addWidget(right_panel)
+        split.setSizes([1080, 340])
+        root.addWidget(split, 1)
+
+        status_label = QLabel('', dialog)
+        root.addWidget(status_label)
+
+        state = {
+            'nodes': {},
+            'edges': {},
+            'protocols': [],
+            'enabled_protocols': set(),
+            'node_positions': {},
+            'protocol_checks': {},
+            'selected': {'kind': '', 'id': ''},
+            'node_items': {},
+            'edge_items': {},
+            'edge_label_items': {},
+            'edge_port_items': {},
+            'node_to_edges': defaultdict(set),
+            'visible_nodes': {},
+            'visible_edges': {},
+            'icon_cache': {},
+            'edge_loop_slots': {},
+        }
+        annotate_timer = QTimer(dialog)
+        annotate_timer.setSingleShot(True)
+        annotate_timer.setInterval(0)
+        annotate_runner = {'fn': None}
+        annotate_timer.timeout.connect(lambda: annotate_runner['fn']() if callable(annotate_runner.get('fn')) else None)
+
+        protocol_colors = {
+            'DNS': QColor('#0b84f3'),
+            'HTTP': QColor('#198754'),
+            'TLS': QColor('#6f42c1'),
+            'TCP': QColor('#0d6efd'),
+            'UDP': QColor('#20c997'),
+            'ICMP': QColor('#fd7e14'),
+            'ICMPv6': QColor('#ff6b6b'),
+            'ARP': QColor('#adb5bd'),
+            'SMB': QColor('#7950f2'),
+            'SSH': QColor('#dc3545'),
+            'FTP': QColor('#ffc107'),
+            'WHOIS': QColor('#4c6ef5'),
+            'DHCP': QColor('#2f9e44'),
+        }
+        icon_dir = Path(__file__).resolve().parent.parent / 'image' / 'topo'
+
+        def _get_topology_icon(name: str) -> QPixmap:
+            key = str(name or '').strip().lower()
+            if key in state['icon_cache']:
+                return state['icon_cache'][key]
+            candidates = [key]
+            if key.endswith('.png'):
+                candidates.append(f'{key[:-4]}.jpg')
+            elif key.endswith('.jpg'):
+                candidates.append(f'{key[:-4]}.png')
+            for cand in candidates:
+                pix = QPixmap(str(icon_dir / cand))
+                if not pix.isNull():
+                    state['icon_cache'][key] = pix
+                    return pix
+            empty = QPixmap()
+            state['icon_cache'][key] = empty
+            return empty
+
+        def _icon_name_for_node(node: dict) -> str:
+            role = str(node.get('role', '') or '').strip().lower()
+            ntype = str(node.get('type', '') or '').strip().lower()
+            label_low = str(node.get('label', '') or '').strip().lower()
+            if role == 'dns_server':
+                return 'dns.png'
+            if role == 'gateway':
+                return 'router.png'
+            if role == 'server':
+                if 'db' in label_low or 'database' in label_low or 'sql' in label_low:
+                    return 'database.png'
+                if 'vpn' in label_low:
+                    return 'vpn.png'
+                return 'server.png'
+            if ntype == 'external':
+                return 'internet.png'
+            if ntype == 'multicast':
+                return 'wifi.png'
+            if ntype == 'broadcast':
+                return 'switch.png'
+            if 'vpn' in label_low:
+                return 'vpn.png'
+            return 'pc.png'
+
+        def _endpoint_id(addr: str) -> str:
+            text = str(addr or '').strip()
+            if not text:
+                return 'special:unknown'
+            low = text.lower()
+            if low == 'ff:ff:ff:ff:ff:ff' or text == '255.255.255.255':
+                return 'special:broadcast'
+            if self._topology_is_mac(text):
+                return f'mac:{low}'
+            try:
+                ip_obj = ipaddress.ip_address(text)
+                return f'ipv6:{text.lower()}' if ip_obj.version == 6 else f'ip:{text}'
+            except Exception:
+                return f'id:{low}'
+
+        def _node_label(addr: str) -> str:
+            text = str(addr or '').strip()
+            if not text:
+                return 'Unknown'
+            return text
+
+        def _build_graph_data():
+            records = self._statistics_scope_records(True)
+            nodes = {}
+            edges = {}
+            for rec in records:
+                src = str(getattr(rec, 'src', '') or '').strip()
+                dst = str(getattr(rec, 'dst', '') or '').strip()
+                if not src or not dst:
+                    continue
+                proto = self._topology_protocol_for_record(rec)
+                size = int(getattr(rec, 'length', 0) or 0)
+                pkt_no = int(getattr(rec, 'number', 0) or 0)
+                ts = float(getattr(rec, 'epoch_time', 0.0) or 0.0)
+                sport = getattr(rec, 'sport', None)
+                dport = getattr(rec, 'dport', None)
+
+                src_id = _endpoint_id(src)
+                dst_id = _endpoint_id(dst)
+                for endpoint_id, endpoint_addr, is_tx in ((src_id, src, True), (dst_id, dst, False)):
+                    node = nodes.get(endpoint_id)
+                    if node is None:
+                        node = {
+                            'id': endpoint_id,
+                            'addr': endpoint_addr,
+                            'label': _node_label(endpoint_addr),
+                            'type': self._topology_node_type(endpoint_addr),
+                            'protocols': set(),
+                            'packet_count': 0,
+                            'byte_count': 0,
+                            'tx_packets': 0,
+                            'rx_packets': 0,
+                            'tx_bytes': 0,
+                            'rx_bytes': 0,
+                            'first_seen': ts,
+                            'last_seen': ts,
+                            'packets': [],
+                            'dns_rx': 0,
+                        }
+                        nodes[endpoint_id] = node
+                    node['protocols'].add(proto)
+                    node['packet_count'] += 1
+                    node['byte_count'] += size
+                    node['packets'].append(pkt_no)
+                    node['first_seen'] = min(float(node['first_seen']), ts)
+                    node['last_seen'] = max(float(node['last_seen']), ts)
+                    if is_tx:
+                        node['tx_packets'] += 1
+                        node['tx_bytes'] += size
+                    else:
+                        node['rx_packets'] += 1
+                        node['rx_bytes'] += size
+                        if str(proto).upper() == 'DNS':
+                            node['dns_rx'] += 1
+
+                a_id, b_id = sorted([src_id, dst_id])
+                edge_id = f'{a_id}|{b_id}'
+                edge = edges.get(edge_id)
+                if edge is None:
+                    edge = {
+                        'id': edge_id,
+                        'a': a_id,
+                        'b': b_id,
+                        'protocols': set(),
+                        'protocol_counts': {},
+                        'flow_counts': {},
+                        'src_ports': set(),
+                        'dst_ports': set(),
+                        'port_set': set(),
+                        'packet_count': 0,
+                        'byte_count': 0,
+                        'a_to_b_packets': 0,
+                        'b_to_a_packets': 0,
+                        'a_to_b_bytes': 0,
+                        'b_to_a_bytes': 0,
+                        'first_seen': ts,
+                        'last_seen': ts,
+                        'packets': [],
+                    }
+                    edges[edge_id] = edge
+                edge['packet_count'] += 1
+                edge['byte_count'] += size
+                edge['packets'].append(pkt_no)
+                edge['protocols'].add(proto)
+                proto_counts = edge.get('protocol_counts', {})
+                proto_counts[proto] = int(proto_counts.get(proto, 0) or 0) + 1
+                edge['protocol_counts'] = proto_counts
+                edge['first_seen'] = min(float(edge['first_seen']), ts)
+                edge['last_seen'] = max(float(edge['last_seen']), ts)
+                sport_i = int(sport) if sport is not None else None
+                dport_i = int(dport) if dport is not None else None
+                if sport is not None:
+                    edge['src_ports'].add(sport_i)
+                    edge['port_set'].add(sport_i)
+                if dport is not None:
+                    edge['dst_ports'].add(dport_i)
+                    edge['port_set'].add(dport_i)
+                if src_id == edge['a'] and dst_id == edge['b']:
+                    a_port_val = sport_i
+                    b_port_val = dport_i
+                else:
+                    a_port_val = dport_i
+                    b_port_val = sport_i
+                a_port_text = str(a_port_val) if a_port_val is not None else '-'
+                b_port_text = str(b_port_val) if b_port_val is not None else '-'
+                flow_key = (str(proto), a_port_text, b_port_text)
+                flow_counts = edge.get('flow_counts', {})
+                flow_counts[flow_key] = int(flow_counts.get(flow_key, 0) or 0) + 1
+                edge['flow_counts'] = flow_counts
+                if src_id == edge['a'] and dst_id == edge['b']:
+                    edge['a_to_b_packets'] += 1
+                    edge['a_to_b_bytes'] += size
+                else:
+                    edge['b_to_a_packets'] += 1
+                    edge['b_to_a_bytes'] += size
+
+            for node in nodes.values():
+                if node['type'] == 'broadcast':
+                    node['role'] = 'broadcast'
+                elif node['type'] == 'multicast':
+                    node['role'] = 'multicast'
+                elif node['type'] == 'external':
+                    node['role'] = 'external'
+                elif int(node.get('dns_rx', 0) or 0) >= 2:
+                    node['role'] = 'dns_server'
+                else:
+                    node['role'] = 'server' if node['rx_packets'] > node['tx_packets'] * 1.2 else 'client'
+
+            # Best-effort gateway role: internal node connected to both internal and external.
+            neighbors = defaultdict(set)
+            for edge in edges.values():
+                a = str(edge.get('a'))
+                b = str(edge.get('b'))
+                neighbors[a].add(b)
+                neighbors[b].add(a)
+            for node_id, node in nodes.items():
+                if str(node.get('type', '') or '') != 'internal':
+                    continue
+                neigh = neighbors.get(node_id, set())
+                if not neigh:
+                    continue
+                internal_seen = False
+                external_seen = False
+                for nid in neigh:
+                    n = nodes.get(nid)
+                    if not n:
+                        continue
+                    ntype = str(n.get('type', '') or '')
+                    if ntype == 'internal':
+                        internal_seen = True
+                    elif ntype == 'external':
+                        external_seen = True
+                if internal_seen and external_seen and node.get('role') not in {'dns_server', 'broadcast', 'multicast'}:
+                    node['role'] = 'gateway'
+
+            protocols = sorted(
+                {
+                    str(proto_name or '').strip()
+                    for edge in edges.values()
+                    for proto_name in set(edge.get('protocols', set()) or set())
+                    if str(proto_name or '').strip().upper() not in {'', 'OTHER', 'OTHERS', 'UNKNOWN'}
+                }
+            )
+            state['nodes'] = nodes
+            state['edges'] = edges
+            state['protocols'] = protocols
+            if not state['enabled_protocols']:
+                state['enabled_protocols'] = set(protocols)
+            else:
+                state['enabled_protocols'] = set(p for p in state['enabled_protocols'] if p in protocols)
+                if not state['enabled_protocols'] and protocols:
+                    state['enabled_protocols'] = set(protocols)
+
+        def _edge_expr(edge: dict) -> str:
+            a_node = state['nodes'].get(str(edge.get('a')))
+            b_node = state['nodes'].get(str(edge.get('b')))
+            if not a_node or not b_node:
+                return ''
+            expr_a = self._topology_addr_filter_expr(str(a_node.get('addr', '') or ''))
+            expr_b = self._topology_addr_filter_expr(str(b_node.get('addr', '') or ''))
+            if not expr_a or not expr_b:
+                return ''
+            expr = f'({expr_a}) && ({expr_b})'
+            proto_names = sorted(str(p or '').strip() for p in set(edge.get('protocols', set()) or set()) if str(p or '').strip())
+            proto_tokens = []
+            for pname in proto_names:
+                tok = self._protocol_filter_token(pname)
+                if tok:
+                    proto_tokens.append(tok)
+            if proto_tokens:
+                if len(proto_tokens) == 1:
+                    expr = f'{expr} && {proto_tokens[0]}'
+                else:
+                    expr = f'{expr} && ({" || ".join(proto_tokens)})'
+            return expr
+
+        def _update_details():
+            sel = state['selected']
+            kind = str(sel.get('kind', '') or '')
+            selected_id = str(sel.get('id', '') or '')
+            if kind == 'node':
+                node = state['nodes'].get(selected_id)
+                if not node:
+                    details.setPlainText('No node selected.')
+                    return
+                lines = [
+                    f'Node: {node.get("label", "-")}',
+                    f'Address: {node.get("addr", "-")}',
+                    f'Role: {node.get("role", "-")}',
+                    f'Type: {node.get("type", "-")}',
+                    f'Packets: {int(node.get("packet_count", 0) or 0)}',
+                    f'Bytes: {int(node.get("byte_count", 0) or 0)}',
+                    f'TX/RX Packets: {int(node.get("tx_packets", 0) or 0)} / {int(node.get("rx_packets", 0) or 0)}',
+                    f'Protocols: {", ".join(sorted(node.get("protocols", set())))}',
+                ]
+                details.setPlainText('\n'.join(lines))
+                return
+            if kind == 'edge':
+                edge = state['edges'].get(selected_id)
+                if not edge:
+                    details.setPlainText('No edge selected.')
+                    return
+                a_node = state['nodes'].get(str(edge.get('a')))
+                b_node = state['nodes'].get(str(edge.get('b')))
+                proto_counts = dict(edge.get('protocol_counts', {}) or {})
+                proto_parts = [f'{k}({int(v)})' for k, v in sorted(proto_counts.items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0])))]
+                proto_text = ', '.join(proto_parts) if proto_parts else '-'
+                ports_text = ", ".join(str(v) for v in sorted(edge.get("port_set", set()))[:24]) or "-"
+                flow_counts = dict(edge.get('flow_counts', {}) or {})
+                proto_agg = {}
+                for k, c in flow_counts.items():
+                    if not isinstance(k, tuple) or len(k) != 3:
+                        continue
+                    proto_k = str(k[0] or '').strip()
+                    a_port_k = str(k[1] or '').strip() or '-'
+                    b_port_k = str(k[2] or '').strip() or '-'
+                    cval = int(c or 0)
+                    if not proto_k or cval <= 0:
+                        continue
+                    row = proto_agg.get(proto_k)
+                    if row is None:
+                        row = {'count': 0, 'a_ports': set(), 'b_ports': set()}
+                        proto_agg[proto_k] = row
+                    row['count'] += cval
+                    if a_port_k != '-':
+                        row['a_ports'].add(a_port_k)
+                    if b_port_k != '-':
+                        row['b_ports'].add(b_port_k)
+                flow_rows = sorted(
+                    [(p, int(v.get('count', 0) or 0), set(v.get('a_ports', set()) or set()), set(v.get('b_ports', set()) or set())) for p, v in proto_agg.items()],
+                    key=lambda r: (-r[1], r[0]),
+                )
+                def _fmt_port_set(values: set[str]) -> str:
+                    vals = sorted(values, key=lambda x: (len(x), x))
+                    if not vals:
+                        return '-'
+                    if len(vals) <= 8:
+                        return ','.join(vals)
+                    return f'{",".join(vals[:8])} +{len(vals) - 8}'
+                flow_preview = '; '.join(f'{p}({n}) <-> A:{_fmt_port_set(a_set)} | B:{_fmt_port_set(b_set)}' for p, n, a_set, b_set in flow_rows[:24]) if flow_rows else '-'
+                if len(flow_rows) > 24:
+                    flow_preview += f' ... +{len(flow_rows) - 24}'
+                packet_list = sorted(int(v) for v in list(edge.get('packets', [])) if int(v) > 0)
+                packet_list_text = ", ".join(str(v) for v in packet_list[:200]) if packet_list else "-"
+                if len(packet_list) > 200:
+                    packet_list_text += f' ... +{len(packet_list) - 200}'
+                lines = [
+                    f'Edge: {str(a_node.get("label", "-") if a_node else "-")} <-> {str(b_node.get("label", "-") if b_node else "-")}',
+                    f'Protocols: {proto_text}',
+                    f'Packets: {int(edge.get("packet_count", 0) or 0)}',
+                    f'Bytes: {int(edge.get("byte_count", 0) or 0)}',
+                    f'A->B / B->A Packets: {int(edge.get("a_to_b_packets", 0) or 0)} / {int(edge.get("b_to_a_packets", 0) or 0)}',
+                    f'Ports src: {", ".join(str(v) for v in sorted(edge.get("src_ports", set()))[:12]) or "-"}',
+                    f'Ports dst: {", ".join(str(v) for v in sorted(edge.get("dst_ports", set()))[:12]) or "-"}',
+                    f'Ports (all): {ports_text}',
+                    f'Flow lines: {flow_preview}',
+                    f'Packet list: {packet_list_text}',
+                    f'Filter: {_edge_expr(edge)}',
+                ]
+                details.setPlainText('\n'.join(lines))
+                return
+            details.setPlainText('Select a node or edge to view details.')
+
+        def _set_selected(kind: str, selected_id: str):
+            state['selected'] = {'kind': str(kind or ''), 'id': str(selected_id or '')}
+            _update_details()
+            for node_id, item in state['node_items'].items():
+                pen = item.pen()
+                pen.setWidthF(2.6 if (kind == 'node' and node_id == selected_id) else 1.1)
+                item.setPen(pen)
+            for edge_id, item in state['edge_items'].items():
+                pen = item.pen()
+                pen.setWidthF(max(2.2, pen.widthF()) if (kind == 'edge' and edge_id == selected_id) else max(1.0, pen.widthF() * 0.65))
+                item.setPen(pen)
+
+        def _build_protocol_checkboxes():
+            existing = dict(state.get('protocol_checks', {}))
+            while protocol_layout.count() > 0:
+                child = protocol_layout.takeAt(0)
+                w = child.widget()
+                if w is not None:
+                    w.deleteLater()
+            checks = {}
+            for proto in state.get('protocols', []):
+                cb = QCheckBox(proto, protocol_host)
+                cb.setChecked(proto in state['enabled_protocols'])
+                protocol_layout.addWidget(cb)
+                checks[proto] = cb
+            protocol_layout.addStretch(1)
+            state['protocol_checks'] = checks
+
+            def _on_any_protocol_toggled(_checked=False):
+                enabled = {name for name, cb in state['protocol_checks'].items() if cb.isChecked()}
+                state['enabled_protocols'] = enabled
+                all_protocol_cb.blockSignals(True)
+                all_protocol_cb.setChecked(bool(state['protocols']) and len(enabled) == len(state['protocols']))
+                all_protocol_cb.blockSignals(False)
+                _render_graph(fit_view=True, compact=True)
+
+            for cb in checks.values():
+                cb.toggled.connect(_on_any_protocol_toggled)
+            if checks:
+                _on_any_protocol_toggled()
+
+        def _assign_default_positions(visible_node_ids: list[str], force_reset: bool = False, compact: bool = False):
+            if force_reset:
+                for nid in visible_node_ids:
+                    state['node_positions'].pop(nid, None)
+            missing = [nid for nid in visible_node_ids if nid not in state['node_positions']]
+            if not missing:
+                return
+            mode = str(layout_combo.currentText() or 'Circular')
+            if mode == 'Grid':
+                cols = max(2, int(math.ceil(math.sqrt(len(visible_node_ids)))))
+                spacing_x = 130.0 if compact else 180.0
+                spacing_y = 96.0 if compact else 130.0
+                for idx, nid in enumerate(visible_node_ids):
+                    if nid in state['node_positions']:
+                        continue
+                    col = idx % cols
+                    row = idx // cols
+                    state['node_positions'][nid] = QPointF(100.0 + col * spacing_x, 90.0 + row * spacing_y)
+                return
+            radius = max(120.0, 18.0 * len(visible_node_ids)) if compact else max(220.0, 36.0 * len(visible_node_ids))
+            center = QPointF(520.0, 360.0)
+            total = max(1, len(visible_node_ids))
+            for idx, nid in enumerate(visible_node_ids):
+                if nid in state['node_positions']:
+                    continue
+                angle = (2.0 * math.pi * float(idx)) / float(total)
+                state['node_positions'][nid] = QPointF(center.x() + radius * math.cos(angle), center.y() + radius * math.sin(angle))
+
+        def _render_graph(fit_view: bool = False, compact: bool = False):
+            scene.clear()
+            state['node_items'].clear()
+            state['edge_items'].clear()
+            state['edge_label_items'].clear()
+            state['edge_port_items'].clear()
+            state['node_to_edges'] = defaultdict(set)
+
+            enabled_protocols = set(state.get('enabled_protocols', set()))
+            search_text = str(search_input.text() or '').strip().lower()
+            visible_edges = {}
+            for edge_id, edge in state['edges'].items():
+                edge_protocols = set(str(p or '').strip() for p in set(edge.get('protocols', set()) or set()) if str(p or '').strip())
+                if enabled_protocols and edge_protocols and not (edge_protocols & enabled_protocols):
+                    continue
+                if search_text:
+                    a = state['nodes'].get(str(edge.get('a')))
+                    b = state['nodes'].get(str(edge.get('b')))
+                    a_text = f'{str(a.get("label", "")).lower()} {str(a.get("addr", "")).lower()}' if a else ''
+                    b_text = f'{str(b.get("label", "")).lower()} {str(b.get("addr", "")).lower()}' if b else ''
+                    proto_text = ' '.join(sorted(p.lower() for p in edge_protocols))
+                    if search_text not in a_text and search_text not in b_text and search_text not in proto_text:
+                        continue
+                visible_edges[edge_id] = edge
+
+            visible_node_ids = set()
+            for edge in visible_edges.values():
+                visible_node_ids.add(str(edge.get('a')))
+                visible_node_ids.add(str(edge.get('b')))
+            visible_nodes = {nid: node for nid, node in state['nodes'].items() if nid in visible_node_ids}
+            state['visible_nodes'] = visible_nodes
+            state['visible_edges'] = visible_edges
+            loop_slots = {}
+            loop_counts = defaultdict(int)
+            for edge_id in sorted(visible_edges.keys()):
+                edge = visible_edges.get(edge_id)
+                if not edge:
+                    continue
+                a_id = str(edge.get('a'))
+                b_id = str(edge.get('b'))
+                if a_id == b_id:
+                    slot = int(loop_counts[a_id])
+                    loop_counts[a_id] = slot + 1
+                    loop_slots[edge_id] = slot
+            state['edge_loop_slots'] = loop_slots
+
+            if not visible_nodes:
+                status_label.setText('No edges match the selected protocol filter. Enable more protocols or choose All Protocols.')
+                details.setPlainText('No visible topology data.')
+                scene.setSceneRect(0, 0, 1200, 760)
+                return
+
+            _assign_default_positions(sorted(visible_nodes.keys()), force_reset=bool(compact), compact=bool(compact))
+            metric_mode = 'Packets'
+            max_metric = 1
+            for edge in visible_edges.values():
+                metric = int(edge.get('byte_count', 0) or 0) if metric_mode == 'Bytes' else int(edge.get('packet_count', 0) or 0)
+                max_metric = max(max_metric, metric)
+
+            def _ports_text(values: set[int]) -> str:
+                nums = sorted(int(v) for v in set(values or set()))
+                if not nums:
+                    return ''
+                show = nums[:3]
+                txt = ','.join(str(v) for v in show)
+                if len(nums) > 3:
+                    txt += f' +{len(nums) - 3}'
+                return txt
+
+            def _edge_protocol_counts(edge: dict, only_enabled: bool = True) -> list[tuple[str, int]]:
+                counts = dict(edge.get('protocol_counts', {}) or {})
+                if only_enabled and enabled_protocols:
+                    counts = {k: v for k, v in counts.items() if k in enabled_protocols}
+                if not counts:
+                    counts = dict(edge.get('protocol_counts', {}) or {})
+                return sorted(
+                    [(str(k), int(v)) for k, v in counts.items() if str(k or '').strip() and int(v or 0) > 0],
+                    key=lambda kv: (-kv[1], kv[0]),
+                )
+
+            def _edge_flow_lines(edge: dict, only_enabled: bool = True) -> list[tuple[str, int, list[str], list[str]]]:
+                flow_counts = dict(edge.get('flow_counts', {}) or {})
+                proto_agg: dict[str, dict] = {}
+                for key, cnt in flow_counts.items():
+                    if not isinstance(key, tuple) or len(key) != 3:
+                        continue
+                    proto = str(key[0] or '').strip()
+                    a_ptxt = str(key[1] or '').strip()
+                    b_ptxt = str(key[2] or '').strip()
+                    cval = int(cnt or 0)
+                    if not proto or cval <= 0:
+                        continue
+                    if only_enabled and enabled_protocols and proto not in enabled_protocols:
+                        continue
+                    row = proto_agg.get(proto)
+                    if row is None:
+                        row = {'count': 0, 'a_ports': set(), 'b_ports': set()}
+                        proto_agg[proto] = row
+                    row['count'] += cval
+                    if a_ptxt and a_ptxt != '-':
+                        row['a_ports'].add(a_ptxt)
+                    if b_ptxt and b_ptxt != '-':
+                        row['b_ports'].add(b_ptxt)
+                if not proto_agg:
+                    # Fallback to protocol summary if no flow rows survive filtering.
+                    for proto, cval in _edge_protocol_counts(edge, only_enabled=only_enabled):
+                        proto_agg[str(proto)] = {'count': int(cval), 'a_ports': set(), 'b_ports': set()}
+                rows: list[tuple[str, int, list[str], list[str]]] = []
+                for proto, dat in proto_agg.items():
+                    a_vals = sorted(list(dat.get('a_ports', set()) or set()), key=lambda x: (len(x), x))
+                    b_vals = sorted(list(dat.get('b_ports', set()) or set()), key=lambda x: (len(x), x))
+                    rows.append((str(proto), int(dat.get('count', 0) or 0), a_vals, b_vals))
+                rows.sort(key=lambda r: (-int(r[1]), str(r[0])))
+                return rows
+
+            def _sort_port_values(values: list[str]) -> list[str]:
+                def _key(v: str):
+                    t = str(v or '').strip()
+                    if t.isdigit():
+                        return (0, int(t))
+                    return (1, t)
+                return sorted(values, key=_key)
+
+            def _fmt_ports_inline(values: list[str]) -> str:
+                vals = _sort_port_values([str(v) for v in values if str(v or '').strip() and str(v).strip() != '-'])
+                if not vals:
+                    return '-'
+                # Rule: 1 port -> show 1; 2-3 ports -> show all; >3 -> show first 2 +N
+                if len(vals) == 1:
+                    return vals[0]
+                if len(vals) <= 3:
+                    return ','.join(vals)
+                return f'{vals[0]},{vals[1]} +{len(vals) - 2}'
+
+            def _edge_protocol_label(edge: dict) -> str:
+                rows = _edge_flow_lines(edge, only_enabled=True)
+                if not rows:
+                    return f'Packets ({int(edge.get("packet_count", 0) or 0)})'
+                return '\n'.join(f'{proto}({cnt})' for proto, cnt, _a_ports, _b_ports in rows)
+
+            def _edge_port_labels(edge: dict) -> tuple[str, str]:
+                rows = _edge_flow_lines(edge, only_enabled=True)
+                if not rows:
+                    txt = _ports_text(set(edge.get('port_set', set()) or set()))
+                    return txt, txt
+                a_txt = '\n'.join(_fmt_ports_inline(a_ports) for _proto, _cnt, a_ports, _b_ports in rows)
+                b_txt = '\n'.join(_fmt_ports_inline(b_ports) for _proto, _cnt, _a_ports, b_ports in rows)
+                return a_txt, b_txt
+
+            def _edge_color(edge: dict) -> QColor:
+                rows = _edge_flow_lines(edge, only_enabled=True)
+                key = rows[0][0] if rows else ''
+                return QColor(protocol_colors.get(key, QColor('#6c757d')))
+
+            def _edge_points(edge_id: str, edge: dict) -> tuple[QPointF, QPointF]:
+                a_id = str(edge.get('a'))
+                b_id = str(edge.get('b'))
+                pa0 = state['node_positions'].get(a_id, QPointF(0, 0))
+                pb0 = state['node_positions'].get(b_id, QPointF(0, 0))
+                if a_id != b_id:
+                    return pa0, pb0
+                # Self-loop: draw a short segment above the node to prevent zero-length overlap at center.
+                slot = int(state.get('edge_loop_slots', {}).get(edge_id, 0))
+                side = -1.0 if (slot % 2 == 0) else 1.0
+                tier = slot // 2
+                rise = 34.0 + (16.0 * float(tier))
+                span = 22.0 + (7.0 * float(tier))
+                cx = pa0.x() + (7.0 * float(tier) * side)
+                cy = pa0.y() - rise
+                return QPointF(cx - span, cy), QPointF(cx + span, cy)
+
+            def _port_label_pos(pa: QPointF, pb: QPointF, distance: float, is_a_side: bool) -> tuple[float, float]:
+                dx = float(pb.x() - pa.x())
+                dy = float(pb.y() - pa.y())
+                length = max(1.0, math.hypot(dx, dy))
+                ux = dx / length
+                uy = dy / length
+                if length < 90.0:
+                    # Keep labels apart on short edges (especially self-loops and compact layouts).
+                    dist = max(8.0, min(float(distance), max(8.0, length * 0.36)))
+                else:
+                    dist = max(28.0, min(float(distance), max(28.0, length - 30.0)))
+                if is_a_side:
+                    return pa.x() + ux * dist, pa.y() + uy * dist
+                return pb.x() - ux * dist, pb.y() - uy * dist
+
+            def _place_text_with_bg(
+                text_item: QGraphicsSimpleTextItem,
+                bg_item,
+                center_x: float,
+                center_y: float,
+                pad_x: float = 4.0,
+                pad_y: float = 1.0,
+                angle_deg: float | None = None,
+            ):
+                br = text_item.boundingRect()
+                x = float(center_x) - (br.width() / 2.0)
+                y = float(center_y) - (br.height() / 2.0)
+                text_item.setPos(x, y)
+                text_item.setTransformOriginPoint(br.center())
+                text_item.setRotation(float(angle_deg) if angle_deg is not None else 0.0)
+                if bg_item is not None:
+                    bg_item.setRect(QRectF(x - pad_x, y - pad_y, br.width() + (2.0 * pad_x), br.height() + (2.0 * pad_y)))
+                    bg_br = bg_item.rect()
+                    bg_item.setTransformOriginPoint(bg_br.center())
+                    bg_item.setRotation(float(angle_deg) if angle_deg is not None else 0.0)
+
+            def _place_edge_annotations():
+                node_slot_counts = defaultdict(int)
+                for edge_id in sorted(visible_edges.keys()):
+                    edge = visible_edges.get(edge_id)
+                    if not edge:
+                        continue
+                    pa, pb = _edge_points(edge_id, edge)
+                    is_self_loop = str(edge.get('a')) == str(edge.get('b'))
+                    loop_slot = int(state.get('edge_loop_slots', {}).get(edge_id, 0))
+
+                    # Keep edge label lightweight and deterministic to avoid UI stalls.
+                    label_holder = state['edge_label_items'].get(edge_id) or {}
+                    label_item = label_holder.get('text')
+                    label_bg = label_holder.get('bg')
+                    if label_item is not None:
+                        if is_self_loop:
+                            cx = (pa.x() + pb.x()) / 2.0
+                            cy = min(pa.y(), pb.y()) - 18.0 - (8.0 * float(loop_slot))
+                        else:
+                            dx = float(pb.x() - pa.x())
+                            dy = float(pb.y() - pa.y())
+                            length = max(1.0, math.hypot(dx, dy))
+                            nx = -dy / length
+                            ny = dx / length
+                            sign = 1.0 if (hash(edge_id) & 1) else -1.0
+                            cx = ((pa.x() + pb.x()) / 2.0) + (nx * 10.0 * sign)
+                            cy = ((pa.y() + pb.y()) / 2.0) + (ny * 10.0 * sign)
+                        _place_text_with_bg(label_item, label_bg, cx, cy, 5.0, 1.5)
+
+                    # Port labels are pinned near endpoint A/B.
+                    port_items = state['edge_port_items'].get(edge_id) or {}
+                    for side_key, is_a_side in (('a', True), ('b', False)):
+                        holder = port_items.get(side_key)
+                        if not holder:
+                            continue
+                        text_item = holder.get('text')
+                        bg_item = holder.get('bg')
+                        if text_item is None:
+                            continue
+                        node_id = str(edge.get('a')) if is_a_side else str(edge.get('b'))
+                        degree = len(state['node_to_edges'].get(node_id, set()))
+                        if is_self_loop:
+                            if is_a_side:
+                                cx = pa.x() - 10.0 - (5.0 * float(loop_slot))
+                                cy = pa.y() + 10.0 + (5.0 * float(loop_slot))
+                            else:
+                                cx = pb.x() + 10.0 + (5.0 * float(loop_slot))
+                                cy = pb.y() + 10.0 + (5.0 * float(loop_slot))
+                            _place_text_with_bg(text_item, bg_item, cx, cy, 4.0, 1.0)
+                        else:
+                            dx = float(pb.x() - pa.x())
+                            dy = float(pb.y() - pa.y())
+                            length = max(1.0, math.hypot(dx, dy))
+                            nx = -dy / length
+                            ny = dx / length
+                            if degree > 3:
+                                # Dense endpoint: pin label on the line direction and rotate with the wire.
+                                ux = dx / length
+                                uy = dy / length
+                                dir_x = ux if is_a_side else -ux
+                                dir_y = uy if is_a_side else -uy
+                                anchor = pa if is_a_side else pb
+                                br = text_item.boundingRect()
+                                endpoint_radius = 22.0
+                                gap = 2.0
+                                dist_along = endpoint_radius + gap + (br.width() / 2.0)
+                                cx = anchor.x() + (dir_x * dist_along)
+                                cy = anchor.y() + (dir_y * dist_along)
+                                angle = math.degrees(math.atan2(dir_y, dir_x))
+                                if angle > 90.0:
+                                    angle -= 180.0
+                                elif angle < -90.0:
+                                    angle += 180.0
+                                _place_text_with_bg(text_item, bg_item, cx, cy, 4.0, 1.0, angle_deg=angle)
+                            else:
+                                sign = 1.0 if (hash(edge_id) & 1) else -1.0
+                                dist = 30.0
+                                bx, by = _port_label_pos(pa, pb, dist, is_a_side)
+                                side_bias = 12.0 + (6.0 * float(loop_slot))
+                                cx = bx - (nx * side_bias * sign)
+                                cy = by - (ny * side_bias * sign)
+                                _place_text_with_bg(text_item, bg_item, cx, cy, 4.0, 1.0)
+
+            annotate_runner['fn'] = _place_edge_annotations
+
+            def _schedule_edge_annotations():
+                if not annotate_timer.isActive():
+                    annotate_timer.start()
+
+            def _on_node_move(node_id: str, pos: QPointF):
+                state['node_positions'][node_id] = QPointF(pos)
+                for eid in state['node_to_edges'].get(node_id, set()):
+                    edge_item = state['edge_items'].get(eid)
+                    edge = state['visible_edges'].get(eid)
+                    if edge_item is None or edge is None:
+                        continue
+                    pa, pb = _edge_points(eid, edge)
+                    edge_item.setLine(pa.x(), pa.y(), pb.x(), pb.y())
+                _schedule_edge_annotations()
+
+            for edge_id, edge in visible_edges.items():
+                a_id = str(edge.get('a'))
+                b_id = str(edge.get('b'))
+                pa, pb = _edge_points(edge_id, edge)
+                color = _edge_color(edge)
+                metric = int(edge.get('byte_count', 0) or 0) if metric_mode == 'Bytes' else int(edge.get('packet_count', 0) or 0)
+                width = 1.2 + (4.4 * (float(metric) / float(max_metric))) if max_metric > 0 else 1.2
+                edge_item = TopologyEdgeItem(edge_id, _set_selected)
+                edge_item.setPen(QPen(color, width))
+                edge_item.setLine(pa.x(), pa.y(), pb.x(), pb.y())
+                scene.addItem(edge_item)
+                state['edge_items'][edge_id] = edge_item
+                state['node_to_edges'][a_id].add(edge_id)
+                state['node_to_edges'][b_id].add(edge_id)
+                lbl = scene.addSimpleText(_edge_protocol_label(edge))
+                lbl.setBrush(QBrush(QColor(35, 35, 35)))
+                lbl_bg = scene.addRect(QRectF(0.0, 0.0, 1.0, 1.0), QPen(Qt.NoPen), QBrush(QColor(255, 255, 255, 220)))
+                # Keep protocol/port labels above all nodes/icons.
+                lbl_bg.setZValue(119)
+                lbl.setZValue(120)
+                state['edge_label_items'][edge_id] = {'text': lbl, 'bg': lbl_bg}
+
+                a_ports_text, b_ports_text = _edge_port_labels(edge)
+                port_items = {'a': None, 'b': None}
+                if a_ports_text:
+                    a_item = scene.addSimpleText(a_ports_text)
+                    a_item.setBrush(QBrush(QColor(40, 40, 40)))
+                    a_item.setZValue(120)
+                    a_bg = scene.addRect(QRectF(0.0, 0.0, 1.0, 1.0), QPen(Qt.NoPen), QBrush(QColor(255, 255, 255, 218)))
+                    a_bg.setZValue(119)
+                    port_items['a'] = {'text': a_item, 'bg': a_bg}
+                if b_ports_text:
+                    b_item = scene.addSimpleText(b_ports_text)
+                    b_item.setBrush(QBrush(QColor(40, 40, 40)))
+                    b_item.setZValue(120)
+                    b_bg = scene.addRect(QRectF(0.0, 0.0, 1.0, 1.0), QPen(Qt.NoPen), QBrush(QColor(255, 255, 255, 218)))
+                    b_bg.setZValue(119)
+                    port_items['b'] = {'text': b_item, 'bg': b_bg}
+                state['edge_port_items'][edge_id] = port_items
+
+            for node_id, node in visible_nodes.items():
+                pos = state['node_positions'].get(node_id, QPointF(0, 0))
+                role = str(node.get('role', 'client') or 'client')
+                node_color = QColor('#ffd43b') if role == 'server' else (QColor('#4dabf7') if role == 'client' else QColor('#adb5bd'))
+                icon_name = _icon_name_for_node(node)
+                icon_pix = _get_topology_icon(icon_name)
+                item = TopologyNodeItem(node_id, str(node.get('label', node_id)), 22.0, node_color, _on_node_move, _set_selected, icon=icon_pix)
+                item.setPos(pos)
+                scene.addItem(item)
+                state['node_items'][node_id] = item
+
+            _place_edge_annotations()
+
+            rect = scene.itemsBoundingRect()
+            if rect.isNull():
+                rect = scene.sceneRect()
+            rect = rect.adjusted(-80, -80, 80, 80)
+            scene.setSceneRect(rect)
+            status_label.setText(
+                f'Nodes: {len(visible_nodes)} / {len(state["nodes"])} | '
+                f'Edges: {len(visible_edges)} / {len(state["edges"])} | '
+                f'Protocols: {len(state["enabled_protocols"])} / {len(state["protocols"])}'
+            )
+            if fit_view:
+                try:
+                    view.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
+                except Exception:
+                    pass
+            _update_details()
+
+        def _refresh_topology():
+            _build_graph_data()
+            _build_protocol_checkboxes()
+            _render_graph(fit_view=True)
+
+        def _on_all_protocol_toggled(checked: bool):
+            val = bool(checked)
+            for cb in state['protocol_checks'].values():
+                cb.blockSignals(True)
+                cb.setChecked(val)
+                cb.blockSignals(False)
+            state['enabled_protocols'] = set(state['protocols']) if val else set()
+            _render_graph(fit_view=True, compact=True)
+
+        def _fit_endpoints():
+            visible_ids = sorted(state.get('visible_nodes', {}).keys())
+            if not visible_ids:
+                return
+            _assign_default_positions(visible_ids, force_reset=True, compact=True)
+            _render_graph(fit_view=True)
+
+        def _selected_filter_expr() -> str:
+            sel = state['selected']
+            kind = str(sel.get('kind', '') or '')
+            selected_id = str(sel.get('id', '') or '')
+            if kind == 'node':
+                node = state['nodes'].get(selected_id)
+                return self._topology_addr_filter_expr(str(node.get('addr', '') or '')) if node else ''
+            if kind == 'edge':
+                edge = state['edges'].get(selected_id)
+                return _edge_expr(edge) if edge else ''
+            return ''
+
+        def _apply_selected_filter():
+            expr = _selected_filter_expr()
+            if expr:
+                self._set_display_filter_text(expr, apply_now=True)
+            else:
+                QMessageBox.information(dialog, 'Network Topology Graph', 'Select a node or edge first.')
+
+        def _goto_selected_first_packet():
+            sel = state['selected']
+            kind = str(sel.get('kind', '') or '')
+            selected_id = str(sel.get('id', '') or '')
+            packet_no = 0
+            if kind == 'node':
+                node = state['nodes'].get(selected_id)
+                if node and node.get('packets'):
+                    packet_no = int(node.get('packets')[0] or 0)
+            elif kind == 'edge':
+                edge = state['edges'].get(selected_id)
+                if edge and edge.get('packets'):
+                    packet_no = int(edge.get('packets')[0] or 0)
+            if packet_no > 0:
+                try:
+                    self.capture_view.goto_packet_number(packet_no)
+                except Exception:
+                    pass
+            else:
+                QMessageBox.information(dialog, 'Network Topology Graph', 'No packet is associated with the current selection.')
+
+        def _copy_selected_filter():
+            expr = _selected_filter_expr()
+            if expr:
+                QApplication.clipboard().setText(expr)
+            else:
+                QMessageBox.information(dialog, 'Network Topology Graph', 'No filter expression available for current selection.')
+
+        refresh_btn.clicked.connect(_refresh_topology)
+        layout_combo.currentTextChanged.connect(lambda _v: _render_graph(fit_view=True))
+        search_input.textChanged.connect(lambda _v: _render_graph())
+        all_protocol_cb.toggled.connect(_on_all_protocol_toggled)
+        fit_endpoints_btn.clicked.connect(_fit_endpoints)
+        fit_btn.clicked.connect(lambda: view.fitInView(scene.sceneRect(), Qt.KeepAspectRatio))
+        apply_filter_btn.clicked.connect(_apply_selected_filter)
+        goto_packet_btn.clicked.connect(_goto_selected_first_packet)
+        copy_filter_btn.clicked.connect(_copy_selected_filter)
+
+        _refresh_topology()
+        dialog.resize(1520, 860)
+        self._fit_widget_90(dialog)
+        dialog.exec()
 
     def _current_display_filter_text(self) -> str:
         if not self.capture_view:
