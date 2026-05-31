@@ -26,6 +26,21 @@ from PySide6.QtWidgets import QColorDialog, QFontDialog
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from scapy.all import ARP, DNS, Ether, IP, IPv6, TCP, UDP
 from core.filtering import DisplayFilter
+from core.firewall_acl import (
+    ACTION_ALLOW,
+    ACTION_DENY,
+    DIRECTION_INBOUND,
+    DIRECTION_OUTBOUND,
+    PRODUCT_CISCO,
+    PRODUCT_IPFILTER,
+    PRODUCT_IPFW,
+    PRODUCT_IPTABLES,
+    PRODUCT_NETSH_NEW,
+    PRODUCT_NETSH_OLD,
+    PRODUCT_PF,
+    PacketAclSnapshot,
+    generate_rules_bundle,
+)
 from core.formatters import get_mac_vendor
 
 from gui.interface_selector_view import InterfaceSelectorView
@@ -1778,6 +1793,7 @@ class ApplicationWindow(QMainWindow):
         self.setWindowTitle('Packetra - Network Packet Analyzer')
         self.resize(1700, 930)
         self._ai_model_bundle = None
+        self._fw_acl_dialog = None
 
         # Trạng thái ứng dụng
         self.current_view = None
@@ -2152,15 +2168,26 @@ class ApplicationWindow(QMainWindow):
         self.action_ipv6_statistics = QAction('IPv&6 Statistics', self)
         statistics_menu.addAction(self.action_ipv6_statistics)
 
+        # Tools menu
+        tools_menu = menubar.addMenu('&Tools')
+
         # Hidden non-spec statistics actions
         self.action_summary = QAction('&Summary', self)
         self.action_io_graph = QAction('&I/O Graph', self)
 
-        # Hidden menus not in current tab feature specs (keep actions for compatibility)
+        # Advanced tools actions
         self.action_advanced_dashboard = QAction('&Dashboard', self)
         self.action_advanced_demo_packet = QAction('&Demo Packet', self)
         self.action_advanced_draw_topo = QAction('&Draw Topo', self)
         self.action_advanced_ai_analyst = QAction('&AI Analyst', self)
+        self.action_advanced_fwrule = QAction('&Firewall ACL Rules', self)
+
+        # Keep original order expected by users
+        tools_menu.addAction(self.action_advanced_ai_analyst)
+        tools_menu.addAction(self.action_advanced_demo_packet)
+        tools_menu.addAction(self.action_advanced_draw_topo)
+        tools_menu.addAction(self.action_advanced_dashboard)
+        tools_menu.addAction(self.action_advanced_fwrule)
 
         self.action_contents = QAction('&Contents', self)
         self.action_contents.setShortcut(QKeySequence.HelpContents)
@@ -2396,6 +2423,7 @@ class ApplicationWindow(QMainWindow):
         self.action_advanced_demo_packet.triggered.connect(lambda: self._on_advanced_analysis_action('Demo Packet'))
         self.action_advanced_draw_topo.triggered.connect(lambda: self._on_advanced_analysis_action('Draw Topo'))
         self.action_advanced_ai_analyst.triggered.connect(lambda: self._on_advanced_analysis_action('AI Analyst'))
+        self.action_advanced_fwrule.triggered.connect(lambda: self._on_advanced_analysis_action('Firewall ACL Rules'))
 
         # Help
         self.action_about.triggered.connect(self._on_about)
@@ -2432,11 +2460,14 @@ class ApplicationWindow(QMainWindow):
         if str(feature_name) == 'AI Analyst':
             self._open_ai_analyst_dialog()
             return
+        if str(feature_name) in {'FWrule', 'Firewall ACL Rules'}:
+            self._on_open_firewall_acl_rules()
+            return
 
         QMessageBox.information(
             self,
-            'Advanced Analysis',
-            f'"{feature_name}" is available in Advanced Analysis and will be integrated with full workflow soon.',
+            'Coming soon',
+            f'"{feature_name}" coming soon.',
         )
 
     def _parse_ai_packet_selector(self, selector: str, available_numbers: list[int]) -> list[int]:
@@ -2965,6 +2996,7 @@ class ApplicationWindow(QMainWindow):
 
     def show_interface_selector(self):
         """Hiển thị màn hình chọn interface"""
+        self._close_firewall_acl_dialog()
         if not self.iface_selector_view:
             self.iface_selector_view = InterfaceSelectorView()
             self.iface_selector_view.capture_started.connect(self._on_capture_started)
@@ -6038,6 +6070,7 @@ class ApplicationWindow(QMainWindow):
     def _on_redissect_packets(self):
         if not self.capture_view:
             return
+        self._close_firewall_acl_dialog('Capture data was redissected. Re-open Firewall ACL Rules to regenerate from the updated packet.')
         self.capture_view.reload_file()
         self._refresh_status_metrics()
 
@@ -6097,6 +6130,309 @@ class ApplicationWindow(QMainWindow):
             self.action_follow_stream.setEnabled(bool(has_current))
         if hasattr(self, 'action_expert_info'):
             self.action_expert_info.setEnabled(bool(has_capture))
+        if hasattr(self, 'action_advanced_fwrule'):
+            self.action_advanced_fwrule.setEnabled(self._can_open_firewall_acl_rules())
+
+    def _selected_records_from_packet_list(self) -> list:
+        cv = self.capture_view
+        if not cv or not hasattr(cv, 'table'):
+            return []
+        table = cv.table
+        model = table.selectionModel() if table else None
+        if model is None:
+            return []
+        rows = sorted({idx.row() for idx in model.selectedRows()})
+        if not rows:
+            return []
+
+        records = []
+        for row in rows:
+            if row < 0 or row >= len(cv.visible_indices):
+                continue
+            rec_index = int(cv.visible_indices[row])
+            if rec_index < 0 or rec_index >= len(cv.records):
+                continue
+            records.append(cv.records[rec_index])
+        return records
+
+    def _build_acl_snapshot_from_record(self, record) -> PacketAclSnapshot:
+        raw = getattr(record, 'raw', None)
+        metadata = getattr(record, 'metadata', {}) or {}
+        eth_src = ''
+        eth_dst = ''
+        ip_src = ''
+        ip_dst = ''
+        ip_proto = None
+        tcp_sport = None
+        tcp_dport = None
+        udp_sport = None
+        udp_dport = None
+
+        try:
+            if raw is not None and raw.haslayer(Ether):
+                eth_src = str(getattr(raw[Ether], 'src', '') or '').strip()
+                eth_dst = str(getattr(raw[Ether], 'dst', '') or '').strip()
+        except Exception:
+            pass
+        try:
+            if raw is not None and raw.haslayer(IP):
+                ip_src = str(getattr(raw[IP], 'src', '') or '').strip()
+                ip_dst = str(getattr(raw[IP], 'dst', '') or '').strip()
+                proto_value = getattr(raw[IP], 'proto', None)
+                ip_proto = int(proto_value) if proto_value is not None else None
+        except Exception:
+            pass
+        try:
+            if raw is not None and raw.haslayer(TCP):
+                tcp_sport = int(getattr(raw[TCP], 'sport', 0) or 0)
+                tcp_dport = int(getattr(raw[TCP], 'dport', 0) or 0)
+        except Exception:
+            pass
+        try:
+            if raw is not None and raw.haslayer(UDP):
+                udp_sport = int(getattr(raw[UDP], 'sport', 0) or 0)
+                udp_dport = int(getattr(raw[UDP], 'dport', 0) or 0)
+        except Exception:
+            pass
+
+        iface = str(metadata.get('frame_interface_name', '') or metadata.get('interface_name', '') or getattr(record, 'iface', '') or '').strip()
+        return PacketAclSnapshot(
+            frame_number=int(getattr(record, 'number', 0) or 0),
+            protocol=str(getattr(record, 'protocol', '') or '').strip(),
+            eth_src=eth_src,
+            eth_dst=eth_dst,
+            ip_src=ip_src,
+            ip_dst=ip_dst,
+            ip_proto=ip_proto,
+            tcp_src_port=tcp_sport if tcp_sport is not None else None,
+            tcp_dst_port=tcp_dport if tcp_dport is not None else None,
+            udp_src_port=udp_sport if udp_sport is not None else None,
+            udp_dst_port=udp_dport if udp_dport is not None else None,
+            interface_name=iface,
+        )
+
+    def _can_open_firewall_acl_rules(self) -> bool:
+        if not self._has_capture_document():
+            return False
+        if not self.capture_view:
+            return False
+        if bool(self.capture_view.is_file_format_view_mode()):
+            return False
+        selected_records = self._selected_records_from_packet_list()
+        if len(selected_records) != 1:
+            return False
+        snapshot = self._build_acl_snapshot_from_record(selected_records[0])
+        return bool(snapshot.has_acl_usable_fields())
+
+    def _on_open_firewall_acl_rules(self):
+        if not self.capture_view or not self._has_capture_document():
+            QMessageBox.information(self, 'Firewall ACL Rules', 'No capture is loaded.')
+            return
+        if bool(self.capture_view.is_file_format_view_mode()):
+            QMessageBox.information(self, 'Firewall ACL Rules', 'Firewall ACL Rules is not available in file format view mode.')
+            return
+
+        selected_records = self._selected_records_from_packet_list()
+        if not selected_records:
+            QMessageBox.information(self, 'Firewall ACL Rules', 'Please select exactly one packet before creating firewall ACL rules.')
+            return
+        if len(selected_records) > 1:
+            QMessageBox.information(self, 'Firewall ACL Rules', 'Firewall ACL Rules can only be generated from one selected packet.')
+            return
+
+        snapshot = self._build_acl_snapshot_from_record(selected_records[0])
+        if not snapshot.has_acl_usable_fields():
+            QMessageBox.information(
+                self,
+                'Firewall ACL Rules',
+                'The selected packet does not contain Ethernet/IPv4/TCP/UDP fields required to generate ACL rules.',
+            )
+            return
+        self._show_firewall_acl_dialog(snapshot)
+
+    def _show_firewall_acl_dialog(self, snapshot: PacketAclSnapshot):
+        if self._fw_acl_dialog is not None:
+            try:
+                if self._fw_acl_dialog.isVisible():
+                    self._fw_acl_dialog.raise_()
+                    self._fw_acl_dialog.activateWindow()
+                    return
+            except Exception:
+                pass
+            try:
+                self._fw_acl_dialog.close()
+            except Exception:
+                pass
+            self._fw_acl_dialog = None
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Firewall ACL Rules')
+        root = QVBoxLayout(dialog)
+
+        summary_title = QLabel('Selected Packet Summary', dialog)
+        summary_title.setStyleSheet('font-weight: 600;')
+        root.addWidget(summary_title)
+
+        def _fmt_endpoint(ip_value: str, port_value: int | None) -> str:
+            if ip_value:
+                return f'{ip_value}:{port_value}' if port_value is not None else ip_value
+            return 'N/A'
+
+        source_endpoint = _fmt_endpoint(snapshot.ip_src, snapshot.tcp_src_port if snapshot.tcp_src_port is not None else snapshot.udp_src_port)
+        destination_endpoint = _fmt_endpoint(snapshot.ip_dst, snapshot.tcp_dst_port if snapshot.tcp_dst_port is not None else snapshot.udp_dst_port)
+        summary_lines = [
+            f'Packet No: {int(snapshot.frame_number)}',
+            f'Protocol: {snapshot.protocol or "N/A"}',
+            f'Source: {source_endpoint}',
+            f'Destination: {destination_endpoint}',
+            f'Source MAC: {snapshot.eth_src or "N/A"}',
+            f'Destination MAC: {snapshot.eth_dst or "N/A"}',
+            f'Interface: {snapshot.interface_name or "N/A"}',
+        ]
+        summary_text = QTextEdit(dialog)
+        summary_text.setReadOnly(True)
+        summary_text.setFixedHeight(168)
+        summary_text.setPlainText('\n'.join(summary_lines))
+        root.addWidget(summary_text)
+
+        controls = QGridLayout()
+        controls.addWidget(QLabel('Firewall Product', dialog), 0, 0)
+        product_combo = QComboBox(dialog)
+        product_combo.addItem(PRODUCT_CISCO)
+        product_combo.addItem(PRODUCT_IPFILTER)
+        product_combo.addItem(PRODUCT_IPFW)
+        product_combo.addItem(PRODUCT_IPTABLES)
+        product_combo.addItem(PRODUCT_PF)
+        product_combo.addItem(PRODUCT_NETSH_OLD)
+        product_combo.addItem(PRODUCT_NETSH_NEW)
+        controls.addWidget(product_combo, 0, 1, 1, 2)
+
+        controls.addWidget(QLabel('Action', dialog), 1, 0)
+        action_allow = QRadioButton('Allow / Permit', dialog)
+        action_deny = QRadioButton('Deny / Block', dialog)
+        action_allow.setChecked(True)
+        action_group = QButtonGroup(dialog)
+        action_group.addButton(action_allow)
+        action_group.addButton(action_deny)
+        controls.addWidget(action_allow, 1, 1)
+        controls.addWidget(action_deny, 1, 2)
+
+        controls.addWidget(QLabel('Direction', dialog), 2, 0)
+        direction_in = QRadioButton('Inbound', dialog)
+        direction_out = QRadioButton('Outbound', dialog)
+        direction_in.setChecked(True)
+        direction_group = QButtonGroup(dialog)
+        direction_group.addButton(direction_in)
+        direction_group.addButton(direction_out)
+        controls.addWidget(direction_in, 2, 1)
+        controls.addWidget(direction_out, 2, 2)
+        root.addLayout(controls)
+
+        note = QLabel(
+            'Note: Generated rules are templates and assume use on an outside interface. '
+            'Review before applying to real firewall.',
+            dialog,
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet('color: #555;')
+        root.addWidget(note)
+
+        preview_title = QLabel('Generated Rule Preview', dialog)
+        preview_title.setStyleSheet('font-weight: 600;')
+        root.addWidget(preview_title)
+        rule_preview = QTextEdit(dialog)
+        rule_preview.setReadOnly(True)
+        preview_font = QFont('Consolas')
+        preview_font.setStyleHint(QFont.Monospace)
+        rule_preview.setFont(preview_font)
+        rule_preview.setMinimumHeight(250)
+        root.addWidget(rule_preview)
+
+        buttons = QHBoxLayout()
+        copy_btn = QPushButton('Copy', dialog)
+        save_btn = QPushButton('Save As...', dialog)
+        regen_btn = QPushButton('Regenerate', dialog)
+        close_btn = QPushButton('Close', dialog)
+        buttons.addWidget(copy_btn)
+        buttons.addWidget(save_btn)
+        buttons.addWidget(regen_btn)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+        root.addLayout(buttons)
+
+        def _render_rule():
+            product = str(product_combo.currentText() or '')
+            action = ACTION_ALLOW if action_allow.isChecked() else ACTION_DENY
+            direction = DIRECTION_INBOUND if direction_in.isChecked() else DIRECTION_OUTBOUND
+            try:
+                text = generate_rules_bundle(snapshot, product, action, direction)
+                rule_preview.setPlainText(text)
+            except Exception as exc:
+                rule_preview.setPlainText(str(exc))
+
+        def _on_copy():
+            text = str(rule_preview.toPlainText() or '').strip()
+            if not text:
+                QMessageBox.information(dialog, 'Firewall ACL Rules', 'No generated rule to copy.')
+                return
+            try:
+                QApplication.clipboard().setText(text)
+            except Exception:
+                QMessageBox.warning(dialog, 'Firewall ACL Rules', 'Unable to copy the generated rule to clipboard.')
+
+        def _on_save():
+            text = str(rule_preview.toPlainText() or '').strip()
+            if not text:
+                QMessageBox.information(dialog, 'Firewall ACL Rules', 'No generated rule to save.')
+                return
+            file_path, _ = QFileDialog.getSaveFileName(
+                dialog,
+                'Save Firewall Rule',
+                str(Path.cwd() / f'firewall_rule_frame_{int(snapshot.frame_number)}.txt'),
+                'Text Files (*.txt);;All Files (*)',
+            )
+            if not file_path:
+                return
+            try:
+                Path(file_path).write_text(text + '\n', encoding='utf-8')
+            except Exception:
+                QMessageBox.warning(
+                    dialog,
+                    'Firewall ACL Rules',
+                    'Unable to save the generated rule file. Please check file permissions.',
+                )
+
+        product_combo.currentIndexChanged.connect(lambda _idx: _render_rule())
+        action_allow.toggled.connect(lambda _checked: _render_rule())
+        action_deny.toggled.connect(lambda _checked: _render_rule())
+        direction_in.toggled.connect(lambda _checked: _render_rule())
+        direction_out.toggled.connect(lambda _checked: _render_rule())
+        copy_btn.clicked.connect(_on_copy)
+        save_btn.clicked.connect(_on_save)
+        regen_btn.clicked.connect(_render_rule)
+        close_btn.clicked.connect(dialog.accept)
+
+        _render_rule()
+        dialog.resize(980, 640)
+        self._fit_widget_90(dialog)
+        self._fw_acl_dialog = dialog
+        dialog.finished.connect(lambda _result: setattr(self, '_fw_acl_dialog', None))
+        dialog.exec()
+
+    def _close_firewall_acl_dialog(self, reason: str = ''):
+        dialog = getattr(self, '_fw_acl_dialog', None)
+        if dialog is None:
+            return
+        if reason:
+            try:
+                QMessageBox.information(self, 'Firewall ACL Rules', reason)
+            except Exception:
+                pass
+        try:
+            dialog.close()
+        except Exception:
+            pass
+        self._fw_acl_dialog = None
 
     def _current_display_filter_text(self) -> str:
         if not self.capture_view:
@@ -7230,6 +7566,7 @@ class ApplicationWindow(QMainWindow):
         if not proceed:
             return
 
+        self._close_firewall_acl_dialog()
         self.capture_view.stop_capture()
         self.show_interface_selector()
         self._refresh_status_metrics()
@@ -7238,6 +7575,7 @@ class ApplicationWindow(QMainWindow):
     def _on_reload_file(self):
         if not self.capture_view:
             return
+        self._close_firewall_acl_dialog('The capture file was reloaded. This ACL rule may no longer match the selected packet.')
         self.capture_view.reload_file()
         self._sync_capture_buttons()
         self._refresh_status_metrics()
