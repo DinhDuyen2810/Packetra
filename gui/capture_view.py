@@ -9,7 +9,7 @@ import threading
 import queue
 from datetime import datetime
 from pathlib import Path
-from collections import Counter
+from collections import Counter, deque
 from scapy.all import TCP, ICMP, IP
 from PySide6.QtCore import Qt, Signal, QSettings, QDateTime, QTimer, QStringListModel, QEvent
 from PySide6.QtWidgets import (
@@ -127,6 +127,8 @@ class _PacketListMinimap(QWidget):
         self.setMaximumWidth(42)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.setToolTip('Packet list minimap')
+        self._cache_pixmap = None
+        self._cache_key = None
 
     def _row_color(self, row: int) -> QColor:
         item = self._table.item(row, 0)
@@ -148,7 +150,7 @@ class _PacketListMinimap(QWidget):
         color = item.background().color()
         return color if color.isValid() else QColor('#FFFFFF')
 
-    def _bucket_color(self, start: int, end: int, selected_row: int) -> QColor:
+    def _bucket_color(self, start: int, end: int) -> QColor:
         if start < 0:
             start = 0
         if end <= start:
@@ -159,12 +161,23 @@ class _PacketListMinimap(QWidget):
         end = min(rows, end)
         if start >= rows:
             return QColor('#FFFFFF')
-        if selected_row >= start and selected_row < end:
-            return QColor('#2F80ED')
+        span = max(0, int(end - start))
+        if span <= 1:
+            return self._row_color(start)
+        if span <= 8:
+            sample_rows = list(range(start, end))
+        else:
+            # Sampling keeps minimap fast even while table data is changing heavily.
+            sample_rows = []
+            steps = 6
+            for i in range(steps):
+                row = int(start + ((span - 1) * i) / max(1, steps - 1))
+                if not sample_rows or row != sample_rows[-1]:
+                    sample_rows.append(row)
         counts = {}
         top_color = QColor('#FFFFFF')
         top_count = 0
-        for row in range(start, end):
+        for row in sample_rows:
             color = self._row_color(row)
             key = color.name().lower()
             count = int(counts.get(key, 0)) + 1
@@ -174,13 +187,44 @@ class _PacketListMinimap(QWidget):
                 top_color = color
         return top_color if top_color.isValid() else QColor('#FFFFFF')
 
+    def invalidate_cache(self):
+        self._cache_pixmap = None
+        self._cache_key = None
+
+    def _rebuild_cache(self, w: int, h: int, window_start: int, window_end: int, rows: int):
+        window_rows = max(0, int(window_end - window_start))
+        if window_rows <= 0 or w <= 0 or h <= 0:
+            self._cache_pixmap = None
+            self._cache_key = None
+            return
+        pix = QPixmap(w, h)
+        pix.fill(QColor('#F4F6F8'))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        for y in range(h):
+            local_start = int((y * window_rows) / h)
+            local_end = int(((y + 1) * window_rows) / h)
+            start = int(window_start + local_start)
+            end = int(window_start + local_end)
+            if end <= start:
+                end = start + 1
+            end = min(window_end, end)
+            color = self._bucket_color(start, end)
+            painter.setPen(QPen(color, 1))
+            painter.drawLine(0, y, w - 1, y)
+        painter.setPen(QPen(QColor('#9AA4B2'), 1))
+        painter.drawRect(0, 0, w - 1, h - 1)
+        painter.end()
+        self._cache_pixmap = pix
+        self._cache_key = (int(w), int(h), int(window_start), int(window_end))
+
     def _active_packet_window(self) -> tuple[int, int, int]:
         rows = int(self._table.rowCount() or 0)
         if rows <= 0:
             return 0, 0, 0
         max_window = 500
         if rows <= max_window:
-            return 0, rows, rows
+            return 0, max_window, rows
         anchor = int(self._table.currentRow())
         if anchor < 0 or anchor >= rows:
             anchor = int(self._table.rowAt(0))
@@ -198,29 +242,29 @@ class _PacketListMinimap(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         w = max(1, self.width())
         h = max(1, self.height())
-        painter.fillRect(0, 0, w, h, QColor('#F4F6F8'))
-        painter.setPen(QPen(QColor('#9AA4B2'), 1))
-        painter.drawRect(0, 0, w - 1, h - 1)
-
         window_start, window_end, rows = self._active_packet_window()
+        fast_mode = bool(getattr(self._capture_view, '_startup_priority_mode', False))
         if rows <= 0:
+            painter.fillRect(0, 0, w, h, QColor('#F4F6F8'))
+            painter.setPen(QPen(QColor('#9AA4B2'), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
             return
         window_rows = max(0, int(window_end - window_start))
         if window_rows <= 0:
+            painter.fillRect(0, 0, w, h, QColor('#F4F6F8'))
+            painter.setPen(QPen(QColor('#9AA4B2'), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
             return
-
-        selected_row = int(self._table.currentRow())
-        for y in range(h):
-            local_start = int((y * window_rows) / h)
-            local_end = int(((y + 1) * window_rows) / h)
-            start = int(window_start + local_start)
-            end = int(window_start + local_end)
-            if end <= start:
-                end = start + 1
-            end = min(window_end, end)
-            color = self._bucket_color(start, end, selected_row)
-            painter.setPen(QPen(color, 1))
-            painter.drawLine(0, y, w - 1, y)
+        key = (int(w), int(h), int(window_start), int(window_end))
+        if self._cache_pixmap is None or self._cache_key != key:
+            if not fast_mode:
+                self._rebuild_cache(w, h, window_start, window_end, rows)
+        if self._cache_pixmap is not None:
+            painter.drawPixmap(0, 0, self._cache_pixmap)
+        else:
+            painter.fillRect(0, 0, w, h, QColor('#F4F6F8'))
+            painter.setPen(QPen(QColor('#9AA4B2'), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
 
         top = int(self._table.rowAt(0))
         bottom = int(self._table.rowAt(max(0, self._table.viewport().height() - 1)))
@@ -243,6 +287,7 @@ class _PacketListMinimap(QWidget):
         painter.setPen(QPen(QColor('#111111'), 1))
         painter.drawRect(0, view_top, w - 1, max(1, view_bottom - view_top))
 
+        selected_row = int(self._table.currentRow())
         if window_start <= selected_row < window_end:
             sy = int(((selected_row - window_start) * h) / max(1, window_rows))
             painter.setPen(QPen(QColor('#FF6B00'), 1))
@@ -259,6 +304,7 @@ class _PacketListMinimap(QWidget):
         ratio = max(0.0, min(1.0, y / max(1.0, float(self.height() - 1))))
         local_target = int(round(ratio * max(0, window_rows - 1)))
         target = int(window_start + local_target)
+        target = max(0, min(rows - 1, target))
         if event.button() == Qt.MouseButton.LeftButton:
             try:
                 self._capture_view.goto_row(target)
@@ -435,6 +481,11 @@ class CaptureView(QWidget):
         self._file_load_loaded_count = 0
         self._file_load_last_status_count = 0
         self._file_load_error_message = ''
+        self._visible_append_queue = deque()
+        self._file_load_done_pending_finalize = False
+        self._visible_append_timer = QTimer(self)
+        self._visible_append_timer.setInterval(8)
+        self._visible_append_timer.timeout.connect(self._drain_visible_append_queue)
         self._refine_timer = QTimer(self)
         self._refine_timer.setInterval(16)
         self._refine_timer.timeout.connect(self._drain_refine_queue)
@@ -444,6 +495,10 @@ class CaptureView(QWidget):
         self._packet_list_aux_refresh_timer.timeout.connect(self._flush_packet_list_aux_refresh)
         self._pending_related_indicator_refresh = False
         self._pending_minimap_refresh = False
+        self._last_minimap_refresh_monotonic = 0.0
+        self._minimap_refresh_interval_during_bulk = 0.12
+        self._minimap_cache_dirty = True
+        self._startup_priority_mode = False
 
         self._build_ui()
         self.refresh_preferences_from_settings()
@@ -624,6 +679,7 @@ class CaptureView(QWidget):
         self.stop_capture()
         self._stop_file_load_thread()
         self._is_bulk_loading = False
+        self._startup_priority_mode = False
         self.records.clear()
         self.visible_indices.clear()
         self._reset_visible_row_lookup()
@@ -1229,14 +1285,13 @@ class CaptureView(QWidget):
         self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self.table.itemSelectionChanged.connect(self._on_packet_table_selection_changed)
         self.table.verticalScrollBar().valueChanged.connect(
-            lambda _value: self._schedule_packet_list_aux_refresh(minimap=True)
+            lambda _value: getattr(self, 'packet_minimap', None).update() if getattr(self, 'packet_minimap', None) is not None else None
         )
         model = self.table.model()
         if model is not None:
-            model.dataChanged.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True))
-            model.rowsInserted.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True))
-            model.rowsRemoved.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True))
-            model.modelReset.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True))
+            model.rowsInserted.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True))
+            model.rowsRemoved.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True))
+            model.modelReset.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True))
         self.details_tree.detail_field_selected.connect(self._on_detail_field_selected)
         self.details_tree.item_bytes_selected.connect(self.hex_view.highlight_bytes)
         self.hex_view.bytes_range_selected.connect(self._on_bytes_range_selected)
@@ -2098,6 +2153,7 @@ class CaptureView(QWidget):
     def clear_packets(self, reset_file_path: bool = False):
         self._stop_file_load_thread()
         self._is_bulk_loading = False
+        self._startup_priority_mode = False
         self._stop_refine_thread()
         self._show_file_format_view = False
         self._file_format_record = None
@@ -2153,6 +2209,7 @@ class CaptureView(QWidget):
     def _stop_file_load_thread(self):
         self._file_load_stop.set()
         self._file_load_timer.stop()
+        self._visible_append_timer.stop()
         try:
             if self._file_load_thread is not None and self._file_load_thread.is_alive():
                 self._file_load_thread.join(timeout=0.2)
@@ -2165,6 +2222,8 @@ class CaptureView(QWidget):
         self._file_load_loaded_count = 0
         self._file_load_last_status_count = 0
         self._file_load_error_message = ''
+        self._file_load_done_pending_finalize = False
+        self._visible_append_queue.clear()
         while True:
             try:
                 self._file_load_queue.get_nowait()
@@ -2196,7 +2255,9 @@ class CaptureView(QWidget):
             matcher = DisplayFilter()
             index = max(0, int(start_index) - 1)
             batch = []
-            batch_size = 400
+            has_custom_columns = bool(self.table.columnCount() > 7)
+            # Smaller UI batches prevent long main-thread pauses while custom columns exist.
+            batch_size = 80 if has_custom_columns else 400
             try:
                 for packet in packet_iter:
                     if stop_event.is_set():
@@ -2239,33 +2300,74 @@ class CaptureView(QWidget):
             if filter_unchanged:
                 if bool(matched):
                     self.visible_indices.append(rec_idx)
-                    append_visible.append(applied)
+                    append_visible.append((applied, rec_idx))
             else:
                 self._file_load_requires_filter_rebuild = True
 
         self._file_load_loaded_count = len(self.records)
         if filter_unchanged and append_visible:
-            start_row = len(self.visible_indices) - len(append_visible)
-            self.table.setUpdatesEnabled(False)
-            try:
-                self.table.append_records(append_visible)
-            finally:
-                self.table.setUpdatesEnabled(True)
-            for rel, rec in enumerate(append_visible):
-                row = start_row + rel
-                rec_idx = self.visible_indices[row]
-                self._visible_row_lookup[int(rec_idx)] = int(row)
-            self._schedule_packet_list_aux_refresh(minimap=True)
+            self._visible_append_queue.extend(append_visible)
+            if not self._visible_append_timer.isActive():
+                self._visible_append_timer.start()
         if self.table.rowCount() > 0 and self.table.currentRow() < 0:
             self.table.selectRow(0)
             self.table.setCurrentCell(0, 0)
             self.table.setFocus()
-            self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+            self._schedule_packet_list_aux_refresh(related=True, minimap=False)
+
+    def _drain_visible_append_queue(self):
+        if not self._visible_append_queue:
+            self._visible_append_timer.stop()
+            if bool(self._file_load_done_pending_finalize):
+                self._file_load_done_pending_finalize = False
+                self._finalize_background_file_load()
+            return
+        table = self.table
+        max_rows = 40
+        if bool(self._startup_priority_mode):
+            max_rows = 10
+        elif table.columnCount() > 7:
+            max_rows = 16
+        try:
+            scrollbar = table.verticalScrollBar()
+            if scrollbar is not None and bool(scrollbar.isSliderDown()):
+                max_rows = max(6, int(max_rows // 2))
+        except Exception:
+            pass
+        chunk = []
+        while self._visible_append_queue and len(chunk) < max_rows:
+            chunk.append(self._visible_append_queue.popleft())
+        if not chunk:
+            return
+        start_row = int(table.rowCount() or 0)
+        records = [pair[0] for pair in chunk]
+        rec_indices = [int(pair[1]) for pair in chunk]
+        table.setUpdatesEnabled(False)
+        try:
+            table.append_records(records)
+        finally:
+            table.setUpdatesEnabled(True)
+        for rel, rec_idx in enumerate(rec_indices):
+            self._visible_row_lookup[int(rec_idx)] = int(start_row + rel)
+        if bool(self._startup_priority_mode):
+            self._force_visible_feedback_now(minimap_data_changed=True)
+        else:
+            self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
+        if table.rowCount() > 0 and table.currentRow() < 0:
+            table.selectRow(0)
+            table.setCurrentCell(0, 0)
+            table.setFocus()
+            if bool(self._startup_priority_mode):
+                self._force_visible_feedback_now(minimap_data_changed=False)
+            else:
+                self._schedule_packet_list_aux_refresh(related=True, minimap=False)
 
     def _finalize_background_file_load(self):
         self._file_load_timer.stop()
+        self._visible_append_timer.stop()
         self._file_load_thread = None
         self._is_bulk_loading = False
+        self._startup_priority_mode = False
         self._set_dirty(False)
         self._remember_recent_file(self.loaded_file_path)
         self._rebuild_visible_row_lookup()
@@ -2278,7 +2380,8 @@ class CaptureView(QWidget):
         else:
             self.display_filter_applied.emit()
             self._emit_go_state_changed()
-            self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+            self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
+            self._schedule_packet_list_aux_refresh(related=True, minimap=False)
         self._start_refine_thread()
         warning = str(self._file_load_error_message or '').strip()
         if warning:
@@ -2289,9 +2392,24 @@ class CaptureView(QWidget):
     def _drain_file_load_queue(self):
         done = False
         start = time.perf_counter()
-        max_batches = 4
+        max_batches = 3
+        max_tick_seconds = 0.008
+        if bool(self._startup_priority_mode):
+            max_batches = 1
+            max_tick_seconds = 0.0022
+        if self.table.columnCount() > 7:
+            # Keep the UI responsive when custom columns are present.
+            max_batches = 1
+            max_tick_seconds = 0.003
+        try:
+            scrollbar = self.table.verticalScrollBar()
+            if scrollbar is not None and bool(scrollbar.isSliderDown()):
+                max_batches = 1
+                max_tick_seconds = 0.003
+        except Exception:
+            pass
         processed_batches = 0
-        while processed_batches < max_batches and (time.perf_counter() - start) < 0.010:
+        while processed_batches < max_batches and (time.perf_counter() - start) < max_tick_seconds:
             try:
                 item = self._file_load_queue.get_nowait()
             except Exception:
@@ -2316,7 +2434,12 @@ class CaptureView(QWidget):
             self._update_status(f'Loaded {loaded} packets...')
 
         if done:
-            self._finalize_background_file_load()
+            self._file_load_done_pending_finalize = True
+            if not self._visible_append_queue:
+                self._file_load_done_pending_finalize = False
+                self._finalize_background_file_load()
+            elif not self._visible_append_timer.isActive():
+                self._visible_append_timer.start()
 
     def _start_refine_thread(self):
         self._stop_refine_thread()
@@ -2391,8 +2514,25 @@ class CaptureView(QWidget):
         changed_rows = set()
         selected_refresh_record = None
         reached_end = False
-        while processed < int(self._refine_max_rows_per_tick):
-            if (time.perf_counter() - started) >= float(self._refine_max_tick_seconds):
+        max_rows = int(self._refine_max_rows_per_tick)
+        max_tick_seconds = float(self._refine_max_tick_seconds)
+        startup_priority = bool(self._startup_priority_mode)
+        if startup_priority:
+            max_rows = min(max_rows, 6)
+            max_tick_seconds = min(max_tick_seconds, 0.0012)
+        if self.table.columnCount() > 7:
+            # With custom columns, keep refine ticks short to avoid post-load hitching.
+            max_rows = min(max_rows, 20)
+            max_tick_seconds = min(max_tick_seconds, 0.0025)
+        try:
+            scrollbar = self.table.verticalScrollBar()
+            if scrollbar is not None and bool(scrollbar.isSliderDown()):
+                max_rows = max(8, int(max_rows // 3))
+                max_tick_seconds = min(max_tick_seconds, 0.002)
+        except Exception:
+            pass
+        while processed < max_rows:
+            if (time.perf_counter() - started) >= max_tick_seconds:
                 break
             try:
                 idx, full_record = self._refine_queue.get_nowait()
@@ -2408,8 +2548,9 @@ class CaptureView(QWidget):
             # Update row only if currently visible.
             row = visible_row_by_index.get(idx, -1)
             if row >= 0:
-                pending_row_updates.append((int(row), applied))
-                changed_rows.add(int(row))
+                if (not startup_priority) or (idx == self._selected_record_index):
+                    pending_row_updates.append((int(row), applied))
+                    changed_rows.add(int(row))
             if idx == self._selected_record_index:
                 selected_refresh_record = applied
             processed += 1
@@ -2426,7 +2567,7 @@ class CaptureView(QWidget):
             self.hex_view.show_packet(selected_refresh_record)
         if processed > 0 and changed_rows:
             self.records_refined.emit(sorted(changed_rows))
-            self._schedule_packet_list_aux_refresh(minimap=True)
+            self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
         if reached_end:
             self._refine_timer.stop()
 
@@ -2465,7 +2606,7 @@ class CaptureView(QWidget):
         self._captured_bytes = 0
         self._last_live_status_count = 0
         self._set_dirty(False)
-        self._schedule_packet_list_aux_refresh(minimap=True)
+        self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
 
         # Keep window/file name as the last written file (newest completed file).
         self.loaded_file_path = saved_path
@@ -2511,7 +2652,7 @@ class CaptureView(QWidget):
             self.table.append_record(record)
             if self.auto_scroll_enabled:
                 self.table.scrollToBottom()
-            self._schedule_packet_list_aux_refresh(minimap=True)
+            self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
 
         # Update Capture Information dialog
         if self._capture_info_dialog is not None and self._capture_info_dialog.isVisible():
@@ -2566,6 +2707,10 @@ class CaptureView(QWidget):
         return False
 
     def apply_display_filter(self):
+        if self._visible_append_queue:
+            self._visible_append_queue.clear()
+            self._visible_append_timer.stop()
+            self._file_load_done_pending_finalize = False
         if self._show_file_format_view and self._file_format_record is not None:
             self.table.replace_records([self._file_format_record])
             self._reset_visible_row_lookup()
@@ -2573,7 +2718,7 @@ class CaptureView(QWidget):
             self.display_filter_applied.emit()
             self._emit_go_state_changed()
             self._clear_related_packet_indicators()
-            self._schedule_packet_list_aux_refresh(minimap=True)
+            self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
             return
         self.visible_indices.clear()
         expr = self._expand_display_filter_macros(self.display_filter_input.text())
@@ -2592,7 +2737,7 @@ class CaptureView(QWidget):
         self._apply_visible_conversation_highlight()
         self._update_status('Display filter applied')
         self.display_filter_applied.emit()
-        self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+        self._schedule_packet_list_aux_refresh(related=True, minimap=True, minimap_data_changed=True)
         self._emit_go_state_changed()
 
     def _update_packet_minimap(self):
@@ -2600,18 +2745,56 @@ class CaptureView(QWidget):
         if minimap is None:
             return
         try:
-            self._layout_packet_minimap_overlay()
+            if bool(self._minimap_cache_dirty) and hasattr(minimap, 'invalidate_cache'):
+                minimap.invalidate_cache()
+                self._minimap_cache_dirty = False
+            if (not minimap.isVisible()) or (minimap.height() != self.table.viewport().height()):
+                self._layout_packet_minimap_overlay()
             minimap.update()
         except Exception:
             pass
 
-    def _schedule_packet_list_aux_refresh(self, related: bool = False, minimap: bool = False):
+    def _force_visible_feedback_now(self, minimap_data_changed: bool = False):
+        if minimap_data_changed:
+            self._minimap_cache_dirty = True
+        self._set_selected_indicator_immediate()
+        # Keep immediate feedback lightweight; related-arrows are resolved asynchronously.
+        self._update_packet_minimap()
+        try:
+            self.table.verticalHeader().viewport().repaint()
+        except Exception:
+            pass
+        minimap = getattr(self, 'packet_minimap', None)
+        if minimap is not None:
+            try:
+                minimap.repaint()
+            except Exception:
+                pass
+
+    def _schedule_packet_list_aux_refresh(self, related: bool = False, minimap: bool = False, minimap_data_changed: bool = False):
+        if bool(getattr(self, '_startup_priority_mode', False)) and (bool(related) or bool(minimap)):
+            # Startup UX-first: render what user sees immediately.
+            self._force_visible_feedback_now(minimap_data_changed=bool(minimap_data_changed))
+            return
         if bool(related):
             self._pending_related_indicator_refresh = True
         if bool(minimap):
             self._pending_minimap_refresh = True
+        if bool(minimap_data_changed):
+            self._minimap_cache_dirty = True
         if not (self._pending_related_indicator_refresh or self._pending_minimap_refresh):
             return
+        start_delay_ms = 0
+        if bool(minimap) and not bool(related):
+            try:
+                if bool(self._is_bulk_loading) and int(self.table.rowCount() or 0) > 50:
+                    now = time.monotonic()
+                    min_interval = float(self._minimap_refresh_interval_during_bulk)
+                    elapsed = float(now - float(self._last_minimap_refresh_monotonic))
+                    if elapsed < min_interval:
+                        start_delay_ms = int(max(1.0, (min_interval - elapsed) * 1000.0))
+            except Exception:
+                start_delay_ms = 0
         timer = getattr(self, '_packet_list_aux_refresh_timer', None)
         if timer is None:
             try:
@@ -2639,7 +2822,10 @@ class CaptureView(QWidget):
         if is_active:
             return
         try:
-            timer.start()
+            if start_delay_ms > 0:
+                timer.start(start_delay_ms)
+            else:
+                timer.start()
         except RuntimeError:
             # QObject is being torn down; skip scheduling safely.
             pass
@@ -2652,6 +2838,7 @@ class CaptureView(QWidget):
         if refresh_related:
             self._update_related_packet_indicators()
         if refresh_minimap:
+            self._last_minimap_refresh_monotonic = time.monotonic()
             self._update_packet_minimap()
 
     def _clear_related_packet_indicators(self):
@@ -2659,6 +2846,25 @@ class CaptureView(QWidget):
         self._last_related_indicator_signature = None
         if hasattr(self.table, 'set_related_indicators'):
             self.table.set_related_indicators({})
+
+    def _set_selected_indicator_immediate(self):
+        if hasattr(self.table, 'set_selected_indicator_immediate'):
+            row = self.get_current_visible_row()
+            if row >= 0 and row < int(self.table.rowCount() or 0):
+                try:
+                    self.table.set_selected_indicator_immediate(int(row), '◆')
+                    return
+                except Exception:
+                    pass
+        if not hasattr(self.table, 'set_related_indicators'):
+            return
+        row = self.get_current_visible_row()
+        if row < 0 or row >= int(self.table.rowCount() or 0):
+            return
+        indicators = {int(row): '◆'}
+        self._related_indicator_rows = indicators
+        self._last_related_indicator_signature = None
+        self.table.set_related_indicators(indicators)
 
     def _relation_arrow_for_rows(self, selected_record, candidate_record) -> str:
         sel_src = str(getattr(selected_record, 'src', '') or '')
@@ -2689,6 +2895,18 @@ class CaptureView(QWidget):
         selected_record = self.get_current_record()
         if selected_record is None:
             self._clear_related_packet_indicators()
+            return
+        if bool(self._is_bulk_loading):
+            indicators = {int(selected_row): '◆'}
+            self._related_indicator_rows = indicators
+            self._last_related_indicator_signature = (
+                int(selected_row),
+                int(getattr(selected_record, 'number', 0) or 0),
+                int(len(self.visible_indices)),
+                int(self.table.rowCount() or 0),
+                'bulk_selected_only',
+            )
+            self.table.set_related_indicators(indicators)
             return
         signature = (
             int(selected_row),
@@ -2737,7 +2955,11 @@ class CaptureView(QWidget):
         self.table.set_related_indicators(indicators)
 
     def _on_packet_table_selection_changed(self):
-        self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+        self._set_selected_indicator_immediate()
+        self._schedule_packet_list_aux_refresh(related=True, minimap=False)
+        minimap = getattr(self, 'packet_minimap', None)
+        if minimap is not None:
+            minimap.update()
 
     def get_selected_records(self):
         selected_rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()}) if self.table.selectionModel() else []
@@ -2771,7 +2993,7 @@ class CaptureView(QWidget):
             self.detail_status_changed.emit('', 0)
             self._update_status('Selected file format frame')
             self._clear_related_packet_indicators()
-            self._schedule_packet_list_aux_refresh(minimap=True)
+            self._schedule_packet_list_aux_refresh(minimap=False)
             self._emit_go_state_changed()
             return
         if row < 0 or row >= len(self.visible_indices):
@@ -2785,7 +3007,11 @@ class CaptureView(QWidget):
         self.hex_view.show_packet(record)
         self.detail_status_changed.emit('', 0)
         self._update_status(f'Selected frame {record.number}')
-        self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+        self._set_selected_indicator_immediate()
+        self._schedule_packet_list_aux_refresh(related=True, minimap=False)
+        minimap = getattr(self, 'packet_minimap', None)
+        if minimap is not None:
+            minimap.update()
         self._emit_go_state_changed()
 
     def _on_detail_field_selected(self, field_name: str, byte_count: int):
@@ -2908,6 +3134,7 @@ class CaptureView(QWidget):
         self.stop_capture()
         self._stop_file_load_thread()
         self._is_bulk_loading = True
+        self._startup_priority_mode = True
         try:
             self.clear_packets(reset_file_path=False)
             self._is_bulk_loading = True
@@ -2928,9 +3155,10 @@ class CaptureView(QWidget):
                 if idx > full_preload_count:
                     first_remaining_packet = packet
                     break
-                record = self.parser.parse(packet, idx)
-                if isinstance(getattr(record, 'metadata', None), dict):
-                    record.metadata['full_preloaded'] = True
+                try:
+                    record = self.parser.parse_fast(packet, idx)
+                except Exception:
+                    record = self.parser.parse(packet, idx)
                 record = self._apply_capture_metadata_to_record(record, idx)
                 self.records.append(record)
                 loaded = idx
@@ -2955,7 +3183,7 @@ class CaptureView(QWidget):
                 self.table.selectRow(0)
                 self.table.setCurrentCell(0, 0)
                 self.table.setFocus()
-            self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+            self._force_visible_feedback_now(minimap_data_changed=True)
             self.display_filter_applied.emit()
             self._emit_go_state_changed()
             self._update_status(f'Loaded {loaded} packets...')
@@ -2963,9 +3191,11 @@ class CaptureView(QWidget):
 
             if first_remaining_packet is None:
                 self._set_dirty(False)
+                self._startup_priority_mode = False
                 self._start_refine_thread()
                 self._remember_recent_file(self.loaded_file_path)
-                self._schedule_packet_list_aux_refresh(related=True, minimap=True)
+                self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
+                self._schedule_packet_list_aux_refresh(related=True, minimap=False)
                 self._update_status(f'Loaded {loaded} packets from {self.loaded_file_path}')
                 return
 
@@ -3033,7 +3263,7 @@ class CaptureView(QWidget):
     def set_color_rules_enabled(self, enabled: bool):
         self.color_rules_enabled = bool(enabled)
         self.table.set_color_rules_enabled(self.color_rules_enabled)
-        self._schedule_packet_list_aux_refresh(minimap=True)
+        self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
 
     def _navigate_to_row(self, row: int, add_to_history: bool = True) -> bool:
         if row < 0 or row >= len(self.visible_indices):
@@ -3360,7 +3590,7 @@ class CaptureView(QWidget):
     def _refresh_all_visible_row_styles(self):
         for row in range(len(self.visible_indices)):
             self._refresh_row_style(row)
-        self._schedule_packet_list_aux_refresh(minimap=True)
+        self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
 
     def toggle_go_to_packet_row(self):
         visible = not self.goto_packet_widget.isVisible()
@@ -3959,7 +4189,7 @@ class CaptureView(QWidget):
             row = visible_rows.get(rec_idx, -1)
             if row >= 0:
                 self._refresh_row_style(row)
-        self._schedule_packet_list_aux_refresh(minimap=True)
+        self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
         self._set_dirty(True)
         return True
 

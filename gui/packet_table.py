@@ -43,6 +43,7 @@ class PacketTable(QTableWidget):
         self._rule_background_overrides = {}
         self._column_alignment_map = {}
         self._related_indicators = {}
+        self._immediate_indicator_row = None
         self.setColumnCount(7)
         self.setHorizontalHeaderLabels(['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'])
         self.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -57,11 +58,13 @@ class PacketTable(QTableWidget):
             'QTableWidget::item:selected { background-color: #2F80ED; color: #FFFFFF; } '
             'QTableWidget::item:selected:!active { background-color: #2F80ED; color: #FFFFFF; }'
         )
-        self.verticalHeader().setVisible(True)
-        self.verticalHeader().setFixedWidth(18)
-        self.verticalHeader().setDefaultAlignment(Qt.AlignCenter)
-        self.verticalHeader().setDefaultSectionSize(20)
-        self.verticalHeader().setMinimumSectionSize(18)
+        vheader = self.verticalHeader()
+        vheader.setVisible(True)
+        vheader.setFixedWidth(38)
+        vheader.setDefaultAlignment(Qt.AlignCenter)
+        vheader.setDefaultSectionSize(20)
+        vheader.setMinimumSectionSize(18)
+        vheader.setStyleSheet('QHeaderView::section { font-size: 20px; font-weight: 700; padding-left: 3px; padding-right: 3px; }')
         self.setShowGrid(True)
         header = self.horizontalHeader()
         header.setSectionsMovable(False)
@@ -98,7 +101,7 @@ class PacketTable(QTableWidget):
         except Exception:
             col = -1
         alignment = self._column_alignment_map.get(col)
-        if alignment is not None:
+        if alignment is not None and int(item.textAlignment()) != int(alignment):
             item.setTextAlignment(int(alignment))
 
     def wireshark_coloring_rules(self):
@@ -305,6 +308,11 @@ class PacketTable(QTableWidget):
         values = self.display_values(record)
         info_col = max(0, self.columnCount() - 1)
         for col in range(self.columnCount()):
+            # Custom columns (between Length and Info) are populated lazily to keep initial
+            # loading and scrolling responsive on large captures.
+            if 6 <= col < info_col and clear_extra_columns:
+                if self.item(row, col) is None:
+                    continue
             item = self.item(row, col)
             if item is None:
                 item = QTableWidgetItem()
@@ -315,7 +323,9 @@ class PacketTable(QTableWidget):
                 text = values[col]
             else:
                 text = '' if clear_extra_columns else str(item.text() or '')
-            item.setText(str(text))
+            text = str(text)
+            if item.text() != text:
+                item.setText(text)
             self._apply_item_alignment(item, col)
 
     def append_record(self, record):
@@ -374,11 +384,15 @@ class PacketTable(QTableWidget):
             ignored = bool(getattr(record_or_proto, 'ignored', False))
 
         if not self._color_rules_enabled:
+            white = QColor(255, 255, 255)
+            black = QColor(0, 0, 0)
             for col in range(self.columnCount()):
                 item = self.item(row, col)
                 if item:
-                    item.setBackground(QColor(255, 255, 255))
-                    item.setForeground(QColor(0, 0, 0))
+                    if item.background().color() != white:
+                        item.setBackground(white)
+                    if item.foreground().color() != black:
+                        item.setForeground(black)
             return
 
         if ignored:
@@ -392,14 +406,14 @@ class PacketTable(QTableWidget):
             if text_color is None:
                 text_color = QColor(0, 0, 0)
 
+        background_color = color if color else QColor(255, 255, 255)
         for col in range(self.columnCount()):
             item = self.item(row, col)
             if item:
-                if color:
-                    item.setBackground(color)
-                else:
-                    item.setBackground(QColor(255, 255, 255))
-                item.setForeground(text_color)
+                if item.background().color() != background_color:
+                    item.setBackground(background_color)
+                if item.foreground().color() != text_color:
+                    item.setForeground(text_color)
 
     def set_color_rules_enabled(self, enabled: bool):
         self._color_rules_enabled = bool(enabled)
@@ -478,6 +492,8 @@ class PacketTable(QTableWidget):
                 text = str(value or '').strip()
                 if text:
                     normalized[row] = text
+        if normalized == self._related_indicators:
+            return
 
         changed_rows = set(self._related_indicators.keys()) | set(normalized.keys())
         for row in changed_rows:
@@ -492,3 +508,33 @@ class PacketTable(QTableWidget):
             item.setTextAlignment(int(Qt.AlignCenter))
             item.setToolTip('Related packet indicator' if text else '')
         self._related_indicators = normalized
+        self._immediate_indicator_row = None
+
+    def set_selected_indicator_immediate(self, row: int, symbol: str = '◆'):
+        try:
+            target = int(row)
+        except Exception:
+            return
+        if target < 0 or target >= self.rowCount():
+            return
+
+        prev = self._immediate_indicator_row
+        if prev is not None and prev != target and 0 <= int(prev) < self.rowCount():
+            prev_item = self.verticalHeaderItem(int(prev))
+            if prev_item is None:
+                prev_item = QTableWidgetItem()
+                self.setVerticalHeaderItem(int(prev), prev_item)
+            fallback = str(self._related_indicators.get(int(prev), '') or '')
+            prev_item.setText(fallback)
+            prev_item.setTextAlignment(int(Qt.AlignCenter))
+            prev_item.setToolTip('Related packet indicator' if fallback else '')
+
+        item = self.verticalHeaderItem(target)
+        if item is None:
+            item = QTableWidgetItem()
+            self.setVerticalHeaderItem(target, item)
+        text = str(symbol or '').strip()
+        item.setText(text)
+        item.setTextAlignment(int(Qt.AlignCenter))
+        item.setToolTip('Related packet indicator' if text else '')
+        self._immediate_indicator_row = int(target)

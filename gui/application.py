@@ -1799,6 +1799,7 @@ class ApplicationWindow(QMainWindow):
         self._analyze_custom_columns = []
         self._custom_column_refresh_generation = 0
         self._custom_column_refresh_pending_rows = deque()
+        self._custom_column_refresh_pending_set = set()
         self._custom_column_fit_timer = None
         self._custom_column_refresh_dispatch_timer = QTimer(self)
         self._custom_column_refresh_dispatch_timer.setSingleShot(True)
@@ -6369,9 +6370,13 @@ class ApplicationWindow(QMainWindow):
         if row_count <= 0 or visible_count <= 0:
             return
         if row_count <= 50:
-            self._schedule_custom_column_refresh(list(range(row_count)), replace=True)
+            start, end = self._visible_table_row_range(tight=True)
+            if start < 0 or end < start:
+                start = 0
+                end = min(row_count - 1, 16)
+            self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
             return
-        start, end = self._visible_table_row_range()
+        start, end = self._visible_table_row_range(tight=False)
         if start < 0 or end < start:
             return
         self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
@@ -6385,14 +6390,18 @@ class ApplicationWindow(QMainWindow):
         if row_count <= 0:
             return
         if row_count <= 50:
-            self._schedule_custom_column_refresh(list(range(row_count)), replace=True)
+            start, end = self._visible_table_row_range(tight=True)
+            if start < 0 or end < start:
+                start = 0
+                end = min(row_count - 1, 16)
+            self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
             return
-        start, end = self._visible_table_row_range()
+        start, end = self._visible_table_row_range(tight=False)
         if start < 0 or end < start:
             return
         self._schedule_custom_column_refresh(list(range(start, end + 1)), replace=True)
 
-    def _visible_table_row_range(self) -> tuple[int, int]:
+    def _visible_table_row_range(self, tight: bool = False) -> tuple[int, int]:
         cv = self.capture_view
         if not cv:
             return -1, -1
@@ -6406,9 +6415,13 @@ class ApplicationWindow(QMainWindow):
             top = 0
         if bottom < 0:
             bottom = min(row_count - 1, top + 64)
-        # Add a small margin to avoid blank cells right after a scroll.
-        top = max(0, top - 20)
-        bottom = min(row_count - 1, bottom + 20)
+        if not bool(tight):
+            margin = 20
+            if row_count <= 200:
+                margin = 8
+            # Add a small margin to avoid blank cells right after a scroll.
+            top = max(0, top - margin)
+            bottom = min(row_count - 1, bottom + margin)
         return top, bottom
 
     def _schedule_custom_column_refresh(self, rows, replace: bool):
@@ -6417,8 +6430,8 @@ class ApplicationWindow(QMainWindow):
             return
         table = cv.table
         if replace:
-            seen = set()
             normalized = []
+            seen = set()
             for row in rows or []:
                 try:
                     idx = int(row)
@@ -6431,10 +6444,9 @@ class ApplicationWindow(QMainWindow):
                 seen.add(idx)
                 normalized.append(idx)
             self._custom_column_refresh_pending_rows = deque(normalized)
+            self._custom_column_refresh_pending_set = set(normalized)
             self._custom_column_refresh_generation += 1
         else:
-            pending = list(self._custom_column_refresh_pending_rows)
-            seen = set(pending)
             for row in rows or []:
                 try:
                     idx = int(row)
@@ -6442,11 +6454,10 @@ class ApplicationWindow(QMainWindow):
                     continue
                 if idx < 0 or idx >= table.rowCount():
                     continue
-                if idx in seen:
+                if idx in self._custom_column_refresh_pending_set:
                     continue
-                seen.add(idx)
-                pending.append(idx)
-            self._custom_column_refresh_pending_rows = deque(pending)
+                self._custom_column_refresh_pending_rows.append(idx)
+                self._custom_column_refresh_pending_set.add(idx)
             self._custom_column_refresh_generation += 1
         self._custom_column_refresh_dispatch_generation = int(self._custom_column_refresh_generation)
         if not self._custom_column_refresh_dispatch_timer.isActive():
@@ -6462,20 +6473,42 @@ class ApplicationWindow(QMainWindow):
         cv = self.capture_view
         if not cv or not self._analyze_custom_columns:
             self._custom_column_refresh_pending_rows = deque()
+            self._custom_column_refresh_pending_set = set()
             return
         table = cv.table
         pending = self._custom_column_refresh_pending_rows
         if not pending:
+            self._custom_column_refresh_pending_set = set()
             return
 
         started = time.perf_counter()
         processed = 0
         max_rows_per_tick = 32
         max_tick_seconds = 0.0035
+        try:
+            startup_priority = bool(getattr(cv, '_startup_priority_mode', False))
+            if startup_priority:
+                max_rows_per_tick = 4
+                max_tick_seconds = 0.0008
+            elif bool(cv.is_bulk_loading()):
+                # During initial file load, keep UI thread mostly free.
+                max_rows_per_tick = 8
+                max_tick_seconds = 0.0012
+        except Exception:
+            pass
+        try:
+            scrollbar = table.verticalScrollBar()
+            if scrollbar is not None and bool(scrollbar.isSliderDown()):
+                # Keep interaction smooth while user drags the list.
+                max_rows_per_tick = 10
+                max_tick_seconds = 0.0018
+        except Exception:
+            pass
         table.setUpdatesEnabled(False)
         try:
             while pending and processed < max_rows_per_tick and (time.perf_counter() - started) < max_tick_seconds:
                 row = pending.popleft()
+                self._custom_column_refresh_pending_set.discard(int(row))
                 self._refresh_analyze_custom_columns_for_row(int(row))
                 processed += 1
         finally:
@@ -6495,13 +6528,24 @@ class ApplicationWindow(QMainWindow):
         if rec_idx < 0 or rec_idx >= len(cv.records):
             return
         record = cv.records[rec_idx]
-        info_col = 6 + len(self._analyze_custom_columns)
         for extra_idx, cfg in enumerate(self._analyze_custom_columns):
             col = 6 + extra_idx
             item = table.item(row, col)
             if item is None:
                 item = QTableWidgetItem()
                 table.setItem(row, col, item)
+                if hasattr(table, '_apply_item_alignment'):
+                    try:
+                        table._apply_item_alignment(item, col)
+                    except Exception:
+                        pass
+                base_item = table.item(row, 0)
+                if base_item is not None:
+                    try:
+                        item.setBackground(base_item.background())
+                        item.setForeground(base_item.foreground())
+                    except Exception:
+                        pass
             field = str(cfg.get('field', '') or '').strip()
             detail_query = str(cfg.get('detail_query', '') or '').strip()
             detail_key = str(cfg.get('detail_key', '') or '').strip()
@@ -6535,11 +6579,6 @@ class ApplicationWindow(QMainWindow):
             text = str(value or '')
             if item.text() != text:
                 item.setText(text)
-        info_item = table.item(row, info_col)
-        if info_item is None:
-            info_item = QTableWidgetItem()
-            table.setItem(row, info_col, info_item)
-        info_item.setText(str(getattr(record, 'info', '') or ''))
 
     def _on_records_refined_rows(self, rows):
         if not rows:
@@ -9167,10 +9206,6 @@ class ApplicationWindow(QMainWindow):
         cv = self.capture_view
         if cv and hasattr(cv, 'is_bulk_loading') and cv.is_bulk_loading():
             self._fit_all_custom_columns()
-            row_count = int(cv.table.rowCount() or 0) if hasattr(cv, 'table') else 0
-            if row_count > 0 and row_count <= 50:
-                self._refresh_analyze_custom_column_cells_blocking()
-                return
             self._refresh_analyze_custom_column_cells()
             return
         self._refresh_analyze_custom_column_cells()
@@ -9188,6 +9223,7 @@ class ApplicationWindow(QMainWindow):
             return
         max_rows = min(row_count, visible_count)
         self._custom_column_refresh_pending_rows = deque()
+        self._custom_column_refresh_pending_set = set()
         self._custom_column_refresh_generation += 1
         table.setUpdatesEnabled(False)
         try:

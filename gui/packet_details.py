@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSignalBlocker
 from PySide6.QtGui import QFont, QAction
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QMenu
 
@@ -23,6 +23,7 @@ class PacketDetailsTree(QTreeWidget):
         self.itemSelectionChanged.connect(self._on_selection_changed)
         # Persistent expand state by normalized tree path.
         self._expand_state = {}
+        self._show_item_tooltips = False
 
     def _on_selection_changed(self):
         selected_items = self.selectedItems()
@@ -133,46 +134,51 @@ class PacketDetailsTree(QTreeWidget):
         self._save_expand_state()
         v_scroll = self.verticalScrollBar().value()
         h_scroll = self.horizontalScrollBar().value()
+        self.setUpdatesEnabled(False)
+        try:
+            with QSignalBlocker(self):
+                self.clear()
+                if not record:
+                    self.item_selected.emit(-1, 0)
+                    self.item_bytes_selected.emit(-1, 0, 'packet')
+                    self.detail_field_selected.emit('', 0)
+                    return
 
-        self.clear()
-        if not record:
-            self.item_selected.emit(-1, 0)
-            self.item_bytes_selected.emit(-1, 0, 'packet')
-            self.detail_field_selected.emit('', 0)
-            return
+                metadata = getattr(record, 'metadata', {}) if record else {}
+                cached_tree = metadata.get('_detail_tree_cache', None) if isinstance(metadata, dict) else None
+                if not isinstance(cached_tree, list):
+                    cached_tree = packet_summary_tree(record.raw, record)
+                    if isinstance(metadata, dict):
+                        metadata['_detail_tree_cache'] = cached_tree
 
-        metadata = getattr(record, 'metadata', {}) if record else {}
-        cached_tree = metadata.get('_detail_tree_cache', None) if isinstance(metadata, dict) else None
-        if not isinstance(cached_tree, list):
-            cached_tree = packet_summary_tree(record.raw, record)
-            if isinstance(metadata, dict):
-                metadata['_detail_tree_cache'] = cached_tree
+                packet_comment = str(getattr(record, 'packet_comment', '') or '').strip()
+                if packet_comment:
+                    comment_lines = packet_comment.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+                    if not comment_lines:
+                        comment_lines = [packet_comment]
+                    comment_children = []
+                    for idx, line in enumerate(comment_lines, start=1):
+                        comment_children.append({'title': f'Line {idx}: {line}'})
+                    comment_node = {
+                        'title': 'Packet Comment',
+                        'children': comment_children,
+                    }
+                    self._add_node(self.invisibleRootItem(), comment_node)
 
-        packet_comment = str(getattr(record, 'packet_comment', '') or '').strip()
-        if packet_comment:
-            comment_lines = packet_comment.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-            if not comment_lines:
-                comment_lines = [packet_comment]
-            comment_children = []
-            for idx, line in enumerate(comment_lines, start=1):
-                comment_children.append({'title': f'Line {idx}: {line}'})
-            comment_node = {
-                'title': 'Packet Comment',
-                'children': comment_children,
-            }
-            self._add_node(self.invisibleRootItem(), comment_node)
+                for node in cached_tree:
+                    self._add_node(self.invisibleRootItem(), node)
 
-        for node in cached_tree:
-            self._add_node(self.invisibleRootItem(), node)
-
-        self._restore_expand_state()
-        self.verticalScrollBar().setValue(v_scroll)
-        self.horizontalScrollBar().setValue(h_scroll)
+                self._restore_expand_state()
+                self.verticalScrollBar().setValue(v_scroll)
+                self.horizontalScrollBar().setValue(h_scroll)
+        finally:
+            self.setUpdatesEnabled(True)
 
     def _add_node(self, parent, data):
         title = str(data.get('title', '') or '')
         item = QTreeWidgetItem([title])
-        item.setToolTip(0, title)
+        if self._show_item_tooltips:
+            item.setToolTip(0, title)
         parent_source = parent.data(0, self.BYTE_SOURCE_ROLE) if parent is not self.invisibleRootItem() else 'packet'
         offset = int(data['offset']) if 'offset' in data else -1
         length = int(data['length']) if 'length' in data else 0
