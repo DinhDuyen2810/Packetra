@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QSpinBox
 )
 from PySide6.QtCore import Qt, Signal, QSize, QPoint, QRect, QTimer, QMimeData
-from PySide6.QtGui import QIcon, QFont, QDrag, QCursor, QPixmap, QPainter, QColor
+from PySide6.QtGui import QIcon, QFont, QCursor, QPixmap, QPainter, QColor
 from typing import Optional, List, Dict, Callable
 from uuid import uuid4
 from datetime import datetime
@@ -395,6 +395,9 @@ class GridWidget(QFrame):
     
     clicked = Signal(str)  # widget ID
     edit_requested = Signal(str)
+    drag_started = Signal(str, QPoint, QPoint, object)
+    drag_moved = Signal(QPoint)
+    drag_finished = Signal(QPoint)
     
     def __init__(self, widget, editable: bool = True, query_engine=None, viz_registry=None, display_mode: Optional[str] = None):
         super().__init__()
@@ -538,27 +541,24 @@ class GridWidget(QFrame):
         if (event.pos() - self._drag_start_pos).manhattanLength() < QApplication.startDragDistance():
             return super().mouseMoveEvent(event)
 
-        self._drag_in_progress = True
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData("application/x-dashboard-widget-id", self.widget.id.encode("utf-8"))
-        mime.setData(
-            "application/x-dashboard-widget-hotspot",
-            f"{event.pos().x()},{event.pos().y()}".encode("utf-8"),
-        )
-        drag.setMimeData(mime)
-        drag.setPixmap(self._create_drag_pixmap())
-        drag.setHotSpot(event.pos())
-        self.setCursor(Qt.ClosedHandCursor)
-        drag.exec(Qt.MoveAction)
-        self.setCursor(Qt.OpenHandCursor)
-        self._drag_start_pos = None
-        self._drag_in_progress = False
+        if not self._drag_in_progress:
+            self._drag_in_progress = True
+            self.setCursor(Qt.ClosedHandCursor)
+            self.drag_started.emit(
+                self.widget.id,
+                self.mapToGlobal(event.pos()),
+                QPoint(event.pos()),
+                self._create_drag_pixmap(),
+            )
+        else:
+            self.drag_moved.emit(self.mapToGlobal(event.pos()))
         event.accept()
 
     def mouseReleaseEvent(self, event):
         if self.editable and event.button() == Qt.LeftButton:
-            if not self._drag_in_progress and self._drag_start_pos is not None:
+            if self._drag_in_progress:
+                self.drag_finished.emit(self.mapToGlobal(event.pos()))
+            elif self._drag_start_pos is not None:
                 self.clicked.emit(self.widget.id)
             self._drag_start_pos = None
             self._drag_in_progress = False
@@ -600,6 +600,13 @@ class DashboardEditor(QDialog):
         self.single_widget_view_mode = "chart"
         self.view_mode_combo: Optional[QComboBox] = None
         self.title_label: Optional[QLabel] = None
+        self.scroll_area: Optional[QScrollArea] = None
+        self._dragging_widget_id: Optional[str] = None
+        self._drag_hotspot = QPoint(0, 0)
+        self._drag_preview: Optional[QLabel] = None
+        self._drag_indicator: Optional[QFrame] = None
+        self._drag_candidate_layout: Optional[WidgetLayout] = None
+        self._drag_source_view: Optional[GridWidget] = None
         
         self.setWindowTitle(f"Dashboard Editor - {dashboard.name}")
         
@@ -687,6 +694,7 @@ class DashboardEditor(QDialog):
         
         # Grid area
         scroll_area = QScrollArea()
+        self.scroll_area = scroll_area
         scroll_area.setWidgetResizable(True)
         scroll_area.setStyleSheet("QScrollArea { background-color: #fafafa; }")
         
@@ -696,7 +704,7 @@ class DashboardEditor(QDialog):
         self.grid_layout.setSpacing(self.GRID_SPACING)
         
         # Grid styling
-        for row in range(20):  # Show 20 rows initially
+        for row in range(200):
             self.grid_layout.setRowMinimumHeight(row, self.GRID_ROW_HEIGHT)
         
         for col in range(12):
@@ -704,8 +712,19 @@ class DashboardEditor(QDialog):
             self.grid_layout.setColumnStretch(col, 1)
         
         # Set bottom-right area to stretch
-        self.grid_layout.setRowStretch(19, 1)
+        self.grid_layout.setRowStretch(199, 1)
         self.grid_layout.setColumnStretch(11, 1)
+
+        self._drag_indicator = QFrame(self.grid_container)
+        self._drag_indicator.hide()
+        self._drag_indicator.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._drag_indicator.setStyleSheet(
+            "QFrame {"
+            "background-color: rgba(0, 102, 204, 0.12);"
+            "border: 2px dashed rgba(0, 102, 204, 0.85);"
+            "border-radius: 6px;"
+            "}"
+        )
         
         scroll_area.setWidget(self.grid_container)
         main_layout.addWidget(scroll_area)
@@ -744,6 +763,9 @@ class DashboardEditor(QDialog):
             )
             grid_widget.clicked.connect(self.on_grid_widget_clicked)
             grid_widget.edit_requested.connect(self.on_widget_edit_requested)
+            grid_widget.drag_started.connect(self.on_widget_drag_started)
+            grid_widget.drag_moved.connect(self.on_widget_drag_moved)
+            grid_widget.drag_finished.connect(self.on_widget_drag_finished)
             
             layout = widget_model.layout
             self.grid_layout.addWidget(grid_widget, layout.y, layout.x, layout.h, layout.w)
@@ -797,16 +819,65 @@ class DashboardEditor(QDialog):
             return
 
         width = max(1, min(self.GRID_COLUMNS, int(widget.layout.w or 1)))
-        height = max(1, int(widget.layout.h or 1))
-        max_x = max(0, self.GRID_COLUMNS - width)
-        grid_width = max(1, self.grid_container.width())
-        column_width = max(1.0, grid_width / float(self.GRID_COLUMNS))
         origin_point = drop_position - hotspot
-        candidate_x = min(max(int(origin_point.x() / column_width), 0), max_x)
-        row_span = max(1, self.GRID_ROW_HEIGHT + self.GRID_SPACING)
-        candidate_y = max(0, int(origin_point.y() / row_span))
+        candidate_x = self._grid_column_for_position(origin_point.x(), width)
+        candidate_y = self._grid_row_for_position(origin_point.y())
 
-        preferred_layout = WidgetLayout(x=candidate_x, y=candidate_y, w=width, h=height)
+        preferred_layout = WidgetLayout(x=candidate_x, y=candidate_y, w=width, h=max(1, int(widget.layout.h or 1)))
+        self._place_widget_at_drop(widget_id, preferred_layout)
+        self.render_grid()
+
+    def on_widget_drag_started(self, widget_id: str, global_position: QPoint, hotspot: QPoint, preview_pixmap):
+        if not self.edit_mode:
+            return
+
+        self._cancel_drag_preview()
+        self._dragging_widget_id = widget_id
+        self._drag_hotspot = QPoint(hotspot)
+        self._drag_source_view = self._find_grid_widget_view(widget_id)
+        if self._drag_source_view is not None:
+            self._drag_source_view.setVisible(False)
+
+        self._drag_preview = QLabel(self.grid_container)
+        self._drag_preview.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._drag_preview.setPixmap(preview_pixmap)
+        self._drag_preview.resize(preview_pixmap.size())
+        self._drag_preview.show()
+        self._drag_preview.raise_()
+        if self._drag_indicator is not None:
+            self._drag_indicator.raise_()
+        self.on_widget_drag_moved(global_position)
+
+    def on_widget_drag_moved(self, global_position: QPoint):
+        if not self._dragging_widget_id or self._drag_preview is None:
+            return
+
+        local_position = self.grid_container.mapFromGlobal(global_position)
+        origin_point = local_position - self._drag_hotspot
+        self._drag_preview.move(origin_point)
+
+        widget = self.find_widget(self._dragging_widget_id)
+        if not widget:
+            return
+
+        width = max(1, min(self.GRID_COLUMNS, int(widget.layout.w or 1)))
+        height = max(1, int(widget.layout.h or 1))
+        candidate_x = self._grid_column_for_position(origin_point.x(), width)
+        candidate_y = self._grid_row_for_position(origin_point.y())
+        self._drag_candidate_layout = WidgetLayout(x=candidate_x, y=candidate_y, w=width, h=height)
+        self._update_drag_indicator(self._drag_candidate_layout)
+        self._maybe_autoscroll(local_position)
+
+    def on_widget_drag_finished(self, global_position: QPoint):
+        if not self._dragging_widget_id:
+            return
+
+        self.on_widget_drag_moved(global_position)
+        widget_id = self._dragging_widget_id
+        preferred_layout = self._drag_candidate_layout
+        self._cancel_drag_preview()
+        if preferred_layout is None:
+            return
         self._place_widget_at_drop(widget_id, preferred_layout)
         self.render_grid()
     
@@ -860,6 +931,7 @@ class DashboardEditor(QDialog):
         QMessageBox.information(self, "Success", "Widget added. Edit to customize.")
 
     def on_back(self):
+        self._cancel_drag_preview()
         callback = self.back_callback
         self.close()
         if callback is not None:
@@ -896,6 +968,7 @@ class DashboardEditor(QDialog):
     
     def on_save(self):
         """Save dashboard"""
+        self._cancel_drag_preview()
         self.dashboard.updated_at = datetime.now().isoformat()
         self.dashboard_repo.save(self.dashboard)
         QMessageBox.information(self, "Success", "Dashboard saved")
@@ -906,6 +979,12 @@ class DashboardEditor(QDialog):
         for w in self.dashboard.widgets:
             if w.id == widget_id:
                 return w
+        return None
+
+    def _find_grid_widget_view(self, widget_id: str) -> Optional[GridWidget]:
+        for child in self.grid_container.findChildren(GridWidget):
+            if child.widget.id == widget_id:
+                return child
         return None
 
     def _layout_cells(self, layout: WidgetLayout):
@@ -947,6 +1026,111 @@ class DashboardEditor(QDialog):
                 if self._can_place_layout(candidate, exclude_widget_id=exclude_widget_id):
                     return x, y
         return 0, 0
+
+    def _grid_cell_rect(self, row: int, column: int) -> QRect:
+        rect = self.grid_layout.cellRect(max(0, row), max(0, column))
+        if rect.isValid():
+            return rect
+
+        margins = self.grid_layout.contentsMargins()
+        spacing = max(0, self.grid_layout.spacing())
+        x = margins.left()
+        for current_column in range(max(0, column)):
+            x += max(1, self.grid_layout.columnMinimumWidth(current_column)) + spacing
+
+        y = margins.top() + (max(0, row) * (self.GRID_ROW_HEIGHT + spacing))
+        width = max(1, self.grid_layout.columnMinimumWidth(max(0, column)))
+        height = self.GRID_ROW_HEIGHT
+        return QRect(x, y, width, height)
+
+    def _layout_rect(self, layout: WidgetLayout) -> QRect:
+        normalized = self._sanitize_layout(layout)
+        top_left = self._grid_cell_rect(normalized.y, normalized.x)
+        bottom_right = self._grid_cell_rect(normalized.y + normalized.h - 1, normalized.x + normalized.w - 1)
+        return QRect(
+            top_left.left(),
+            top_left.top(),
+            max(1, bottom_right.right() - top_left.left() + 1),
+            max(1, bottom_right.bottom() - top_left.top() + 1),
+        )
+
+    def _update_drag_indicator(self, layout: WidgetLayout):
+        if self._drag_indicator is None:
+            return
+        rect = self._layout_rect(layout)
+        self._drag_indicator.setGeometry(rect)
+        self._drag_indicator.show()
+        self._drag_indicator.raise_()
+
+    def _maybe_autoscroll(self, local_position: QPoint):
+        if self.scroll_area is None:
+            return
+
+        scrollbar = self.scroll_area.verticalScrollBar()
+        viewport_height = self.scroll_area.viewport().height()
+        margin = 72
+        step = 28
+        if local_position.y() < scrollbar.value() + margin:
+            scrollbar.setValue(max(scrollbar.minimum(), scrollbar.value() - step))
+        elif local_position.y() > scrollbar.value() + viewport_height - margin:
+            scrollbar.setValue(min(scrollbar.maximum(), scrollbar.value() + step))
+
+    def _cancel_drag_preview(self):
+        if self._drag_source_view is not None:
+            self._drag_source_view.setVisible(True)
+            self._drag_source_view = None
+        if self._drag_preview is not None:
+            self._drag_preview.hide()
+            self._drag_preview.deleteLater()
+            self._drag_preview = None
+        if self._drag_indicator is not None:
+            self._drag_indicator.hide()
+        self._dragging_widget_id = None
+        self._drag_candidate_layout = None
+        self._drag_hotspot = QPoint(0, 0)
+
+    def _grid_column_for_position(self, x_pos: int, widget_width: int) -> int:
+        max_x = max(0, self.GRID_COLUMNS - max(1, min(self.GRID_COLUMNS, int(widget_width or 1))))
+        x_value = int(x_pos)
+        for column in range(0, max_x + 1):
+            rect = self.grid_layout.cellRect(0, column)
+            if rect.isValid():
+                origin_x = rect.x()
+            else:
+                margins = self.grid_layout.contentsMargins()
+                origin_x = margins.left() + (column * max(1, self.grid_layout.columnMinimumWidth(column)))
+
+            next_rect = self.grid_layout.cellRect(0, column + 1) if column < max_x else QRect()
+            if next_rect.isValid():
+                next_x = next_rect.x()
+            else:
+                next_x = origin_x + max(1, self.grid_layout.columnMinimumWidth(column))
+
+            if x_value < origin_x:
+                return column
+            if origin_x <= x_value < next_x:
+                return column
+        return max_x
+
+    def _grid_row_for_position(self, y_pos: int) -> int:
+        y_value = int(y_pos)
+        for row in range(0, 200):
+            rect = self.grid_layout.cellRect(row, 0)
+            if rect.isValid():
+                origin_y = rect.y()
+            else:
+                origin_y = self.grid_layout.contentsMargins().top() + (row * self.GRID_ROW_HEIGHT)
+            next_rect = self.grid_layout.cellRect(row + 1, 0)
+            if next_rect.isValid():
+                next_y = next_rect.y()
+            else:
+                next_y = origin_y + self.GRID_ROW_HEIGHT
+
+            if y_value < origin_y:
+                return row
+            if origin_y <= y_value < next_y:
+                return row
+        return max(0, int(y_value / max(1, self.GRID_ROW_HEIGHT)))
 
     def _find_fit_position_from(self, start_x: int, start_y: int, width: int, height: int, *, exclude_widget_id: Optional[str] = None) -> tuple[int, int]:
         search_width = max(1, min(self.GRID_COLUMNS, int(width or 1)))
