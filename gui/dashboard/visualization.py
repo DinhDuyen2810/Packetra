@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QLabel,
     QAbstractItemView
 )
-from PySide6.QtCore import Qt, QDateTime, QMargins, QPointF, QRectF
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtCore import Qt, QDateTime, QMargins, QPoint, QPointF, QRectF, QObject, QEvent
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtCharts import (
     QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView,
     QDateTimeAxis, QHorizontalBarSeries, QLineSeries, QPieSeries, QScatterSeries, QValueAxis
@@ -87,6 +87,151 @@ def _build_chart_view(chart: QChart, parent: QWidget = None) -> QChartView:
     view.setRenderHint(QPainter.Antialiasing)
     view.setStyleSheet("background: transparent;")
     return view
+
+
+def _format_inspector_text(*lines: Optional[str]) -> Optional[str]:
+    normalized = [str(line) for line in lines if line not in (None, "")]
+    return "\n".join(normalized) if normalized else None
+
+
+def _mouse_event_pos(event) -> QPoint:
+    if hasattr(event, "position"):
+        return event.position().toPoint()
+    return event.pos()
+
+
+def _mouse_event_global_pos(event) -> QPoint:
+    if hasattr(event, "globalPosition"):
+        return event.globalPosition().toPoint()
+    return event.globalPos()
+
+
+class _InspectorBubble(QLabel):
+    def __init__(self, parent: QWidget = None):
+        super().__init__(parent)
+        self.setWordWrap(True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet(
+            "background-color: rgba(17, 24, 39, 225); color: white; "
+            "border: 1px solid rgba(255, 255, 255, 40); border-radius: 8px; "
+            "padding: 6px 8px; font-size: 9pt;"
+        )
+        self.hide()
+
+
+class _PointerInspectorController(QObject):
+    def __init__(self, interactive_widget: QWidget, provider: Optional[Callable[[QPoint], Optional[str]]] = None):
+        super().__init__(interactive_widget)
+        self.interactive_widget = interactive_widget
+        self.provider = provider
+        self.active_text: Optional[str] = None
+        bubble_parent = interactive_widget.window() if interactive_widget.window() else interactive_widget
+        self.bubble = _InspectorBubble(bubble_parent)
+        self.interactive_widget.installEventFilter(self)
+        self.interactive_widget.setMouseTracking(True)
+
+    def start(self, text: Optional[str], global_pos: Optional[QPoint] = None):
+        if not text:
+            return
+        self.active_text = str(text)
+        self._show(global_pos or QCursor.pos())
+
+    def stop(self):
+        self.active_text = None
+        self.bubble.hide()
+
+    def _show(self, global_pos: QPoint):
+        if not self.active_text:
+            return
+        self.bubble.setText(self.active_text)
+        self.bubble.adjustSize()
+        anchor = self.bubble.parentWidget() or self.interactive_widget
+        local_pos = anchor.mapFromGlobal(global_pos + QPoint(18, 18))
+        max_x = max(8, anchor.width() - self.bubble.width() - 8)
+        max_y = max(8, anchor.height() - self.bubble.height() - 8)
+        x_pos = min(max(8, local_pos.x()), max_x)
+        y_pos = min(max(8, local_pos.y()), max_y)
+        self.bubble.move(x_pos, y_pos)
+        self.bubble.raise_()
+        self.bubble.show()
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+        if self.provider is not None and event_type == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+            text = self.provider(_mouse_event_pos(event))
+            if text:
+                self.start(text, _mouse_event_global_pos(event))
+            else:
+                self.stop()
+        elif self.active_text and event_type == QEvent.MouseMove:
+            if self.provider is not None:
+                next_text = self.provider(_mouse_event_pos(event))
+                if next_text:
+                    self.active_text = next_text
+            self._show(_mouse_event_global_pos(event))
+        elif event_type in {QEvent.Leave, QEvent.Hide, QEvent.WindowDeactivate}:
+            self.stop()
+        return False
+
+
+def _ensure_pointer_inspector(widget: QWidget, provider: Optional[Callable[[QPoint], Optional[str]]] = None) -> _PointerInspectorController:
+    controller = getattr(widget, "_pointer_inspector_controller", None)
+    if controller is None or (provider is not None and controller.provider is not provider):
+        controller = _PointerInspectorController(widget, provider=provider)
+        setattr(widget, "_pointer_inspector_controller", controller)
+    return controller
+
+
+class _InteractiveChartCanvas(QWidget):
+    def __init__(self, parent: QWidget = None):
+        super().__init__(parent)
+        self._inspector_regions: List[tuple[Any, str]] = []
+        self._inspector_controller = _ensure_pointer_inspector(self, self._inspector_text_at)
+
+    def _inspector_text_at(self, pos: QPoint) -> Optional[str]:
+        point = QPointF(pos)
+        for shape, text in reversed(self._inspector_regions):
+            if isinstance(shape, QPainterPath) and shape.contains(point):
+                return text
+            if isinstance(shape, QRectF) and shape.contains(point):
+                return text
+        return None
+
+    def _set_inspector_regions(self, regions: List[tuple[Any, str]]):
+        self._inspector_regions = regions
+
+
+def _format_info_bubble(title: Optional[str], fields: List[tuple[str, Optional[str]]]) -> Optional[str]:
+    lines = [str(title).strip()] if title else []
+    for label, value in fields:
+        if value in (None, ""):
+            continue
+        lines.append(f"{label}: {value}")
+    return "\n".join(line for line in lines if line)
+
+
+def _attach_static_inspector(widget: QWidget, title: Optional[str], fields: List[tuple[str, Optional[str]]]) -> None:
+    text = _format_info_bubble(title, fields)
+    _ensure_pointer_inspector(widget, lambda _pos, text=text: text)
+
+
+def _attach_table_inspector(table: QTableWidget) -> None:
+    def provider(pos: QPoint) -> Optional[str]:
+        item = table.itemAt(pos)
+        if item is None:
+            return None
+        row_header = table.verticalHeaderItem(item.row())
+        col_header = table.horizontalHeaderItem(item.column())
+        return _format_info_bubble(
+            "Cell Details",
+            [
+                ("Row", row_header.text() if row_header else str(item.row() + 1)),
+                ("Column", col_header.text() if col_header else str(item.column() + 1)),
+                ("Value", item.text()),
+            ],
+        )
+
+    _ensure_pointer_inspector(table.viewport(), provider)
 
 
 def _semantic_annotations_enabled(config: Dict[str, Any]) -> bool:
@@ -313,7 +458,7 @@ def _scale_points(points: List[tuple[float, float]], rect, *, include_zero: bool
     return scaled
 
 
-class _RadarCanvas(QWidget):
+class _RadarCanvas(_InteractiveChartCanvas):
     """Custom radar/spider chart renderer."""
 
     def __init__(self, labels: List[str], values: List[float], *, compact_mode: bool, parent: QWidget = None):
@@ -331,6 +476,8 @@ class _RadarCanvas(QWidget):
     def paintEvent(self, event):
         if not self.labels or not self.values:
             return
+
+        info_regions: List[tuple[Any, str]] = []
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -377,10 +524,24 @@ class _RadarCanvas(QWidget):
             painter.drawLine(center, axis_end)
 
             value_radius = radius * (self.values[index] / max_value)
-            polygon_points.append(
-                QPointF(
-                    center.x() + (math.cos(angle) * value_radius),
-                    center.y() + (math.sin(angle) * value_radius),
+            value_point = QPointF(
+                center.x() + (math.cos(angle) * value_radius),
+                center.y() + (math.sin(angle) * value_radius),
+            )
+            polygon_points.append(value_point)
+
+            point_path = QPainterPath()
+            point_path.addEllipse(value_point, 12.0, 12.0)
+            info_regions.append(
+                (
+                    point_path,
+                    _format_info_bubble(
+                        label,
+                        [
+                            ("Value", _format_number(self.values[index])),
+                            ("Share of Max", f"{(self.values[index] / max_value) * 100.0:.1f}%"),
+                        ],
+                    ),
                 )
             )
 
@@ -388,13 +549,17 @@ class _RadarCanvas(QWidget):
                 painter.setPen(QPen(QColor("#1f2937"), 1))
                 text_rect = QRectF(axis_end.x() - 40, axis_end.y() - 10, 80, 20)
                 painter.drawText(text_rect, Qt.AlignCenter, label)
+                text_path = QPainterPath()
+                text_path.addRect(text_rect)
+                info_regions.append((text_path, _format_info_bubble(label, [("Value", _format_number(self.values[index]))])))
 
         painter.setPen(QPen(QColor("#0066cc"), 2))
         painter.setBrush(QBrush(QColor(0, 102, 204, 80)))
         painter.drawPolygon(QPolygonF(polygon_points))
+        self._set_inspector_regions(info_regions)
 
 
-class _TreemapCanvas(QWidget):
+class _TreemapCanvas(_InteractiveChartCanvas):
     """Custom slice-and-dice treemap renderer."""
 
     def __init__(self, groups: List[dict], *, compact_mode: bool, parent: QWidget = None):
@@ -406,6 +571,8 @@ class _TreemapCanvas(QWidget):
     def paintEvent(self, event):
         if not self.groups:
             return
+
+        info_regions: List[tuple[Any, str]] = []
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -421,6 +588,9 @@ class _TreemapCanvas(QWidget):
             painter.setPen(QPen(QColor("white"), 1))
             painter.setBrush(QBrush(_palette(group_index).lighter(125)))
             painter.drawRect(group_rect)
+            group_path = QPainterPath()
+            group_path.addRect(group_rect)
+            info_regions.append((group_path, _format_info_bubble(group['label'], [("Group Total", _format_number(group['value']))])))
 
             if not self.compact_mode:
                 painter.setPen(QColor("#223"))
@@ -437,12 +607,24 @@ class _TreemapCanvas(QWidget):
                 child_y += child_height
                 painter.setBrush(QBrush(_palette(group_index + child_index).darker(100 + (child_index * 7))))
                 painter.drawRect(child_rect)
+                child_path = QPainterPath()
+                child_path.addRect(child_rect)
+                info_regions.append(
+                    (
+                        child_path,
+                        _format_info_bubble(
+                            child['label'],
+                            [("Group", group['label']), ("Value", _format_number(child['value']))],
+                        ),
+                    )
+                )
                 if child_rect.width() > 50 and child_rect.height() > 24:
                     painter.setPen(QColor("white"))
                     painter.drawText(child_rect.adjusted(4, 4, -4, -4), Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, child['label'])
+        self._set_inspector_regions(info_regions)
 
 
-class _SunburstCanvas(QWidget):
+class _SunburstCanvas(_InteractiveChartCanvas):
     """Custom sunburst renderer with inner groups and outer leaves."""
 
     def __init__(self, groups: List[dict], *, compact_mode: bool, center_label: str = "Total", parent: QWidget = None):
@@ -455,6 +637,8 @@ class _SunburstCanvas(QWidget):
     def paintEvent(self, event):
         if not self.groups:
             return
+
+        info_regions: List[tuple[Any, str]] = []
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -565,9 +749,19 @@ class _SunburstCanvas(QWidget):
             painter.setPen(outer_pen)
             group_color = _palette(group_index).lighter(110)
             painter.setBrush(QBrush(group_color))
-            painter.drawPath(ring_segment_path(split_radius, hole_radius, start_angle, span_angle))
+            group_path = ring_segment_path(split_radius, hole_radius, start_angle, span_angle)
+            painter.drawPath(group_path)
 
             group_percent = (group['value'] / total_value) * 100.0
+            info_regions.append(
+                (
+                    group_path,
+                    _format_info_bubble(
+                        str(group['label']),
+                        [("Value", _format_number(group['value'])), ("Share", f"{group_percent:.1f}%")],
+                    ),
+                )
+            )
             draw_arc_label(
                 str(group['label']),
                 f"{_format_number(group['value'])} ({group_percent:.0f}%)",
@@ -585,7 +779,23 @@ class _SunburstCanvas(QWidget):
                 child_span = span_angle * (child['value'] / child_total)
                 child_color = _palette(group_index + child_index + 1).darker(105 + (child_index * 8))
                 painter.setBrush(QBrush(child_color))
-                painter.drawPath(ring_segment_path(outer_radius, split_radius, child_start, child_span))
+                child_path = ring_segment_path(outer_radius, split_radius, child_start, child_span)
+                painter.drawPath(child_path)
+
+                child_percent = (child['value'] / total_value) * 100.0
+                info_regions.append(
+                    (
+                        child_path,
+                        _format_info_bubble(
+                            str(child['label']),
+                            [
+                                ("Group", str(group['label'])),
+                                ("Value", _format_number(child['value'])),
+                                ("Share", f"{child_percent:.1f}%"),
+                            ],
+                        ),
+                    )
+                )
 
                 draw_arc_label(
                     str(child['label']),
@@ -615,6 +825,7 @@ class _SunburstCanvas(QWidget):
             painter.setFont(label_font)
             painter.setPen(QColor("#1f2937"))
             painter.drawText(hole_rect, Qt.AlignCenter, f"{self.center_label}\n{_format_number(total_value)}")
+        self._set_inspector_regions(info_regions)
 
 
 def _build_grouped_items(data: List[Dict[str, Any]], config: Dict[str, Any], *, fallback_group: str = "Group") -> List[dict]:
@@ -645,7 +856,7 @@ def _format_x_value(value: float, *, is_datetime: bool) -> str:
     return _format_number(value)
 
 
-class _AreaCanvas(QWidget):
+class _AreaCanvas(_InteractiveChartCanvas):
     """Custom-painted area chart to avoid QAreaSeries crashes on Windows."""
 
     def __init__(self, points: List[tuple[float, float]], *, is_datetime: bool, compact_mode: bool, parent: QWidget = None):
@@ -658,6 +869,8 @@ class _AreaCanvas(QWidget):
     def paintEvent(self, event):
         if not self.points:
             return
+
+        info_regions: List[tuple[Any, str]] = []
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -688,6 +901,21 @@ class _AreaCanvas(QWidget):
             return QPointF(x_pos, y_pos)
 
         mapped_points = [map_point(x_value, y_value) for x_value, y_value in self.points]
+        for (x_value, y_value), mapped_point in zip(self.points, mapped_points):
+            point_path = QPainterPath()
+            point_path.addEllipse(mapped_point, 10.0, 10.0)
+            info_regions.append(
+                (
+                    point_path,
+                    _format_info_bubble(
+                        "Area Point",
+                        [
+                            ("X", _format_x_value(x_value, is_datetime=self.is_datetime)),
+                            ("Y", _format_number(y_value)),
+                        ],
+                    ),
+                )
+            )
         polygon = QPolygonF()
         polygon.append(QPointF(mapped_points[0].x(), plot_rect.bottom()))
         for point in mapped_points:
@@ -744,6 +972,7 @@ class _AreaCanvas(QWidget):
             Qt.AlignRight | Qt.AlignTop,
             _format_x_value(max_x, is_datetime=self.is_datetime),
         )
+        self._set_inspector_regions(info_regions)
 
 
 class VisualizationRegistry:
@@ -836,6 +1065,12 @@ class MetricRenderer:
             caption.setWordWrap(True)
             caption.setStyleSheet("color: #666; font-size: 10pt;")
             layout.addWidget(caption)
+
+        _attach_static_inspector(
+            widget,
+            _humanize_field_name(value_field, fallback="Metric"),
+            [("Value", str(value))],
+        )
         
         layout.addStretch()
         return widget
@@ -876,6 +1111,7 @@ class TableRenderer:
         # Auto-resize columns
         table.resizeColumnsToContents()
         layout.addWidget(table)
+        _attach_table_inspector(table)
         
         return widget
 
@@ -936,6 +1172,18 @@ class BarChartRenderer:
         series.attachAxis(axis_y)
 
         view = _build_chart_view(chart, parent)
+        tracker = _ensure_pointer_inspector(view)
+        signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
+        if signal is not None:
+            signal.connect(
+                lambda index, _bar_set=None, tracker=tracker, categories=categories, values=values, category_field=category_field, value_field=value_field:
+                tracker.start(
+                    _format_info_bubble(
+                        str(categories[index]),
+                        [(_humanize_field_name(value_field, fallback="Value"), _format_number(values[index]))],
+                    )
+                )
+            )
         if not _semantic_annotations_enabled(config or {}):
             return view
         return _wrap_with_chart_context(
@@ -1004,6 +1252,18 @@ class HorizontalBarChartRenderer:
         series.attachAxis(axis_x)
 
         view = _build_chart_view(chart, parent)
+        tracker = _ensure_pointer_inspector(view)
+        signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
+        if signal is not None:
+            signal.connect(
+                lambda index, _bar_set=None, tracker=tracker, categories=categories, values=values, category_field=category_field, value_field=value_field:
+                tracker.start(
+                    _format_info_bubble(
+                        str(categories[index]),
+                        [(_humanize_field_name(value_field, fallback="Value"), _format_number(values[index]))],
+                    )
+                )
+            )
         if not _semantic_annotations_enabled(config or {}):
             return view
         return _wrap_with_chart_context(
@@ -1058,6 +1318,21 @@ class LineChartRenderer:
         _configure_xy_axes(chart, series, numeric_points, datetime_points, x_field, y_field, config)
 
         view = _build_chart_view(chart, parent)
+        tracker = _ensure_pointer_inspector(view)
+        signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
+        if signal is not None:
+            signal.connect(
+                lambda point, tracker=tracker, x_field=x_field, y_field=y_field, is_datetime=bool(datetime_points):
+                tracker.start(
+                    _format_info_bubble(
+                        "Line Point",
+                        [
+                            (_humanize_field_name(x_field, fallback="X Axis"), _format_x_value(point.x(), is_datetime=is_datetime)),
+                            (_humanize_field_name(y_field, fallback="Value"), _format_number(point.y())),
+                        ],
+                    )
+                )
+            )
         if not _semantic_annotations_enabled(config):
             return view
         return _wrap_with_chart_context(
@@ -1153,6 +1428,21 @@ class ScatterChartRenderer:
 
         _configure_xy_axes(chart, series, numeric_points, datetime_points, x_field, y_field, config)
         view = _build_chart_view(chart, parent)
+        tracker = _ensure_pointer_inspector(view)
+        signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
+        if signal is not None:
+            signal.connect(
+                lambda point, tracker=tracker, x_field=x_field, y_field=y_field, is_datetime=bool(datetime_points):
+                tracker.start(
+                    _format_info_bubble(
+                        "Scatter Point",
+                        [
+                            (_humanize_field_name(x_field, fallback="X Axis"), _format_x_value(point.x(), is_datetime=is_datetime)),
+                            (_humanize_field_name(y_field, fallback="Value"), _format_number(point.y())),
+                        ],
+                    )
+                )
+            )
         if not _semantic_annotations_enabled(config):
             return view
         return _wrap_with_chart_context(
@@ -1296,6 +1586,24 @@ class PieChartRenderer:
         chart.setMargins(QMargins(0, 0, 0, 0))
 
         view = _build_chart_view(chart, parent)
+        tracker = _ensure_pointer_inspector(view)
+        for slice_index, pie_slice in enumerate(series.slices()):
+            category, value = slices[slice_index]
+            percent = 0.0 if total <= 0 else (value / total) * 100.0
+            signal = getattr(pie_slice, "pressed", None) or getattr(pie_slice, "clicked", None)
+            if signal is not None:
+                signal.connect(
+                    lambda tracker=tracker, category=category, value=value, percent=percent, value_field=value_field:
+                    tracker.start(
+                        _format_info_bubble(
+                            str(category),
+                            [
+                                (_humanize_field_name(value_field, fallback="Value"), _format_number(value)),
+                                ("Share", f"{percent:.1f}%"),
+                            ],
+                        )
+                    )
+                )
         if not _semantic_annotations_enabled(config):
             return view
 
@@ -1398,6 +1706,18 @@ class HistogramRenderer:
         series.attachAxis(axis_y)
 
         view = _build_chart_view(chart, parent)
+        tracker = _ensure_pointer_inspector(view)
+        signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
+        if signal is not None:
+            signal.connect(
+                lambda index, _bar_set=None, tracker=tracker, labels=labels, counts=counts:
+                tracker.start(
+                    _format_info_bubble(
+                        str(labels[index]),
+                        [("Count", _format_number(counts[index]))],
+                    )
+                )
+            )
         if not _semantic_annotations_enabled(config):
             return view
         return _wrap_with_chart_context(
@@ -1489,6 +1809,7 @@ class HeatmapRenderer:
 
         table.resizeColumnsToContents()
         layout.addWidget(table)
+        _attach_table_inspector(table)
         if not _semantic_annotations_enabled(config):
             return widget
         return _wrap_with_chart_context(
