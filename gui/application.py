@@ -2567,6 +2567,9 @@ class ApplicationWindow(QMainWindow):
         if str(feature_name) == 'AI Analyst':
             self._open_ai_analyst_dialog()
             return
+        if str(feature_name) == 'Dashboard':
+            self._on_open_analysis_dashboard()
+            return
         if str(feature_name) in {'Draw Topo', 'Network Topology Graph', 'Topo'}:
             self._on_open_network_topology_graph()
             return
@@ -3008,6 +3011,53 @@ class ApplicationWindow(QMainWindow):
                 ])
 
         return str(ml_csv_path), str(pred_csv_path)
+
+    def _on_open_analysis_dashboard(self):
+        """Open Analysis Dashboard with current capture view"""
+        if not self.capture_view or not getattr(self.capture_view, 'records', None):
+            QMessageBox.information(self, 'Analysis Dashboard', 'No capture is loaded. Please start or load a capture.')
+            return
+        
+        # Import dashboard components
+        from gui.dashboard import (
+            DashboardOverviewDialog, DashboardRepository, DashboardTemplateRepository,
+            DataSourceRegistry, QueryEngine, CaptureDataSourceBuilder,
+            DashboardService, create_default_visualization_registry
+        )
+        
+        # Initialize repositories
+        template_repo = DashboardTemplateRepository("docs/dashboard_templates")
+        dashboard_repo = DashboardRepository("docs/dashboards")
+        
+        # Setup data source registry with capture data for this session
+        data_registry = DataSourceRegistry()
+        CaptureDataSourceBuilder.register_all_sources(data_registry, self.capture_view)
+        
+        # Create visualization registry
+        viz_registry = create_default_visualization_registry()
+        
+        # Create dashboard service and store for later use
+        self.dashboard_service = DashboardService(
+            dashboard_repo=dashboard_repo,
+            template_repo=template_repo,
+            data_source_registry=data_registry,
+            visualization_registry=viz_registry
+        )
+        self.dashboard_data_registry = data_registry
+        
+        # Create query engine for dashboard queries
+        query_engine = QueryEngine(data_registry)
+        
+        # Open dashboard overview dialog with full dashboard system
+        dialog = DashboardOverviewDialog(
+            template_repo=template_repo,
+            dashboard_repo=dashboard_repo,
+            query_engine=query_engine,
+            viz_registry=viz_registry,
+            parent=self
+        )
+        
+        dialog.exec()
 
     def _open_ai_analyst_dialog(self):
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
