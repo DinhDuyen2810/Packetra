@@ -16,6 +16,20 @@ from .models import (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DASHBOARD_DATA_ROOT = PROJECT_ROOT / "data"
+
+
+def get_dashboard_templates_path() -> Path:
+    """Return the runtime path for dashboard templates."""
+    return DASHBOARD_DATA_ROOT / "dashboard_templates"
+
+
+def get_user_dashboards_path() -> Path:
+    """Return the runtime path for user dashboards."""
+    return DASHBOARD_DATA_ROOT / "dashboards"
+
+
 class DashboardRepository:
     """Manages user-created dashboards (save, load, delete, list, etc.)"""
     

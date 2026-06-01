@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "dashboard_id": "template_http_tls_analysis",
+  "name": "HTTP/TLS Analysis",
+  "description": "Analyze HTTP requests, TLS sessions",
+  "is_template": true,
+  "created_at": "2026-06-01T00:00:00",
+  "updated_at": "2026-06-01T00:00:00",
+  "layout": {
+    "columns": 12,
+    "row_height": 80
+  },
+  "widgets": [
+    {
+      "id": "http_message_count",
+      "title": "HTTP Messages",
+      "data_source": "http_requests",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": [
+          {
+            "type": "count",
+            "field": "*",
+            "as_": "messages"
+          }
+        ],
+        "sort": null,
+        "limit": null,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "metric",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": "messages",
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "w": 3,
+        "h": 2
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "http_tls_mix",
+      "title": "HTTP vs SSL",
+      "data_source": "packets",
+      "query": {
+        "filter": "(protocol == HTTP) OR (protocol == SSL)",
+        "group_by": [
+          "protocol"
+        ],
+        "metrics": [
+          {
+            "type": "count",
+            "field": "*",
+            "as_": "packets"
+          }
+        ],
+        "sort": [
+          {
+            "field": "packets",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "donut",
+        "x_field": null,
+        "y_field": null,
+        "category_field": "protocol",
+        "value_field": "packets",
+        "series_field": null,
+        "show_legend": true,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 3,
+        "y": 0,
+        "w": 9,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "http_request_table",
+      "title": "HTTP Request Table",
+      "data_source": "http_requests",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "bytes",
+            "direction": "desc"
+          }
+        ],
+        "limit": 15,
+        "time_bucket": null,
+        "columns": [
+          "kind",
+          "uri",
+          "status",
+          "latency_ms",
+          "bytes"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 4,
+        "w": 7,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "http_tls_packets",
+      "title": "Largest SSL Packets",
+      "data_source": "packets",
+      "query": {
+        "filter": "protocol == SSL",
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "length",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": [
+          "src_ip",
+          "dst_ip",
+          "length",
+          "info"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 7,
+        "y": 4,
+        "w": 5,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    }
+  ],
+  "source_template_id": null,
+  "global_filter": null,
+  "time_range": null,
+  "data_scope": "displayed_packets",
+  "tags": [
+    "http",
+    "tls",
+    "https"
+  ],
+  "thumbnail": null
+}

@@ -10,7 +10,8 @@ from .models import (
 )
 from .repository import (
     DashboardRepository, DashboardTemplateRepository,
-    create_default_templates
+    create_default_templates, get_dashboard_templates_path,
+    get_user_dashboards_path,
 )
 from .dashboard_overview import DashboardOverviewDialog, DashboardCard
 from .dashboard_editor import DashboardEditor, GridWidget
@@ -37,7 +38,8 @@ __all__ = [
     
     # Repository
     'DashboardRepository', 'DashboardTemplateRepository',
-    'create_default_templates',
+    'create_default_templates', 'get_dashboard_templates_path',
+    'get_user_dashboards_path',
     
     # UI
     'DashboardOverviewDialog', 'DashboardCard',

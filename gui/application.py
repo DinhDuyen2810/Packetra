@@ -3022,12 +3022,13 @@ class ApplicationWindow(QMainWindow):
         from gui.dashboard import (
             DashboardOverviewDialog, DashboardRepository, DashboardTemplateRepository,
             DataSourceRegistry, QueryEngine, CaptureDataSourceBuilder,
-            DashboardService, create_default_visualization_registry
+            DashboardService, create_default_visualization_registry,
+            get_dashboard_templates_path, get_user_dashboards_path,
         )
         
         # Initialize repositories
-        template_repo = DashboardTemplateRepository("docs/dashboard_templates")
-        dashboard_repo = DashboardRepository("docs/dashboards")
+        template_repo = DashboardTemplateRepository(str(get_dashboard_templates_path()))
+        dashboard_repo = DashboardRepository(str(get_user_dashboards_path()))
         
         # Setup data source registry with capture data for this session
         data_registry = DataSourceRegistry()

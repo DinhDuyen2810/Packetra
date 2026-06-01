@@ -89,6 +89,60 @@ def _build_chart_view(chart: QChart, parent: QWidget = None) -> QChartView:
     return view
 
 
+def _semantic_annotations_enabled(config: Dict[str, Any]) -> bool:
+    return not bool((config or {}).get("compactMode", False))
+
+
+def _wrap_with_chart_context(content: QWidget, lines: List[str], parent: QWidget = None) -> QWidget:
+    context_lines = [line for line in lines if line]
+    if not context_lines:
+        return content
+
+    container = QWidget(parent)
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    layout.addWidget(content, 1)
+
+    for line in context_lines:
+        label = QLabel(line, container)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #666; font-size: 9pt;")
+        layout.addWidget(label)
+
+    return container
+
+
+def _build_chart_overlay(lines: List[str], parent: QWidget = None) -> Optional[QWidget]:
+    overlay_lines = [line for line in lines if line]
+    if not overlay_lines:
+        return None
+
+    overlay = QWidget(parent)
+    overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+    overlay_layout = QVBoxLayout(overlay)
+    overlay_layout.setContentsMargins(10, 10, 10, 10)
+    overlay_layout.setSpacing(6)
+
+    for index, line in enumerate(overlay_lines):
+        label = QLabel(line, overlay)
+        label.setWordWrap(True)
+        if index == 0:
+            label.setStyleSheet(
+                "color: #111827; font-size: 9pt; font-weight: 700; "
+                "background-color: rgba(255, 255, 255, 205); border-radius: 6px; padding: 4px 6px;"
+            )
+        else:
+            label.setStyleSheet(
+                "color: #374151; font-size: 9pt; "
+                "background-color: rgba(255, 255, 255, 190); border-radius: 6px; padding: 4px 6px;"
+            )
+        overlay_layout.addWidget(label)
+
+    overlay_layout.addStretch(1)
+    return overlay
+
+
 def _humanize_field_name(field_name: Optional[str], *, fallback: str = "Value") -> str:
     if not field_name:
         return fallback
@@ -268,6 +322,11 @@ class _RadarCanvas(QWidget):
         self.values = values
         self.compact_mode = compact_mode
         self.setMinimumHeight(120 if compact_mode else 280)
+        if not compact_mode:
+            label_font = self.font()
+            label_font.setPointSize(max(label_font.pointSize(), 9))
+            label_font.setBold(True)
+            self.setFont(label_font)
 
     def paintEvent(self, event):
         if not self.labels or not self.values:
@@ -275,6 +334,12 @@ class _RadarCanvas(QWidget):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+
+        label_font = painter.font()
+        if not self.compact_mode:
+            label_font.setPointSize(max(label_font.pointSize(), 9))
+            label_font.setBold(True)
+            painter.setFont(label_font)
 
         margin = 18 if self.compact_mode else 44
         center = self.rect().center()
@@ -320,6 +385,7 @@ class _RadarCanvas(QWidget):
             )
 
             if not self.compact_mode:
+                painter.setPen(QPen(QColor("#1f2937"), 1))
                 text_rect = QRectF(axis_end.x() - 40, axis_end.y() - 10, 80, 20)
                 painter.drawText(text_rect, Qt.AlignCenter, label)
 
@@ -379,10 +445,11 @@ class _TreemapCanvas(QWidget):
 class _SunburstCanvas(QWidget):
     """Custom sunburst renderer with inner groups and outer leaves."""
 
-    def __init__(self, groups: List[dict], *, compact_mode: bool, parent: QWidget = None):
+    def __init__(self, groups: List[dict], *, compact_mode: bool, center_label: str = "Total", parent: QWidget = None):
         super().__init__(parent)
         self.groups = groups
         self.compact_mode = compact_mode
+        self.center_label = center_label
         self.setMinimumHeight(140 if compact_mode else 280)
 
     def paintEvent(self, event):
@@ -393,42 +460,161 @@ class _SunburstCanvas(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         outer_rect = self.rect().adjusted(12, 12, -12, -12)
         size = min(outer_rect.width(), outer_rect.height())
-        circle_rect = QRectF(
-            outer_rect.center().x() - (size / 2),
-            outer_rect.center().y() - (size / 2),
-            size,
-            size,
-        )
+        center = outer_rect.center()
+        outer_radius = size / 2.0
+        split_radius = outer_radius * 0.58
+        hole_radius = outer_radius * 0.28
         total_value = sum(group['value'] for group in self.groups) or 1.0
         start_angle = 90.0 * 16
+
+        def rect_for_radius(radius: float) -> QRectF:
+            return QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0)
+
+        def point_at_angle(radius: float, angle_degrees: float) -> QPointF:
+            radians = math.radians(-angle_degrees)
+            return QPointF(
+                center.x() + (math.cos(radians) * radius),
+                center.y() + (math.sin(radians) * radius),
+            )
+
+        def ring_segment_path(outer_segment_radius: float, inner_segment_radius: float, start: float, span: float) -> QPainterPath:
+            start_degrees = start / 16.0
+            span_degrees = span / 16.0
+            end_degrees = start_degrees + span_degrees
+            outer_segment_rect = rect_for_radius(outer_segment_radius)
+            inner_segment_rect = rect_for_radius(inner_segment_radius)
+
+            path = QPainterPath()
+            path.arcMoveTo(outer_segment_rect, start_degrees)
+            path.arcTo(outer_segment_rect, start_degrees, span_degrees)
+            path.lineTo(point_at_angle(inner_segment_radius, end_degrees))
+            path.arcTo(inner_segment_rect, end_degrees, -span_degrees)
+            path.closeSubpath()
+            return path
+
+        def draw_arc_label(primary_text: str, secondary_text: str, start: float, span: float, *, outer_segment_radius: float, inner_segment_radius: float, fill_color: QColor, min_span_degrees: float, font_scale: int = 0):
+            if self.compact_mode or (not primary_text and not secondary_text):
+                return
+            span_degrees = abs(span) / 16.0
+            value_only_min_span = max(4.5, min_span_degrees * 0.35)
+            if span_degrees < value_only_min_span:
+                return
+
+            font = painter.font()
+            font.setPointSize(max(font.pointSize() + font_scale, 8))
+            font.setBold(True)
+
+            label_radius = (outer_segment_radius + inner_segment_radius) / 2.0
+            available_width = max(36.0, min(math.radians(span_degrees) * label_radius * 0.9, 150.0))
+            available_height = max(20.0, min((outer_segment_radius - inner_segment_radius) * 0.9, 56.0))
+
+            compact_secondary_text = str(secondary_text or "")
+            if compact_secondary_text and '(' in compact_secondary_text and available_width < 76.0:
+                compact_secondary_text = compact_secondary_text.split(' ', 1)[0]
+
+            show_name = bool(primary_text) and span_degrees >= min_span_degrees and available_width >= 62.0 and available_height >= 28.0
+            use_value_only = not show_name and bool(compact_secondary_text)
+            if use_value_only:
+                font.setPointSize(max(font.pointSize() - 1, 7))
+
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+
+            raw_lines = []
+            if compact_secondary_text:
+                raw_lines.append(compact_secondary_text)
+            if show_name:
+                raw_lines.insert(0, primary_text)
+            elif not raw_lines and primary_text:
+                raw_lines = [primary_text]
+
+            if not raw_lines:
+                return
+
+            fitted_lines = [
+                metrics.elidedText(line, Qt.ElideRight, max(24, int(available_width)))
+                for line in raw_lines
+            ]
+            if not any(line.strip() for line in fitted_lines):
+                return
+
+            total_text_height = max(metrics.height() * len(fitted_lines) + 4, 18)
+            text_width = max(metrics.horizontalAdvance(line) for line in fitted_lines) + 8
+            text_rect = QRectF(0, 0, min(max(text_width, 40.0), available_width), min(total_text_height, available_height))
+
+            mid_degrees = (start + (span / 2.0)) / 16.0
+            label_center = point_at_angle(label_radius, mid_degrees)
+            text_rect.moveCenter(label_center)
+
+            outer_bounds = rect_for_radius(outer_segment_radius - 4.0)
+            if text_rect.left() < outer_bounds.left():
+                text_rect.moveLeft(outer_bounds.left())
+            if text_rect.right() > outer_bounds.right():
+                text_rect.moveRight(outer_bounds.right())
+            if text_rect.top() < outer_bounds.top():
+                text_rect.moveTop(outer_bounds.top())
+            if text_rect.bottom() > outer_bounds.bottom():
+                text_rect.moveBottom(outer_bounds.bottom())
+
+            painter.setPen(QColor("#ffffff") if fill_color.lightness() < 150 else QColor("#111827"))
+            painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, "\n".join(fitted_lines))
 
         outer_pen = QPen(QColor("white"), 1)
         for group_index, group in enumerate(self.groups):
             span_angle = -360.0 * 16 * (group['value'] / total_value)
             painter.setPen(outer_pen)
-            painter.setBrush(QBrush(_palette(group_index).lighter(110)))
-            painter.drawPie(circle_rect.adjusted(size * 0.2, size * 0.2, -(size * 0.2), -(size * 0.2)), int(start_angle), int(span_angle))
+            group_color = _palette(group_index).lighter(110)
+            painter.setBrush(QBrush(group_color))
+            painter.drawPath(ring_segment_path(split_radius, hole_radius, start_angle, span_angle))
+
+            group_percent = (group['value'] / total_value) * 100.0
+            draw_arc_label(
+                str(group['label']),
+                f"{_format_number(group['value'])} ({group_percent:.0f}%)",
+                start_angle,
+                span_angle,
+                outer_segment_radius=split_radius,
+                inner_segment_radius=hole_radius,
+                fill_color=group_color,
+                min_span_degrees=28.0,
+            )
 
             child_start = start_angle
             child_total = sum(item['value'] for item in group['children']) or 1.0
             for child_index, child in enumerate(group['children']):
                 child_span = span_angle * (child['value'] / child_total)
-                painter.setBrush(QBrush(_palette(group_index + child_index + 1).darker(105 + (child_index * 8))))
-                painter.drawPie(circle_rect, int(child_start), int(child_span))
+                child_color = _palette(group_index + child_index + 1).darker(105 + (child_index * 8))
+                painter.setBrush(QBrush(child_color))
+                painter.drawPath(ring_segment_path(outer_radius, split_radius, child_start, child_span))
+
+                draw_arc_label(
+                    str(child['label']),
+                    _format_number(child['value']),
+                    child_start,
+                    child_span,
+                    outer_segment_radius=outer_radius,
+                    inner_segment_radius=split_radius,
+                    fill_color=child_color,
+                    min_span_degrees=18.0,
+                    font_scale=-1,
+                )
                 child_start += child_span
 
             start_angle += span_angle
 
-        hole_size = size * 0.28
-        hole_rect = QRectF(
-            outer_rect.center().x() - (hole_size / 2),
-            outer_rect.center().y() - (hole_size / 2),
-            hole_size,
-            hole_size,
-        )
+        hole_rect = rect_for_radius(hole_radius - 2.0)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("white"))
         painter.drawEllipse(hole_rect)
+
+        if not self.compact_mode:
+            total_value = sum(group['value'] for group in self.groups)
+            label_font = painter.font()
+            label_font.setPointSize(max(label_font.pointSize() - 1, 8))
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            painter.setPen(QColor("#1f2937"))
+            painter.drawText(hole_rect, Qt.AlignCenter, f"{self.center_label}\n{_format_number(total_value)}")
 
 
 def _build_grouped_items(data: List[Dict[str, Any]], config: Dict[str, Any], *, fallback_group: str = "Group") -> List[dict]:
@@ -643,6 +829,13 @@ class MetricRenderer:
         value_label.setFont(value_font)
         value_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(value_label)
+
+        if _semantic_annotations_enabled(config or {}):
+            caption = QLabel(_humanize_field_name(value_field, fallback="Metric"))
+            caption.setAlignment(Qt.AlignCenter)
+            caption.setWordWrap(True)
+            caption.setStyleSheet("color: #666; font-size: 10pt;")
+            layout.addWidget(caption)
         
         layout.addStretch()
         return widget
@@ -670,7 +863,7 @@ class TableRenderer:
         # Get column names from first row
         columns = list(data[0].keys())
         table.setColumnCount(len(columns))
-        table.setHorizontalHeaderLabels(columns)
+        table.setHorizontalHeaderLabels([_humanize_field_name(column) for column in columns])
         
         # Populate rows
         table.setRowCount(len(data))
@@ -719,6 +912,8 @@ class BarChartRenderer:
 
         series = QBarSeries()
         series.append(bar_set)
+        if hasattr(series, "setLabelsVisible"):
+            series.setLabelsVisible(_semantic_annotations_enabled(config or {}))
 
         chart = QChart()
         chart.addSeries(series)
@@ -740,7 +935,17 @@ class BarChartRenderer:
         chart.addAxis(axis_y, Qt.AlignLeft)
         series.attachAxis(axis_y)
 
-        return _build_chart_view(chart, parent)
+        view = _build_chart_view(chart, parent)
+        if not _semantic_annotations_enabled(config or {}):
+            return view
+        return _wrap_with_chart_context(
+            view,
+            [
+                f"X Axis: {_humanize_field_name(category_field, fallback='Category')} | Y Axis: {_humanize_field_name(value_field, fallback='Value')}",
+                f"Bars show {_humanize_field_name(value_field, fallback='Value')} for each {_humanize_field_name(category_field, fallback='Category')}",
+            ],
+            parent,
+        )
 
 
 class HorizontalBarChartRenderer:
@@ -775,6 +980,8 @@ class HorizontalBarChartRenderer:
 
         series = QHorizontalBarSeries()
         series.append(bar_set)
+        if hasattr(series, "setLabelsVisible"):
+            series.setLabelsVisible(_semantic_annotations_enabled(config or {}))
 
         chart = QChart()
         chart.addSeries(series)
@@ -796,7 +1003,17 @@ class HorizontalBarChartRenderer:
         chart.addAxis(axis_x, Qt.AlignBottom)
         series.attachAxis(axis_x)
 
-        return _build_chart_view(chart, parent)
+        view = _build_chart_view(chart, parent)
+        if not _semantic_annotations_enabled(config or {}):
+            return view
+        return _wrap_with_chart_context(
+            view,
+            [
+                f"X Axis: {_humanize_field_name(value_field, fallback='Value')} | Y Axis: {_humanize_field_name(category_field, fallback='Category')}",
+                f"Bars compare {_humanize_field_name(value_field, fallback='Value')} across {_humanize_field_name(category_field, fallback='Category')}",
+            ],
+            parent,
+        )
 
 
 class LineChartRenderer:
@@ -829,9 +1046,28 @@ class LineChartRenderer:
         chart.setBackgroundVisible(False)
         chart.setMargins(QMargins(0, 0, 0, 0))
 
+        if hasattr(series, "setName"):
+            series.setName(_humanize_field_name(y_field, fallback="Value"))
+        if hasattr(series, "setPointsVisible"):
+            series.setPointsVisible(_semantic_annotations_enabled(config))
+        if hasattr(series, "setPointLabelsVisible"):
+            series.setPointLabelsVisible(_semantic_annotations_enabled(config))
+        if hasattr(series, "setPointLabelsFormat"):
+            series.setPointLabelsFormat("@yPoint")
+
         _configure_xy_axes(chart, series, numeric_points, datetime_points, x_field, y_field, config)
 
-        return _build_chart_view(chart, parent)
+        view = _build_chart_view(chart, parent)
+        if not _semantic_annotations_enabled(config):
+            return view
+        return _wrap_with_chart_context(
+            view,
+            [
+                f"X Axis: {_humanize_field_name(x_field, fallback='X Axis')} | Y Axis: {_humanize_field_name(y_field, fallback='Value')}",
+                f"Line tracks {_humanize_field_name(y_field, fallback='Value')} over {_humanize_field_name(x_field, fallback='X Axis')}",
+            ],
+            parent,
+        )
 
 
 class AreaChartRenderer:
@@ -908,8 +1144,25 @@ class ScatterChartRenderer:
         chart.setBackgroundVisible(False)
         chart.setMargins(QMargins(0, 0, 0, 0))
 
+        if hasattr(series, "setName"):
+            series.setName(_humanize_field_name(y_field, fallback="Value"))
+        if hasattr(series, "setPointLabelsVisible"):
+            series.setPointLabelsVisible(_semantic_annotations_enabled(config))
+        if hasattr(series, "setPointLabelsFormat"):
+            series.setPointLabelsFormat("(@xPoint, @yPoint)")
+
         _configure_xy_axes(chart, series, numeric_points, datetime_points, x_field, y_field, config)
-        return _build_chart_view(chart, parent)
+        view = _build_chart_view(chart, parent)
+        if not _semantic_annotations_enabled(config):
+            return view
+        return _wrap_with_chart_context(
+            view,
+            [
+                f"X Axis: {_humanize_field_name(x_field, fallback='X Axis')} | Y Axis: {_humanize_field_name(y_field, fallback='Value')}",
+                f"Points plot {_humanize_field_name(y_field, fallback='Value')} against {_humanize_field_name(x_field, fallback='X Axis')}",
+            ],
+            parent,
+        )
 
 
 class RadarChartRenderer:
@@ -984,16 +1237,13 @@ class SunburstRenderer:
         if not groups:
             return _empty_widget("Sunburst needs grouped values", parent)
 
-        widget = QWidget(parent)
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addWidget(_SunburstCanvas(groups, compact_mode=bool((config or {}).get("compactMode", False)), parent=widget), 1)
-        if not bool((config or {}).get("compactMode", False)):
-            meta = QLabel(f"Inner ring: {_humanize_field_name((config or {}).get('seriesField'), fallback='Group')} | Outer ring: {_humanize_field_name(_infer_category_field(data, config or {}, _infer_value_field(data, config or {})), fallback='Category')}")
-            meta.setStyleSheet("color: #666; font-size: 9pt;")
-            layout.addWidget(meta)
-        return widget
+        config = config or {}
+        return _SunburstCanvas(
+            groups,
+            compact_mode=bool(config.get("compactMode", False)),
+            center_label=_humanize_field_name(_infer_value_field(data, config), fallback="Value"),
+            parent=parent,
+        )
 
 
 class PieChartRenderer:
@@ -1008,18 +1258,30 @@ class PieChartRenderer:
         if not data:
             return _empty_widget("No data", parent)
 
+        config = config or {}
         value_field = _infer_value_field(data, config or {})
         category_field = _infer_category_field(data, config or {}, value_field)
         if not value_field or not category_field:
             return _empty_widget("Chart fields are not configured", parent)
 
-        series = QPieSeries()
+        slices = []
+        total = 0.0
         for row in data:
             value = _coerce_number(row.get(value_field))
             category = str(row.get(category_field, '') or '')
             if value is None or value <= 0 or not category:
                 continue
-            series.append(category, value)
+            slices.append((category, value))
+            total += value
+
+        series = QPieSeries()
+        for index, (category, value) in enumerate(slices):
+            pie_slice = series.append(category, value)
+            pie_slice.setColor(_palette(index))
+            percent = 0.0 if total <= 0 else (value / total) * 100.0
+            pie_slice.setLabel(f"{category}: {_format_number(value)} ({percent:.1f}%)")
+            if hasattr(pie_slice, "setLabelVisible"):
+                pie_slice.setLabelVisible(_semantic_annotations_enabled(config))
 
         if not series.slices():
             return _empty_widget("No plottable data", parent)
@@ -1029,11 +1291,31 @@ class PieChartRenderer:
 
         chart = QChart()
         chart.addSeries(series)
-        chart.legend().setVisible(bool((config or {}).get("showLegend", True)))
+        chart.legend().setVisible(bool(config.get("showLegend", True)) or _semantic_annotations_enabled(config))
         chart.setBackgroundVisible(False)
         chart.setMargins(QMargins(0, 0, 0, 0))
 
-        return _build_chart_view(chart, parent)
+        view = _build_chart_view(chart, parent)
+        if not _semantic_annotations_enabled(config):
+            return view
+
+        chart_kind = "Donut" if donut else "Pie"
+        context_lines = [
+            f"Slices: {_humanize_field_name(category_field, fallback='Category')} | Size: {_humanize_field_name(value_field, fallback='Value')}",
+            f"{chart_kind} segments show {_humanize_field_name(value_field, fallback='Value')} for each {_humanize_field_name(category_field, fallback='Category')}",
+        ]
+
+        if donut:
+            top_slices = sorted(slices, key=lambda item: item[1], reverse=True)[:3]
+            summary_parts = [
+                f"Total {_humanize_field_name(value_field, fallback='Value')}: {_format_number(total)}"
+            ]
+            for category, value in top_slices:
+                percent = 0.0 if total <= 0 else (value / total) * 100.0
+                summary_parts.append(f"{category}: {_format_number(value)} ({percent:.1f}%)")
+            context_lines.append(" | ".join(summary_parts))
+
+        return _wrap_with_chart_context(view, context_lines, parent)
 
 
 class DonutChartRenderer:
@@ -1093,6 +1375,8 @@ class HistogramRenderer:
         series = QBarSeries()
         series.append(bar_set)
         series.setBarWidth(1.0)
+        if hasattr(series, "setLabelsVisible"):
+            series.setLabelsVisible(_semantic_annotations_enabled(config))
 
         chart = QChart()
         chart.addSeries(series)
@@ -1113,7 +1397,17 @@ class HistogramRenderer:
         chart.addAxis(axis_y, Qt.AlignLeft)
         series.attachAxis(axis_y)
 
-        return _build_chart_view(chart, parent)
+        view = _build_chart_view(chart, parent)
+        if not _semantic_annotations_enabled(config):
+            return view
+        return _wrap_with_chart_context(
+            view,
+            [
+                f"X Axis: {_humanize_field_name(numeric_field, fallback='Bins')} bins | Y Axis: Count",
+                f"Histogram counts how many records fall into each {_humanize_field_name(numeric_field, fallback='Value')} range",
+            ],
+            parent,
+        )
 
 
 class HeatmapRenderer:
@@ -1195,7 +1489,15 @@ class HeatmapRenderer:
 
         table.resizeColumnsToContents()
         layout.addWidget(table)
-        return widget
+        if not _semantic_annotations_enabled(config):
+            return widget
+        return _wrap_with_chart_context(
+            widget,
+            [
+                f"Rows: {_humanize_field_name(label_field, fallback='Category')} | Columns: {', '.join(_humanize_field_name(field) for field in numeric_fields)}",
+            ],
+            parent,
+        )
 
 
 class TopologyRenderer:

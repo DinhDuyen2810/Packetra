@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "dashboard_id": "template_endpoint_activity",
+  "name": "Endpoint Activity",
+  "description": "Track endpoint behavior, traffic patterns",
+  "is_template": true,
+  "created_at": "2026-06-01T00:00:00",
+  "updated_at": "2026-06-01T00:00:00",
+  "layout": {
+    "columns": 12,
+    "row_height": 80
+  },
+  "widgets": [
+    {
+      "id": "endpoint_top_bytes",
+      "title": "Top Talkers by Bytes",
+      "data_source": "endpoints",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "bytes",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "bar",
+        "x_field": null,
+        "y_field": null,
+        "category_field": "address",
+        "value_field": "bytes",
+        "series_field": null,
+        "show_legend": true,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "endpoint_top_packets",
+      "title": "Top Talkers by Packets",
+      "data_source": "endpoints",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "packets",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "bar",
+        "x_field": null,
+        "y_field": null,
+        "category_field": "address",
+        "value_field": "packets",
+        "series_field": null,
+        "show_legend": true,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "endpoint_table",
+      "title": "Endpoint Table",
+      "data_source": "endpoints",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "packets",
+            "direction": "desc"
+          }
+        ],
+        "limit": 15,
+        "time_bucket": null,
+        "columns": [
+          "address",
+          "packets",
+          "bytes",
+          "tx_packets",
+          "rx_packets",
+          "protocols"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    }
+  ],
+  "source_template_id": null,
+  "global_filter": null,
+  "time_range": null,
+  "data_scope": "displayed_packets",
+  "tags": [
+    "endpoints",
+    "activity",
+    "traffic"
+  ],
+  "thumbnail": null
+}

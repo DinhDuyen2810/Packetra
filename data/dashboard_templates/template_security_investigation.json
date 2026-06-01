@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "dashboard_id": "template_security_investigation",
+  "name": "Security Investigation",
+  "description": "Investigate suspicious activity, expert warnings",
+  "is_template": true,
+  "created_at": "2026-06-01T00:00:00",
+  "updated_at": "2026-06-01T00:00:00",
+  "layout": {
+    "columns": 12,
+    "row_height": 80
+  },
+  "widgets": [
+    {
+      "id": "security_top_dst_ports",
+      "title": "Top Destination Ports",
+      "data_source": "packets",
+      "query": {
+        "filter": "dst_port > 0",
+        "group_by": [
+          "dst_port"
+        ],
+        "metrics": [
+          {
+            "type": "count",
+            "field": "*",
+            "as_": "hits"
+          },
+          {
+            "type": "sum",
+            "field": "length",
+            "as_": "bytes"
+          }
+        ],
+        "sort": [
+          {
+            "field": "hits",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "bar",
+        "x_field": null,
+        "y_field": null,
+        "category_field": "dst_port",
+        "value_field": "hits",
+        "series_field": null,
+        "show_legend": true,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "security_slow_dns",
+      "title": "Slow DNS Responses",
+      "data_source": "dns_queries",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "avg_time_ms",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": [
+          "query",
+          "responses",
+          "avg_time_ms",
+          "count"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    },
+    {
+      "id": "security_largest_conversations",
+      "title": "Largest Conversations",
+      "data_source": "conversations",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "bytes",
+            "direction": "desc"
+          }
+        ],
+        "limit": 12,
+        "time_bucket": null,
+        "columns": [
+          "conversation",
+          "protocol",
+          "packets",
+          "bytes"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 4
+      },
+      "description": null,
+      "style": null
+    }
+  ],
+  "source_template_id": null,
+  "global_filter": null,
+  "time_range": null,
+  "data_scope": "displayed_packets",
+  "tags": [
+    "security",
+    "expert",
+    "warnings"
+  ],
+  "thumbnail": null
+}

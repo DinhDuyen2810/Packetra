@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "dashboard_id": "template_network_overview",
+  "name": "Network Overview",
+  "description": "Overview of packets, protocols, endpoints and conversations",
+  "is_template": true,
+  "created_at": "2026-06-01T00:00:00",
+  "updated_at": "2026-06-01T00:00:00",
+  "layout": {
+    "columns": 12,
+    "row_height": 80
+  },
+  "widgets": [
+    {
+      "id": "network_total_packets",
+      "title": "Total Packets",
+      "data_source": "packets",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": [
+          {
+            "type": "count",
+            "field": "*",
+            "as_": "packets"
+          }
+        ],
+        "sort": null,
+        "limit": null,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "metric",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": "packets",
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "w": 3,
+        "h": 2
+      },
+      "description": "Total number of packets in the current capture",
+      "style": null
+    },
+    {
+      "id": "network_total_bytes",
+      "title": "Total Bytes",
+      "data_source": "packets",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": [
+          {
+            "type": "sum",
+            "field": "length",
+            "as_": "bytes"
+          }
+        ],
+        "sort": null,
+        "limit": null,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "metric",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": "bytes",
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 3,
+        "y": 0,
+        "w": 3,
+        "h": 2
+      },
+      "description": "Total bytes transferred in the current capture",
+      "style": null
+    },
+    {
+      "id": "network_protocol_distribution",
+      "title": "Protocol Distribution",
+      "data_source": "protocol_stats",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "packets",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": null
+      },
+      "visualization": {
+        "type": "donut",
+        "x_field": null,
+        "y_field": null,
+        "category_field": "protocol",
+        "value_field": "packets",
+        "series_field": null,
+        "show_legend": true,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Protocol mix across the displayed packets",
+      "style": null
+    },
+    {
+      "id": "network_packets_over_time",
+      "title": "Packets Over Time",
+      "data_source": "packets",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": [
+          {
+            "type": "count",
+            "field": "*",
+            "as_": "packets"
+          }
+        ],
+        "sort": null,
+        "limit": null,
+        "time_bucket": "1s",
+        "columns": null
+      },
+      "visualization": {
+        "type": "line",
+        "x_field": "time",
+        "y_field": "packets",
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 2,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Packet rate across the capture timeline",
+      "style": null
+    },
+    {
+      "id": "network_top_endpoints",
+      "title": "Top Endpoints",
+      "data_source": "endpoints",
+      "query": {
+        "filter": null,
+        "group_by": null,
+        "metrics": null,
+        "sort": [
+          {
+            "field": "packets",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10,
+        "time_bucket": null,
+        "columns": [
+          "address",
+          "packets",
+          "bytes",
+          "protocols"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "x_field": null,
+        "y_field": null,
+        "category_field": null,
+        "value_field": null,
+        "series_field": null,
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 4
+      },
+      "description": "Top endpoints by packet count",
+      "style": null
+    }
+  ],
+  "source_template_id": null,
+  "global_filter": null,
+  "time_range": null,
+  "data_scope": "displayed_packets",
+  "tags": [
+    "overview",
+    "packets",
+    "protocols"
+  ],
+  "thumbnail": null
+}
