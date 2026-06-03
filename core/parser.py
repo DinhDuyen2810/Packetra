@@ -25,6 +25,9 @@ bind_layers(Ether, ARP, type=0x8035)
 
 class PacketParser:
     MAX_CONTIGUOUS_RANGES = 101
+    HTTP_REQUEST_METHODS = {
+        b'GET', b'POST', b'PUT', b'DELETE', b'HEAD', b'OPTIONS', b'PATCH', b'TRACE', b'CONNECT', b'PRI'
+    }
 
     def __init__(self):
         self.first_epoch = None
@@ -8184,15 +8187,18 @@ class PacketParser:
     def _http_payload_kind(self, payload: bytes) -> str | None:
         if not payload:
             return None
-        request_prefixes = (
-            b'GET ', b'POST ', b'HEAD ', b'PUT ', b'DELETE ',
-            b'OPTIONS ', b'PATCH ', b'TRACE ', b'CONNECT ',
-            b'SUBSCRIBE ', b'UNSUBSCRIBE ', b'NOTIFY '
-        )
-        if any(payload.startswith(prefix) for prefix in request_prefixes):
-            return 'request'
-        if payload.startswith(b'HTTP/1.') or payload.startswith(b'HTTP/2'):
+        first_line = payload.split(b'\r\n', 1)[0].strip()
+        if first_line.startswith(b'HTTP/'):
             return 'response'
+
+        parts = first_line.split(b' ', 2)
+        if len(parts) < 3:
+            return None
+        method = bytes(parts[0] or b'').upper()
+        target = bytes(parts[1] or b'').strip()
+        version = bytes(parts[2] or b'').upper()
+        if method in self.HTTP_REQUEST_METHODS and target and version.startswith(b'HTTP/'):
+            return 'request'
         return None
 
     def _http_request_parts(self, payload: bytes) -> tuple[str, str, str]:

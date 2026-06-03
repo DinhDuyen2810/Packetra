@@ -186,7 +186,7 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-03T16:57:50.521565",
-      "updated_at": "2026-06-03T22:22:26.525847",
+      "updated_at": "2026-06-03T23:16:31.938507",
       "layout": {
         "columns": 12,
         "row_height": 80
@@ -376,11 +376,19 @@
         {
           "id": "478eeff1-2060-4cf6-b12e-6b123b1717f1",
           "title": "Top Protocols",
-          "data_source": "protocol_stats",
+          "data_source": "packets",
           "query": {
             "filter": null,
-            "group_by": null,
-            "metrics": null,
+            "group_by": [
+              "tcp_ack_frame_number"
+            ],
+            "metrics": [
+              {
+                "type": "avg",
+                "field": "tcp_ack_frame_number",
+                "as_": "tcp_ack_frame_number"
+              }
+            ],
             "sort": [
               {
                 "field": "packets",
@@ -390,16 +398,16 @@
             "limit": 10,
             "time_bucket": null,
             "columns": [
-              "protocol",
-              "packets"
+              "tcp_ack_frame_number",
+              "tcp_ack_frame_number"
             ]
           },
           "visualization": {
             "type": "radar",
             "x_field": null,
             "y_field": null,
-            "category_field": "protocol",
-            "value_field": "packets",
+            "category_field": "tcp_ack_frame_number",
+            "value_field": "tcp_ack_frame_number",
             "series_field": null,
             "show_legend": true,
             "show_labels": false
@@ -465,7 +473,8 @@
           "query": {
             "filter": null,
             "group_by": [
-              "time"
+              "time",
+              "protocol"
             ],
             "metrics": [
               {
@@ -479,7 +488,8 @@
             "time_bucket": "1s",
             "columns": [
               "time",
-              "bytes"
+              "bytes",
+              "protocol"
             ]
           },
           "visualization": {
@@ -488,7 +498,7 @@
             "y_field": "bytes",
             "category_field": null,
             "value_field": "bytes",
-            "series_field": null,
+            "series_field": "protocol",
             "show_legend": false,
             "show_labels": false
           },
@@ -545,7 +555,7 @@
         {
           "id": "aa77e04e-9503-40af-9dd1-e5690401f37e",
           "title": "Packets Over Time",
-          "data_source": "packets",
+          "data_source": "conversations",
           "query": {
             "filter": null,
             "group_by": null,
@@ -560,16 +570,17 @@
             "limit": null,
             "time_bucket": "1s",
             "columns": [
-              "ip.src",
-              "time"
+              "time",
+              "frame.len",
+              "packets"
             ]
           },
           "visualization": {
             "type": "scatter",
-            "x_field": "ip.src",
-            "y_field": "time",
+            "x_field": "frame.len",
+            "y_field": "packets",
             "category_field": null,
-            "value_field": "time",
+            "value_field": "packets",
             "series_field": null,
             "show_legend": false,
             "show_labels": false
@@ -583,7 +594,7 @@
           "description": "Packet rate across the capture timeline",
           "style": {
             "x_data_source": "packets",
-            "y_data_source": "packets",
+            "y_data_source": "conversations",
             "display_mode": "chart"
           }
         },
@@ -603,7 +614,10 @@
             ],
             "limit": 10,
             "time_bucket": null,
-            "columns": null
+            "columns": [
+              "conversation",
+              "packets"
+            ]
           },
           "visualization": {
             "type": "treemap",
@@ -611,7 +625,7 @@
             "y_field": null,
             "category_field": "conversation",
             "value_field": "packets",
-            "series_field": "protocol",
+            "series_field": null,
             "show_legend": true,
             "show_labels": false
           },
@@ -622,7 +636,9 @@
             "h": 4
           },
           "description": null,
-          "style": null
+          "style": {
+            "display_mode": "chart"
+          }
         }
       ],
       "source_template_id": null,

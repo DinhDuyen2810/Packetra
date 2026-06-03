@@ -430,7 +430,13 @@ class DisplayFilter:
         if name == 'ssl':
             return proto_low == 'ssl' or proto_low.startswith('tls') or 'ssl' in layer_lows or 'tls' in layer_lows
         if name == 'http':
-            return proto_low == 'http' or 'http' in layer_lows or bool(self._http_payload_kind(record))
+            if proto_low in {'http', 'http/xml'} or 'http' in layer_lows:
+                return True
+            # Only use payload heuristics for TCP traffic to avoid matching
+            # HTTP-like text protocols over UDP (e.g. SSDP responses).
+            if raw is not None and raw.haslayer(TCP):
+                return bool(self._http_payload_kind(record))
+            return False
         if name in {'smtp', 'imf'}:
             return proto_low in {'smtp', 'smtp/imf'} or name in layer_lows
         if name in {'ssh', 'sshv2'}:
@@ -610,7 +616,7 @@ class DisplayFilter:
         method = str(parts[0] or '').upper()
         target = str(parts[1] or '').strip()
         version = str(parts[2] or '').upper() if len(parts) >= 3 else ''
-        if method in self.HTTP_REQUEST_METHODS and target and (version.startswith('HTTP/') or len(parts) == 2):
+        if method in self.HTTP_REQUEST_METHODS and target and version.startswith('HTTP/'):
             return 'request'
         return ''
 
@@ -624,7 +630,7 @@ class DisplayFilter:
         method = str(parts[0] or '').upper()
         target = str(parts[1] or '').strip()
         version = str(parts[2] or '').upper() if len(parts) >= 3 else ''
-        if method in self.HTTP_REQUEST_METHODS and target and (version.startswith('HTTP/') or len(parts) == 2):
+        if method in self.HTTP_REQUEST_METHODS and target and version.startswith('HTTP/'):
             return method
         return ''
 

@@ -3169,9 +3169,6 @@ class ApplicationWindow(QMainWindow):
                 f"ID: {int(entry.get('id', 0) or 0):03d}",
                 f"Loai: {str(entry.get('category', '') or '-').strip() or '-'}",
                 f"Protocol: {str(entry.get('protocol', '') or '-').strip() or '-'}",
-                f"File: {str(entry.get('file', '') or '').strip()}",
-                f"Duong dan: {demo_path}",
-                f"Trang thai file: {'Ton tai' if exists else 'Khong ton tai'}",
                 '',
                 f"Mo ta: {str(entry.get('description', '') or '').strip()}",
             ]
@@ -3187,7 +3184,7 @@ class ApplicationWindow(QMainWindow):
             demo_name = str(entry.get('name', '') or '').strip() or f'Demo {demo_id:03d}'
             demo_path = str(entry.get('path') or '')
             if not os.path.exists(demo_path):
-                QMessageBox.critical(dialog, 'Demo Packet', f'Khong tim thay file PCAPNG:\n{demo_path}')
+                QMessageBox.critical(dialog, 'Demo Packet', f'Khong tim thay file demo cho muc {demo_id:03d}.')
                 return
 
             proceed = self._prompt_save_before_destructive_action(
@@ -3205,11 +3202,11 @@ class ApplicationWindow(QMainWindow):
             try:
                 packets = list(iter_pcap_packets(demo_path))
             except Exception as exc:
-                QMessageBox.critical(dialog, 'Demo Packet', f'Khong doc duoc file demo:\n{demo_path}\n\n{exc}')
+                QMessageBox.critical(dialog, 'Demo Packet', f'Khong doc duoc file demo cho muc {demo_id:03d}.\n\n{exc}')
                 return
 
             if not packets:
-                QMessageBox.warning(dialog, 'Demo Packet', f'File demo khong co packet hop le:\n{demo_path}')
+                QMessageBox.warning(dialog, 'Demo Packet', f'Demo {demo_id:03d} khong co packet hop le.')
                 return
 
             self._replace_capture_packets(
