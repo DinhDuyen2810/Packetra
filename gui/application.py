@@ -1857,6 +1857,8 @@ class ApplicationWindow(QMainWindow):
     AI_MODEL_FILE = 'xgb_ids_model.json'
     AI_LABEL_ENCODER_FILE = 'label_encoder.pkl'
     AI_FEATURE_COLUMNS_FILE = 'feature_columns.json'
+    DEMO_DOC_PATH = Path(__file__).resolve().parents[1] / 'docs' / 'md' / 'demo packet.md'
+    DEMO_DIR = Path(__file__).resolve().parents[1] / 'demo'
     AI_FALLBACK_LABELS = [
         'BENIGN',
         'Bot',
@@ -1901,6 +1903,7 @@ class ApplicationWindow(QMainWindow):
         self.resize(1700, 930)
         self._ai_model_bundle = None
         self._fw_acl_dialog = None
+        self._demo_packet_entries = None
 
         # Trạng thái ứng dụng
         self.current_view = None
@@ -2570,6 +2573,9 @@ class ApplicationWindow(QMainWindow):
         if str(feature_name) == 'Dashboard':
             self._on_open_analysis_dashboard()
             return
+        if str(feature_name) in {'Demo Packet', 'Demo'}:
+            self._on_open_demo_packet()
+            return
         if str(feature_name) in {'Draw Topo', 'Network Topology Graph', 'Topo'}:
             self._on_open_network_topology_graph()
             return
@@ -3058,6 +3064,188 @@ class ApplicationWindow(QMainWindow):
             parent=self
         )
         
+        dialog.exec()
+
+    def _default_demo_packet_entries(self):
+        entries = []
+        for index in range(1, 101):
+            file_name = f"{index:03d}.pcapng"
+            entries.append({
+                'id': index,
+                'category': 'Demo',
+                'name': f'Demo Packet {index:03d}',
+                'protocol': '',
+                'file': file_name,
+                'description': '',
+                'path': str((self.DEMO_DIR / file_name).resolve()),
+            })
+        return entries
+
+    def _load_demo_packet_entries(self):
+        if isinstance(self._demo_packet_entries, list) and self._demo_packet_entries:
+            return self._demo_packet_entries
+
+        entries = {}
+        doc_path = self.DEMO_DOC_PATH
+        if doc_path.exists():
+            try:
+                line_pattern = re.compile(
+                    r"^\|\s*(\d{1,3})\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*`?([^|`]+\.pcapng)`?\s*\|\s*([^|]+?)\s*\|\s*$"
+                )
+                with open(doc_path, 'r', encoding='utf-8') as handle:
+                    for line in handle:
+                        match = line_pattern.match(line.strip())
+                        if not match:
+                            continue
+                        demo_id = int(match.group(1))
+                        file_text = str(match.group(5) or '').strip().replace('\\', '/').split('/')[-1]
+                        entries[demo_id] = {
+                            'id': demo_id,
+                            'category': str(match.group(2) or '').strip(),
+                            'name': str(match.group(3) or '').strip(),
+                            'protocol': str(match.group(4) or '').strip(),
+                            'file': file_text,
+                            'description': str(match.group(6) or '').strip(),
+                            'path': str((self.DEMO_DIR / file_text).resolve()),
+                        }
+            except Exception:
+                entries = {}
+
+        merged = []
+        defaults = self._default_demo_packet_entries()
+        for fallback in defaults:
+            demo_id = int(fallback['id'])
+            merged.append(entries.get(demo_id, fallback))
+
+        self._demo_packet_entries = sorted(merged, key=lambda item: int(item.get('id', 0) or 0))
+        return self._demo_packet_entries
+
+    def _on_open_demo_packet(self):
+        entries = self._load_demo_packet_entries()
+        if not entries:
+            QMessageBox.warning(self, 'Demo Packet', 'Khong the tai danh sach demo packet.')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Demo Packet')
+        root = QVBoxLayout(dialog)
+
+        root.addWidget(QLabel('Chon hanh vi demo:'))
+        combo = QComboBox(dialog)
+        entry_by_id = {}
+        for entry in entries:
+            demo_id = int(entry.get('id', 0) or 0)
+            entry_by_id[demo_id] = entry
+            combo.addItem(f"{demo_id:03d} - {entry.get('name', '')}", demo_id)
+        root.addWidget(combo)
+
+        info = QTextEdit(dialog)
+        info.setReadOnly(True)
+        info.setMinimumHeight(180)
+        root.addWidget(info)
+
+        button_row = QHBoxLayout()
+        open_btn = QPushButton('Mo demo', dialog)
+        close_btn = QPushButton('Dong', dialog)
+        button_row.addWidget(open_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+        root.addLayout(button_row)
+
+        def _selected_entry():
+            selected_id = int(combo.currentData() or 0)
+            return entry_by_id.get(selected_id)
+
+        def _refresh_info():
+            entry = _selected_entry()
+            if not entry:
+                info.setPlainText('Khong co du lieu demo duoc chon.')
+                open_btn.setEnabled(False)
+                return
+            demo_path = str(entry.get('path') or '')
+            exists = os.path.exists(demo_path)
+            open_btn.setEnabled(exists)
+            lines = [
+                f"ID: {int(entry.get('id', 0) or 0):03d}",
+                f"Loai: {str(entry.get('category', '') or '-').strip() or '-'}",
+                f"Protocol: {str(entry.get('protocol', '') or '-').strip() or '-'}",
+                f"File: {str(entry.get('file', '') or '').strip()}",
+                f"Duong dan: {demo_path}",
+                f"Trang thai file: {'Ton tai' if exists else 'Khong ton tai'}",
+                '',
+                f"Mo ta: {str(entry.get('description', '') or '').strip()}",
+            ]
+            info.setPlainText("\n".join(lines))
+
+        def _open_selected_demo():
+            entry = _selected_entry()
+            if not entry:
+                QMessageBox.warning(dialog, 'Demo Packet', 'Khong tim thay demo duoc chon.')
+                return
+
+            demo_id = int(entry.get('id', 0) or 0)
+            demo_name = str(entry.get('name', '') or '').strip() or f'Demo {demo_id:03d}'
+            demo_path = str(entry.get('path') or '')
+            if not os.path.exists(demo_path):
+                QMessageBox.critical(dialog, 'Demo Packet', f'Khong tim thay file PCAPNG:\n{demo_path}')
+                return
+
+            proceed = self._prompt_save_before_destructive_action(
+                'Project hien tai co thay doi chua luu. Ban co muon luu truoc khi mo demo packet moi khong?'
+            )
+            if not proceed:
+                return
+
+            self.show_capture_view('', 'Offline', '')
+            if not self.capture_view:
+                QMessageBox.critical(dialog, 'Demo Packet', 'Khong tao duoc Capture View de mo demo packet.')
+                return
+
+            started = time.perf_counter()
+            try:
+                packets = list(iter_pcap_packets(demo_path))
+            except Exception as exc:
+                QMessageBox.critical(dialog, 'Demo Packet', f'Khong doc duoc file demo:\n{demo_path}\n\n{exc}')
+                return
+
+            if not packets:
+                QMessageBox.warning(dialog, 'Demo Packet', f'File demo khong co packet hop le:\n{demo_path}')
+                return
+
+            self._replace_capture_packets(
+                packets,
+                preserve_metadata=False,
+                preserve_loaded_path=False,
+                mark_dirty=True,
+                status_message=f'Loaded demo {demo_id:03d} - {demo_name}. Capture dang o trang thai chua luu.',
+                preserve_display_filter=False,
+            )
+
+            self.capture_view.loaded_file_path = None
+            self.capture_view._configure_parser_capture_context(self.capture_view.parser, '')
+            self.capture_view._set_dirty(True)
+
+            self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
+            self._status_mode = 'activity'
+            self._status_activity_kind = 'load'
+            self._selected_packet_number = None
+            self._capture_started_monotonic = None
+            self._update_packet_status_label()
+            self.detail_field_label.setText('Field: - | Byte: 0')
+            self._sync_capture_buttons()
+            self._refresh_capture_menu_state()
+            self._refresh_status_metrics()
+            self._refresh_file_menu_state()
+            self._update_capture_window_title()
+            dialog.accept()
+
+        combo.currentIndexChanged.connect(_refresh_info)
+        open_btn.clicked.connect(_open_selected_demo)
+        close_btn.clicked.connect(dialog.reject)
+        _refresh_info()
+
+        dialog.resize(760, 420)
+        self._fit_widget_90(dialog)
         dialog.exec()
 
     def _open_ai_analyst_dialog(self):
@@ -4592,6 +4780,7 @@ class ApplicationWindow(QMainWindow):
         preserve_loaded_path: bool,
         mark_dirty: bool,
         status_message: str,
+        preserve_display_filter: bool = True,
     ):
         cv = self.capture_view
         if not cv:
@@ -4601,7 +4790,7 @@ class ApplicationWindow(QMainWindow):
         old_loaded_path = cv.loaded_file_path
         old_metadata = cv.capture_metadata
         old_comments = cv.capture_comments
-        old_filter = str(cv.display_filter_input.text() or '')
+        old_filter = str(cv.display_filter_input.text() or '') if preserve_display_filter else ''
 
         cv.stop_capture()
         cv._set_packet_panes_visible(False)

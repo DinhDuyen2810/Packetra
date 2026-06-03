@@ -159,6 +159,43 @@ class CaptureDataSourceBuilder:
             return int(match.group(1))
         except Exception:
             return 0
+
+    @staticmethod
+    def _extract_http_method(record: Any, metadata: Dict[str, Any]) -> str:
+        for key in ('http_request_method', 'http.method', 'http.request.method', 'method'):
+            value = str(metadata.get(key, '') or '').strip().upper()
+            if value:
+                return value
+
+        info = str(getattr(record, 'info', '') or '').strip()
+        if info:
+            token = info.split(' ', 1)[0].strip().upper()
+            if token in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE', 'CONNECT'}:
+                return token
+
+        return ''
+
+    @staticmethod
+    def _with_shared_fields(row: Dict[str, Any], *, default_protocol: str = "", default_time: float = 0.0) -> Dict[str, Any]:
+        normalized = dict(row or {})
+        protocol_value = str(
+            normalized.get('protocol')
+            or normalized.get('frame.protocol')
+            or default_protocol
+            or 'UNKNOWN'
+        )
+        bytes_value = CaptureDataSourceBuilder._to_int(
+            normalized.get('bytes', normalized.get('length', normalized.get('frame.len', 0)))
+        )
+        packets_value = CaptureDataSourceBuilder._to_int(
+            normalized.get('packets', normalized.get('count', 1))
+        )
+        normalized['protocol'] = protocol_value
+        normalized['bytes'] = bytes_value
+        normalized['packets'] = packets_value
+        normalized['packet'] = packets_value
+        normalized['time'] = CaptureDataSourceBuilder._to_float(normalized.get('time', default_time))
+        return normalized
     
     @staticmethod
     def create_packets_fetcher(capture_view_ref: Any) -> Callable:
@@ -176,6 +213,7 @@ class CaptureDataSourceBuilder:
                     result = []
                     for packet in records:
                         metadata = CaptureDataSourceBuilder._metadata(packet)
+                        http_method = CaptureDataSourceBuilder._extract_http_method(packet, metadata)
                         packet_dict = {
                             'number': CaptureDataSourceBuilder._to_int(getattr(packet, 'number', 0)),
                             'time': CaptureDataSourceBuilder._to_float(getattr(packet, 'relative_time', 0.0)),
@@ -188,6 +226,7 @@ class CaptureDataSourceBuilder:
                             'dst_port': CaptureDataSourceBuilder._to_int(getattr(packet, 'dport', 0)),
                             'info': str(getattr(packet, 'info', '') or ''),
                             'http_kind': str(metadata.get('http_kind', '') or ''),
+                            'http_method': http_method,
                             'http_request_uri': str(metadata.get('http_request_uri', '') or metadata.get('http_full_request_uri', '') or ''),
                             'http_latency_ms': CaptureDataSourceBuilder._to_float(metadata.get('http_time_since_request_ms', 0.0)),
                             'dns_time_ms': CaptureDataSourceBuilder._to_float(metadata.get('dns_time_ms', 0.0)),
@@ -204,12 +243,14 @@ class CaptureDataSourceBuilder:
                             'udp.srcport': CaptureDataSourceBuilder._to_int(getattr(packet, 'sport', 0)),
                             'udp.dstport': CaptureDataSourceBuilder._to_int(getattr(packet, 'dport', 0)),
                             'http.kind': str(metadata.get('http_kind', '') or ''),
+                            'http.method': http_method,
+                            'http.request.method': http_method,
                             'http.request_uri': str(metadata.get('http_request_uri', '') or metadata.get('http_full_request_uri', '') or ''),
                             'http.time_since_request_ms': CaptureDataSourceBuilder._to_float(metadata.get('http_time_since_request_ms', 0.0)),
                             'dns.time_ms': CaptureDataSourceBuilder._to_float(metadata.get('dns_time_ms', 0.0)),
                         }
                         packet_dict.update(CaptureDataSourceBuilder._metadata_dashboard_fields(metadata))
-                        result.append(packet_dict)
+                        result.append(CaptureDataSourceBuilder._with_shared_fields(packet_dict, default_protocol=str(getattr(packet, 'protocol', '') or ''), default_time=CaptureDataSourceBuilder._to_float(getattr(packet, 'relative_time', 0.0))))
                     cache_rows = result
                     cache_signature = signature
 
@@ -277,7 +318,7 @@ class CaptureDataSourceBuilder:
                     result = []
                     for endpoint in endpoints.values():
                         endpoint['protocols'] = ', '.join(sorted(endpoint['protocols']))
-                        result.append(endpoint)
+                        result.append(CaptureDataSourceBuilder._with_shared_fields(endpoint, default_protocol='ENDPOINT', default_time=0.0))
                     cache_rows = result
                     cache_signature = signature
 
@@ -327,7 +368,10 @@ class CaptureDataSourceBuilder:
                             conversations[key]['packets'] += 1
                             conversations[key]['bytes'] += length
 
-                    cache_rows = list(conversations.values())
+                    cache_rows = [
+                        CaptureDataSourceBuilder._with_shared_fields(item, default_protocol=str(item.get('protocol', '') or 'UNKNOWN'), default_time=0.0)
+                        for item in conversations.values()
+                    ]
                     cache_signature = signature
 
                 if limit is not None:
@@ -367,7 +411,10 @@ class CaptureDataSourceBuilder:
                         protocols[protocol]['packets'] += 1
                         protocols[protocol]['bytes'] += length
 
-                    cache_rows = list(protocols.values())
+                    cache_rows = [
+                        CaptureDataSourceBuilder._with_shared_fields(item, default_protocol=str(item.get('protocol', '') or 'UNKNOWN'), default_time=0.0)
+                        for item in protocols.values()
+                    ]
                     cache_signature = signature
 
                 if limit is not None:
@@ -414,7 +461,7 @@ class CaptureDataSourceBuilder:
                     responses = max(1, entry['responses']) if entry['responses'] else 0
                     total_time_ms = entry.pop('_total_time_ms', 0.0)
                     entry['avg_time_ms'] = round(total_time_ms / responses, 2) if responses else 0.0
-                    result.append(entry)
+                    result.append(CaptureDataSourceBuilder._with_shared_fields(entry, default_protocol='DNS', default_time=0.0))
                 return result
             except Exception as e:
                 print(f"Error fetching DNS queries: {e}")
@@ -435,6 +482,7 @@ class CaptureDataSourceBuilder:
                     metadata = CaptureDataSourceBuilder._metadata(packet)
                     kind = str(metadata.get('http_kind', '') or '')
                     uri = str(metadata.get('http_request_uri', '') or metadata.get('http_full_request_uri', '') or '')
+                    method = CaptureDataSourceBuilder._extract_http_method(packet, metadata)
 
                     if protocol not in {'HTTP', 'HTTP/XML'} and not (kind or uri):
                         continue
@@ -443,12 +491,13 @@ class CaptureDataSourceBuilder:
                         'src_ip': str(getattr(packet, 'src', '') or ''),
                         'dst_ip': str(getattr(packet, 'dst', '') or ''),
                         'kind': kind or 'message',
+                        'method': method,
                         'uri': uri or str(getattr(packet, 'info', '') or ''),
                         'status': CaptureDataSourceBuilder._extract_http_status(str(getattr(packet, 'info', '') or '')),
                         'latency_ms': round(CaptureDataSourceBuilder._to_float(metadata.get('http_time_since_request_ms', 0.0)), 2),
                         'bytes': CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0)),
                     }
-                    http_requests.append(http_request)
+                    http_requests.append(CaptureDataSourceBuilder._with_shared_fields(http_request, default_protocol='HTTP', default_time=0.0))
 
                 return http_requests
             except Exception as e:

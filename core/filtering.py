@@ -20,6 +20,9 @@ class DisplayFilter:
         'ftp', 'pop', 'imap', 'smb', 'smb2', 'llmnr', 'nbns', 'snmp', 'ah', 'ospf', 'eigrp', 'bgp', 'gre', 'vlan', 'ssl',
         'ipv4', 'icmpv4'
     }
+    HTTP_REQUEST_METHODS = {
+        'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH', 'TRACE', 'CONNECT', 'PRI'
+    }
 
     def matches(self, record: PacketRecord, expression: str) -> bool:
         text = self._normalize_expression(expression)
@@ -602,7 +605,12 @@ class DisplayFilter:
         if line.startswith('HTTP/'):
             return 'response'
         parts = line.split(' ', 2)
-        if parts and parts[0].isalpha():
+        if len(parts) < 2:
+            return ''
+        method = str(parts[0] or '').upper()
+        target = str(parts[1] or '').strip()
+        version = str(parts[2] or '').upper() if len(parts) >= 3 else ''
+        if method in self.HTTP_REQUEST_METHODS and target and (version.startswith('HTTP/') or len(parts) == 2):
             return 'request'
         return ''
 
@@ -611,8 +619,13 @@ class DisplayFilter:
         if not line:
             return ''
         parts = line.split(' ', 2)
-        if len(parts) >= 1 and parts[0].isalpha() and not parts[0].startswith('HTTP/'):
-            return parts[0].upper()
+        if len(parts) < 2:
+            return ''
+        method = str(parts[0] or '').upper()
+        target = str(parts[1] or '').strip()
+        version = str(parts[2] or '').upper() if len(parts) >= 3 else ''
+        if method in self.HTTP_REQUEST_METHODS and target and (version.startswith('HTTP/') or len(parts) == 2):
+            return method
         return ''
 
     def _http_host(self, record: PacketRecord) -> str:

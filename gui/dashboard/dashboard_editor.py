@@ -41,6 +41,59 @@ def _apply_fixed_screen_size(dialog: QDialog):
     )
 
 
+def _fetch_rows_for_source(query_engine, source_name: str, *, limit: int = 500) -> List[Dict[str, Any]]:
+    if not query_engine or not getattr(query_engine, "registry", None):
+        return []
+    cleaned_source = str(source_name or "").strip()
+    if not cleaned_source:
+        return []
+    try:
+        fetcher = query_engine.registry.get_fetcher(cleaned_source)
+    except Exception:
+        fetcher = None
+    if fetcher is None:
+        return []
+    try:
+        rows = fetcher(limit=limit) or []
+    except TypeError:
+        try:
+            rows = fetcher() or []
+        except Exception:
+            return []
+    except Exception:
+        return []
+    return list(rows)[:max(1, int(limit or 500))]
+
+
+def _build_dual_source_xy_rows(
+    query_engine,
+    x_source: str,
+    y_source: str,
+    x_field: str,
+    y_field: str,
+    *,
+    series_field: Optional[str] = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    rows_x = _fetch_rows_for_source(query_engine, x_source, limit=limit)
+    rows_y = _fetch_rows_for_source(query_engine, y_source, limit=limit)
+    if not rows_x or not rows_y:
+        return []
+
+    merged: List[Dict[str, Any]] = []
+    sample_count = min(len(rows_x), len(rows_y), max(1, int(limit or 500)))
+    for idx in range(sample_count):
+        left = rows_x[idx]
+        right = rows_y[idx]
+        row: Dict[str, Any] = {}
+        row[x_field] = left.get(x_field, left.get("time", idx))
+        row[y_field] = right.get(y_field, right.get("packets", right.get("bytes", 0)))
+        if series_field:
+            row[series_field] = right.get(series_field, left.get(series_field, str(y_source)))
+        merged.append(row)
+    return merged
+
+
 class TemplatePreviewCard(QFrame):
     """Selectable card used in the Add Widget chart picker."""
 
@@ -122,22 +175,6 @@ class ChartTemplatePickerDialog(QDialog):
         self.setup_ui()
         _apply_fixed_screen_size(self)
 
-
-class _NoWheelComboBox(QComboBox):
-    def wheelEvent(self, event):
-        if self.hasFocus():
-            super().wheelEvent(event)
-            return
-        event.ignore()
-
-
-class _NoWheelSpinBox(QSpinBox):
-    def wheelEvent(self, event):
-        if self.hasFocus():
-            super().wheelEvent(event)
-            return
-        event.ignore()
-
     def _preview_config(self, widget_model) -> Dict[str, object]:
         visualization = widget_model.visualization
         return {
@@ -210,17 +247,23 @@ class _NoWheelSpinBox(QSpinBox):
         scroll_area.setWidgetResizable(True)
 
         content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
+        content_layout = QGridLayout(content_widget)
         content_layout.setContentsMargins(8, 8, 8, 8)
-        content_layout.setSpacing(12)
+        content_layout.setHorizontalSpacing(12)
+        content_layout.setVerticalSpacing(12)
 
-        for dashboard in self.chart_templates:
+        column_count = 3
+        for idx, dashboard in enumerate(self.chart_templates):
             preview_widget = self._create_preview_widget(dashboard)
             card = TemplatePreviewCard(dashboard, preview_widget, content_widget)
             card.selected.connect(self.on_select_template)
-            content_layout.addWidget(card)
+            row = idx // column_count
+            col = idx % column_count
+            content_layout.addWidget(card, row, col)
 
-        content_layout.addStretch()
+        for col in range(column_count):
+            content_layout.setColumnStretch(col, 1)
+        content_layout.setRowStretch((len(self.chart_templates) // max(1, column_count)) + 1, 1)
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area, 1)
 
@@ -233,6 +276,22 @@ class _NoWheelSpinBox(QSpinBox):
         self.blank_requested = True
         self.selected_template_id = None
         self.accept()
+
+
+class _NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+            return
+        event.ignore()
+
+
+class _NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+            return
+        event.ignore()
 
 
 class WidgetEditorDialog(QDialog):
@@ -250,6 +309,7 @@ class WidgetEditorDialog(QDialog):
     FILTER_OPERATORS = ["==", "!=", ">", ">=", "<", "<="]
     FILTER_JOINERS = ["AND", "OR"]
     FIELD_ROLE_OPTIONS = ["All Roles", "time", "metric", "dimension", "flag"]
+    CORE_SHARED_FIELDS = ["time", "protocol", "bytes", "packets", "packet"]
     SINGLE_SOURCE_CHARTS = {"metric", "histogram", "pie", "donut", "radar", "treemap", "sunburst"}
     PROPORTION_SOURCE_CHARTS = {"pie", "donut", "radar", "treemap", "sunburst"}
     DOUBLE_SOURCE_CHARTS = {"bar", "horizontal_bar", "line", "area", "scatter", "heatmap", "table"}
@@ -373,6 +433,28 @@ class WidgetEditorDialog(QDialog):
         },
     }
 
+    SOURCE_PRIORITY = [
+        "packets",
+        "endpoints",
+        "conversations",
+        "protocol_stats",
+        "dns_queries",
+        "http_requests",
+    ]
+
+    @classmethod
+    def _ordered_sources(cls, sources: List[str]) -> List[str]:
+        seen = set()
+        cleaned_sources: List[str] = []
+        for source_name in sources or []:
+            cleaned = str(source_name or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            cleaned_sources.append(cleaned)
+        priority = {name: idx for idx, name in enumerate(cls.SOURCE_PRIORITY)}
+        return sorted(cleaned_sources, key=lambda name: (priority.get(name, 999), name))
+
     def __init__(
         self,
         widget_model: DashboardWidget,
@@ -384,13 +466,14 @@ class WidgetEditorDialog(QDialog):
     ):
         super().__init__(parent)
         self.widget_model = widget_model
-        self.available_sources = available_sources
+        self.available_sources = self._ordered_sources(available_sources or [widget_model.data_source])
         self.available_visualizations = available_visualizations
         self.query_engine = query_engine
         self.viz_registry = viz_registry
         self.delete_requested = False
         self._working_copy = deepcopy(widget_model)
         self._source_rows: List[Dict[str, Any]] = []
+        self._source_rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
         self._field_catalog: List[Dict[str, Any]] = []
         self._mapping_controls: Dict[str, Any] = {}
         self._query_controls: Dict[str, Any] = {}
@@ -401,10 +484,13 @@ class WidgetEditorDialog(QDialog):
         self._preview_refresh_pending = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(250)
+        # Slightly longer debounce keeps the editor responsive while typing/filtering.
+        self._preview_timer.setInterval(420)
         self._preview_timer.timeout.connect(self._refresh_preview)
         self.setWindowTitle(f"Edit Chart - {widget_model.title}")
         self._build_ui()
+        self._set_combo_to_text(self.x_data_source_combo, self._working_copy.data_source)
+        self._set_combo_to_text(self.y_data_source_combo, self._working_copy.data_source)
         self._load_source(self._working_copy.data_source)
         self._populate_controls()
         self._connect_live_preview_signals()
@@ -568,7 +654,23 @@ class WidgetEditorDialog(QDialog):
         self.data_source_combo = _NoWheelComboBox()
         self.data_source_combo.addItems(self.available_sources or [self.widget_model.data_source])
         self.data_source_combo.currentTextChanged.connect(self._on_source_changed)
-        source_form.addRow("Data Source", self.data_source_combo)
+        self.data_source_label = QLabel("Data Source")
+        source_form.addRow(self.data_source_label, self.data_source_combo)
+
+        self.x_data_source_combo = _NoWheelComboBox()
+        self.x_data_source_combo.addItems(self.available_sources or [self.widget_model.data_source])
+        self.x_data_source_combo.currentTextChanged.connect(self._on_dual_source_changed)
+
+        self.y_data_source_combo = _NoWheelComboBox()
+        self.y_data_source_combo.addItems(self.available_sources or [self.widget_model.data_source])
+        self.y_data_source_combo.currentTextChanged.connect(self._on_dual_source_changed)
+
+        self.source_primary_axis_label = QLabel("X Name")
+        self.source_secondary_axis_label = QLabel("Y Name")
+
+        self.x_data_source_label = QLabel("X Source")
+        self.y_data_source_label = QLabel("Y Source")
+
         layout.addLayout(source_form)
 
         self.simple_source_form = QFormLayout()
@@ -577,12 +679,16 @@ class WidgetEditorDialog(QDialog):
         self.single_source_field_combo.currentTextChanged.connect(self._on_simple_source_changed)
         self.simple_source_form.addRow(self.single_source_field_label, self.single_source_field_combo)
 
-        self.primary_source_field_label = QLabel("Primary Field")
+        self.simple_source_form.addRow(self.x_data_source_label, self.x_data_source_combo)
+
+        self.primary_source_field_label = QLabel("X Field")
         self.primary_source_field_combo = self._create_field_combo()
         self.primary_source_field_combo.currentTextChanged.connect(self._on_simple_source_changed)
         self.simple_source_form.addRow(self.primary_source_field_label, self.primary_source_field_combo)
 
-        self.secondary_source_field_label = QLabel("Secondary Field")
+        self.simple_source_form.addRow(self.y_data_source_label, self.y_data_source_combo)
+
+        self.secondary_source_field_label = QLabel("Y Field")
         self.secondary_source_field_combo = self._create_field_combo()
         self.secondary_source_field_combo.currentTextChanged.connect(self._on_simple_source_changed)
         self.simple_source_form.addRow(self.secondary_source_field_label, self.secondary_source_field_combo)
@@ -602,9 +708,6 @@ class WidgetEditorDialog(QDialog):
         self.source_tab_hint_label.setStyleSheet("color: #666; font-size: 9pt;")
         layout.addLayout(self.simple_source_form)
         layout.addWidget(self.source_tab_hint_label)
-
-        self.source_axis_form = QFormLayout()
-        layout.addLayout(self.source_axis_form)
 
         browser_frame = QFrame()
         browser_layout = QVBoxLayout(browser_frame)
@@ -907,10 +1010,8 @@ class WidgetEditorDialog(QDialog):
             self.primary_color_input.setText(color.name())
 
     def _finalize_simplified_editor(self):
-        self.source_primary_axis_label = QLabel("Primary Axis Name")
-        self.source_axis_form.addRow(self.source_primary_axis_label, self.axis_x_label_input)
-        self.source_secondary_axis_label = QLabel("Secondary Axis Name")
-        self.source_axis_form.addRow(self.source_secondary_axis_label, self.axis_y_label_input)
+        self.simple_source_form.insertRow(3, self.source_primary_axis_label, self.axis_x_label_input)
+        self.simple_source_form.insertRow(6, self.source_secondary_axis_label, self.axis_y_label_input)
 
         for tab_widget in (getattr(self, "mapping_tab", None), getattr(self, "query_tab", None)):
             if tab_widget is None:
@@ -946,9 +1047,9 @@ class WidgetEditorDialog(QDialog):
             return {
                 "mode": "single",
                 "single_label": "Category Field",
-                "hint": "Choose the field that splits the current data source into slices or groups. If the source already has an aggregate field like packets/bytes/count, it is reused automatically; otherwise rows are counted.",
+                "hint": "Pick one category field from the current source. Value can come from metric or built-in numeric fields.",
                 "primary_axis_label": "Category Name",
-                "secondary_axis_label": "Total Name",
+                "secondary_axis_label": "Value Name",
                 "swap": False,
                 "metric_locked": None,
             }
@@ -975,11 +1076,22 @@ class WidgetEditorDialog(QDialog):
         if normalized in {"bar", "horizontal_bar", "heatmap", "table"}:
             return {
                 "mode": "double",
-                "primary_label": "Category / Row Field",
-                "secondary_label": "Value / Metric Field",
-                "hint": "The first field names the groups. The second field provides the number, bytes, count or other value to plot.",
-                "primary_axis_label": "Primary Axis Name",
-                "secondary_axis_label": "Secondary Axis Name",
+                "primary_label": "X Field",
+                "secondary_label": "Y Field",
+                "hint": "Choose X and Y fields from the selected sources.",
+                "primary_axis_label": "X Name",
+                "secondary_axis_label": "Y Name",
+                "swap": True,
+                "metric_locked": None,
+            }
+        if normalized in {"line", "area", "scatter"}:
+            return {
+                "mode": "double",
+                "primary_label": "X Field",
+                "secondary_label": "Y Field",
+                "hint": "For 2-axis charts, use time on X when available and choose a numeric Y field.",
+                "primary_axis_label": "X Name",
+                "secondary_axis_label": "Y Name",
                 "swap": True,
                 "metric_locked": None,
             }
@@ -988,8 +1100,8 @@ class WidgetEditorDialog(QDialog):
             "primary_label": "X Axis Field",
             "secondary_label": "Y Axis Field",
             "hint": "The first field drives the X axis. The second field drives the Y axis. You can rename or swap them here.",
-            "primary_axis_label": "X Axis Name",
-            "secondary_axis_label": "Y Axis Name",
+            "primary_axis_label": "X Name",
+            "secondary_axis_label": "Y Name",
             "swap": True,
             "metric_locked": None,
         }
@@ -1001,6 +1113,7 @@ class WidgetEditorDialog(QDialog):
     def _on_simple_source_changed(self, _value: str):
         with self._preview_refresh_batch():
             self._sync_hidden_controls_from_simple_editor()
+            self._refresh_secondary_field_compatibility()
         self._schedule_preview_refresh()
 
     def _swap_simple_source_fields(self):
@@ -1033,6 +1146,162 @@ class WidgetEditorDialog(QDialog):
             if entry.get("id") == cleaned:
                 return entry
         return None
+
+    def _is_numeric_field(self, field_id: Optional[str]) -> bool:
+        entry = self._field_catalog_entry(field_id)
+        if entry is None:
+            return False
+        field_type = str(entry.get("type") or "").strip().lower()
+        if field_type in {"int", "float"}:
+            return True
+        return str(entry.get("role") or "").strip().lower() == "metric"
+
+    def _preferred_time_field(self) -> Optional[str]:
+        for entry in self._field_catalog:
+            if str(entry.get("role") or "").strip().lower() == "time":
+                field_id = str(entry.get("id") or "").strip()
+                if field_id:
+                    return field_id
+        for fallback in ["time", "frame.time", "frame.time_epoch", "timestamp"]:
+            if self._field_catalog_entry(fallback) is not None:
+                return fallback
+        return None
+
+    def _preferred_protocol_field(self) -> Optional[str]:
+        for candidate in ["protocol", "frame.protocol"]:
+            if self._field_catalog_entry(candidate) is not None:
+                return candidate
+        for entry in self._field_catalog:
+            if str(entry.get("role") or "").strip().lower() == "dimension":
+                field_id = str(entry.get("id") or "").strip().lower()
+                if field_id.endswith("protocol"):
+                    return str(entry.get("id") or "").strip()
+        return None
+
+    def _is_secondary_field_compatible(self, field_id: Optional[str], chart_type: str) -> bool:
+        cleaned = str(field_id or "").strip()
+        normalized_chart = str(chart_type or "").strip().lower()
+        if not cleaned:
+            return True
+        if normalized_chart in {"line", "area", "scatter"}:
+            primary_field = self.primary_source_field_combo.currentText().strip() if hasattr(self, "primary_source_field_combo") else ""
+            if primary_field and cleaned == primary_field:
+                return False
+            return self._is_numeric_field(cleaned)
+        return True
+
+    def _refresh_secondary_field_compatibility(self):
+        if not hasattr(self, "secondary_source_field_combo"):
+            return
+
+        chart_type = self.visualization_combo.currentText().strip().lower() if hasattr(self, "visualization_combo") else ""
+        model = self.secondary_source_field_combo.model()
+        current_value = self.secondary_source_field_combo.currentText().strip()
+        compatible_values: List[str] = []
+
+        for row in range(self.secondary_source_field_combo.count()):
+            field_id = self.secondary_source_field_combo.itemText(row).strip()
+            compatible = self._is_secondary_field_compatible(field_id, chart_type)
+            if compatible:
+                compatible_values.append(field_id)
+            if hasattr(model, "item"):
+                item = model.item(row)
+                if item is not None:
+                    item.setEnabled(compatible)
+
+        behavior = self._source_behavior(chart_type)
+        enforce_compatibility = behavior.get("mode") == "double" and chart_type in {"line", "area", "scatter"}
+
+        self.secondary_source_field_combo.blockSignals(True)
+        if enforce_compatibility and current_value and current_value not in compatible_values:
+            if compatible_values:
+                self._set_combo_to_text(self.secondary_source_field_combo, compatible_values[0])
+            else:
+                self.secondary_source_field_combo.setCurrentIndex(-1)
+                self.secondary_source_field_combo.setEditText("")
+
+        no_compatible = enforce_compatibility and not compatible_values
+        self.secondary_source_field_combo.setEnabled(not no_compatible)
+        if no_compatible:
+            self.secondary_source_field_label.setEnabled(False)
+            self.secondary_source_field_combo.setToolTip("No compatible numeric field for Field 2 with the current chart type.")
+        else:
+            self.secondary_source_field_label.setEnabled(True)
+            self.secondary_source_field_combo.setToolTip("")
+        self.secondary_source_field_combo.blockSignals(False)
+
+    def _source_field_catalog_for(self, source_name: str) -> List[Dict[str, Any]]:
+        cleaned = str(source_name or "").strip()
+        if not cleaned:
+            return []
+        rows = self._source_rows_by_name.get(cleaned)
+        if rows is None:
+            rows = self._fetch_source_rows(cleaned)
+            self._source_rows_by_name[cleaned] = rows
+        return self._build_field_catalog(rows)
+
+    def _source_has_compatible_secondary_fields(self, source_name: str, chart_type: str, primary_field: Optional[str]) -> bool:
+        normalized_chart = str(chart_type or "").strip().lower()
+        catalog = self._source_field_catalog_for(source_name)
+        primary_cleaned = str(primary_field or "").strip()
+        if normalized_chart not in {"line", "area", "scatter"}:
+            for entry in catalog:
+                field_id = str(entry.get("id") or "").strip()
+                if field_id and (not primary_cleaned or field_id != primary_cleaned):
+                    return True
+            return False
+        for entry in catalog:
+            field_id = str(entry.get("id") or "").strip()
+            if not field_id or (primary_cleaned and field_id == primary_cleaned):
+                continue
+            field_type = str(entry.get("type") or "").strip().lower()
+            field_role = str(entry.get("role") or "").strip().lower()
+            if field_type in {"int", "float"} or field_role == "metric":
+                return True
+        return False
+
+    def _refresh_dual_source_compatibility(self):
+        if not hasattr(self, "y_data_source_combo"):
+            return
+
+        chart_type = self.visualization_combo.currentText().strip().lower() if hasattr(self, "visualization_combo") else ""
+        behavior = self._source_behavior(chart_type)
+        if behavior.get("mode") != "double":
+            self.y_data_source_combo.setEnabled(True)
+            self.y_data_source_label.setEnabled(True)
+            return
+
+        primary_field = self.primary_source_field_combo.currentText().strip() if hasattr(self, "primary_source_field_combo") else ""
+        model = self.y_data_source_combo.model()
+        current_source = self.y_data_source_combo.currentText().strip()
+        compatible_sources: List[str] = []
+
+        self.y_data_source_combo.blockSignals(True)
+        for row in range(self.y_data_source_combo.count()):
+            source_name = self.y_data_source_combo.itemText(row).strip()
+            compatible = self._source_has_compatible_secondary_fields(source_name, chart_type, primary_field)
+            if compatible:
+                compatible_sources.append(source_name)
+            if hasattr(model, "item"):
+                item = model.item(row)
+                if item is not None:
+                    item.setEnabled(compatible)
+
+        if current_source and current_source not in compatible_sources:
+            if compatible_sources:
+                self._set_combo_to_text(self.y_data_source_combo, compatible_sources[0])
+            else:
+                self.y_data_source_combo.setCurrentIndex(-1)
+                self.y_data_source_combo.setEditText("")
+
+        has_compatible_source = bool(compatible_sources)
+        self.y_data_source_combo.setEnabled(has_compatible_source)
+        self.y_data_source_label.setEnabled(has_compatible_source)
+        self.y_data_source_combo.setToolTip("" if has_compatible_source else "No compatible Y source for current chart and Field 1.")
+        self.y_data_source_combo.blockSignals(False)
+
+        dual_sources_visible = behavior.get("mode") == "double"
+        self._set_form_row_visible(self.y_data_source_label, self.y_data_source_combo, dual_sources_visible and has_compatible_source)
 
     def _should_group_after_swap(self, primary_field: Optional[str]) -> bool:
         cleaned = str(primary_field or "").strip()
@@ -1078,7 +1347,7 @@ class WidgetEditorDialog(QDialog):
         if current_value and current_value in field_ids and current_value != detail:
             return current_value
 
-        preferred_names = ["packets", "count", "bytes"]
+        preferred_names = ["packets", "count", "bytes", "length", "frame.len"]
         for name in preferred_names:
             if name in field_ids and name != detail:
                 return name
@@ -1096,7 +1365,7 @@ class WidgetEditorDialog(QDialog):
         y_label = style.get("y_axis_label") or ""
 
         if chart_type in self.PROPORTION_SOURCE_CHARTS:
-            category_key = visualization.category_field or self.single_source_field_combo.currentText().strip() or "source"
+            category_key = visualization.category_field or self.primary_source_field_combo.currentText().strip() or "source"
             headers[category_key] = x_label or category_key
             headers["total"] = y_label or visualization.value_field or "total"
             headers["%"] = "%"
@@ -1141,6 +1410,8 @@ class WidgetEditorDialog(QDialog):
         single_field = self.single_source_field_combo.currentText().strip() or None
         primary_field = self.primary_source_field_combo.currentText().strip() or None
         secondary_field = self.secondary_source_field_combo.currentText().strip() or None
+        preferred_time_field = self._preferred_time_field()
+        protocol_series_field = self._preferred_protocol_field() if chart_type in {"line", "area"} else None
         selected_source = self.data_source_combo.currentText().strip() or None
         working_copy_source = getattr(self._working_copy, "data_source", None)
         fallback_value_field = self._working_copy.visualization.value_field if selected_source and working_copy_source == selected_source else None
@@ -1165,22 +1436,21 @@ class WidgetEditorDialog(QDialog):
         self._clear_combo_text(self.metric_field_combo)
 
         if chart_type in self.PROPORTION_SOURCE_CHARTS:
-            direct_total_field = self._preferred_single_source_total_field(single_field, current_value_field)
-            self._set_combo_to_text(self.category_field_combo, single_field or "")
-            if direct_total_field:
+            category_field = single_field or primary_field
+            direct_total_field = self._preferred_single_source_total_field(category_field, current_value_field)
+            self._set_combo_to_text(self.category_field_combo, category_field or "")
+            if metric_type == "none" and direct_total_field:
                 self.metric_type_combo.blockSignals(True)
                 self.metric_type_combo.setCurrentText("none")
                 self.metric_type_combo.blockSignals(False)
                 self._set_combo_to_text(self.value_field_combo, direct_total_field)
-                self.columns_input.setText(", ".join([field for field in [single_field, direct_total_field] if field]))
+                self.columns_input.setText(", ".join([field for field in [category_field, direct_total_field] if field]))
             else:
-                self.metric_type_combo.blockSignals(True)
-                self.metric_type_combo.setCurrentText("count")
-                self.metric_type_combo.blockSignals(False)
-                self._set_combo_to_text(self.value_field_combo, "count")
-                self._set_combo_to_text(self.metric_field_combo, "*")
-                self.group_by_input.setText(single_field or "")
-                self.columns_input.setText(", ".join([field for field in [single_field, "count"] if field]))
+                metric_field = "*" if metric_type == "count" else (current_value_field or "*")
+                self._set_combo_to_text(self.metric_field_combo, metric_field)
+                self._set_combo_to_text(self.value_field_combo, metric_alias)
+                self.group_by_input.setText(category_field or "")
+                self.columns_input.setText(", ".join([field for field in [category_field, metric_alias] if field]))
             return
 
         if chart_type == "histogram":
@@ -1210,7 +1480,27 @@ class WidgetEditorDialog(QDialog):
             self.columns_input.setText(", ".join(selected_columns))
             return
 
-        self._set_combo_to_text(self.x_field_combo, primary_field or "")
+        effective_primary_field = primary_field or (preferred_time_field if chart_type in {"line", "area", "scatter"} else None)
+        secondary_is_numeric = self._is_numeric_field(secondary_field)
+        self._set_combo_to_text(self.x_field_combo, effective_primary_field or "")
+        if chart_type in {"line", "area"}:
+            self._set_combo_to_text(self.series_field_combo, protocol_series_field or "")
+        if chart_type in {"line", "area"} and secondary_field and not secondary_is_numeric:
+            self.metric_type_combo.blockSignals(True)
+            self.metric_type_combo.setCurrentText("count")
+            self.metric_type_combo.blockSignals(False)
+            self.metric_alias_input.setText("count")
+            self._set_combo_to_text(self.metric_field_combo, "*")
+            self._set_combo_to_text(self.y_field_combo, "count")
+            self._set_combo_to_text(self.value_field_combo, "count")
+            grouped_fields = [field for field in [effective_primary_field, protocol_series_field] if field]
+            self.group_by_input.setText(", ".join(grouped_fields))
+            selected_columns = [field for field in [effective_primary_field, protocol_series_field, "count"] if field]
+            if preferred_time_field and preferred_time_field not in selected_columns:
+                selected_columns.insert(0, preferred_time_field)
+            self.columns_input.setText(", ".join(selected_columns))
+            return
+
         if metric_type == "none" or chart_type == "scatter":
             self._set_combo_to_text(self.y_field_combo, secondary_field or "")
             self._set_combo_to_text(self.value_field_combo, secondary_field or "")
@@ -1219,9 +1509,14 @@ class WidgetEditorDialog(QDialog):
             self._set_combo_to_text(self.metric_field_combo, "*" if metric_type == "count" else (secondary_field or "*"))
             self._set_combo_to_text(self.y_field_combo, metric_alias)
             self._set_combo_to_text(self.value_field_combo, metric_alias)
-            self.group_by_input.setText(primary_field or "")
+            grouped_fields = [field for field in [effective_primary_field, protocol_series_field] if field] if chart_type in {"line", "area"} else [effective_primary_field]
+            self.group_by_input.setText(", ".join([field for field in grouped_fields if field]))
             plotted_value = metric_alias
-        selected_columns = [field for field in [primary_field, plotted_value] if field]
+        selected_columns = [field for field in [effective_primary_field, plotted_value] if field]
+        if chart_type in {"line", "area"} and protocol_series_field and protocol_series_field not in selected_columns:
+            selected_columns.append(protocol_series_field)
+        if chart_type in {"line", "area", "scatter"} and preferred_time_field and preferred_time_field not in selected_columns:
+            selected_columns.insert(0, preferred_time_field)
         self.columns_input.setText(", ".join(selected_columns))
 
     def _sync_simple_controls_from_working_copy(self):
@@ -1231,7 +1526,7 @@ class WidgetEditorDialog(QDialog):
         metric = query.metrics[0] if query.metrics else None
 
         if chart_type in self.PROPORTION_SOURCE_CHARTS:
-            source_field = (query.group_by or [visualization.category_field or ""])[0]
+            source_field = visualization.category_field or ((query.group_by or [""])[0])
             self._set_combo_to_text(self.single_source_field_combo, source_field)
         elif chart_type == "histogram":
             self._set_combo_to_text(self.single_source_field_combo, visualization.value_field or "")
@@ -1243,7 +1538,7 @@ class WidgetEditorDialog(QDialog):
             secondary_value = metric.field if metric is not None and metric.field != "*" else (visualization.value_field or "")
             self._set_combo_to_text(self.secondary_source_field_combo, secondary_value)
         else:
-            self._set_combo_to_text(self.primary_source_field_combo, visualization.x_field or "")
+            self._set_combo_to_text(self.primary_source_field_combo, visualization.x_field or self._preferred_time_field() or "")
             secondary_value = metric.field if metric is not None and metric.field != "*" else (visualization.y_field or visualization.value_field or "")
             self._set_combo_to_text(self.secondary_source_field_combo, secondary_value)
 
@@ -1358,6 +1653,12 @@ class WidgetEditorDialog(QDialog):
         self._set_form_row_visible(self.single_source_field_label, self.single_source_field_combo, behavior["mode"] == "single")
         self._set_form_row_visible(self.primary_source_field_label, self.primary_source_field_combo, behavior["mode"] == "double")
         self._set_form_row_visible(self.secondary_source_field_label, self.secondary_source_field_combo, behavior["mode"] == "double")
+        dual_sources_visible = behavior["mode"] == "double"
+        self._set_form_row_visible(self.data_source_label, self.data_source_combo, behavior["mode"] == "single")
+        self._set_form_row_visible(self.x_data_source_label, self.x_data_source_combo, dual_sources_visible)
+        self._set_form_row_visible(self.y_data_source_label, self.y_data_source_combo, dual_sources_visible)
+        self._set_form_row_visible(self.source_primary_axis_label, self.axis_x_label_input, dual_sources_visible)
+        self._set_form_row_visible(self.source_secondary_axis_label, self.axis_y_label_input, dual_sources_visible)
         self._set_form_row_visible(self.swap_axes_label, self.swap_axes_button.parentWidget(), behavior.get("swap", False) and behavior["mode"] == "double")
         self.swap_axes_button.setEnabled(bool(behavior.get("swap", False)))
         self.single_source_field_label.setText(behavior.get("single_label", "Source Field"))
@@ -1385,6 +1686,8 @@ class WidgetEditorDialog(QDialog):
         self._set_color_editor_active(preserve_color_state)
         with self._preview_refresh_batch():
             self._sync_hidden_controls_from_simple_editor()
+            self._refresh_secondary_field_compatibility()
+            self._refresh_dual_source_compatibility()
 
     def _on_chart_type_changed(self, _chart_type: str):
         with self._preview_refresh_batch():
@@ -1401,7 +1704,8 @@ class WidgetEditorDialog(QDialog):
             self.size_preset_combo,
             self.display_mode_combo,
             self.data_source_combo,
-            self.field_search_input,
+            self.x_data_source_combo,
+            self.y_data_source_combo,
             self.single_source_field_combo,
             self.primary_source_field_combo,
             self.secondary_source_field_combo,
@@ -1455,6 +1759,8 @@ class WidgetEditorDialog(QDialog):
             self.display_mode_combo.setCurrentText("Table" if style.get("display_mode") == "table" else "Chart")
 
             self._set_combo_to_text(self.data_source_combo, working.data_source or "")
+            self._set_combo_to_text(self.x_data_source_combo, str(style.get("x_data_source") or working.data_source or ""))
+            self._set_combo_to_text(self.y_data_source_combo, str(style.get("y_data_source") or working.data_source or ""))
             self._set_combo_to_text(self.x_field_combo, visualization.x_field or "")
             self._set_combo_to_text(self.y_field_combo, visualization.y_field or "")
             self._set_combo_to_text(self.category_field_combo, visualization.category_field or "")
@@ -1489,6 +1795,7 @@ class WidgetEditorDialog(QDialog):
             self.unit_input.setText(str(style.get("unit") or ""))
             self.primary_color_input.setText(str(style.get("primary_color") or ""))
             self.color_palette_input.setText(str(style.get("color_palette") or ""))
+            self._load_source(working.data_source)
             self._sync_simple_controls_from_working_copy()
             self._apply_chart_type_capabilities()
 
@@ -1523,13 +1830,54 @@ class WidgetEditorDialog(QDialog):
         self.size_preset_combo.blockSignals(False)
 
     def _on_source_changed(self, source_name: str):
+        self.x_data_source_combo.blockSignals(True)
+        self.y_data_source_combo.blockSignals(True)
+        self._set_combo_to_text(self.x_data_source_combo, source_name)
+        self._set_combo_to_text(self.y_data_source_combo, source_name)
+        self.x_data_source_combo.blockSignals(False)
+        self.y_data_source_combo.blockSignals(False)
         with self._preview_refresh_batch():
             self._load_source(source_name)
             self._sync_hidden_controls_from_simple_editor()
+            self._refresh_dual_source_compatibility()
         self._schedule_preview_refresh()
 
+    def _on_dual_source_changed(self, _source_name: str):
+        with self._preview_refresh_batch():
+            self._load_source(self.data_source_combo.currentText().strip())
+            self._sync_hidden_controls_from_simple_editor()
+            self._refresh_dual_source_compatibility()
+        self._schedule_preview_refresh()
+
+    def _active_field_sources(self, default_source: Optional[str] = None) -> List[str]:
+        chart_type = self.visualization_combo.currentText().strip().lower() if hasattr(self, "visualization_combo") else ""
+        behavior = self._source_behavior(chart_type)
+        if behavior.get("mode") == "double":
+            x_source = self.x_data_source_combo.currentText().strip() if hasattr(self, "x_data_source_combo") else ""
+            y_source = self.y_data_source_combo.currentText().strip() if hasattr(self, "y_data_source_combo") else ""
+            ordered = [x_source, y_source, default_source or self.data_source_combo.currentText().strip()]
+        else:
+            ordered = [default_source or self.data_source_combo.currentText().strip()]
+
+        resolved: List[str] = []
+        seen = set()
+        for source_name in ordered:
+            cleaned = str(source_name or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            resolved.append(cleaned)
+        return resolved
+
     def _load_source(self, source_name: str):
-        self._source_rows = self._fetch_source_rows(source_name)
+        active_sources = self._active_field_sources(source_name)
+        self._source_rows_by_name = {}
+        merged_rows: List[Dict[str, Any]] = []
+        for active_source in active_sources:
+            rows = self._fetch_source_rows(active_source)
+            self._source_rows_by_name[active_source] = rows
+            merged_rows.extend(rows)
+        self._source_rows = merged_rows
         self._field_catalog = self._build_field_catalog(self._source_rows)
         self._refresh_field_filter_options()
         self._refresh_field_combo_items()
@@ -1602,10 +1950,18 @@ class WidgetEditorDialog(QDialog):
         return "dimension"
 
     def _build_field_catalog(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not rows:
-            return []
         summary: Dict[str, Dict[str, Any]] = {}
         total_rows = len(rows)
+
+        for shared_field in self.CORE_SHARED_FIELDS:
+            summary[shared_field] = {
+                "id": shared_field,
+                "name": shared_field.replace("_", " ").replace(".", " ").title(),
+                "present_count": 0,
+                "samples": [],
+                "types": {"float" if shared_field == "time" else ("int" if shared_field in {"bytes", "packets", "packet"} else "string")},
+            }
+
         for row in rows:
             for key, value in row.items():
                 entry = summary.setdefault(
@@ -1647,9 +2003,20 @@ class WidgetEditorDialog(QDialog):
             entry["type"] = field_type
             entry["group"] = self._field_group(entry["id"])
             entry["role"] = self._field_role(entry["id"], field_type)
-            entry["present_ratio"] = f"{entry['present_count']}/{total_rows}"
+            entry["present_ratio"] = f"{entry['present_count']}/{max(1, total_rows)}"
             catalog.append(entry)
-        return sorted(catalog, key=lambda item: (item["group"], item["role"], item["id"]))
+
+        shared_rank = {field: idx for idx, field in enumerate(self.CORE_SHARED_FIELDS)}
+        return sorted(
+            catalog,
+            key=lambda item: (
+                0 if item["id"] in shared_rank else 1,
+                shared_rank.get(item["id"], 999),
+                item["group"],
+                item["role"],
+                item["id"],
+            ),
+        )
 
     def _refresh_field_filter_options(self):
         current_group = self.field_group_filter_combo.currentText().strip() if hasattr(self, "field_group_filter_combo") else ""
@@ -1692,6 +2059,8 @@ class WidgetEditorDialog(QDialog):
                 combo.setCurrentIndex(-1)
                 combo.setEditText("")
             combo.blockSignals(False)
+        self._refresh_secondary_field_compatibility()
+        self._refresh_dual_source_compatibility()
 
     def _refresh_field_list(self):
         term = (self.field_search_input.text() or "").strip().lower()
@@ -1874,7 +2243,18 @@ class WidgetEditorDialog(QDialog):
 
         working.title = self.title_input.text().strip() or self._auto_title()
         working.description = self.description_input.toPlainText().strip() or None
-        working.data_source = self.data_source_combo.currentText().strip() or working.data_source
+        base_source = self.data_source_combo.currentText().strip() or working.data_source
+        x_source = self.x_data_source_combo.currentText().strip() or base_source
+        y_source = self.y_data_source_combo.currentText().strip() or base_source
+        behavior = self._source_behavior(self.visualization_combo.currentText().strip().lower())
+        if behavior.get("mode") == "double":
+            working.data_source = y_source or base_source
+            style["x_data_source"] = x_source
+            style["y_data_source"] = y_source
+        else:
+            working.data_source = base_source
+            style.pop("x_data_source", None)
+            style.pop("y_data_source", None)
         visualization.type = self.visualization_combo.currentText().strip() or visualization.type
         visualization.x_field = self.x_field_combo.currentText().strip() or None
         visualization.y_field = self.y_field_combo.currentText().strip() or None
@@ -1945,8 +2325,9 @@ class WidgetEditorDialog(QDialog):
 
     def _refresh_preview(self):
         self._working_copy = self._collect_working_copy()
-        self._refresh_chart_preview()
-        self._refresh_sheet_preview()
+        preview_rows = self._execute_plot_preview_rows()
+        self._refresh_chart_preview(preview_rows)
+        self._refresh_sheet_preview(preview_rows)
 
     def _chart_config(self) -> Dict[str, Any]:
         visualization = self._working_copy.visualization
@@ -1972,23 +2353,59 @@ class WidgetEditorDialog(QDialog):
             config["primaryColor"] = style["primary_color"]
         if style.get("color_palette"):
             config["colorPalette"] = style["color_palette"]
+        if style.get("x_data_source"):
+            config["xDataSource"] = style["x_data_source"]
+        if style.get("y_data_source"):
+            config["yDataSource"] = style["y_data_source"]
         return config
+
+    def _selected_xy_sources(self) -> tuple[str, str]:
+        style = dict(self._working_copy.style or {})
+        base_source = str(self._working_copy.data_source or self.data_source_combo.currentText() or "").strip()
+        x_source = str(style.get("x_data_source") or self.x_data_source_combo.currentText() or base_source).strip()
+        y_source = str(style.get("y_data_source") or self.y_data_source_combo.currentText() or base_source).strip()
+        return x_source, y_source
+
+    def _uses_dual_source_execution(self) -> bool:
+        chart_type = self.visualization_combo.currentText().strip().lower()
+        if chart_type not in {"line", "area", "scatter"}:
+            return False
+        x_source, y_source = self._selected_xy_sources()
+        return bool(x_source and y_source and x_source != y_source)
+
+    def _execute_dual_source_preview_rows(self) -> List[Dict[str, Any]]:
+        x_source, y_source = self._selected_xy_sources()
+        x_field = str(self._working_copy.visualization.x_field or "time").strip() or "time"
+        y_field = str(self._working_copy.visualization.y_field or self._working_copy.visualization.value_field or "packets").strip() or "packets"
+        series_field = str(self._working_copy.visualization.series_field or "").strip() or None
+        return _build_dual_source_xy_rows(
+            self.query_engine,
+            x_source,
+            y_source,
+            x_field,
+            y_field,
+            series_field=series_field,
+            limit=max(50, int(self._working_copy.query.limit or 500)),
+        )
 
     def _execute_plot_preview_rows(self) -> List[Dict[str, Any]]:
         if not self.query_engine:
             return []
         try:
+            if self._uses_dual_source_execution():
+                return self._execute_dual_source_preview_rows()
             return self.query_engine.execute(self._working_copy.data_source, self._working_copy.query, None)
         except Exception:
             return []
 
-    def _build_sheet_preview_rows(self) -> List[Dict[str, Any]]:
-        rows = self._execute_plot_preview_rows()
+    def _build_sheet_preview_rows(self, rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        if rows is None:
+            rows = self._execute_plot_preview_rows()
         chart_type = self.visualization_combo.currentText().strip().lower()
         if chart_type not in self.PROPORTION_SOURCE_CHARTS or not rows:
             return self._apply_sheet_preview_headers(rows)
 
-        category_field = self._working_copy.visualization.category_field or self.single_source_field_combo.currentText().strip() or "source"
+        category_field = self._working_copy.visualization.category_field or self.primary_source_field_combo.currentText().strip() or "source"
         value_field = self._working_copy.visualization.value_field or "count"
         total = 0.0
         for row in rows:
@@ -2012,7 +2429,7 @@ class WidgetEditorDialog(QDialog):
             })
         return self._apply_sheet_preview_headers(preview_rows)
 
-    def _refresh_chart_preview(self):
+    def _refresh_chart_preview(self, preview_data: Optional[List[Dict[str, Any]]] = None):
         while self.preview_chart_layout.count() > 0:
             item = self.preview_chart_layout.takeAt(0)
             if item.widget() is not None:
@@ -2027,7 +2444,8 @@ class WidgetEditorDialog(QDialog):
             return
 
         try:
-            preview_data = self.query_engine.execute(self._working_copy.data_source, self._working_copy.query, None)
+            if preview_data is None:
+                preview_data = self.query_engine.execute(self._working_copy.data_source, self._working_copy.query, None)
             renderer = self.viz_registry.get_renderer(self._working_copy.visualization.type)
             if renderer is None:
                 raise ValueError(f"Renderer '{self._working_copy.visualization.type}' not found")
@@ -2046,8 +2464,8 @@ class WidgetEditorDialog(QDialog):
             self.preview_chart_layout.addWidget(error_label)
             self.preview_status_label.setText("Preview failed. Check field mappings, filter expression, or source sample.")
 
-    def _refresh_sheet_preview(self):
-        self._populate_table(self.preview_sheet_table, self._build_sheet_preview_rows())
+    def _refresh_sheet_preview(self, preview_rows: Optional[List[Dict[str, Any]]] = None):
+        self._populate_table(self.preview_sheet_table, self._build_sheet_preview_rows(preview_rows))
 
     def _execute_aggregated_preview(self) -> List[Dict[str, Any]]:
         if not self.query_engine:
@@ -2060,6 +2478,8 @@ class WidgetEditorDialog(QDialog):
     def _execute_raw_preview(self) -> List[Dict[str, Any]]:
         if not self.query_engine:
             return []
+        if self._uses_dual_source_execution():
+            return self._execute_dual_source_preview_rows()
         raw_query = deepcopy(self._working_copy.query)
         raw_query.group_by = None
         raw_query.metrics = None
@@ -2183,13 +2603,14 @@ class GridWidget(QFrame):
     drag_moved = Signal(QPoint)
     drag_finished = Signal(QPoint)
     
-    def __init__(self, widget, editable: bool = True, query_engine=None, viz_registry=None, display_mode: Optional[str] = None):
+    def __init__(self, widget, editable: bool = True, query_engine=None, viz_registry=None, display_mode: Optional[str] = None, preview_font_scale: float = 1.0):
         super().__init__()
         self.widget = widget
         self.editable = editable
         self.query_engine = query_engine
         self.viz_registry = viz_registry
         self.display_mode = display_mode
+        self.preview_font_scale = float(preview_font_scale or 1.0)
         self._drag_start_pos: Optional[QPoint] = None
         self._drag_in_progress = False
         self.setup_ui()
@@ -2197,6 +2618,7 @@ class GridWidget(QFrame):
     def _visualization_config(self) -> Dict[str, object]:
         visualization = self.widget.visualization
         style = dict(self.widget.style or {})
+        compact_mode = int(getattr(self.widget.layout, "h", 1) or 1) <= 2 or int(getattr(self.widget.layout, "w", 1) or 1) <= 3
         config = {
             "type": visualization.type,
             "xField": visualization.x_field,
@@ -2206,9 +2628,10 @@ class GridWidget(QFrame):
             "seriesField": visualization.series_field,
             "showLegend": visualization.show_legend,
             "showLabels": visualization.show_labels,
-            "compactMode": False,
+            "compactMode": compact_mode,
             "showChartAnnotations": True,
             "showChartContext": False,
+            "previewFontScale": self.preview_font_scale,
         }
         if style.get("x_axis_label"):
             config["xAxisLabel"] = style["x_axis_label"]
@@ -2238,6 +2661,36 @@ class GridWidget(QFrame):
             return "table"
         return "table" if self.widget.visualization.type == "table" else "chart"
 
+    def _uses_dual_source_mapping(self) -> bool:
+        style = dict(self.widget.style or {})
+        x_source = str(style.get("x_data_source") or "").strip()
+        y_source = str(style.get("y_data_source") or "").strip()
+        return self.widget.visualization.type in {"line", "area", "scatter"} and bool(x_source and y_source and x_source != y_source)
+
+    def _load_widget_rows(self) -> List[Dict[str, Any]]:
+        if self._uses_dual_source_mapping():
+            style = dict(self.widget.style or {})
+            x_source = str(style.get("x_data_source") or self.widget.data_source or "").strip()
+            y_source = str(style.get("y_data_source") or self.widget.data_source or "").strip()
+            x_field = str(self.widget.visualization.x_field or "time").strip() or "time"
+            y_field = str(self.widget.visualization.y_field or self.widget.visualization.value_field or "packets").strip() or "packets"
+            series_field = str(self.widget.visualization.series_field or "").strip() or None
+            return _build_dual_source_xy_rows(
+                self.query_engine,
+                x_source,
+                y_source,
+                x_field,
+                y_field,
+                series_field=series_field,
+                limit=max(50, int(getattr(self.widget.query, "limit", 0) or 500)),
+            )
+
+        return self.query_engine.execute(
+            data_source=self.widget.data_source,
+            query=self.widget.query,
+            global_filter=None,
+        )
+
     def _toggle_view_mode(self):
         next_mode = "chart" if self._effective_display_mode() == "table" else "table"
         self.view_mode_changed.emit(self.widget.id, next_mode)
@@ -2246,6 +2699,25 @@ class GridWidget(QFrame):
         widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         for child in widget.findChildren(QWidget):
             child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def _make_visualization_flexible(self, widget: QWidget):
+        if widget is None:
+            return
+        widget.setMinimumSize(0, 0)
+        if hasattr(widget, "setMaximumHeight"):
+            widget.setMaximumHeight(16777215)
+        if hasattr(widget, "setMaximumWidth"):
+            widget.setMaximumWidth(16777215)
+        policy = widget.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Expanding)
+        policy.setVerticalPolicy(QSizePolicy.Expanding)
+        widget.setSizePolicy(policy)
+        for child in widget.findChildren(QWidget):
+            child.setMinimumSize(0, 0)
+            if hasattr(child, "setMaximumHeight"):
+                child.setMaximumHeight(16777215)
+            if hasattr(child, "setMaximumWidth"):
+                child.setMaximumWidth(16777215)
 
     def _create_drag_pixmap(self) -> QPixmap:
         """Build an opaque drag preview so the moving widget does not look washed out."""
@@ -2314,21 +2786,22 @@ class GridWidget(QFrame):
         content.setStyleSheet("background-color: #f9f9f9; border: none;")
         content.setCursor(QCursor(Qt.ArrowCursor))
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(8, 8, 8, 8)
+        compact_body = int(getattr(self.widget.layout, "h", 1) or 1) <= 2
+        if compact_body:
+            content_layout.setContentsMargins(6, 6, 6, 6)
+        else:
+            content_layout.setContentsMargins(8, 8, 8, 8)
         
         # Try to render widget data if we have query engine
         if self.query_engine and self.viz_registry and self.widget.query:
             try:
-                data = self.query_engine.execute(
-                    data_source=self.widget.data_source,
-                    query=self.widget.query,
-                    global_filter=None
-                )
+                data = self._load_widget_rows()
 
                 viz_type = self._render_visualization_type()
                 renderer = self.viz_registry.get_renderer(viz_type)
                 if renderer:
                     viz_widget = renderer(data, self._visualization_config(), content)
+                    self._make_visualization_flexible(viz_widget)
                     content_layout.addWidget(viz_widget)
                 else:
                     error_label = QLabel(f"Renderer '{viz_type}' not found")
@@ -2581,7 +3054,7 @@ class DashboardEditor(QDialog):
         self._drag_indicator.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._drag_indicator.setStyleSheet(
             "QFrame {"
-            "background-color: rgba(0, 102, 204, 0.12);"
+            "background-color: rgba(0, 102, 204, 0.02);"
             "border: 2px dashed rgba(0, 102, 204, 0.85);"
             "border-radius: 6px;"
             "}"
@@ -2630,6 +3103,13 @@ class DashboardEditor(QDialog):
             grid_widget.drag_finished.connect(self.on_widget_drag_finished)
             
             layout = widget_model.layout
+            slot_height = (max(1, int(layout.h or 1)) * self.GRID_ROW_HEIGHT) + (max(0, int(layout.h or 1) - 1) * self.GRID_SPACING)
+            grid_widget.setMinimumHeight(slot_height)
+            grid_widget.setMaximumHeight(slot_height)
+            grid_policy = grid_widget.sizePolicy()
+            grid_policy.setHorizontalPolicy(QSizePolicy.Expanding)
+            grid_policy.setVerticalPolicy(QSizePolicy.Fixed)
+            grid_widget.setSizePolicy(grid_policy)
             self.grid_layout.addWidget(grid_widget, layout.y, layout.x, layout.h, layout.w)
         
         self.update_status()

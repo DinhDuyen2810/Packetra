@@ -29,7 +29,8 @@ class _ScaledPixmapWidget(QWidget):
     def sizeHint(self):
         if self._pixmap.isNull():
             return QSize(240, 180)
-        return self._pixmap.size() / max(1.0, self._pixmap.devicePixelRatio())
+        logical_size = self._pixmap.deviceIndependentSize()
+        return QSize(max(1, int(logical_size.width())), max(1, int(logical_size.height())))
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -37,9 +38,14 @@ class _ScaledPixmapWidget(QWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        source_width = self._pixmap.width() / max(1.0, self._pixmap.devicePixelRatio())
-        source_height = self._pixmap.height() / max(1.0, self._pixmap.devicePixelRatio())
+        smooth_scaling = self.property("smoothScaling")
+        if smooth_scaling is None:
+            smooth_scaling = self._cover
+        if bool(smooth_scaling):
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        logical_size = self._pixmap.deviceIndependentSize()
+        source_width = logical_size.width()
+        source_height = logical_size.height()
         if source_width <= 0 or source_height <= 0:
             return
 
@@ -56,7 +62,8 @@ class _ScaledPixmapWidget(QWidget):
             draw_width,
             draw_height,
         )
-        painter.drawPixmap(target_rect, self._pixmap, QRectF(0, 0, source_width, source_height))
+        # Draw the full pixmap into target rect; this avoids source-rect DPI mismatch clipping.
+        painter.drawPixmap(target_rect.toRect(), self._pixmap)
         painter.end()
 
 
@@ -145,10 +152,10 @@ class DashboardCard(QFrame):
             thumbnail_frame.setStyleSheet("background-color: transparent; border: none;")
             thumbnail_frame.setMinimumHeight(170)
         else:
-            thumbnail_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #d9d9d9; border-radius: 6px;")
+            thumbnail_frame.setStyleSheet("background-color: transparent; border: none;")
             thumbnail_frame.setMinimumHeight(120)
         thumbnail_layout = QVBoxLayout(thumbnail_frame)
-        thumbnail_layout.setContentsMargins(4 if self.is_template else 8, 4 if self.is_template else 8, 4 if self.is_template else 8, 4 if self.is_template else 8)
+        thumbnail_layout.setContentsMargins(4 if self.is_template else 0, 4 if self.is_template else 0, 4 if self.is_template else 0, 4 if self.is_template else 0)
         if self.preview_widget is not None:
             self.preview_widget.setParent(thumbnail_frame)
             thumbnail_layout.addWidget(self.preview_widget)
@@ -158,6 +165,8 @@ class DashboardCard(QFrame):
             placeholder_label.setStyleSheet("color: #888; font-size: 9pt;")
             thumbnail_layout.addWidget(placeholder_label)
         layout.addWidget(thumbnail_frame, 1 if self.is_template else 0)
+        if not self.is_template:
+            layout.addStretch()
         
         # Stats
         if not self.is_template:
@@ -174,16 +183,31 @@ class DashboardCard(QFrame):
             stats_layout.addWidget(updated_label)
 
             layout.addLayout(stats_layout)
-        
-        layout.addStretch()
+
+        if self.is_template:
+            layout.addStretch()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.is_template or not hasattr(self, "thumbnail_frame") or self.thumbnail_frame is None:
             return
-        side = max(260, min(self.width() - 16, 400))
-        self.thumbnail_frame.setMinimumHeight(side)
-        self.thumbnail_frame.setMaximumHeight(side)
+        available_width = max(260, self.width() - 16)
+        preview_ratio = 0.62
+        if self.preview_widget is not None:
+            property_ratio = self.preview_widget.property("previewAspectRatio")
+            if property_ratio is not None:
+                try:
+                    preview_ratio = max(0.42, min(float(property_ratio), 0.82))
+                except (TypeError, ValueError):
+                    preview_ratio = 0.62
+            else:
+                hint = self.preview_widget.sizeHint()
+                if hint.width() > 0:
+                    preview_ratio = max(0.42, min(hint.height() / hint.width(), 0.82))
+        target_height = int(available_width * preview_ratio * 0.95)
+        target_height = max(240, min(target_height, 520))
+        self.thumbnail_frame.setMinimumHeight(target_height)
+        self.thumbnail_frame.setMaximumHeight(target_height)
 
     def _event_targets_thumbnail(self, event) -> bool:
         if not self.thumbnail_interactive:
@@ -501,6 +525,8 @@ class DashboardOverviewDialog(QDialog):
     def render_user_dashboards(self):
         """Render user dashboard cards"""
         user_dashboards = self.sort_dashboards(self.filtered_user_dashboards)
+        # A single dashboard should use full row width so the preview stays readable.
+        user_columns = 1 if len(user_dashboards) == 1 else 2
         
         if not user_dashboards:
             no_dash_label = QLabel("No custom dashboards yet.\nStart from a template or create a blank dashboard.")
@@ -524,12 +550,12 @@ class DashboardOverviewDialog(QDialog):
             card.double_clicked.connect(self.on_open_dashboard)
             card.more_clicked.connect(self.on_card_more_clicked)
             
-            col = idx % 3
-            row = idx // 3
+            col = idx % user_columns
+            row = idx // user_columns
             self.user_grid.addWidget(card, row, col)
         
         # Fill remaining columns with stretch
-        for col in range(3):
+        for col in range(user_columns):
             self.user_grid.setColumnStretch(col, 1)
 
     def update_section_visibility(self):
@@ -609,7 +635,7 @@ class DashboardOverviewDialog(QDialog):
         QTimer.singleShot(0, launch_editor)
         self.accept()
 
-    def _preview_config(self, widget_model, *, compact_mode: bool = True, display_mode: Optional[str] = None) -> dict:
+    def _preview_config(self, widget_model, *, compact_mode: bool = True, display_mode: Optional[str] = None, preview_font_scale: float = 1.0) -> dict:
         visualization = widget_model.visualization
         config = {
             "type": visualization.type,
@@ -623,6 +649,7 @@ class DashboardOverviewDialog(QDialog):
             "compactMode": compact_mode,
             "showChartAnnotations": True,
             "showChartContext": False,
+            "previewFontScale": preview_font_scale,
         }
         if display_mode == "table":
             config["type"] = "table"
@@ -639,6 +666,24 @@ class DashboardOverviewDialog(QDialog):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _template_preview_font_scale(self, render_type: str) -> float:
+        render_key = str(render_type or "").strip().lower()
+        scale_map = {
+            "metric": 1.05,
+            "pie": 1.52,
+            "donut": 1.52,
+            "bar": 1.78,
+            "horizontal_bar": 1.68,
+            "line": 1.82,
+            "scatter": 1.68,
+            "area": 2.2,
+            "radar": 1.12,
+            "sunburst": 1.12,
+            "treemap": 1.12,
+            "table": 1.42,
+        }
+        return scale_map.get(render_key, 1.62)
+
     def _create_preview_widget(
         self,
         dashboard: Optional[Dashboard],
@@ -653,19 +698,35 @@ class DashboardOverviewDialog(QDialog):
 
         widget_model = dashboard.widgets[0]
         try:
-            data = self.query_engine.execute(
-                data_source=widget_model.data_source,
-                query=widget_model.query,
-                global_filter=None,
-            )
+            style = dict(widget_model.style or {})
+            x_source = str(style.get("x_data_source") or "").strip()
+            y_source = str(style.get("y_data_source") or "").strip()
+            if widget_model.visualization.type in {"line", "area", "scatter"} and x_source and y_source and x_source != y_source:
+                from .dashboard_editor import _build_dual_source_xy_rows
+                data = _build_dual_source_xy_rows(
+                    self.query_engine,
+                    x_source,
+                    y_source,
+                    str(widget_model.visualization.x_field or "time"),
+                    str(widget_model.visualization.y_field or widget_model.visualization.value_field or "packets"),
+                    series_field=str(widget_model.visualization.series_field or "").strip() or None,
+                    limit=max(50, int(widget_model.query.limit or 500)),
+                )
+            else:
+                data = self.query_engine.execute(
+                    data_source=widget_model.data_source,
+                    query=widget_model.query,
+                    global_filter=None,
+                )
             render_type = "table" if display_mode == "table" else widget_model.visualization.type
+            preview_font_scale = self._template_preview_font_scale(render_type) if compact_mode and bool(getattr(dashboard, "is_template", False)) else 1.0
             renderer = self.viz_registry.get_renderer(render_type)
             if renderer is None:
                 return None
             if compact_mode and fixed_height is not None and render_type == "metric":
                 preview = renderer(
                     data,
-                    self._preview_config(widget_model, compact_mode=False, display_mode=display_mode),
+                    self._preview_config(widget_model, compact_mode=False, display_mode=display_mode, preview_font_scale=preview_font_scale),
                     None,
                 )
                 preview.setMinimumHeight(fixed_height)
@@ -673,11 +734,11 @@ class DashboardOverviewDialog(QDialog):
                 preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 return preview
             if compact_mode and fixed_height is not None:
-                source_height = max(320, fixed_height * 3)
+                source_height = max(280, int(fixed_height * 2.35))
                 source_width = max(520, int(source_height * (1.55 if render_type == "metric" else 1.75)))
                 live_preview = renderer(
                     data,
-                    self._preview_config(widget_model, compact_mode=False, display_mode=display_mode),
+                    self._preview_config(widget_model, compact_mode=False, display_mode=display_mode, preview_font_scale=preview_font_scale),
                     None,
                 )
                 live_preview.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -692,6 +753,7 @@ class DashboardOverviewDialog(QDialog):
                 live_preview.deleteLater()
 
                 preview = _ScaledPixmapWidget(snapshot, cover=False)
+                preview.setProperty("smoothScaling", False)
                 preview.setMinimumHeight(fixed_height)
                 preview.setMaximumHeight(fixed_height)
                 preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -699,7 +761,7 @@ class DashboardOverviewDialog(QDialog):
 
             preview = renderer(
                 data,
-                self._preview_config(widget_model, compact_mode=compact_mode, display_mode=display_mode),
+                self._preview_config(widget_model, compact_mode=compact_mode, display_mode=display_mode, preview_font_scale=preview_font_scale),
                 None,
             )
             if fixed_height is not None:
@@ -721,57 +783,76 @@ class DashboardOverviewDialog(QDialog):
         if len(dashboard.widgets) == 1:
             return self._create_preview_widget(dashboard, pass_through=pass_through)
 
-        columns = max(1, int(getattr(dashboard.layout, 'columns', 12) or 12))
-        row_height = max(88, int(getattr(dashboard.layout, 'row_height', 80) or 80) + 8)
-        cell_width = max(64, int(row_height * 0.72))
-        gutter = 12
+        from .dashboard_editor import GridWidget
+
+        render_scale = 3
+        logical_row_height = max(80, int(getattr(dashboard.layout, 'row_height', 80) or 80))
+        logical_cell_width = 100
+        logical_spacing = 8
+        outer_padding = 12
+        row_height = logical_row_height * render_scale
+        cell_width = logical_cell_width * render_scale
         min_col = min(int(getattr(widget.layout, 'x', 0) or 0) for widget in dashboard.widgets)
         max_col = max(int(getattr(widget.layout, 'x', 0) or 0) + max(1, int(getattr(widget.layout, 'w', 1) or 1)) for widget in dashboard.widgets)
         min_row = min(int(getattr(widget.layout, 'y', 0) or 0) for widget in dashboard.widgets)
         max_row = max(int(getattr(widget.layout, 'y', 0) or 0) + max(1, int(getattr(widget.layout, 'h', 1) or 1)) for widget in dashboard.widgets)
-        source_width = max(1, (max_col - min_col) * cell_width)
-        source_height = max(1, (max_row - min_row) * row_height)
+        width_cols = max(1, max_col - min_col)
+        height_rows = max(1, max_row - min_row)
+        source_width = max(1, (width_cols * cell_width) + (max(0, width_cols - 1) * logical_spacing * render_scale) + (outer_padding * 2))
+        source_height = max(1, (height_rows * row_height) + (max(0, height_rows - 1) * logical_spacing * render_scale) + (outer_padding * 2))
 
         canvas = QWidget()
         canvas.setAttribute(Qt.WA_DontShowOnScreen, True)
-        canvas.setStyleSheet("background-color: transparent;")
+        canvas.setStyleSheet("background-color: #ffffff;")
         canvas.resize(source_width, source_height)
+
+        grid_layout = QGridLayout(canvas)
+        grid_layout.setContentsMargins(outer_padding, outer_padding, outer_padding, outer_padding)
+        grid_layout.setSpacing(logical_spacing * render_scale)
+
+        for row in range(height_rows):
+            grid_layout.setRowMinimumHeight(row, row_height)
+            grid_layout.setRowStretch(row, 0)
+        for col in range(width_cols):
+            grid_layout.setColumnMinimumWidth(col, cell_width)
+            grid_layout.setColumnStretch(col, 0)
 
         for widget_model in dashboard.widgets:
             try:
-                data = self.query_engine.execute(
-                    data_source=widget_model.data_source,
-                    query=widget_model.query,
-                    global_filter=None,
-                )
-                render_type = widget_model.visualization.type
-                renderer = self.viz_registry.get_renderer(render_type)
-                if renderer is None:
-                    continue
-                preview_widget = renderer(
-                    data,
-                    self._preview_config(widget_model, compact_mode=False),
-                    canvas,
+                preview_widget = GridWidget(
+                    widget_model,
+                    editable=False,
+                    query_engine=self.query_engine,
+                    viz_registry=self.viz_registry,
+                    display_mode=None,
+                    preview_font_scale=1.22,
                 )
             except Exception:
                 continue
 
             layout = widget_model.layout
-            x = (int(getattr(layout, 'x', 0) or 0) - min_col) * cell_width
-            y = (int(getattr(layout, 'y', 0) or 0) - min_row) * row_height
-            width = max(1, int(getattr(layout, 'w', 1) or 1)) * cell_width
-            height = max(1, int(getattr(layout, 'h', 1) or 1)) * row_height
-            preview_widget.setParent(canvas)
-            preview_widget.setGeometry(x + (gutter // 2), y + (gutter // 2), max(1, width - gutter), max(1, height - gutter))
-            preview_widget.show()
+            local_col = max(0, int(getattr(layout, 'x', 0) or 0) - min_col)
+            local_row = max(0, int(getattr(layout, 'y', 0) or 0) - min_row)
+            local_w = max(1, int(getattr(layout, 'w', 1) or 1))
+            local_h = max(1, int(getattr(layout, 'h', 1) or 1))
+            grid_layout.addWidget(preview_widget, local_row, local_col, local_h, local_w)
+
+        grid_layout.activate()
 
         canvas.show()
-        QApplication.processEvents()
+        for _ in range(4):
+            QApplication.processEvents()
+
         snapshot = canvas.grab()
+        snapshot_ratio = source_height / max(1, source_width)
+
         canvas.hide()
         canvas.deleteLater()
 
         preview = _ScaledPixmapWidget(snapshot, cover=False)
+        # Downsample with smoothing for clearer mini-dashboard text/edges.
+        preview.setProperty("smoothScaling", True)
+        preview.setProperty("previewAspectRatio", snapshot_ratio)
         if pass_through:
             self._make_preview_pass_through(preview)
         return preview

@@ -86,6 +86,8 @@ class FilterParser:
                 parts = expr.split(f' {op_str} ', 1)
                 if len(parts) == 2:
                     field, value = parts[0].strip(), parts[1].strip()
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                        value = value[1:-1]
                     
                     # Get field value from row
                     field_value = row.get(field)
@@ -100,8 +102,31 @@ class FilterParser:
                         pass
                     
                     return op_func(field_value, value)
-        
-        return True
+
+        # Bare token fallback: perform case-insensitive substring search across row values.
+        return FilterParser._row_contains_token(row, expr)
+
+    @staticmethod
+    def _row_contains_token(row: Dict[str, Any], token: str) -> bool:
+        needle = str(token or '').strip()
+        if not needle:
+            return True
+        if len(needle) >= 2 and needle[0] == needle[-1] and needle[0] in {'"', "'"}:
+            needle = needle[1:-1]
+        lowered = needle.lower()
+        if not lowered:
+            return True
+
+        for value in row.values():
+            if value in (None, ''):
+                continue
+            try:
+                hay = str(value).lower()
+            except Exception:
+                continue
+            if lowered in hay:
+                return True
+        return False
 
 
 class DrilldownEngine:
