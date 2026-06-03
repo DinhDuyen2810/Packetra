@@ -183,10 +183,10 @@ def _ensure_pointer_inspector(widget: QWidget, provider: Optional[Callable[[QPoi
 
 
 class _InteractiveChartCanvas(QWidget):
-    def __init__(self, parent: QWidget = None):
+    def __init__(self, parent: QWidget = None, *, inspector_enabled: bool = True):
         super().__init__(parent)
         self._inspector_regions: List[tuple[Any, str]] = []
-        self._inspector_controller = _ensure_pointer_inspector(self, self._inspector_text_at)
+        self._inspector_controller = _ensure_pointer_inspector(self, self._inspector_text_at) if inspector_enabled else None
 
     def _inspector_text_at(self, pos: QPoint) -> Optional[str]:
         point = QPointF(pos)
@@ -210,12 +210,16 @@ def _format_info_bubble(title: Optional[str], fields: List[tuple[str, Optional[s
     return "\n".join(line for line in lines if line)
 
 
-def _attach_static_inspector(widget: QWidget, title: Optional[str], fields: List[tuple[str, Optional[str]]]) -> None:
+def _attach_static_inspector(widget: QWidget, title: Optional[str], fields: List[tuple[str, Optional[str]]], config: Optional[Dict[str, Any]] = None) -> None:
+    if config is not None and not bool(config.get("enableInspector", True)):
+        return
     text = _format_info_bubble(title, fields)
     _ensure_pointer_inspector(widget, lambda _pos, text=text: text)
 
 
-def _attach_table_inspector(table: QTableWidget) -> None:
+def _attach_table_inspector(table: QTableWidget, config: Optional[Dict[str, Any]] = None) -> None:
+    if config is not None and not bool(config.get("enableInspector", True)):
+        return
     def provider(pos: QPoint) -> Optional[str]:
         item = table.itemAt(pos)
         if item is None:
@@ -235,7 +239,21 @@ def _attach_table_inspector(table: QTableWidget) -> None:
 
 
 def _semantic_annotations_enabled(config: Dict[str, Any]) -> bool:
-    return not bool((config or {}).get("compactMode", False))
+    config = config or {}
+    if "showChartAnnotations" in config:
+        return bool(config.get("showChartAnnotations"))
+    return not bool(config.get("compactMode", False))
+
+
+def _chart_context_enabled(config: Dict[str, Any]) -> bool:
+    config = config or {}
+    if "showChartContext" in config:
+        return bool(config.get("showChartContext"))
+    return _semantic_annotations_enabled(config)
+
+
+def _inspector_enabled(config: Optional[Dict[str, Any]]) -> bool:
+    return bool((config or {}).get("enableInspector", True))
 
 
 def _wrap_with_chart_context(content: QWidget, lines: List[str], parent: QWidget = None) -> QWidget:
@@ -322,7 +340,7 @@ def _humanize_field_name(field_name: Optional[str], *, fallback: str = "Value") 
 
 
 def _axis_titles_visible(config: Dict[str, Any]) -> bool:
-    return not bool((config or {}).get("compactMode", False))
+    return _semantic_annotations_enabled(config or {})
 
 
 def _set_axis_title(axis, field_name: Optional[str], config: Dict[str, Any], *, fallback: str):
@@ -331,10 +349,95 @@ def _set_axis_title(axis, field_name: Optional[str], config: Dict[str, Any], *, 
     axis.setTitleVisible(_axis_titles_visible(config))
 
 
+def _apply_axis_label_font(axis, config: Optional[Dict[str, Any]], *, compact_size: int = 8, regular_size: int = 9):
+    if not hasattr(axis, "setLabelsFont"):
+        return
+    font = QFont()
+    font.setPointSize(compact_size if bool((config or {}).get("compactMode", False)) else regular_size)
+    axis.setLabelsFont(font)
+
+
+def _set_chart_margins(chart: QChart, config: Optional[Dict[str, Any]], *, left: int, top: int, right: int, bottom: int):
+    compact_mode = bool((config or {}).get("compactMode", False))
+    if compact_mode:
+        chart.setMargins(QMargins(max(8, left - 6), max(4, top - 4), max(6, right - 4), max(8, bottom - 6)))
+    else:
+        chart.setMargins(QMargins(left, top, right, bottom))
+
+
 def _format_number(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.2f}"
+
+
+def _color_from_value(color_value: Any, fallback: str) -> QColor:
+    if isinstance(color_value, QColor):
+        candidate = QColor(color_value)
+    else:
+        candidate = QColor(str(color_value or "").strip())
+    if candidate.isValid():
+        return candidate
+    return QColor(fallback)
+
+
+def _primary_color(config: Optional[Dict[str, Any]], fallback: str = "#4e79a7") -> QColor:
+    return _color_from_value((config or {}).get("primaryColor"), fallback)
+
+
+def _palette_colors(config: Optional[Dict[str, Any]]) -> List[QColor]:
+    palette_text = str((config or {}).get("colorPalette") or "").strip()
+    if palette_text:
+        parsed = []
+        for token in palette_text.replace("\n", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            color = QColor(token)
+            if color.isValid():
+                parsed.append(color)
+        if parsed:
+            return parsed
+
+    if (config or {}).get("primaryColor"):
+        base = _primary_color(config)
+        return [
+            QColor(base),
+            base.lighter(125),
+            base.darker(115),
+            base.lighter(150),
+            base.darker(135),
+            base.lighter(175),
+            base.darker(155),
+        ]
+
+    return [
+        QColor("#4e79a7"),
+        QColor("#f28e2b"),
+        QColor("#e15759"),
+        QColor("#76b7b2"),
+        QColor("#59a14f"),
+        QColor("#edc948"),
+        QColor("#b07aa1"),
+        QColor("#ff9da7"),
+        QColor("#9c755f"),
+        QColor("#bab0ab"),
+    ]
+
+
+def _with_alpha(color: QColor, alpha: int) -> QColor:
+    shaded = QColor(color)
+    shaded.setAlpha(max(0, min(255, alpha)))
+    return shaded
+
+
+def _blend_colors(start: QColor, end: QColor, ratio: float) -> QColor:
+    clamped = max(0.0, min(1.0, float(ratio)))
+    return QColor(
+        int(start.red() + ((end.red() - start.red()) * clamped)),
+        int(start.green() + ((end.green() - start.green()) * clamped)),
+        int(start.blue() + ((end.blue() - start.blue()) * clamped)),
+    )
 
 
 def _extract_xy_points(data: List[Dict[str, Any]], config: Dict[str, Any]):
@@ -382,12 +485,19 @@ def _configure_xy_axes(
     y_field: Optional[str],
     config: Dict[str, Any],
 ):
+    chart_type = str((config or {}).get("type") or "").strip().lower()
     if datetime_points:
         x_axis = QDateTimeAxis()
         x_axis.setFormat("hh:mm:ss")
         x_values = [point[0] for point in datetime_points]
-        x_axis.setMin(QDateTime.fromMSecsSinceEpoch(int(min(x_values))))
-        x_axis.setMax(QDateTime.fromMSecsSinceEpoch(int(max(x_values))))
+        min_x = min(x_values)
+        max_x = max(x_values)
+        if chart_type == "scatter":
+            padding = max((max_x - min_x) * 0.08, 1000.0)
+            min_x -= padding
+            max_x += padding
+        x_axis.setMin(QDateTime.fromMSecsSinceEpoch(int(min_x)))
+        x_axis.setMax(QDateTime.fromMSecsSinceEpoch(int(max_x)))
     else:
         x_axis = QValueAxis()
         x_values = [point[0] for point in numeric_points]
@@ -396,16 +506,29 @@ def _configure_xy_axes(
         max_x = max(x_values)
         if min_x == max_x:
             max_x += 1.0
+        if chart_type == "scatter":
+            padding = max((max_x - min_x) * 0.08, 0.5)
+            min_x -= padding
+            max_x += padding
         x_axis.setRange(min_x, max_x)
 
     y_axis = QValueAxis()
     y_axis.setLabelFormat("%.0f")
     y_values = [point[1] for point in (datetime_points or numeric_points)]
     max_y = max(y_values) if y_values else 1.0
-    y_axis.setRange(0, max_y * 1.15 if max_y > 0 else 1.0)
+    if chart_type == "scatter":
+        min_y = min(y_values) if y_values else 0.0
+        if min_y == max_y:
+            max_y += 1.0
+        padding = max((max_y - min_y) * 0.12, 0.5)
+        y_axis.setRange(min_y - padding, max_y + padding)
+    else:
+        y_axis.setRange(0, max_y * 1.15 if max_y > 0 else 1.0)
 
     _set_axis_title(x_axis, x_field, config, fallback="X Axis")
     _set_axis_title(y_axis, y_field, config, fallback="Value")
+    _apply_axis_label_font(x_axis, config)
+    _apply_axis_label_font(y_axis, config)
 
     chart.addAxis(x_axis, Qt.AlignBottom)
     chart.addAxis(y_axis, Qt.AlignLeft)
@@ -413,19 +536,8 @@ def _configure_xy_axes(
     series.attachAxis(y_axis)
 
 
-def _palette(index: int) -> QColor:
-    palette = [
-        QColor("#4e79a7"),
-        QColor("#f28e2b"),
-        QColor("#e15759"),
-        QColor("#76b7b2"),
-        QColor("#59a14f"),
-        QColor("#edc948"),
-        QColor("#b07aa1"),
-        QColor("#ff9da7"),
-        QColor("#9c755f"),
-        QColor("#bab0ab"),
-    ]
+def _palette(index: int, config: Optional[Dict[str, Any]] = None) -> QColor:
+    palette = _palette_colors(config)
     return palette[index % len(palette)]
 
 
@@ -461,13 +573,15 @@ def _scale_points(points: List[tuple[float, float]], rect, *, include_zero: bool
 class _RadarCanvas(_InteractiveChartCanvas):
     """Custom radar/spider chart renderer."""
 
-    def __init__(self, labels: List[str], values: List[float], *, compact_mode: bool, parent: QWidget = None):
-        super().__init__(parent)
+    def __init__(self, labels: List[str], values: List[float], *, compact_mode: bool, show_axis_labels: bool = False, accent_color: Optional[QColor] = None, inspector_enabled: bool = True, parent: QWidget = None):
+        super().__init__(parent, inspector_enabled=inspector_enabled)
         self.labels = labels
         self.values = values
         self.compact_mode = compact_mode
-        self.setMinimumHeight(120 if compact_mode else 280)
-        if not compact_mode:
+        self.show_axis_labels = show_axis_labels
+        self.accent_color = QColor(accent_color or QColor("#0066cc"))
+        self.setMinimumHeight(160 if compact_mode and show_axis_labels else (120 if compact_mode else 280))
+        if not compact_mode or show_axis_labels:
             label_font = self.font()
             label_font.setPointSize(max(label_font.pointSize(), 9))
             label_font.setBold(True)
@@ -483,12 +597,12 @@ class _RadarCanvas(_InteractiveChartCanvas):
         painter.setRenderHint(QPainter.Antialiasing)
 
         label_font = painter.font()
-        if not self.compact_mode:
+        if not self.compact_mode or self.show_axis_labels:
             label_font.setPointSize(max(label_font.pointSize(), 9))
             label_font.setBold(True)
             painter.setFont(label_font)
 
-        margin = 18 if self.compact_mode else 44
+        margin = 30 if self.compact_mode and self.show_axis_labels else (18 if self.compact_mode else 44)
         center = self.rect().center()
         radius = min(self.width(), self.height()) / 2 - margin
         if radius <= 0:
@@ -545,7 +659,7 @@ class _RadarCanvas(_InteractiveChartCanvas):
                 )
             )
 
-            if not self.compact_mode:
+            if not self.compact_mode or self.show_axis_labels:
                 painter.setPen(QPen(QColor("#1f2937"), 1))
                 text_rect = QRectF(axis_end.x() - 40, axis_end.y() - 10, 80, 20)
                 painter.drawText(text_rect, Qt.AlignCenter, label)
@@ -553,8 +667,8 @@ class _RadarCanvas(_InteractiveChartCanvas):
                 text_path.addRect(text_rect)
                 info_regions.append((text_path, _format_info_bubble(label, [("Value", _format_number(self.values[index]))])))
 
-        painter.setPen(QPen(QColor("#0066cc"), 2))
-        painter.setBrush(QBrush(QColor(0, 102, 204, 80)))
+        painter.setPen(QPen(self.accent_color, 2))
+        painter.setBrush(QBrush(_with_alpha(self.accent_color, 80)))
         painter.drawPolygon(QPolygonF(polygon_points))
         self._set_inspector_regions(info_regions)
 
@@ -562,10 +676,11 @@ class _RadarCanvas(_InteractiveChartCanvas):
 class _TreemapCanvas(_InteractiveChartCanvas):
     """Custom slice-and-dice treemap renderer."""
 
-    def __init__(self, groups: List[dict], *, compact_mode: bool, parent: QWidget = None):
-        super().__init__(parent)
+    def __init__(self, groups: List[dict], *, compact_mode: bool, palette_config: Optional[Dict[str, Any]] = None, inspector_enabled: bool = True, parent: QWidget = None):
+        super().__init__(parent, inspector_enabled=inspector_enabled)
         self.groups = groups
         self.compact_mode = compact_mode
+        self.palette_config = palette_config or {}
         self.setMinimumHeight(140 if compact_mode else 260)
 
     def paintEvent(self, event):
@@ -586,7 +701,7 @@ class _TreemapCanvas(_InteractiveChartCanvas):
             current_x += group_width
 
             painter.setPen(QPen(QColor("white"), 1))
-            painter.setBrush(QBrush(_palette(group_index).lighter(125)))
+            painter.setBrush(QBrush(_palette(group_index, self.palette_config).lighter(125)))
             painter.drawRect(group_rect)
             group_path = QPainterPath()
             group_path.addRect(group_rect)
@@ -605,7 +720,7 @@ class _TreemapCanvas(_InteractiveChartCanvas):
                 child_height = usable_height * (child['value'] / children_total)
                 child_rect = QRectF(group_rect.left(), child_y, group_rect.width(), child_height)
                 child_y += child_height
-                painter.setBrush(QBrush(_palette(group_index + child_index).darker(100 + (child_index * 7))))
+                painter.setBrush(QBrush(_palette(group_index + child_index, self.palette_config).darker(100 + (child_index * 7))))
                 painter.drawRect(child_rect)
                 child_path = QPainterPath()
                 child_path.addRect(child_rect)
@@ -627,12 +742,14 @@ class _TreemapCanvas(_InteractiveChartCanvas):
 class _SunburstCanvas(_InteractiveChartCanvas):
     """Custom sunburst renderer with inner groups and outer leaves."""
 
-    def __init__(self, groups: List[dict], *, compact_mode: bool, center_label: str = "Total", parent: QWidget = None):
-        super().__init__(parent)
+    def __init__(self, groups: List[dict], *, compact_mode: bool, center_label: str = "Total", palette_config: Optional[Dict[str, Any]] = None, show_segment_labels: bool = False, inspector_enabled: bool = True, parent: QWidget = None):
+        super().__init__(parent, inspector_enabled=inspector_enabled)
         self.groups = groups
         self.compact_mode = compact_mode
         self.center_label = center_label
-        self.setMinimumHeight(140 if compact_mode else 280)
+        self.palette_config = palette_config or {}
+        self.show_segment_labels = show_segment_labels
+        self.setMinimumHeight(180 if compact_mode and show_segment_labels else (140 if compact_mode else 280))
 
     def paintEvent(self, event):
         if not self.groups:
@@ -677,7 +794,7 @@ class _SunburstCanvas(_InteractiveChartCanvas):
             return path
 
         def draw_arc_label(primary_text: str, secondary_text: str, start: float, span: float, *, outer_segment_radius: float, inner_segment_radius: float, fill_color: QColor, min_span_degrees: float, font_scale: int = 0):
-            if self.compact_mode or (not primary_text and not secondary_text):
+            if (not self.show_segment_labels and self.compact_mode) or (not primary_text and not secondary_text):
                 return
             span_degrees = abs(span) / 16.0
             value_only_min_span = max(4.5, min_span_degrees * 0.35)
@@ -747,7 +864,7 @@ class _SunburstCanvas(_InteractiveChartCanvas):
         for group_index, group in enumerate(self.groups):
             span_angle = -360.0 * 16 * (group['value'] / total_value)
             painter.setPen(outer_pen)
-            group_color = _palette(group_index).lighter(110)
+            group_color = _palette(group_index, self.palette_config).lighter(110)
             painter.setBrush(QBrush(group_color))
             group_path = ring_segment_path(split_radius, hole_radius, start_angle, span_angle)
             painter.drawPath(group_path)
@@ -777,7 +894,7 @@ class _SunburstCanvas(_InteractiveChartCanvas):
             child_total = sum(item['value'] for item in group['children']) or 1.0
             for child_index, child in enumerate(group['children']):
                 child_span = span_angle * (child['value'] / child_total)
-                child_color = _palette(group_index + child_index + 1).darker(105 + (child_index * 8))
+                child_color = _palette(group_index + child_index + 1, self.palette_config).darker(105 + (child_index * 8))
                 painter.setBrush(QBrush(child_color))
                 child_path = ring_segment_path(outer_radius, split_radius, child_start, child_span)
                 painter.drawPath(child_path)
@@ -859,11 +976,13 @@ def _format_x_value(value: float, *, is_datetime: bool) -> str:
 class _AreaCanvas(_InteractiveChartCanvas):
     """Custom-painted area chart to avoid QAreaSeries crashes on Windows."""
 
-    def __init__(self, points: List[tuple[float, float]], *, is_datetime: bool, compact_mode: bool, parent: QWidget = None):
-        super().__init__(parent)
+    def __init__(self, points: List[tuple[float, float]], *, is_datetime: bool, compact_mode: bool, line_color: Optional[QColor] = None, fill_color: Optional[QColor] = None, inspector_enabled: bool = True, parent: QWidget = None):
+        super().__init__(parent, inspector_enabled=inspector_enabled)
         self.points = points
         self.is_datetime = is_datetime
         self.compact_mode = compact_mode
+        self.line_color = QColor(line_color or QColor("#0066cc"))
+        self.fill_color = QColor(fill_color or _with_alpha(self.line_color, 90))
         self.setMinimumHeight(120 if compact_mode else 260)
 
     def paintEvent(self, event):
@@ -928,10 +1047,10 @@ class _AreaCanvas(_InteractiveChartCanvas):
         painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(0, 102, 204, 90)))
+        painter.setBrush(QBrush(self.fill_color))
         painter.drawPolygon(polygon)
 
-        painter.setPen(QPen(QColor("#0066cc"), 2))
+        painter.setPen(QPen(self.line_color, 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawPolyline(QPolygonF(mapped_points))
 
@@ -1070,6 +1189,7 @@ class MetricRenderer:
             widget,
             _humanize_field_name(value_field, fallback="Metric"),
             [("Value", str(value))],
+            config,
         )
         
         layout.addStretch()
@@ -1111,7 +1231,7 @@ class TableRenderer:
         # Auto-resize columns
         table.resizeColumnsToContents()
         layout.addWidget(table)
-        _attach_table_inspector(table)
+        _attach_table_inspector(table, config)
         
         return widget
 
@@ -1145,6 +1265,10 @@ class BarChartRenderer:
         bar_set = QBarSet(value_field)
         for value in values:
             bar_set.append(value)
+        if hasattr(bar_set, "setColor"):
+            bar_set.setColor(_primary_color(config or {}, "#4e79a7"))
+        if hasattr(bar_set, "setBorderColor"):
+            bar_set.setBorderColor(_primary_color(config or {}, "#4e79a7").darker(120))
 
         series = QBarSeries()
         series.append(bar_set)
@@ -1155,11 +1279,12 @@ class BarChartRenderer:
         chart.addSeries(series)
         chart.legend().setVisible(bool((config or {}).get("showLegend", True)))
         chart.setBackgroundVisible(False)
-        chart.setMargins(QMargins(0, 0, 0, 0))
+        _set_chart_margins(chart, config, left=34, top=12, right=12, bottom=28)
 
         axis_x = QBarCategoryAxis()
         axis_x.append(categories)
         _set_axis_title(axis_x, category_field, config, fallback="Category")
+        _apply_axis_label_font(axis_x, config)
         chart.addAxis(axis_x, Qt.AlignBottom)
         series.attachAxis(axis_x)
 
@@ -1168,13 +1293,14 @@ class BarChartRenderer:
         axis_y.setMin(0)
         axis_y.setMax(max(values) * 1.15 if max(values) > 0 else 1)
         _set_axis_title(axis_y, value_field, config, fallback="Value")
+        _apply_axis_label_font(axis_y, config)
         chart.addAxis(axis_y, Qt.AlignLeft)
         series.attachAxis(axis_y)
 
         view = _build_chart_view(chart, parent)
-        tracker = _ensure_pointer_inspector(view)
+        tracker = _ensure_pointer_inspector(view) if _inspector_enabled(config) else None
         signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
-        if signal is not None:
+        if signal is not None and tracker is not None:
             signal.connect(
                 lambda index, _bar_set=None, tracker=tracker, categories=categories, values=values, category_field=category_field, value_field=value_field:
                 tracker.start(
@@ -1184,7 +1310,7 @@ class BarChartRenderer:
                     )
                 )
             )
-        if not _semantic_annotations_enabled(config or {}):
+        if not _chart_context_enabled(config or {}):
             return view
         return _wrap_with_chart_context(
             view,
@@ -1225,6 +1351,10 @@ class HorizontalBarChartRenderer:
         bar_set = QBarSet(value_field)
         for value in values:
             bar_set.append(value)
+        if hasattr(bar_set, "setColor"):
+            bar_set.setColor(_primary_color(config or {}, "#4e79a7"))
+        if hasattr(bar_set, "setBorderColor"):
+            bar_set.setBorderColor(_primary_color(config or {}, "#4e79a7").darker(120))
 
         series = QHorizontalBarSeries()
         series.append(bar_set)
@@ -1235,11 +1365,12 @@ class HorizontalBarChartRenderer:
         chart.addSeries(series)
         chart.legend().setVisible(bool((config or {}).get("showLegend", True)))
         chart.setBackgroundVisible(False)
-        chart.setMargins(QMargins(0, 0, 0, 0))
+        _set_chart_margins(chart, config, left=72, top=12, right=18, bottom=24)
 
         axis_y = QBarCategoryAxis()
         axis_y.append(categories)
         _set_axis_title(axis_y, category_field, config, fallback="Category")
+        _apply_axis_label_font(axis_y, config, compact_size=7, regular_size=8)
         chart.addAxis(axis_y, Qt.AlignLeft)
         series.attachAxis(axis_y)
 
@@ -1248,13 +1379,14 @@ class HorizontalBarChartRenderer:
         axis_x.setMin(0)
         axis_x.setMax(max(values) * 1.15 if max(values) > 0 else 1)
         _set_axis_title(axis_x, value_field, config, fallback="Value")
+        _apply_axis_label_font(axis_x, config)
         chart.addAxis(axis_x, Qt.AlignBottom)
         series.attachAxis(axis_x)
 
         view = _build_chart_view(chart, parent)
-        tracker = _ensure_pointer_inspector(view)
+        tracker = _ensure_pointer_inspector(view) if _inspector_enabled(config) else None
         signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
-        if signal is not None:
+        if signal is not None and tracker is not None:
             signal.connect(
                 lambda index, _bar_set=None, tracker=tracker, categories=categories, values=values, category_field=category_field, value_field=value_field:
                 tracker.start(
@@ -1264,7 +1396,7 @@ class HorizontalBarChartRenderer:
                     )
                 )
             )
-        if not _semantic_annotations_enabled(config or {}):
+        if not _chart_context_enabled(config or {}):
             return view
         return _wrap_with_chart_context(
             view,
@@ -1290,6 +1422,7 @@ class LineChartRenderer:
             return _empty_widget("Line chart is missing a numeric field", parent)
 
         series = QLineSeries()
+        series.setColor(_primary_color(config, "#4e79a7"))
 
         if datetime_points:
             for x_value, y_value in datetime_points:
@@ -1318,9 +1451,9 @@ class LineChartRenderer:
         _configure_xy_axes(chart, series, numeric_points, datetime_points, x_field, y_field, config)
 
         view = _build_chart_view(chart, parent)
-        tracker = _ensure_pointer_inspector(view)
+        tracker = _ensure_pointer_inspector(view) if _inspector_enabled(config) else None
         signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
-        if signal is not None:
+        if signal is not None and tracker is not None:
             signal.connect(
                 lambda point, tracker=tracker, x_field=x_field, y_field=y_field, is_datetime=bool(datetime_points):
                 tracker.start(
@@ -1333,7 +1466,7 @@ class LineChartRenderer:
                     )
                 )
             )
-        if not _semantic_annotations_enabled(config):
+        if not _chart_context_enabled(config):
             return view
         return _wrap_with_chart_context(
             view,
@@ -1377,6 +1510,9 @@ class AreaChartRenderer:
             points,
             is_datetime=bool(datetime_points),
             compact_mode=compact_mode,
+            line_color=_primary_color(config, "#4e79a7"),
+            fill_color=_with_alpha(_primary_color(config, "#4e79a7"), 90),
+            inspector_enabled=_inspector_enabled(config),
             parent=container,
         )
         layout.addWidget(canvas, 1)
@@ -1409,7 +1545,7 @@ class ScatterChartRenderer:
 
         series = QScatterSeries()
         series.setMarkerSize(10.0 if not config.get("compactMode") else 7.0)
-        series.setColor(QColor("#0066cc"))
+        series.setColor(_primary_color(config, "#4e79a7"))
         for x_value, y_value in points:
             series.append(x_value, y_value)
 
@@ -1428,9 +1564,9 @@ class ScatterChartRenderer:
 
         _configure_xy_axes(chart, series, numeric_points, datetime_points, x_field, y_field, config)
         view = _build_chart_view(chart, parent)
-        tracker = _ensure_pointer_inspector(view)
+        tracker = _ensure_pointer_inspector(view) if _inspector_enabled(config) else None
         signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
-        if signal is not None:
+        if signal is not None and tracker is not None:
             signal.connect(
                 lambda point, tracker=tracker, x_field=x_field, y_field=y_field, is_datetime=bool(datetime_points):
                 tracker.start(
@@ -1443,7 +1579,7 @@ class ScatterChartRenderer:
                     )
                 )
             )
-        if not _semantic_annotations_enabled(config):
+        if not _chart_context_enabled(config):
             return view
         return _wrap_with_chart_context(
             view,
@@ -1470,7 +1606,7 @@ class RadarChartRenderer:
 
         labels = []
         values = []
-        for row in data[:8]:
+        for row in data:
             value = _coerce_number(row.get(value_field))
             category = str(row.get(category_field, '') or '')
             if value is None or not category:
@@ -1480,14 +1616,27 @@ class RadarChartRenderer:
 
         if not values:
             return _empty_widget("No plottable data", parent)
+        if len(values) < 3:
+            return _empty_widget("Radar chart needs at least 3 values", parent)
 
         widget = QWidget(parent)
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(_RadarCanvas(labels, values, compact_mode=bool((config or {}).get("compactMode", False)), parent=widget), 1)
+        layout.addWidget(
+            _RadarCanvas(
+                labels,
+                values,
+                compact_mode=bool((config or {}).get("compactMode", False)),
+                show_axis_labels=_semantic_annotations_enabled(config or {}),
+                accent_color=_primary_color(config or {}, "#4e79a7"),
+                inspector_enabled=_inspector_enabled(config),
+                parent=widget,
+            ),
+            1,
+        )
 
-        if not bool((config or {}).get("compactMode", False)):
+        if _chart_context_enabled(config or {}):
             axis_label = QLabel(f"Axes: {_humanize_field_name(category_field, fallback='Category')} | Value: {_humanize_field_name(value_field, fallback='Value')}")
             axis_label.setStyleSheet("color: #666; font-size: 9pt;")
             layout.addWidget(axis_label)
@@ -1508,8 +1657,12 @@ class TreemapRenderer:
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(_TreemapCanvas(groups, compact_mode=bool((config or {}).get("compactMode", False)), parent=widget), 1)
-        if not bool((config or {}).get("compactMode", False)):
+        layout.addWidget(
+            _TreemapCanvas(groups, compact_mode=bool((config or {}).get("compactMode", False)), palette_config=(config or {}), parent=widget),
+            
+            1,
+        )
+        if _chart_context_enabled(config or {}):
             group_field = (config or {}).get("seriesField")
             label_text = f"Group: {_humanize_field_name(group_field, fallback='Items')} | Size: {_humanize_field_name(_infer_value_field(data, config or {}), fallback='Value')}"
             meta = QLabel(label_text)
@@ -1532,6 +1685,9 @@ class SunburstRenderer:
             groups,
             compact_mode=bool(config.get("compactMode", False)),
             center_label=_humanize_field_name(_infer_value_field(data, config), fallback="Value"),
+            palette_config=config,
+            show_segment_labels=_semantic_annotations_enabled(config),
+            inspector_enabled=_inspector_enabled(config),
             parent=parent,
         )
 
@@ -1567,7 +1723,7 @@ class PieChartRenderer:
         series = QPieSeries()
         for index, (category, value) in enumerate(slices):
             pie_slice = series.append(category, value)
-            pie_slice.setColor(_palette(index))
+            pie_slice.setColor(_palette(index, config))
             percent = 0.0 if total <= 0 else (value / total) * 100.0
             pie_slice.setLabel(f"{category}: {_format_number(value)} ({percent:.1f}%)")
             if hasattr(pie_slice, "setLabelVisible"):
@@ -1586,12 +1742,12 @@ class PieChartRenderer:
         chart.setMargins(QMargins(0, 0, 0, 0))
 
         view = _build_chart_view(chart, parent)
-        tracker = _ensure_pointer_inspector(view)
+        tracker = _ensure_pointer_inspector(view) if _inspector_enabled(config) else None
         for slice_index, pie_slice in enumerate(series.slices()):
             category, value = slices[slice_index]
             percent = 0.0 if total <= 0 else (value / total) * 100.0
             signal = getattr(pie_slice, "pressed", None) or getattr(pie_slice, "clicked", None)
-            if signal is not None:
+            if signal is not None and tracker is not None:
                 signal.connect(
                     lambda tracker=tracker, category=category, value=value, percent=percent, value_field=value_field:
                     tracker.start(
@@ -1604,7 +1760,7 @@ class PieChartRenderer:
                         )
                     )
                 )
-        if not _semantic_annotations_enabled(config):
+        if not _chart_context_enabled(config):
             return view
 
         chart_kind = "Donut" if donut else "Pie"
@@ -1679,6 +1835,10 @@ class HistogramRenderer:
         bar_set = QBarSet("Frequency")
         for count in counts:
             bar_set.append(count)
+        if hasattr(bar_set, "setColor"):
+            bar_set.setColor(_primary_color(config, "#4e79a7"))
+        if hasattr(bar_set, "setBorderColor"):
+            bar_set.setBorderColor(_primary_color(config, "#4e79a7").darker(120))
 
         series = QBarSeries()
         series.append(bar_set)
@@ -1706,9 +1866,9 @@ class HistogramRenderer:
         series.attachAxis(axis_y)
 
         view = _build_chart_view(chart, parent)
-        tracker = _ensure_pointer_inspector(view)
+        tracker = _ensure_pointer_inspector(view) if _inspector_enabled(config) else None
         signal = getattr(series, "pressed", None) or getattr(series, "clicked", None)
-        if signal is not None:
+        if signal is not None and tracker is not None:
             signal.connect(
                 lambda index, _bar_set=None, tracker=tracker, labels=labels, counts=counts:
                 tracker.start(
@@ -1718,7 +1878,7 @@ class HistogramRenderer:
                     )
                 )
             )
-        if not _semantic_annotations_enabled(config):
+        if not _chart_context_enabled(config):
             return view
         return _wrap_with_chart_context(
             view,
@@ -1789,6 +1949,8 @@ class HeatmapRenderer:
         ]
         min_value = min(values) if values else 0.0
         max_value = max(values) if values else 1.0
+        heatmap_color = _primary_color(config, "#4e79a7")
+        cold_color = _blend_colors(QColor("#ffffff"), heatmap_color, 0.12)
 
         for row_index, row in enumerate(data):
             for col_index, field in enumerate(numeric_fields):
@@ -1797,20 +1959,16 @@ class HeatmapRenderer:
                 item.setTextAlignment(Qt.AlignCenter)
                 if numeric_value is not None:
                     ratio = 0.0 if max_value == min_value else (numeric_value - min_value) / (max_value - min_value)
-                    color = QColor(
-                        int(245 - (ratio * 120)),
-                        int(248 - (ratio * 140)),
-                        int(255 - (ratio * 20)),
-                    )
+                    color = _blend_colors(cold_color, heatmap_color, ratio)
                     item.setBackground(color)
-                    if ratio > 0.6:
+                    if color.lightness() < 150:
                         item.setForeground(QColor("white"))
                 table.setItem(row_index, col_index, item)
 
         table.resizeColumnsToContents()
         layout.addWidget(table)
-        _attach_table_inspector(table)
-        if not _semantic_annotations_enabled(config):
+        _attach_table_inspector(table, config)
+        if not _chart_context_enabled(config):
             return widget
         return _wrap_with_chart_context(
             widget,

@@ -7,12 +7,91 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-01T10:50:34.984404",
-      "updated_at": "2026-06-01T14:13:14.970416",
+      "updated_at": "2026-06-03T03:09:40.393809",
       "layout": {
         "columns": 12,
         "row_height": 80
       },
       "widgets": [
+        {
+          "id": "a34b9f6d-8ad9-45d8-b6d6-63c801ffcb53",
+          "title": "Total Packets",
+          "data_source": "protocol_stats",
+          "query": {
+            "filter": null,
+            "group_by": null,
+            "metrics": [
+              {
+                "type": "sum",
+                "field": "bytes",
+                "as_": "bytes"
+              }
+            ],
+            "sort": null,
+            "limit": null,
+            "time_bucket": null,
+            "columns": [
+              "bytes"
+            ]
+          },
+          "visualization": {
+            "type": "metric",
+            "x_field": null,
+            "y_field": null,
+            "category_field": null,
+            "value_field": "bytes",
+            "series_field": null,
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 0,
+            "y": 0,
+            "w": 3,
+            "h": 2
+          },
+          "description": "Total number of packets in the current capture",
+          "style": {
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "51d0ac03-67eb-4eef-aca3-6acffbe67a26",
+          "title": "Protocol Distribution",
+          "data_source": "endpoints",
+          "query": {
+            "filter": null,
+            "group_by": null,
+            "metrics": null,
+            "sort": [
+              {
+                "field": "packets",
+                "direction": "desc"
+              }
+            ],
+            "limit": 10,
+            "time_bucket": null,
+            "columns": null
+          },
+          "visualization": {
+            "type": "pie",
+            "x_field": "protocol",
+            "y_field": "protocol",
+            "category_field": "ip",
+            "value_field": "packets",
+            "series_field": "protocol",
+            "show_legend": true,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 5,
+            "y": 0,
+            "w": 3,
+            "h": 3
+          },
+          "description": "Protocol mix across the displayed packets",
+          "style": null
+        },
         {
           "id": "01992e2b-c9f3-49d4-a5ad-6815d57c280d",
           "title": "Top Protocols",
@@ -33,96 +112,21 @@
           },
           "visualization": {
             "type": "radar",
-            "x_field": null,
-            "y_field": null,
+            "x_field": "protocol",
+            "y_field": "protocol",
             "category_field": "protocol",
             "value_field": "packets",
-            "series_field": null,
+            "series_field": "protocol",
             "show_legend": true,
             "show_labels": false
           },
           "layout": {
-            "x": 6,
+            "x": 8,
             "y": 0,
             "w": 4,
             "h": 4
           },
           "description": null,
-          "style": null
-        },
-        {
-          "id": "a34b9f6d-8ad9-45d8-b6d6-63c801ffcb53",
-          "title": "Total Packets",
-          "data_source": "packets",
-          "query": {
-            "filter": null,
-            "group_by": null,
-            "metrics": [
-              {
-                "type": "count",
-                "field": "*",
-                "as_": "packets"
-              }
-            ],
-            "sort": null,
-            "limit": null,
-            "time_bucket": null,
-            "columns": null
-          },
-          "visualization": {
-            "type": "metric",
-            "x_field": null,
-            "y_field": null,
-            "category_field": null,
-            "value_field": "packets",
-            "series_field": null,
-            "show_legend": false,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 0,
-            "y": 0,
-            "w": 3,
-            "h": 2
-          },
-          "description": "Total number of packets in the current capture",
-          "style": null
-        },
-        {
-          "id": "51d0ac03-67eb-4eef-aca3-6acffbe67a26",
-          "title": "Protocol Distribution",
-          "data_source": "protocol_stats",
-          "query": {
-            "filter": null,
-            "group_by": null,
-            "metrics": null,
-            "sort": [
-              {
-                "field": "packets",
-                "direction": "desc"
-              }
-            ],
-            "limit": 10,
-            "time_bucket": null,
-            "columns": null
-          },
-          "visualization": {
-            "type": "pie",
-            "x_field": null,
-            "y_field": null,
-            "category_field": "protocol",
-            "value_field": "packets",
-            "series_field": null,
-            "show_legend": true,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 3,
-            "y": 0,
-            "w": 3,
-            "h": 3
-          },
-          "description": "Protocol mix across the displayed packets",
           "style": null
         },
         {
@@ -145,11 +149,11 @@
           },
           "visualization": {
             "type": "bar",
-            "x_field": null,
-            "y_field": null,
-            "category_field": "protocol",
+            "x_field": "protocol",
+            "y_field": "protocol",
+            "category_field": "bytes",
             "value_field": "packets",
-            "series_field": null,
+            "series_field": "protocol",
             "show_legend": true,
             "show_labels": false
           },

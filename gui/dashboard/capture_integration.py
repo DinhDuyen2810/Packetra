@@ -53,9 +53,62 @@ class CaptureDataSourceBuilder:
         return []
 
     @staticmethod
+    def _records_signature(records: List[Any]) -> tuple[int, Any, Any]:
+        if not records:
+            return (0, None, None)
+        return (
+            len(records),
+            getattr(records[0], 'number', None),
+            getattr(records[-1], 'number', None),
+        )
+
+    @staticmethod
     def _metadata(record: Any) -> Dict[str, Any]:
         metadata = getattr(record, 'metadata', None)
         return metadata if isinstance(metadata, dict) else {}
+
+    @staticmethod
+    def _flatten_dashboard_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, bytes):
+            return value.decode('utf-8', errors='ignore')
+        if isinstance(value, (list, tuple, set)):
+            parts = []
+            for item in value:
+                normalized = CaptureDataSourceBuilder._flatten_dashboard_value(item)
+                if normalized not in (None, ''):
+                    parts.append(str(normalized))
+            return ', '.join(parts) if parts else None
+        return str(value)
+
+    @staticmethod
+    def _flatten_dashboard_mapping(prefix: str, value: Any, target: Dict[str, Any]):
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                child_prefix = f"{prefix}.{child_key}" if prefix else str(child_key)
+                CaptureDataSourceBuilder._flatten_dashboard_mapping(child_prefix, child_value, target)
+            return
+
+        normalized = CaptureDataSourceBuilder._flatten_dashboard_value(value)
+        if normalized is None or not prefix:
+            return
+        target[prefix] = normalized
+
+    @staticmethod
+    def _metadata_dashboard_fields(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        fields: Dict[str, Any] = {}
+        for key, value in metadata.items():
+            if isinstance(value, dict):
+                CaptureDataSourceBuilder._flatten_dashboard_mapping(str(key), value, fields)
+                continue
+
+            normalized = CaptureDataSourceBuilder._flatten_dashboard_value(value)
+            if normalized is not None:
+                fields[str(key)] = normalized
+        return fields
 
     @staticmethod
     def _to_int(value: Any) -> int:
@@ -110,32 +163,59 @@ class CaptureDataSourceBuilder:
     @staticmethod
     def create_packets_fetcher(capture_view_ref: Any) -> Callable:
         """Create fetcher for packet data"""
-        def fetch_packets() -> List[Dict[str, Any]]:
+        cache_signature = None
+        cache_rows: List[Dict[str, Any]] = []
+
+        def fetch_packets(limit: int | None = None) -> List[Dict[str, Any]]:
             """Fetch all packets from capture view"""
+            nonlocal cache_signature, cache_rows
             try:
-                result = []
+                records = CaptureDataSourceBuilder._iter_records(capture_view_ref)
+                signature = CaptureDataSourceBuilder._records_signature(records)
+                if cache_signature != signature:
+                    result = []
+                    for packet in records:
+                        metadata = CaptureDataSourceBuilder._metadata(packet)
+                        packet_dict = {
+                            'number': CaptureDataSourceBuilder._to_int(getattr(packet, 'number', 0)),
+                            'time': CaptureDataSourceBuilder._to_float(getattr(packet, 'relative_time', 0.0)),
+                            'epoch_time': CaptureDataSourceBuilder._to_float(getattr(packet, 'epoch_time', 0.0)),
+                            'src_ip': str(getattr(packet, 'src', '') or ''),
+                            'dst_ip': str(getattr(packet, 'dst', '') or ''),
+                            'protocol': str(getattr(packet, 'protocol', '') or ''),
+                            'length': CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0)),
+                            'src_port': CaptureDataSourceBuilder._to_int(getattr(packet, 'sport', 0)),
+                            'dst_port': CaptureDataSourceBuilder._to_int(getattr(packet, 'dport', 0)),
+                            'info': str(getattr(packet, 'info', '') or ''),
+                            'http_kind': str(metadata.get('http_kind', '') or ''),
+                            'http_request_uri': str(metadata.get('http_request_uri', '') or metadata.get('http_full_request_uri', '') or ''),
+                            'http_latency_ms': CaptureDataSourceBuilder._to_float(metadata.get('http_time_since_request_ms', 0.0)),
+                            'dns_time_ms': CaptureDataSourceBuilder._to_float(metadata.get('dns_time_ms', 0.0)),
+                            'frame.number': CaptureDataSourceBuilder._to_int(getattr(packet, 'number', 0)),
+                            'frame.time_relative': CaptureDataSourceBuilder._to_float(getattr(packet, 'relative_time', 0.0)),
+                            'frame.time_epoch': CaptureDataSourceBuilder._to_float(getattr(packet, 'epoch_time', 0.0)),
+                            'frame.len': CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0)),
+                            'frame.protocol': str(getattr(packet, 'protocol', '') or ''),
+                            'frame.info': str(getattr(packet, 'info', '') or ''),
+                            'ip.src': str(getattr(packet, 'src', '') or ''),
+                            'ip.dst': str(getattr(packet, 'dst', '') or ''),
+                            'tcp.srcport': CaptureDataSourceBuilder._to_int(getattr(packet, 'sport', 0)),
+                            'tcp.dstport': CaptureDataSourceBuilder._to_int(getattr(packet, 'dport', 0)),
+                            'udp.srcport': CaptureDataSourceBuilder._to_int(getattr(packet, 'sport', 0)),
+                            'udp.dstport': CaptureDataSourceBuilder._to_int(getattr(packet, 'dport', 0)),
+                            'http.kind': str(metadata.get('http_kind', '') or ''),
+                            'http.request_uri': str(metadata.get('http_request_uri', '') or metadata.get('http_full_request_uri', '') or ''),
+                            'http.time_since_request_ms': CaptureDataSourceBuilder._to_float(metadata.get('http_time_since_request_ms', 0.0)),
+                            'dns.time_ms': CaptureDataSourceBuilder._to_float(metadata.get('dns_time_ms', 0.0)),
+                        }
+                        packet_dict.update(CaptureDataSourceBuilder._metadata_dashboard_fields(metadata))
+                        result.append(packet_dict)
+                    cache_rows = result
+                    cache_signature = signature
 
-                for packet in CaptureDataSourceBuilder._iter_records(capture_view_ref):
-                    metadata = CaptureDataSourceBuilder._metadata(packet)
-                    packet_dict = {
-                        'number': CaptureDataSourceBuilder._to_int(getattr(packet, 'number', 0)),
-                        'time': CaptureDataSourceBuilder._to_float(getattr(packet, 'relative_time', 0.0)),
-                        'epoch_time': CaptureDataSourceBuilder._to_float(getattr(packet, 'epoch_time', 0.0)),
-                        'src_ip': str(getattr(packet, 'src', '') or ''),
-                        'dst_ip': str(getattr(packet, 'dst', '') or ''),
-                        'protocol': str(getattr(packet, 'protocol', '') or ''),
-                        'length': CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0)),
-                        'src_port': CaptureDataSourceBuilder._to_int(getattr(packet, 'sport', 0)),
-                        'dst_port': CaptureDataSourceBuilder._to_int(getattr(packet, 'dport', 0)),
-                        'info': str(getattr(packet, 'info', '') or ''),
-                        'http_kind': str(metadata.get('http_kind', '') or ''),
-                        'http_request_uri': str(metadata.get('http_request_uri', '') or metadata.get('http_full_request_uri', '') or ''),
-                        'http_latency_ms': CaptureDataSourceBuilder._to_float(metadata.get('http_time_since_request_ms', 0.0)),
-                        'dns_time_ms': CaptureDataSourceBuilder._to_float(metadata.get('dns_time_ms', 0.0)),
-                    }
-                    result.append(packet_dict)
-
-                return result
+                if limit is not None:
+                    return list(cache_rows[:max(1, int(limit))])
+                return list(cache_rows)
             except Exception as e:
                 print(f"Error fetching packets: {e}")
                 return []
@@ -145,54 +225,65 @@ class CaptureDataSourceBuilder:
     @staticmethod
     def create_endpoints_fetcher(capture_view_ref: Any) -> Callable:
         """Create fetcher for endpoint statistics"""
-        def fetch_endpoints() -> List[Dict[str, Any]]:
+        cache_signature = None
+        cache_rows: List[Dict[str, Any]] = []
+
+        def fetch_endpoints(limit: int | None = None) -> List[Dict[str, Any]]:
             """Fetch endpoint statistics"""
+            nonlocal cache_signature, cache_rows
             try:
-                endpoints = {}
+                records = CaptureDataSourceBuilder._iter_records(capture_view_ref)
+                signature = CaptureDataSourceBuilder._records_signature(records)
+                if cache_signature != signature:
+                    endpoints = {}
+                    for packet in records:
+                        src_ip = str(getattr(packet, 'src', '') or '')
+                        dst_ip = str(getattr(packet, 'dst', '') or '')
+                        protocol = str(getattr(packet, 'protocol', '') or '')
+                        length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
 
-                for packet in CaptureDataSourceBuilder._iter_records(capture_view_ref):
-                    src_ip = str(getattr(packet, 'src', '') or '')
-                    dst_ip = str(getattr(packet, 'dst', '') or '')
-                    protocol = str(getattr(packet, 'protocol', '') or '')
-                    length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
+                        if src_ip:
+                            entry = endpoints.setdefault(src_ip, {
+                                'address': src_ip,
+                                'ip': src_ip,
+                                'packets': 0,
+                                'bytes': 0,
+                                'tx_packets': 0,
+                                'rx_packets': 0,
+                                'protocols': set(),
+                            })
+                            entry['packets'] += 1
+                            entry['bytes'] += length
+                            entry['tx_packets'] += 1
+                            if protocol:
+                                entry['protocols'].add(protocol)
 
-                    if src_ip:
-                        entry = endpoints.setdefault(src_ip, {
-                            'address': src_ip,
-                            'ip': src_ip,
-                            'packets': 0,
-                            'bytes': 0,
-                            'tx_packets': 0,
-                            'rx_packets': 0,
-                            'protocols': set(),
-                        })
-                        entry['packets'] += 1
-                        entry['bytes'] += length
-                        entry['tx_packets'] += 1
-                        if protocol:
-                            entry['protocols'].add(protocol)
+                        if dst_ip:
+                            entry = endpoints.setdefault(dst_ip, {
+                                'address': dst_ip,
+                                'ip': dst_ip,
+                                'packets': 0,
+                                'bytes': 0,
+                                'tx_packets': 0,
+                                'rx_packets': 0,
+                                'protocols': set(),
+                            })
+                            entry['packets'] += 1
+                            entry['bytes'] += length
+                            entry['rx_packets'] += 1
+                            if protocol:
+                                entry['protocols'].add(protocol)
 
-                    if dst_ip:
-                        entry = endpoints.setdefault(dst_ip, {
-                            'address': dst_ip,
-                            'ip': dst_ip,
-                            'packets': 0,
-                            'bytes': 0,
-                            'tx_packets': 0,
-                            'rx_packets': 0,
-                            'protocols': set(),
-                        })
-                        entry['packets'] += 1
-                        entry['bytes'] += length
-                        entry['rx_packets'] += 1
-                        if protocol:
-                            entry['protocols'].add(protocol)
+                    result = []
+                    for endpoint in endpoints.values():
+                        endpoint['protocols'] = ', '.join(sorted(endpoint['protocols']))
+                        result.append(endpoint)
+                    cache_rows = result
+                    cache_signature = signature
 
-                result = []
-                for endpoint in endpoints.values():
-                    endpoint['protocols'] = ', '.join(sorted(endpoint['protocols']))
-                    result.append(endpoint)
-                return result
+                if limit is not None:
+                    return list(cache_rows[:max(1, int(limit))])
+                return list(cache_rows)
             except Exception as e:
                 print(f"Error fetching endpoints: {e}")
                 return []
@@ -202,35 +293,46 @@ class CaptureDataSourceBuilder:
     @staticmethod
     def create_conversations_fetcher(capture_view_ref: Any) -> Callable:
         """Create fetcher for conversation data"""
-        def fetch_conversations() -> List[Dict[str, Any]]:
+        cache_signature = None
+        cache_rows: List[Dict[str, Any]] = []
+
+        def fetch_conversations(limit: int | None = None) -> List[Dict[str, Any]]:
             """Fetch conversation statistics"""
+            nonlocal cache_signature, cache_rows
             try:
-                conversations = {}
+                records = CaptureDataSourceBuilder._iter_records(capture_view_ref)
+                signature = CaptureDataSourceBuilder._records_signature(records)
+                if cache_signature != signature:
+                    conversations = {}
+                    for packet in records:
+                        src_ip = str(getattr(packet, 'src', '') or '')
+                        dst_ip = str(getattr(packet, 'dst', '') or '')
+                        protocol = str(getattr(packet, 'protocol', '') or '')
+                        length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
 
-                for packet in CaptureDataSourceBuilder._iter_records(capture_view_ref):
-                    src_ip = str(getattr(packet, 'src', '') or '')
-                    dst_ip = str(getattr(packet, 'dst', '') or '')
-                    protocol = str(getattr(packet, 'protocol', '') or '')
-                    length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
+                        ips = sorted([src_ip, dst_ip])
+                        if ips[0] and ips[1]:
+                            key = f"{ips[0]}<->{ips[1]}:{protocol}"
 
-                    ips = sorted([src_ip, dst_ip])
-                    if ips[0] and ips[1]:
-                        key = f"{ips[0]}<->{ips[1]}:{protocol}"
+                            if key not in conversations:
+                                conversations[key] = {
+                                    'conversation': f"{ips[0]} <-> {ips[1]} ({protocol or 'UNKNOWN'})",
+                                    'src_ip': ips[0],
+                                    'dst_ip': ips[1],
+                                    'protocol': protocol,
+                                    'packets': 0,
+                                    'bytes': 0,
+                                }
 
-                        if key not in conversations:
-                            conversations[key] = {
-                                'conversation': f"{ips[0]} <-> {ips[1]} ({protocol or 'UNKNOWN'})",
-                                'src_ip': ips[0],
-                                'dst_ip': ips[1],
-                                'protocol': protocol,
-                                'packets': 0,
-                                'bytes': 0,
-                            }
+                            conversations[key]['packets'] += 1
+                            conversations[key]['bytes'] += length
 
-                        conversations[key]['packets'] += 1
-                        conversations[key]['bytes'] += length
+                    cache_rows = list(conversations.values())
+                    cache_signature = signature
 
-                return list(conversations.values())
+                if limit is not None:
+                    return list(cache_rows[:max(1, int(limit))])
+                return list(cache_rows)
             except Exception as e:
                 print(f"Error fetching conversations: {e}")
                 return []
@@ -240,26 +342,37 @@ class CaptureDataSourceBuilder:
     @staticmethod
     def create_protocol_stats_fetcher(capture_view_ref: Any) -> Callable:
         """Create fetcher for protocol statistics"""
-        def fetch_protocol_stats() -> List[Dict[str, Any]]:
+        cache_signature = None
+        cache_rows: List[Dict[str, Any]] = []
+
+        def fetch_protocol_stats(limit: int | None = None) -> List[Dict[str, Any]]:
             """Fetch protocol distribution"""
+            nonlocal cache_signature, cache_rows
             try:
-                protocols = {}
+                records = CaptureDataSourceBuilder._iter_records(capture_view_ref)
+                signature = CaptureDataSourceBuilder._records_signature(records)
+                if cache_signature != signature:
+                    protocols = {}
+                    for packet in records:
+                        protocol = str(getattr(packet, 'protocol', 'Unknown') or 'Unknown')
+                        length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
 
-                for packet in CaptureDataSourceBuilder._iter_records(capture_view_ref):
-                    protocol = str(getattr(packet, 'protocol', 'Unknown') or 'Unknown')
-                    length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
+                        if protocol not in protocols:
+                            protocols[protocol] = {
+                                'protocol': protocol,
+                                'packets': 0,
+                                'bytes': 0,
+                            }
 
-                    if protocol not in protocols:
-                        protocols[protocol] = {
-                            'protocol': protocol,
-                            'packets': 0,
-                            'bytes': 0,
-                        }
+                        protocols[protocol]['packets'] += 1
+                        protocols[protocol]['bytes'] += length
 
-                    protocols[protocol]['packets'] += 1
-                    protocols[protocol]['bytes'] += length
+                    cache_rows = list(protocols.values())
+                    cache_signature = signature
 
-                return list(protocols.values())
+                if limit is not None:
+                    return list(cache_rows[:max(1, int(limit))])
+                return list(cache_rows)
             except Exception as e:
                 print(f"Error fetching protocol stats: {e}")
                 return []

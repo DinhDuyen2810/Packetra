@@ -38,7 +38,13 @@ class QueryEngine:
     def __init__(self, data_source_registry: DataSourceRegistry):
         self.registry = data_source_registry
     
-    def execute(self, data_source: str, query: WidgetQuery, global_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    def execute(
+        self,
+        data_source: str,
+        query: WidgetQuery,
+        global_filter: Optional[str] = None,
+        prefetched_data: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Execute a query on a data source.
         
@@ -50,12 +56,14 @@ class QueryEngine:
         Returns:
             List of result rows (dicts)
         """
-        fetcher = self.registry.get_fetcher(data_source)
-        if not fetcher:
-            raise ValueError(f"Unknown data source: {data_source}")
-        
-        # Fetch raw data
-        data = fetcher()
+        if prefetched_data is None:
+            fetcher = self.registry.get_fetcher(data_source)
+            if not fetcher:
+                raise ValueError(f"Unknown data source: {data_source}")
+            data = fetcher()
+        else:
+            data = list(prefetched_data)
+
         if not data:
             return []
         

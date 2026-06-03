@@ -10,13 +10,54 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStackedWidget,
     QMenu, QApplication
 )
-from PySide6.QtCore import Qt, Signal, QSize, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QColor, QFont
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QRectF
+from PySide6.QtGui import QIcon, QPixmap, QColor, QFont, QPainter
 from typing import List, Callable, Optional
 import json
 
 from .models import Dashboard, DashboardSummary, DashboardLayout, dashboard_to_summary
 from .repository import DashboardRepository, DashboardTemplateRepository
+
+
+class _ScaledPixmapWidget(QWidget):
+    def __init__(self, pixmap: QPixmap, *, cover: bool = True, parent=None):
+        super().__init__(parent)
+        self._pixmap = pixmap
+        self._cover = cover
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def sizeHint(self):
+        if self._pixmap.isNull():
+            return QSize(240, 180)
+        return self._pixmap.size() / max(1.0, self._pixmap.devicePixelRatio())
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._pixmap.isNull():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        source_width = self._pixmap.width() / max(1.0, self._pixmap.devicePixelRatio())
+        source_height = self._pixmap.height() / max(1.0, self._pixmap.devicePixelRatio())
+        if source_width <= 0 or source_height <= 0:
+            return
+
+        target_width = max(1, self.width())
+        target_height = max(1, self.height())
+        scale_x = target_width / source_width
+        scale_y = target_height / source_height
+        scale = max(scale_x, scale_y) if self._cover else min(scale_x, scale_y)
+        draw_width = source_width * scale
+        draw_height = source_height * scale
+        target_rect = QRectF(
+            (target_width - draw_width) / 2.0,
+            (target_height - draw_height) / 2.0,
+            draw_width,
+            draw_height,
+        )
+        painter.drawPixmap(target_rect, self._pixmap, QRectF(0, 0, source_width, source_height))
+        painter.end()
 
 
 class DashboardCard(QFrame):
@@ -28,12 +69,15 @@ class DashboardCard(QFrame):
     more_clicked = Signal(str, QWidget)  # dashboard ID, widget position
     
     def __init__(self, summary: DashboardSummary, is_template: bool = False,
-                 preview_widget: Optional[QWidget] = None, subtitle: Optional[str] = None):
+                 preview_widget: Optional[QWidget] = None, subtitle: Optional[str] = None,
+                 single_click_enabled: bool = True, thumbnail_interactive: bool = True):
         super().__init__()
         self.summary = summary
         self.is_template = is_template
         self.preview_widget = preview_widget
         self.subtitle = subtitle
+        self.single_click_enabled = single_click_enabled
+        self.thumbnail_interactive = thumbnail_interactive
         self.setup_ui()
     
     def setup_ui(self):
@@ -68,7 +112,12 @@ class DashboardCard(QFrame):
         header_layout.addWidget(title_label)
         header_layout.addStretch()
 
-        if not self.is_template:
+        if self.is_template:
+            use_btn = QPushButton("Use Template")
+            use_btn.setMinimumHeight(28)
+            use_btn.clicked.connect(lambda: self.use_template_clicked.emit(self.summary.id))
+            header_layout.addWidget(use_btn)
+        else:
             more_btn = QPushButton("⋮")
             more_btn.setMaximumWidth(32)
             more_btn.clicked.connect(lambda: self.more_clicked.emit(self.summary.id, more_btn))
@@ -77,13 +126,13 @@ class DashboardCard(QFrame):
         layout.addLayout(header_layout)
         
         # Description
-        if self.summary.description:
+        if self.summary.description and not self.is_template:
             desc_label = QLabel(self.summary.description)
             desc_label.setWordWrap(True)
             desc_label.setStyleSheet("color: #666; font-size: 9pt;")
             layout.addWidget(desc_label)
 
-        if self.subtitle:
+        if self.subtitle and not self.is_template:
             subtitle_label = QLabel(self.subtitle)
             subtitle_label.setStyleSheet("color: #999; font-size: 8pt;")
             subtitle_label.setWordWrap(True)
@@ -91,10 +140,15 @@ class DashboardCard(QFrame):
         
         # Thumbnail / live preview
         thumbnail_frame = QFrame()
-        thumbnail_frame.setStyleSheet("background-color: #e8e8e8; border: 1px solid #ccc; border-radius: 2px;")
-        thumbnail_frame.setMinimumHeight(100)
+        self.thumbnail_frame = thumbnail_frame
+        if self.is_template:
+            thumbnail_frame.setStyleSheet("background-color: transparent; border: none;")
+            thumbnail_frame.setMinimumHeight(170)
+        else:
+            thumbnail_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #d9d9d9; border-radius: 6px;")
+            thumbnail_frame.setMinimumHeight(120)
         thumbnail_layout = QVBoxLayout(thumbnail_frame)
-        thumbnail_layout.setContentsMargins(4, 4, 4, 4)
+        thumbnail_layout.setContentsMargins(4 if self.is_template else 8, 4 if self.is_template else 8, 4 if self.is_template else 8, 4 if self.is_template else 8)
         if self.preview_widget is not None:
             self.preview_widget.setParent(thumbnail_frame)
             thumbnail_layout.addWidget(self.preview_widget)
@@ -103,64 +157,51 @@ class DashboardCard(QFrame):
             placeholder_label.setAlignment(Qt.AlignCenter)
             placeholder_label.setStyleSheet("color: #888; font-size: 9pt;")
             thumbnail_layout.addWidget(placeholder_label)
-        layout.addWidget(thumbnail_frame)
+        layout.addWidget(thumbnail_frame, 1 if self.is_template else 0)
         
         # Stats
-        stats_layout = QHBoxLayout()
-        
-        widgets_label = QLabel(f"Widgets: {self.summary.widget_count}")
-        widgets_label.setStyleSheet("font-size: 9pt; color: #333;")
-        stats_layout.addWidget(widgets_label)
-        
-        types_str = ", ".join(self.summary.visualization_types[:3])
-        if len(self.summary.visualization_types) > 3:
-            types_str += "..."
-        types_label = QLabel(f"Types: {types_str}")
-        types_label.setStyleSheet("font-size: 9pt; color: #666;")
-        stats_layout.addWidget(types_label)
-        
-        stats_layout.addStretch()
-        
-        updated_label = QLabel(f"Updated: {self.summary.updated_at[:10]}")
-        updated_label.setStyleSheet("font-size: 8pt; color: #999;")
-        stats_layout.addWidget(updated_label)
-        
-        layout.addLayout(stats_layout)
-        
-        # Badge
-        badge_layout = QHBoxLayout()
-        badge_text = "Template" if self.summary.is_template else "Custom"
-        if self.summary.source_template_id and not self.summary.is_template:
-            badge_text = "Custom (from template)"
-        
-        badge_label = QLabel(f"[{badge_text}]")
-        badge_label.setStyleSheet(f"font-size: 8pt; color: #0066cc; font-weight: bold;")
-        badge_layout.addWidget(badge_label)
-        badge_layout.addStretch()
-        layout.addLayout(badge_layout)
-        
-        # Action buttons
-        button_layout = QHBoxLayout()
-        
-        if self.is_template:
-            use_btn = QPushButton("Use Template")
-            use_btn.setMinimumHeight(32)
-            use_btn.clicked.connect(lambda: self.use_template_clicked.emit(self.summary.id))
-            button_layout.addWidget(use_btn)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
+        if not self.is_template:
+            stats_layout = QHBoxLayout()
+
+            widgets_label = QLabel(f"Widgets: {self.summary.widget_count}")
+            widgets_label.setStyleSheet("font-size: 9pt; color: #333;")
+            stats_layout.addWidget(widgets_label)
+
+            stats_layout.addStretch()
+
+            updated_label = QLabel(f"Updated: {self.summary.updated_at[:10]}")
+            updated_label.setStyleSheet("font-size: 8pt; color: #999;")
+            stats_layout.addWidget(updated_label)
+
+            layout.addLayout(stats_layout)
         
         layout.addStretch()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.is_template or not hasattr(self, "thumbnail_frame") or self.thumbnail_frame is None:
+            return
+        side = max(260, min(self.width() - 16, 400))
+        self.thumbnail_frame.setMinimumHeight(side)
+        self.thumbnail_frame.setMaximumHeight(side)
+
+    def _event_targets_thumbnail(self, event) -> bool:
+        if not self.thumbnail_interactive:
+            return False
+        if not hasattr(self, "thumbnail_frame") or self.thumbnail_frame is None:
+            return False
+        child = self.childAt(event.position().toPoint()) if hasattr(event, "position") else self.childAt(event.pos())
+        return child is self.thumbnail_frame or (child is not None and self.thumbnail_frame.isAncestorOf(child))
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if self.single_click_enabled and event.button() == Qt.LeftButton and not self._event_targets_thumbnail(event):
             self.clicked.emit(self.summary.id)
         super().mousePressEvent(event)
     
     def mouseDoubleClickEvent(self, event):
         """Handle double-click to open dashboard"""
-        self.double_clicked.emit(self.summary.id)
+        if not self._event_targets_thumbnail(event):
+            self.double_clicked.emit(self.summary.id)
         super().mouseDoubleClickEvent(event)
     
     def get_context_menu_position(self) -> QSize:
@@ -283,19 +324,6 @@ class DashboardOverviewDialog(QDialog):
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
         
-        # Templates section
-        self.templates_label = QLabel("Chart Templates")
-        templates_font = QFont()
-        templates_font.setBold(True)
-        templates_font.setPointSize(11)
-        self.templates_label.setFont(templates_font)
-        self.content_layout.addWidget(self.templates_label)
-        
-        self.templates_grid_widget = QWidget()
-        self.templates_grid = QGridLayout(self.templates_grid_widget)
-        self.templates_grid.setSpacing(12)
-        self.content_layout.addWidget(self.templates_grid_widget)
-        
         # User dashboards section
         self.user_label = QLabel("My Dashboards")
         user_font = QFont()
@@ -308,6 +336,19 @@ class DashboardOverviewDialog(QDialog):
         self.user_grid = QGridLayout(self.user_grid_widget)
         self.user_grid.setSpacing(12)
         self.content_layout.addWidget(self.user_grid_widget)
+
+        # Templates section
+        self.templates_label = QLabel("Chart Templates")
+        templates_font = QFont()
+        templates_font.setBold(True)
+        templates_font.setPointSize(11)
+        self.templates_label.setFont(templates_font)
+        self.content_layout.addWidget(self.templates_label)
+
+        self.templates_grid_widget = QWidget()
+        self.templates_grid = QGridLayout(self.templates_grid_widget)
+        self.templates_grid.setSpacing(12)
+        self.content_layout.addWidget(self.templates_grid_widget)
         
         self.content_layout.addStretch()
         scroll_area.setWidget(self.content_widget)
@@ -442,8 +483,9 @@ class DashboardOverviewDialog(QDialog):
             card = DashboardCard(
                 summary,
                 is_template=True,
-                preview_widget=self._create_preview_widget(template_dashboard),
-                subtitle="Click to preview here. Use Template to add this chart to your dashboards.",
+                preview_widget=self._create_preview_widget(template_dashboard, pass_through=False),
+                single_click_enabled=True,
+                thumbnail_interactive=False,
             )
             card.clicked.connect(self.on_view_template)
             card.use_template_clicked.connect(self.on_use_template)
@@ -474,10 +516,11 @@ class DashboardOverviewDialog(QDialog):
             card = DashboardCard(
                 dashboard,
                 is_template=False,
-                preview_widget=self._create_dashboard_preview_widget(dashboard_model) if dashboard_model else None,
-                subtitle="Miniature of your full dashboard. Click to open it directly.",
+                preview_widget=self._create_dashboard_preview_widget(dashboard_model, pass_through=True) if dashboard_model else None,
+                subtitle=None,
+                single_click_enabled=False,
+                thumbnail_interactive=False,
             )
-            card.clicked.connect(self.on_open_dashboard)
             card.double_clicked.connect(self.on_open_dashboard)
             card.more_clicked.connect(self.on_card_more_clicked)
             
@@ -575,9 +618,11 @@ class DashboardOverviewDialog(QDialog):
             "categoryField": visualization.category_field,
             "valueField": visualization.value_field,
             "seriesField": visualization.series_field,
-            "showLegend": False,
-            "showLabels": False,
+            "showLegend": visualization.show_legend,
+            "showLabels": visualization.show_labels,
             "compactMode": compact_mode,
+            "showChartAnnotations": True,
+            "showChartContext": False,
         }
         if display_mode == "table":
             config["type"] = "table"
@@ -599,7 +644,7 @@ class DashboardOverviewDialog(QDialog):
         dashboard: Optional[Dashboard],
         *,
         compact_mode: bool = True,
-        fixed_height: Optional[int] = 120,
+        fixed_height: Optional[int] = 210,
         pass_through: bool = True,
         display_mode: Optional[str] = None,
     ) -> Optional[QWidget]:
@@ -617,6 +662,41 @@ class DashboardOverviewDialog(QDialog):
             renderer = self.viz_registry.get_renderer(render_type)
             if renderer is None:
                 return None
+            if compact_mode and fixed_height is not None and render_type == "metric":
+                preview = renderer(
+                    data,
+                    self._preview_config(widget_model, compact_mode=False, display_mode=display_mode),
+                    None,
+                )
+                preview.setMinimumHeight(fixed_height)
+                preview.setMaximumHeight(fixed_height)
+                preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                return preview
+            if compact_mode and fixed_height is not None:
+                source_height = max(320, fixed_height * 3)
+                source_width = max(520, int(source_height * (1.55 if render_type == "metric" else 1.75)))
+                live_preview = renderer(
+                    data,
+                    self._preview_config(widget_model, compact_mode=False, display_mode=display_mode),
+                    None,
+                )
+                live_preview.setAttribute(Qt.WA_DontShowOnScreen, True)
+                live_preview.resize(source_width, source_height)
+                live_preview.ensurePolished()
+                if live_preview.layout() is not None:
+                    live_preview.layout().activate()
+                live_preview.show()
+                QApplication.processEvents()
+                snapshot = live_preview.grab()
+                live_preview.hide()
+                live_preview.deleteLater()
+
+                preview = _ScaledPixmapWidget(snapshot, cover=False)
+                preview.setMinimumHeight(fixed_height)
+                preview.setMaximumHeight(fixed_height)
+                preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                return preview
+
             preview = renderer(
                 data,
                 self._preview_config(widget_model, compact_mode=compact_mode, display_mode=display_mode),
@@ -634,69 +714,66 @@ class DashboardOverviewDialog(QDialog):
         except Exception:
             return None
 
-    def _create_dashboard_preview_widget(self, dashboard: Optional[Dashboard]) -> Optional[QWidget]:
-        """Render a miniature of the whole dashboard instead of only the first widget."""
+    def _create_dashboard_preview_widget(self, dashboard: Optional[Dashboard], *, pass_through: bool = True) -> Optional[QWidget]:
+        """Render a miniature of the whole dashboard as one scaled snapshot."""
         if dashboard is None or not dashboard.widgets:
             return None
         if len(dashboard.widgets) == 1:
-            return self._create_preview_widget(dashboard)
+            return self._create_preview_widget(dashboard, pass_through=pass_through)
 
-        preview = QWidget()
-        preview_layout = QGridLayout(preview)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.setSpacing(4)
+        columns = max(1, int(getattr(dashboard.layout, 'columns', 12) or 12))
+        row_height = max(88, int(getattr(dashboard.layout, 'row_height', 80) or 80) + 8)
+        cell_width = max(64, int(row_height * 0.72))
+        gutter = 12
+        min_col = min(int(getattr(widget.layout, 'x', 0) or 0) for widget in dashboard.widgets)
+        max_col = max(int(getattr(widget.layout, 'x', 0) or 0) + max(1, int(getattr(widget.layout, 'w', 1) or 1)) for widget in dashboard.widgets)
+        min_row = min(int(getattr(widget.layout, 'y', 0) or 0) for widget in dashboard.widgets)
+        max_row = max(int(getattr(widget.layout, 'y', 0) or 0) + max(1, int(getattr(widget.layout, 'h', 1) or 1)) for widget in dashboard.widgets)
+        source_width = max(1, (max_col - min_col) * cell_width)
+        source_height = max(1, (max_row - min_row) * row_height)
 
-        ordered_widgets = sorted(
-            dashboard.widgets,
-            key=lambda widget: (
-                int(getattr(widget.layout, 'y', 0) or 0),
-                int(getattr(widget.layout, 'x', 0) or 0),
-                widget.id,
-            ),
-        )
+        canvas = QWidget()
+        canvas.setAttribute(Qt.WA_DontShowOnScreen, True)
+        canvas.setStyleSheet("background-color: transparent;")
+        canvas.resize(source_width, source_height)
 
-        for widget_model in ordered_widgets:
-            widget_dashboard = Dashboard(
-                schema_version=dashboard.schema_version,
-                dashboard_id=f"{dashboard.dashboard_id}:{widget_model.id}",
-                name=widget_model.title,
-                description=widget_model.description,
-                is_template=dashboard.is_template,
-                created_at=dashboard.created_at,
-                updated_at=dashboard.updated_at,
-                layout=dashboard.layout,
-                widgets=[widget_model],
-                source_template_id=dashboard.source_template_id,
-                global_filter=dashboard.global_filter,
-                time_range=dashboard.time_range,
-                data_scope=dashboard.data_scope,
-                tags=list(dashboard.tags),
-                thumbnail=dashboard.thumbnail,
-            )
-            widget_preview = self._create_preview_widget(
-                widget_dashboard,
-                compact_mode=True,
-                fixed_height=84,
-                pass_through=True,
-            )
-            if widget_preview is None:
-                widget_preview = QLabel(widget_model.title)
-                widget_preview.setAlignment(Qt.AlignCenter)
-                widget_preview.setStyleSheet("color: #888; font-size: 8pt;")
+        for widget_model in dashboard.widgets:
+            try:
+                data = self.query_engine.execute(
+                    data_source=widget_model.data_source,
+                    query=widget_model.query,
+                    global_filter=None,
+                )
+                render_type = widget_model.visualization.type
+                renderer = self.viz_registry.get_renderer(render_type)
+                if renderer is None:
+                    continue
+                preview_widget = renderer(
+                    data,
+                    self._preview_config(widget_model, compact_mode=False),
+                    canvas,
+                )
+            except Exception:
+                continue
 
-            frame = QFrame()
-            frame.setStyleSheet("background-color: #ffffff; border: 1px solid #ddd; border-radius: 3px;")
-            frame_layout = QVBoxLayout(frame)
-            frame_layout.setContentsMargins(4, 4, 4, 4)
-            frame_layout.setSpacing(2)
-            frame_layout.addWidget(widget_preview)
-            title = QLabel(widget_model.title)
-            title.setStyleSheet("color: #666; font-size: 8pt;")
-            title.setAlignment(Qt.AlignCenter)
-            frame_layout.addWidget(title)
             layout = widget_model.layout
-            preview_layout.addWidget(frame, layout.y, layout.x, layout.h, layout.w)
+            x = (int(getattr(layout, 'x', 0) or 0) - min_col) * cell_width
+            y = (int(getattr(layout, 'y', 0) or 0) - min_row) * row_height
+            width = max(1, int(getattr(layout, 'w', 1) or 1)) * cell_width
+            height = max(1, int(getattr(layout, 'h', 1) or 1)) * row_height
+            preview_widget.setParent(canvas)
+            preview_widget.setGeometry(x + (gutter // 2), y + (gutter // 2), max(1, width - gutter), max(1, height - gutter))
+            preview_widget.show()
 
+        canvas.show()
+        QApplication.processEvents()
+        snapshot = canvas.grab()
+        canvas.hide()
+        canvas.deleteLater()
+
+        preview = _ScaledPixmapWidget(snapshot, cover=False)
+        if pass_through:
+            self._make_preview_pass_through(preview)
         return preview
 
     def _render_detail_dashboard(self):
