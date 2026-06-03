@@ -312,6 +312,7 @@ class WidgetEditorDialog(QDialog):
     CORE_SHARED_FIELDS = ["time", "protocol", "bytes", "packets", "packet"]
     SINGLE_SOURCE_CHARTS = {"metric", "histogram", "pie", "donut", "radar", "treemap", "sunburst"}
     PROPORTION_SOURCE_CHARTS = {"pie", "donut", "radar", "treemap", "sunburst"}
+    HIERARCHY_PROTOCOL_CHARTS = {"treemap", "sunburst"}
     DOUBLE_SOURCE_CHARTS = {"bar", "horizontal_bar", "line", "area", "scatter", "heatmap", "table"}
     ASSIGNMENT_LABELS = {
         "x_field": "X Axis",
@@ -1436,6 +1437,20 @@ class WidgetEditorDialog(QDialog):
         self._clear_combo_text(self.metric_field_combo)
 
         if chart_type in self.PROPORTION_SOURCE_CHARTS:
+            if chart_type in self.HIERARCHY_PROTOCOL_CHARTS:
+                category_field = single_field or primary_field or "conversation"
+                protocol_field = self._preferred_protocol_field()
+                direct_total_field = self._preferred_single_source_total_field(category_field, current_value_field)
+                self._set_combo_to_text(self.category_field_combo, category_field or "")
+                self._set_combo_to_text(self.series_field_combo, protocol_field or "protocol")
+                self.metric_type_combo.blockSignals(True)
+                self.metric_type_combo.setCurrentText("none")
+                self.metric_type_combo.blockSignals(False)
+                self._set_combo_to_text(self.value_field_combo, direct_total_field or current_value_field or "packets")
+                self.group_by_input.setText("")
+                selected_columns = [field for field in [category_field, protocol_field, direct_total_field or current_value_field or "packets"] if field]
+                self.columns_input.setText(", ".join(dict.fromkeys(selected_columns)))
+                return
             category_field = single_field or primary_field
             direct_total_field = self._preferred_single_source_total_field(category_field, current_value_field)
             self._set_combo_to_text(self.category_field_combo, category_field or "")
@@ -1525,6 +1540,10 @@ class WidgetEditorDialog(QDialog):
         visualization = self._working_copy.visualization
         metric = query.metrics[0] if query.metrics else None
 
+        if chart_type in self.HIERARCHY_PROTOCOL_CHARTS:
+            source_field = visualization.category_field or ((query.columns or [""])[0] if query.columns else "")
+            self._set_combo_to_text(self.single_source_field_combo, source_field)
+            return
         if chart_type in self.PROPORTION_SOURCE_CHARTS:
             source_field = visualization.category_field or ((query.group_by or [""])[0])
             self._set_combo_to_text(self.single_source_field_combo, source_field)

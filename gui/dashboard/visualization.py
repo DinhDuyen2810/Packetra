@@ -1133,6 +1133,16 @@ def _build_grouped_items(
     return list(grouped.values())
 
 
+def _preferred_treemap_group_field(data: List[Dict[str, Any]], config: Dict[str, Any]) -> Optional[str]:
+    """Prefer protocol grouping for treemap-like charts when the field exists."""
+    config = config or {}
+    for candidate in ("protocol", "frame.protocol"):
+        if any(str(row.get(candidate, "") or "").strip() for row in data):
+            return candidate
+    series_field = str(config.get("seriesField") or "").strip()
+    return series_field or None
+
+
 def _format_x_value(value: float, *, is_datetime: bool) -> str:
     if is_datetime:
         return QDateTime.fromMSecsSinceEpoch(int(value)).toString("hh:mm:ss")
@@ -2070,6 +2080,10 @@ class TreemapRenderer:
 
     @staticmethod
     def render(data: List[Dict], config: Dict[str, Any], parent: QWidget = None) -> QWidget:
+        config = dict(config or {})
+        protocol_group_field = _preferred_treemap_group_field(data, config)
+        if protocol_group_field:
+            config["seriesField"] = protocol_group_field
         groups = _build_grouped_items(data, config, fallback_group="Items", split_without_group=True)
         if not groups:
             return _empty_widget("Treemap needs categories and values", parent)
@@ -2103,6 +2117,10 @@ class SunburstRenderer:
 
     @staticmethod
     def render(data: List[Dict], config: Dict[str, Any], parent: QWidget = None) -> QWidget:
+        config = dict(config or {})
+        protocol_group_field = _preferred_treemap_group_field(data, config)
+        if protocol_group_field:
+            config["seriesField"] = protocol_group_field
         groups = _build_grouped_items(data, config, fallback_group="Items")
         if not groups:
             return _empty_widget("Sunburst needs grouped values", parent)

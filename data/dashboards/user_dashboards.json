@@ -186,7 +186,7 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-03T16:57:50.521565",
-      "updated_at": "2026-06-03T23:16:31.938507",
+      "updated_at": "2026-06-04T02:01:36.779751",
       "layout": {
         "columns": 12,
         "row_height": 80
@@ -616,6 +616,7 @@
             "time_bucket": null,
             "columns": [
               "conversation",
+              "protocol",
               "packets"
             ]
           },
@@ -625,7 +626,7 @@
             "y_field": null,
             "category_field": "conversation",
             "value_field": "packets",
-            "series_field": null,
+            "series_field": "protocol",
             "show_legend": true,
             "show_labels": false
           },
