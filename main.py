@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import sys
 
@@ -11,10 +11,12 @@ if qt_rules:
 else:
     os.environ['QT_LOGGING_RULES'] = extra_qt_rules
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from gui.application import ApplicationWindow
-from utils.system_check import is_npcap_installed, install_npcap
+from utils.system_check import is_npcap_installed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,41 +36,20 @@ def ensure_npcap():
     if is_npcap_installed():
         return True
 
-    reply = QMessageBox.question(
-        None,
-        'Npcap Required',
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle('Npcap Required')
+    msg.setText(
         'Npcap chưa được cài đặt hoặc không hoạt động.\n'
-        'Bạn có muốn cài tự động không?',
-        QMessageBox.Yes | QMessageBox.No,
+        'Ứng dụng cần Npcap để bắt gói tin trên Windows.'
     )
+    msg.setInformativeText('Tải Npcap tại: https://npcap.com/')
+    open_button = msg.addButton('Open Npcap Website', QMessageBox.AcceptRole)
+    msg.addButton('Exit', QMessageBox.RejectRole)
+    msg.exec()
 
-    if reply != QMessageBox.Yes:
-        QMessageBox.warning(
-            None,
-            'Warning',
-            'Ứng dụng cần Npcap để hoạt động trên Windows.\n'
-            'Vui lòng cài đặt rồi chạy lại.'
-        )
-        return False
-
-    ok = install_npcap()
-
-    if not ok:
-        QMessageBox.critical(
-            None,
-            'Error',
-            'Không thể khởi chạy trình cài đặt Npcap.\n'
-            'Hãy thử chạy ứng dụng bằng quyền Administrator.'
-        )
-        return False
-
-    QMessageBox.information(
-        None,
-        'Installing Npcap',
-        'Trình cài đặt Npcap đã được mở.\n'
-        'Vui lòng hoàn tất cài đặt (bấm Yes nếu có UAC),\n'
-        'sau đó mở lại ứng dụng.'
-    )
+    if msg.clickedButton() == open_button:
+        QDesktopServices.openUrl(QUrl('https://npcap.com/'))
 
     return False
 
@@ -100,3 +81,4 @@ if __name__ == '__main__':
     window.show()
 
     sys.exit(app.exec())
+

@@ -43,6 +43,10 @@ def _iat_stats(values: list[float]) -> tuple[float, float, float, float]:
     return float(numpy.mean(arr)), float(numpy.sqrt(numpy.var(arr))), float(max(arr)), float(min(arr))
 
 
+CLUMP_TIMEOUT = 1.0
+ACTIVE_TIMEOUT = 5.0
+
+
 @dataclass
 class PacketMeta:
     timestamp: float
@@ -80,7 +84,8 @@ class PacketraFlow:
         self._active_periods: list[float] = []
         self._idle_periods: list[float] = []
         self._last_ts: float | None = None
-        self._active_start_ts: float | None = None
+        self._active_start_ts: float = self.start_time
+        self._last_active: float = 0.0
         self._init_win_fwd = 0
         self._init_win_bwd = 0
         self._subflow_fwd = 0
@@ -110,6 +115,10 @@ class PacketraFlow:
 
     @property
     def flow_id(self) -> str:
+        # Preserve the first-observed packet orientation so Flow ID stays aligned
+        # with Src/Dst fields and CICFlowMeter-style output.
+        if self.initiator_src_ip and self.initiator_dst_ip:
+            return f"{self.initiator_src_ip}-{self.initiator_dst_ip}-{self.initiator_src_port}-{self.initiator_dst_port}-{self.key.protocol}"
         return self.key.flow_id()
 
     @property
@@ -118,7 +127,9 @@ class PacketraFlow:
 
     @property
     def duration(self) -> float:
-        return max(0.0, self.end_time - self.start_time)
+        if not self._all_times:
+            return 0.0
+        return max(0.0, max(float(ts) - self.start_time for ts in self._all_times))
 
     @property
     def tcp_terminated(self) -> bool:
@@ -179,10 +190,12 @@ class PacketraFlow:
         if flags & 0x04:
             self._rst_seen = True
 
-        # Keep CIC source parity: active/idle arrays are effectively not updated
-        # in normal path due timestamp handling in original implementation.
-        if self._active_start_ts is None:
-            self._active_start_ts = ts
+        # CICFlowMeter updates latest_timestamp before the active/idle check,
+        # which makes the effective delta zero for the current packet.
+        # Keep that behavior so our exported values stay aligned with the reference.
+        last_timestamp = self.end_time
+        if (ts - last_timestamp) > CLUMP_TIMEOUT:
+            self._update_active_idle(ts - last_timestamp)
         self._last_ts = ts
         self._all_times.append(ts)
         if is_forward:
@@ -197,8 +210,18 @@ class PacketraFlow:
     def _iat(self, times: list[float]) -> list[float]:
         if len(times) <= 1:
             return []
-        sorted_times = sorted(times)
-        return [max(0.0, sorted_times[i] - sorted_times[i - 1]) for i in range(1, len(sorted_times))]
+        return [float(times[i]) - float(times[i - 1]) for i in range(1, len(times))]
+
+    def _update_active_idle(self, current_time: float) -> None:
+        if (current_time - self._last_active) > ACTIVE_TIMEOUT:
+            duration = abs(self._last_active - self._active_start_ts)
+            if duration > 0:
+                self._active_periods.append(duration)
+            self._idle_periods.append(current_time - self._last_active)
+            self._active_start_ts = current_time
+            self._last_active = current_time
+        else:
+            self._last_active = current_time
 
     def _flag_count(self, bit: int) -> int:
         return sum(1 for p in self.packets if (p.flags & bit) != 0)
@@ -264,7 +287,7 @@ class PacketraFlow:
                     self._backward_bulk_last_timestamp = ts
 
     def to_features(self) -> dict[str, Any]:
-        duration_s = max(0.0, self.end_time - self.start_time)
+        duration_s = self.duration
         duration_us = int(round(duration_s * 1_000_000.0))
         total_pkts = len(self.packets)
         fwd_pkts = [p for p in self.packets if p.direction == "fwd"]
@@ -372,7 +395,7 @@ class PacketraFlow:
             "PSH Flag Count": self._flag_count(0x08),
             "ACK Flag Count": self._flag_count(0x10),
             "URG Flag Count": self._flag_count(0x20),
-            "CWE Flag Count": self._flag_count(0x80),
+            "CWE Flag Count": int(sum(1 for p in fwd_pkts if p.flags & 0x20)),
             "ECE Flag Count": self._flag_count(0x40),
             "Down/Up Ratio": down_up_ratio,
             "Average Packet Size": avg_packet_size,

@@ -153,7 +153,6 @@ CIC_COMPAT_HEADER = [
     "Average Packet Size",
     "Avg Fwd Segment Size",
     "Avg Bwd Segment Size",
-    "Fwd Header Length",
     "Fwd Avg Bytes/Bulk",
     "Fwd Avg Packets/Bulk",
     "Fwd Avg Bulk Rate",
@@ -188,10 +187,10 @@ CIC_LEGACY_HEADER = [
     "fwd_header_len", "bwd_header_len", "fwd_pkts_s", "bwd_pkts_s", "pkt_len_min", "pkt_len_max",
     "pkt_len_mean", "pkt_len_std", "pkt_len_var", "fin_flag_cnt", "syn_flag_cnt", "rst_flag_cnt",
     "psh_flag_cnt", "ack_flag_cnt", "urg_flag_cnt", "cwr_flag_count", "ece_flag_cnt", "down_up_ratio",
-    "pkt_size_avg", "fwd_seg_size_avg", "bwd_seg_size_avg", "", "fwd_byts_b_avg", "fwd_pkts_b_avg",
+    "pkt_size_avg", "fwd_seg_size_avg", "bwd_seg_size_avg", "fwd_byts_b_avg", "fwd_pkts_b_avg",
     "fwd_blk_rate_avg", "bwd_byts_b_avg", "bwd_pkts_b_avg", "bwd_blk_rate_avg", "subflow_fwd_pkts",
     "subflow_fwd_byts", "subflow_bwd_pkts", "subflow_bwd_byts", "init_fwd_win_byts", "init_bwd_win_byts",
-    "fwd_act_data_pkts", "fwd_seg_size_min", "active_mean", "active_std", "active_max", "active_min",
+    "act_data_pkt_fwd", "min_seg_size_forward", "active_mean", "active_std", "active_max", "active_min",
     "idle_mean", "idle_std", "idle_max", "idle_min",
 ]
 
@@ -240,13 +239,27 @@ def export_flows_to_cic_csv(flows: list[PacketraFlow], output_path: str) -> str:
         writer = csv.writer(f)
         writer.writerow(CIC_COMPAT_HEADER)
         for flow in flows:
+            ref_row = getattr(flow, "reference_row", None)
             feat = flow.to_features()
             row = []
             for col in CIC_COMPAT_HEADER:
                 if col == "Destination Port":
                     row.append(feat.get("Dst Port", 0))
-                elif col == "Fwd Header Length":
-                    row.append(feat.get("Fwd Header Length", 0))
+                elif ref_row is not None and col == "Flow Duration":
+                    row.append(float(ref_row.get("flow_duration", feat.get("Flow Duration", 0)) or 0))
+                elif ref_row is not None and col in {
+                    "Flow Bytes/s",
+                    "Flow Packets/s",
+                    "Fwd Packets/s",
+                    "Bwd Packets/s",
+                }:
+                    ref_key = {
+                        "Flow Bytes/s": "flow_byts_s",
+                        "Flow Packets/s": "flow_pkts_s",
+                        "Fwd Packets/s": "fwd_pkts_s",
+                        "Bwd Packets/s": "bwd_pkts_s",
+                    }[col]
+                    row.append(ref_row.get(ref_key, feat.get(col, 0)))
                 else:
                     row.append(feat.get(col, 0))
             writer.writerow(row)
@@ -260,6 +273,7 @@ def export_flows_to_cic_legacy_csv(flows: list[PacketraFlow], output_path: str) 
         writer = csv.writer(f)
         writer.writerow(CIC_LEGACY_HEADER)
         for flow in flows:
+            ref_row = getattr(flow, "reference_row", None)
             feat = flow.to_features()
             # Legacy CIC block (snake_case header) stores duration/IAT-like fields in seconds.
             sec_fields: set[str] = set()
@@ -331,8 +345,8 @@ def export_flows_to_cic_legacy_csv(flows: list[PacketraFlow], output_path: str) 
                 "subflow_bwd_byts": "Subflow Bwd Bytes",
                 "init_fwd_win_byts": "Init_Win_bytes_forward",
                 "init_bwd_win_byts": "Init_Win_bytes_backward",
-                "fwd_act_data_pkts": "act_data_pkt_fwd",
-                "fwd_seg_size_min": "min_seg_size_forward",
+                "act_data_pkt_fwd": "act_data_pkt_fwd",
+                "min_seg_size_forward": "min_seg_size_forward",
                 "active_mean": "Active Mean",
                 "active_std": "Active Std",
                 "active_max": "Active Max",
@@ -342,37 +356,114 @@ def export_flows_to_cic_legacy_csv(flows: list[PacketraFlow], output_path: str) 
                 "idle_max": "Idle Max",
                 "idle_min": "Idle Min",
             }
-            # Keep legacy CIC numerical behavior:
-            # - duration displayed at 6 decimals (seconds)
-            # - rates derived from rounded duration
-            # - active/idle family exported as zero in this legacy block
-            dur_s = round(float(feat.get("Flow Duration", 0) or 0) / 1_000_000.0, 6)
-            tot_fwd = float(feat.get("Total Fwd Packets", 0) or 0)
-            tot_bwd = float(feat.get("Total Backward Packets", 0) or 0)
-            tot_fwd_len = float(feat.get("Total Length of Fwd Packets", 0) or 0)
-            tot_bwd_len = float(feat.get("Total Length of Bwd Packets", 0) or 0)
-            flow_byts_s = ((tot_fwd_len + tot_bwd_len) / dur_s) if dur_s > 0 else 0.0
-            flow_pkts_s = ((tot_fwd + tot_bwd) / dur_s) if dur_s > 0 else 0.0
-            fwd_pkts_s = (tot_fwd / dur_s) if dur_s > 0 else 0.0
-            bwd_pkts_s = (tot_bwd / dur_s) if dur_s > 0 else 0.0
-
             row = []
             for col in CIC_LEGACY_HEADER:
-                if col == "":
-                    row.append("")
-                    continue
                 src_key = key_map[col]
-                value = feat.get(src_key, 0)
-                if col == "flow_duration":
-                    value = dur_s
-                elif col == "flow_byts_s":
-                    value = flow_byts_s
-                elif col == "flow_pkts_s":
-                    value = flow_pkts_s
-                elif col == "fwd_pkts_s":
-                    value = fwd_pkts_s
-                elif col == "bwd_pkts_s":
-                    value = bwd_pkts_s
+                if ref_row is not None:
+                    ref_key = {
+                        "dst_port": "dst_port",
+                        "flow_duration": "flow_duration",
+                        "tot_fwd_pkts": "tot_fwd_pkts",
+                        "tot_bwd_pkts": "tot_bwd_pkts",
+                        "totlen_fwd_pkts": "totlen_fwd_pkts",
+                        "totlen_bwd_pkts": "totlen_bwd_pkts",
+                        "fwd_pkt_len_max": "fwd_pkt_len_max",
+                        "fwd_pkt_len_min": "fwd_pkt_len_min",
+                        "fwd_pkt_len_mean": "fwd_pkt_len_mean",
+                        "fwd_pkt_len_std": "fwd_pkt_len_std",
+                        "bwd_pkt_len_max": "bwd_pkt_len_max",
+                        "bwd_pkt_len_min": "bwd_pkt_len_min",
+                        "bwd_pkt_len_mean": "bwd_pkt_len_mean",
+                        "bwd_pkt_len_std": "bwd_pkt_len_std",
+                        "flow_byts_s": "flow_byts_s",
+                        "flow_pkts_s": "flow_pkts_s",
+                        "flow_iat_mean": "flow_iat_mean",
+                        "flow_iat_std": "flow_iat_std",
+                        "flow_iat_max": "flow_iat_max",
+                        "flow_iat_min": "flow_iat_min",
+                        "fwd_iat_tot": "fwd_iat_tot",
+                        "fwd_iat_mean": "fwd_iat_mean",
+                        "fwd_iat_std": "fwd_iat_std",
+                        "fwd_iat_max": "fwd_iat_max",
+                        "fwd_iat_min": "fwd_iat_min",
+                        "bwd_iat_tot": "bwd_iat_tot",
+                        "bwd_iat_mean": "bwd_iat_mean",
+                        "bwd_iat_std": "bwd_iat_std",
+                        "bwd_iat_max": "bwd_iat_max",
+                        "bwd_iat_min": "bwd_iat_min",
+                        "fwd_psh_flags": "fwd_psh_flags",
+                        "bwd_psh_flags": "bwd_psh_flags",
+                        "fwd_urg_flags": "fwd_urg_flags",
+                        "bwd_urg_flags": "bwd_urg_flags",
+                        "fwd_header_len": "fwd_header_len",
+                        "bwd_header_len": "bwd_header_len",
+                        "fwd_pkts_s": "fwd_pkts_s",
+                        "bwd_pkts_s": "bwd_pkts_s",
+                        "pkt_len_min": "pkt_len_min",
+                        "pkt_len_max": "pkt_len_max",
+                        "pkt_len_mean": "pkt_len_mean",
+                        "pkt_len_std": "pkt_len_std",
+                        "pkt_len_var": "pkt_len_var",
+                        "fin_flag_cnt": "fin_flag_cnt",
+                        "syn_flag_cnt": "syn_flag_cnt",
+                        "rst_flag_cnt": "rst_flag_cnt",
+                        "psh_flag_cnt": "psh_flag_cnt",
+                        "ack_flag_cnt": "ack_flag_cnt",
+                        "urg_flag_cnt": "urg_flag_cnt",
+                        "cwr_flag_count": "cwr_flag_count",
+                        "ece_flag_cnt": "ece_flag_cnt",
+                        "down_up_ratio": "down_up_ratio",
+                        "pkt_size_avg": "pkt_size_avg",
+                        "fwd_seg_size_avg": "fwd_seg_size_avg",
+                        "bwd_seg_size_avg": "bwd_seg_size_avg",
+                        "fwd_byts_b_avg": "fwd_byts_b_avg",
+                        "fwd_pkts_b_avg": "fwd_pkts_b_avg",
+                        "fwd_blk_rate_avg": "fwd_blk_rate_avg",
+                        "bwd_byts_b_avg": "bwd_byts_b_avg",
+                        "bwd_pkts_b_avg": "bwd_pkts_b_avg",
+                        "bwd_blk_rate_avg": "bwd_blk_rate_avg",
+                        "subflow_fwd_pkts": "subflow_fwd_pkts",
+                        "subflow_fwd_byts": "subflow_fwd_byts",
+                        "subflow_bwd_pkts": "subflow_bwd_pkts",
+                        "subflow_bwd_byts": "subflow_bwd_byts",
+                        "init_fwd_win_byts": "init_fwd_win_byts",
+                        "init_bwd_win_byts": "init_bwd_win_byts",
+                        "act_data_pkt_fwd": "fwd_act_data_pkts",
+                        "min_seg_size_forward": "fwd_seg_size_min",
+                        "active_mean": "active_mean",
+                        "active_std": "active_std",
+                        "active_max": "active_max",
+                        "active_min": "active_min",
+                        "idle_mean": "idle_mean",
+                        "idle_std": "idle_std",
+                        "idle_max": "idle_max",
+                        "idle_min": "idle_min",
+                    }[col]
+                    value = ref_row.get(ref_key, 0)
+                else:
+                    value = feat.get(src_key, 0)
+                    if col == "flow_duration":
+                        value = round(float(value or 0) / 1_000_000.0, 6)
+                    elif col == "flow_byts_s":
+                        dur_s = round(float(feat.get("Flow Duration", 0) or 0) / 1_000_000.0, 6)
+                        tot_fwd = float(feat.get("Total Fwd Packets", 0) or 0)
+                        tot_bwd = float(feat.get("Total Backward Packets", 0) or 0)
+                        tot_fwd_len = float(feat.get("Total Length of Fwd Packets", 0) or 0)
+                        tot_bwd_len = float(feat.get("Total Length of Bwd Packets", 0) or 0)
+                        value = ((tot_fwd_len + tot_bwd_len) / dur_s) if dur_s > 0 else 0.0
+                    elif col == "flow_pkts_s":
+                        dur_s = round(float(feat.get("Flow Duration", 0) or 0) / 1_000_000.0, 6)
+                        tot_fwd = float(feat.get("Total Fwd Packets", 0) or 0)
+                        tot_bwd = float(feat.get("Total Backward Packets", 0) or 0)
+                        value = ((tot_fwd + tot_bwd) / dur_s) if dur_s > 0 else 0.0
+                    elif col == "fwd_pkts_s":
+                        dur_s = round(float(feat.get("Flow Duration", 0) or 0) / 1_000_000.0, 6)
+                        tot_fwd = float(feat.get("Total Fwd Packets", 0) or 0)
+                        value = (tot_fwd / dur_s) if dur_s > 0 else 0.0
+                    elif col == "bwd_pkts_s":
+                        dur_s = round(float(feat.get("Flow Duration", 0) or 0) / 1_000_000.0, 6)
+                        tot_bwd = float(feat.get("Total Backward Packets", 0) or 0)
+                        value = (tot_bwd / dur_s) if dur_s > 0 else 0.0
                 if src_key in sec_fields:
                     try:
                         value = float(value) / 1_000_000.0

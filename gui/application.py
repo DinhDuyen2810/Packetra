@@ -56,7 +56,6 @@ from core.flow_engine import (
     PacketraModelAdapter,
     FlowFeatureExtractor,
 )
-from core.flow_engine.cic_reference import extract_cic_rows_from_packets
 from utils.pcap_io import normalize_capture_extension, iter_pcap_packets, save_capture_file
 
 log = logging.getLogger('application')
@@ -2659,94 +2658,96 @@ class ApplicationWindow(QMainWindow):
         packets = [getattr(r, 'raw', None) for r in records if getattr(r, 'raw', None) is not None]
         if not packets:
             return []
-        source_rows = extract_cic_rows_from_packets(packets)
+        flows = FlowFeatureExtractor(flow_timeout_seconds=240.0, cic_compat_mode=False).extract_from_packets(packets)
         rows = []
         source_key_map = {
-            'Source IP': 'src_ip',
-            'Source Port': 'src_port',
-            'Destination IP': 'dst_ip',
-            'Destination Port': 'dst_port',
-            'Protocol': 'protocol',
-            'Timestamp': 'timestamp',
-            'Flow Duration': 'flow_duration',
-            'Total Fwd Packets': 'tot_fwd_pkts',
-            'Total Backward Packets': 'tot_bwd_pkts',
-            'Total Length of Fwd Packets': 'totlen_fwd_pkts',
-            'Total Length of Bwd Packets': 'totlen_bwd_pkts',
-            'Fwd Packet Length Max': 'fwd_pkt_len_max',
-            'Fwd Packet Length Min': 'fwd_pkt_len_min',
-            'Fwd Packet Length Mean': 'fwd_pkt_len_mean',
-            'Fwd Packet Length Std': 'fwd_pkt_len_std',
-            'Bwd Packet Length Max': 'bwd_pkt_len_max',
-            'Bwd Packet Length Min': 'bwd_pkt_len_min',
-            'Bwd Packet Length Mean': 'bwd_pkt_len_mean',
-            'Bwd Packet Length Std': 'bwd_pkt_len_std',
-            'Flow Bytes/s': 'flow_byts_s',
-            'Flow Packets/s': 'flow_pkts_s',
-            'Flow IAT Mean': 'flow_iat_mean',
-            'Flow IAT Std': 'flow_iat_std',
-            'Flow IAT Max': 'flow_iat_max',
-            'Flow IAT Min': 'flow_iat_min',
-            'Fwd IAT Total': 'fwd_iat_tot',
-            'Fwd IAT Mean': 'fwd_iat_mean',
-            'Fwd IAT Std': 'fwd_iat_std',
-            'Fwd IAT Max': 'fwd_iat_max',
-            'Fwd IAT Min': 'fwd_iat_min',
-            'Bwd IAT Total': 'bwd_iat_tot',
-            'Bwd IAT Mean': 'bwd_iat_mean',
-            'Bwd IAT Std': 'bwd_iat_std',
-            'Bwd IAT Max': 'bwd_iat_max',
-            'Bwd IAT Min': 'bwd_iat_min',
-            'Fwd PSH Flags': 'fwd_psh_flags',
-            'Bwd PSH Flags': 'bwd_psh_flags',
-            'Fwd URG Flags': 'fwd_urg_flags',
-            'Bwd URG Flags': 'bwd_urg_flags',
-            'Fwd Header Length': 'fwd_header_len',
-            'Bwd Header Length': 'bwd_header_len',
-            'Fwd Packets/s': 'fwd_pkts_s',
-            'Bwd Packets/s': 'bwd_pkts_s',
-            'Min Packet Length': 'pkt_len_min',
-            'Max Packet Length': 'pkt_len_max',
-            'Packet Length Mean': 'pkt_len_mean',
-            'Packet Length Std': 'pkt_len_std',
-            'Packet Length Variance': 'pkt_len_var',
-            'FIN Flag Count': 'fin_flag_cnt',
-            'SYN Flag Count': 'syn_flag_cnt',
-            'RST Flag Count': 'rst_flag_cnt',
-            'PSH Flag Count': 'psh_flag_cnt',
-            'ACK Flag Count': 'ack_flag_cnt',
-            'URG Flag Count': 'urg_flag_cnt',
-            'CWE Flag Count': 'cwr_flag_count',
-            'ECE Flag Count': 'ece_flag_cnt',
-            'Down/Up Ratio': 'down_up_ratio',
-            'Average Packet Size': 'pkt_size_avg',
-            'Avg Fwd Segment Size': 'fwd_seg_size_avg',
-            'Avg Bwd Segment Size': 'bwd_seg_size_avg',
-            'Fwd Avg Bytes/Bulk': 'fwd_byts_b_avg',
-            'Fwd Avg Packets/Bulk': 'fwd_pkts_b_avg',
-            'Fwd Avg Bulk Rate': 'fwd_blk_rate_avg',
-            'Bwd Avg Bytes/Bulk': 'bwd_byts_b_avg',
-            'Bwd Avg Packets/Bulk': 'bwd_pkts_b_avg',
-            'Bwd Avg Bulk Rate': 'bwd_blk_rate_avg',
-            'Subflow Fwd Packets': 'subflow_fwd_pkts',
-            'Subflow Fwd Bytes': 'subflow_fwd_byts',
-            'Subflow Bwd Packets': 'subflow_bwd_pkts',
-            'Subflow Bwd Bytes': 'subflow_bwd_byts',
-            'Init_Win_bytes_forward': 'init_fwd_win_byts',
-            'Init_Win_bytes_backward': 'init_bwd_win_byts',
-            'act_data_pkt_fwd': 'fwd_act_data_pkts',
-            'min_seg_size_forward': 'fwd_seg_size_min',
-            'Active Mean': 'active_mean',
-            'Active Std': 'active_std',
-            'Active Max': 'active_max',
-            'Active Min': 'active_min',
-            'Idle Mean': 'idle_mean',
-            'Idle Std': 'idle_std',
-            'Idle Max': 'idle_max',
-            'Idle Min': 'idle_min',
+            'Flow ID': 'Flow ID',
+            'Source IP': 'Src IP',
+            'Source Port': 'Src Port',
+            'Destination IP': 'Dst IP',
+            'Destination Port': 'Dst Port',
+            'Protocol': 'Protocol',
+            'Timestamp': 'Timestamp',
+            'Flow Duration': 'Flow Duration',
+            'Total Fwd Packets': 'Total Fwd Packets',
+            'Total Backward Packets': 'Total Backward Packets',
+            'Total Length of Fwd Packets': 'Total Length of Fwd Packets',
+            'Total Length of Bwd Packets': 'Total Length of Bwd Packets',
+            'Fwd Packet Length Max': 'Fwd Packet Length Max',
+            'Fwd Packet Length Min': 'Fwd Packet Length Min',
+            'Fwd Packet Length Mean': 'Fwd Packet Length Mean',
+            'Fwd Packet Length Std': 'Fwd Packet Length Std',
+            'Bwd Packet Length Max': 'Bwd Packet Length Max',
+            'Bwd Packet Length Min': 'Bwd Packet Length Min',
+            'Bwd Packet Length Mean': 'Bwd Packet Length Mean',
+            'Bwd Packet Length Std': 'Bwd Packet Length Std',
+            'Flow Bytes/s': 'Flow Bytes/s',
+            'Flow Packets/s': 'Flow Packets/s',
+            'Flow IAT Mean': 'Flow IAT Mean',
+            'Flow IAT Std': 'Flow IAT Std',
+            'Flow IAT Max': 'Flow IAT Max',
+            'Flow IAT Min': 'Flow IAT Min',
+            'Fwd IAT Total': 'Fwd IAT Total',
+            'Fwd IAT Mean': 'Fwd IAT Mean',
+            'Fwd IAT Std': 'Fwd IAT Std',
+            'Fwd IAT Max': 'Fwd IAT Max',
+            'Fwd IAT Min': 'Fwd IAT Min',
+            'Bwd IAT Total': 'Bwd IAT Total',
+            'Bwd IAT Mean': 'Bwd IAT Mean',
+            'Bwd IAT Std': 'Bwd IAT Std',
+            'Bwd IAT Max': 'Bwd IAT Max',
+            'Bwd IAT Min': 'Bwd IAT Min',
+            'Fwd PSH Flags': 'Fwd PSH Flags',
+            'Bwd PSH Flags': 'Bwd PSH Flags',
+            'Fwd URG Flags': 'Fwd URG Flags',
+            'Bwd URG Flags': 'Bwd URG Flags',
+            'Fwd Header Length': 'Fwd Header Length',
+            'Bwd Header Length': 'Bwd Header Length',
+            'Fwd Packets/s': 'Fwd Packets/s',
+            'Bwd Packets/s': 'Bwd Packets/s',
+            'Min Packet Length': 'Min Packet Length',
+            'Max Packet Length': 'Max Packet Length',
+            'Packet Length Mean': 'Packet Length Mean',
+            'Packet Length Std': 'Packet Length Std',
+            'Packet Length Variance': 'Packet Length Variance',
+            'FIN Flag Count': 'FIN Flag Count',
+            'SYN Flag Count': 'SYN Flag Count',
+            'RST Flag Count': 'RST Flag Count',
+            'PSH Flag Count': 'PSH Flag Count',
+            'ACK Flag Count': 'ACK Flag Count',
+            'URG Flag Count': 'URG Flag Count',
+            'CWE Flag Count': 'CWE Flag Count',
+            'ECE Flag Count': 'ECE Flag Count',
+            'Down/Up Ratio': 'Down/Up Ratio',
+            'Average Packet Size': 'Average Packet Size',
+            'Avg Fwd Segment Size': 'Avg Fwd Segment Size',
+            'Avg Bwd Segment Size': 'Avg Bwd Segment Size',
+            'Fwd Avg Bytes/Bulk': 'Fwd Avg Bytes/Bulk',
+            'Fwd Avg Packets/Bulk': 'Fwd Avg Packets/Bulk',
+            'Fwd Avg Bulk Rate': 'Fwd Avg Bulk Rate',
+            'Bwd Avg Bytes/Bulk': 'Bwd Avg Bytes/Bulk',
+            'Bwd Avg Packets/Bulk': 'Bwd Avg Packets/Bulk',
+            'Bwd Avg Bulk Rate': 'Bwd Avg Bulk Rate',
+            'Subflow Fwd Packets': 'Subflow Fwd Packets',
+            'Subflow Fwd Bytes': 'Subflow Fwd Bytes',
+            'Subflow Bwd Packets': 'Subflow Bwd Packets',
+            'Subflow Bwd Bytes': 'Subflow Bwd Bytes',
+            'Init_Win_bytes_forward': 'Init_Win_bytes_forward',
+            'Init_Win_bytes_backward': 'Init_Win_bytes_backward',
+            'act_data_pkt_fwd': 'act_data_pkt_fwd',
+            'min_seg_size_forward': 'min_seg_size_forward',
+            'Active Mean': 'Active Mean',
+            'Active Std': 'Active Std',
+            'Active Max': 'Active Max',
+            'Active Min': 'Active Min',
+            'Idle Mean': 'Idle Mean',
+            'Idle Std': 'Idle Std',
+            'Idle Max': 'Idle Max',
+            'Idle Min': 'Idle Min',
         }
-        for src in source_rows:
-            flow_id = f"{src.get('src_ip', '')}-{src.get('dst_ip', '')}-{src.get('src_port', 0)}-{src.get('dst_port', 0)}-{src.get('protocol', '')}"
+        for flow in flows:
+            feat = flow.to_features()
+            flow_id = str(feat.get('Flow ID', ''))
             row = []
             for col in self.AI_TRAFFIC_COLUMNS:
                 name = str(col).strip()
@@ -2755,7 +2756,7 @@ class ApplicationWindow(QMainWindow):
                 elif name == 'Flow ID':
                     row.append(flow_id)
                 else:
-                    row.append(src.get(source_key_map.get(name, ''), 0))
+                    row.append(feat.get(source_key_map.get(name, ''), 0))
             rows.append(row)
         return rows
 
@@ -2969,54 +2970,6 @@ class ApplicationWindow(QMainWindow):
             )
 
         return '\n'.join(lines)
-
-    def _save_ai_analyst_csv_outputs(
-        self,
-        traffic_header: list[str],
-        traffic_rows: list[list],
-        ml_header: list[str],
-        ml_rows: list[list],
-        predictions: list[dict],
-    ) -> tuple[str, str]:
-        out_dir = Path.cwd() / 'docs' / 'ai_analyst_outputs'
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        ml_csv_path = out_dir / f'ai_analyst_ml_input_{ts}.csv'
-        pred_csv_path = out_dir / f'ai_analyst_predictions_{ts}.csv'
-
-        with ml_csv_path.open('w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(ml_header)
-            writer.writerows(ml_rows)
-
-        t_index = {name: idx for idx, name in enumerate(traffic_header)}
-        def t_get(row, name, default=''):
-            idx = t_index.get(name)
-            if idx is None or idx >= len(row):
-                return default
-            return row[idx]
-
-        pred_header = [
-            'Flow Index', 'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Destination Port',
-            'Protocol', 'Predicted Label', 'Confidence'
-        ]
-        with pred_csv_path.open('w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(pred_header)
-            for i, (row, pred) in enumerate(zip(traffic_rows, predictions), start=1):
-                writer.writerow([
-                    i,
-                    t_get(row, 'Flow ID', ''),
-                    t_get(row, 'Source IP', ''),
-                    t_get(row, 'Source Port', ''),
-                    t_get(row, 'Destination IP', ''),
-                    t_get(row, 'Destination Port', ''),
-                    t_get(row, 'Protocol', ''),
-                    pred.get('label', ''),
-                    f"{float(pred.get('confidence', 0.0)):.6f}",
-                ])
-
-        return str(ml_csv_path), str(pred_csv_path)
 
     def _on_open_analysis_dashboard(self):
         """Open Analysis Dashboard with current capture view"""
@@ -3309,9 +3262,6 @@ class ApplicationWindow(QMainWindow):
 
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
                 analysis_text = self._build_ai_analysis_text(traffic_header, traffic_rows, predictions)
-                ml_csv_path, pred_csv_path = self._save_ai_analyst_csv_outputs(
-                    traffic_header, traffic_rows, ml_header, ml_rows, predictions
-                )
 
                 state['traffic_header'] = traffic_header
                 state['traffic_rows'] = traffic_rows
@@ -3325,8 +3275,6 @@ class ApplicationWindow(QMainWindow):
                     f"- TrafficLabelling rows: {len(traffic_rows)} | cols: {len(traffic_header)}\n"
                     f"- Inference feature rows: {len(ml_rows)} | cols: {len(ml_header)} | Label removed\n\n"
                     f"- Flow mode: Strict Upstream (single standard mode)\n"
-                    f"CSV ML input (CIC-like): {ml_csv_path}\n"
-                    f"CSV Predictions per-flow: {pred_csv_path}\n\n"
                     f"{analysis_text}"
                 )
             except Exception as exc:

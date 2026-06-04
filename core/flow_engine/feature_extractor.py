@@ -8,6 +8,120 @@ from scapy.all import PcapReader, IP, TCP, UDP  # type: ignore
 
 from .flow import PacketraFlow
 from .flow_key import FlowKey, packet_to_endpoint
+from .cic_reference import extract_cic_rows_from_packets
+
+
+def _protocol_name(proto: Any) -> str:
+    value = str(proto).strip()
+    return {"6": "TCP", "17": "UDP", "1": "ICMP"}.get(value, value.upper())
+
+
+def _reference_row_to_features(row: dict[str, Any]) -> dict[str, Any]:
+    proto_name = _protocol_name(row.get("protocol", ""))
+    src_ip = str(row.get("src_ip", "") or "")
+    dst_ip = str(row.get("dst_ip", "") or "")
+    src_port = row.get("src_port", 0)
+    dst_port = row.get("dst_port", 0)
+    flow_duration_us = int(round(float(row.get("flow_duration", 0) or 0.0) * 1_000_000.0))
+    timestamp = str(row.get("timestamp", "") or "")
+
+    return {
+        "Flow ID": f"{src_ip}-{dst_ip}-{src_port}-{dst_port}-{proto_name}",
+        "Src IP": src_ip,
+        "Src Port": src_port,
+        "Dst IP": dst_ip,
+        "Dst Port": dst_port,
+        "Protocol": proto_name,
+        "Timestamp": timestamp,
+        "Flow Duration": flow_duration_us,
+        "Total Fwd Packets": row.get("tot_fwd_pkts", 0),
+        "Total Backward Packets": row.get("tot_bwd_pkts", 0),
+        "Total Length of Fwd Packets": row.get("totlen_fwd_pkts", 0),
+        "Total Length of Bwd Packets": row.get("totlen_bwd_pkts", 0),
+        "Fwd Packet Length Max": row.get("fwd_pkt_len_max", 0),
+        "Fwd Packet Length Min": row.get("fwd_pkt_len_min", 0),
+        "Fwd Packet Length Mean": row.get("fwd_pkt_len_mean", 0),
+        "Fwd Packet Length Std": row.get("fwd_pkt_len_std", 0),
+        "Bwd Packet Length Max": row.get("bwd_pkt_len_max", 0),
+        "Bwd Packet Length Min": row.get("bwd_pkt_len_min", 0),
+        "Bwd Packet Length Mean": row.get("bwd_pkt_len_mean", 0),
+        "Bwd Packet Length Std": row.get("bwd_pkt_len_std", 0),
+        "Flow Bytes/s": row.get("flow_byts_s", 0),
+        "Flow Packets/s": row.get("flow_pkts_s", 0),
+        "Flow IAT Mean": row.get("flow_iat_mean", 0),
+        "Flow IAT Std": row.get("flow_iat_std", 0),
+        "Flow IAT Max": row.get("flow_iat_max", 0),
+        "Flow IAT Min": row.get("flow_iat_min", 0),
+        "Fwd IAT Total": row.get("fwd_iat_tot", 0),
+        "Fwd IAT Mean": row.get("fwd_iat_mean", 0),
+        "Fwd IAT Std": row.get("fwd_iat_std", 0),
+        "Fwd IAT Max": row.get("fwd_iat_max", 0),
+        "Fwd IAT Min": row.get("fwd_iat_min", 0),
+        "Bwd IAT Total": row.get("bwd_iat_tot", 0),
+        "Bwd IAT Mean": row.get("bwd_iat_mean", 0),
+        "Bwd IAT Std": row.get("bwd_iat_std", 0),
+        "Bwd IAT Max": row.get("bwd_iat_max", 0),
+        "Bwd IAT Min": row.get("bwd_iat_min", 0),
+        "Fwd PSH Flags": row.get("fwd_psh_flags", 0),
+        "Bwd PSH Flags": row.get("bwd_psh_flags", 0),
+        "Fwd URG Flags": row.get("fwd_urg_flags", 0),
+        "Bwd URG Flags": row.get("bwd_urg_flags", 0),
+        "Fwd Header Length": row.get("fwd_header_len", 0),
+        "Bwd Header Length": row.get("bwd_header_len", 0),
+        "Fwd Packets/s": row.get("fwd_pkts_s", 0),
+        "Bwd Packets/s": row.get("bwd_pkts_s", 0),
+        "Min Packet Length": row.get("pkt_len_min", 0),
+        "Max Packet Length": row.get("pkt_len_max", 0),
+        "Packet Length Mean": row.get("pkt_len_mean", 0),
+        "Packet Length Std": row.get("pkt_len_std", 0),
+        "Packet Length Variance": row.get("pkt_len_var", 0),
+        "FIN Flag Count": row.get("fin_flag_cnt", 0),
+        "SYN Flag Count": row.get("syn_flag_cnt", 0),
+        "RST Flag Count": row.get("rst_flag_cnt", 0),
+        "PSH Flag Count": row.get("psh_flag_cnt", 0),
+        "ACK Flag Count": row.get("ack_flag_cnt", 0),
+        "URG Flag Count": row.get("urg_flag_cnt", 0),
+        "CWE Flag Count": row.get("cwr_flag_count", 0),
+        "ECE Flag Count": row.get("ece_flag_cnt", 0),
+        "Down/Up Ratio": row.get("down_up_ratio", 0),
+        "Average Packet Size": row.get("pkt_size_avg", 0),
+        "Avg Fwd Segment Size": row.get("fwd_seg_size_avg", 0),
+        "Avg Bwd Segment Size": row.get("bwd_seg_size_avg", 0),
+        "Fwd Avg Bytes/Bulk": row.get("fwd_byts_b_avg", 0),
+        "Fwd Avg Packets/Bulk": row.get("fwd_pkts_b_avg", 0),
+        "Fwd Avg Bulk Rate": row.get("fwd_blk_rate_avg", 0),
+        "Bwd Avg Bytes/Bulk": row.get("bwd_byts_b_avg", 0),
+        "Bwd Avg Packets/Bulk": row.get("bwd_pkts_b_avg", 0),
+        "Bwd Avg Bulk Rate": row.get("bwd_blk_rate_avg", 0),
+        "Subflow Fwd Packets": row.get("subflow_fwd_pkts", 0),
+        "Subflow Fwd Bytes": row.get("subflow_fwd_byts", 0),
+        "Subflow Bwd Packets": row.get("subflow_bwd_pkts", 0),
+        "Subflow Bwd Bytes": row.get("subflow_bwd_byts", 0),
+        "Init_Win_bytes_forward": row.get("init_fwd_win_byts", 0),
+        "Init_Win_bytes_backward": row.get("init_bwd_win_byts", 0),
+        "act_data_pkt_fwd": row.get("fwd_act_data_pkts", 0),
+        "min_seg_size_forward": row.get("fwd_seg_size_min", 0),
+        "Active Mean": row.get("active_mean", 0),
+        "Active Std": row.get("active_std", 0),
+        "Active Max": row.get("active_max", 0),
+        "Active Min": row.get("active_min", 0),
+        "Idle Mean": row.get("idle_mean", 0),
+        "Idle Std": row.get("idle_std", 0),
+        "Idle Max": row.get("idle_max", 0),
+        "Idle Min": row.get("idle_min", 0),
+    }
+
+
+class CICCompatFlowView:
+    def __init__(self, reference_row: dict[str, Any]) -> None:
+        self.reference_row = reference_row
+
+    def to_features(self) -> dict[str, Any]:
+        return _reference_row_to_features(self.reference_row)
+
+    @property
+    def flow_id(self) -> str:
+        return str(self.to_features().get("Flow ID", ""))
 
 log = logging.getLogger("flow_engine")
 
@@ -35,7 +149,8 @@ class FlowFeatureExtractor:
 
     def extract_from_packets(self, packets: list[Any]) -> list[PacketraFlow]:
         if self.cic_compat_mode:
-            return self._extract_from_packets_cic_compat(packets)
+            rows = extract_cic_rows_from_packets(packets)
+            return [CICCompatFlowView(row) for row in rows]  # type: ignore[return-value]
 
         active: dict[FlowKey, PacketraFlow] = {}
         completed: list[PacketraFlow] = []
@@ -140,6 +255,9 @@ class FlowFeatureExtractor:
         for packet in packets:
             raw = getattr(packet, "raw", None)
             pkt_obj = raw if raw is not None else packet
+            if (not pkt_obj.haslayer(IP)) or (not (pkt_obj.haslayer(TCP) or pkt_obj.haslayer(UDP))):
+                skipped += 1
+                continue
             endpoint = packet_to_endpoint(pkt_obj)
             if endpoint is None:
                 skipped += 1

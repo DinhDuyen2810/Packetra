@@ -1,105 +1,105 @@
-# Packetra - Network Packet Analyzer
+﻿# Packetra - Network Packet Analyzer
 
-**Packetra** là một ứng dụng phân tích gói tin mạng (Network Packet Sniffer) mạnh mẽ, tương tự Packetra, được xây dựng bằng Python, Scapy, và PySide6.
+**Packetra** lĂ  má»™t á»©ng dá»¥ng phĂ¢n tĂ­ch gĂ³i tin máº¡ng (Network Packet Sniffer) máº¡nh máº½, tÆ°Æ¡ng tá»± Packetra, Ä‘Æ°á»£c xĂ¢y dá»±ng báº±ng Python, Scapy, vĂ  PySide6.
 
-## 🚀 Tính Năng
+## đŸ€ TĂ­nh NÄƒng
 
-### ✅ Hoạt động tốt:
-- ✓ Bắt gói tin real-time từ bất kỳ interface nào
-- ✓ Hỗ trợ 20+ protocols: TCP, UDP, DNS, ARP, ICMP, TLS, QUIC, HTTP, DHCP, IPv6, v.v
-- ✓ Display Filter giống Packetra (với logic AND/OR/NOT)
-- ✓ Xem chi tiết mỗi packet (hex dump, layer details)
-- ✓ Real-time traffic monitoring cho từng interface
-- ✓ Lưu/tải file PCAP
-- ✓ Color coding theo protocol
-- ✓ Conversation tracking
-- ✓ Menubar & Toolbar hoàn chỉnh giống Packetra
-- ✓ Capture filters & Display filters
-- ✓ Windows Npcap integration
+### âœ… Hoáº¡t Ä‘á»™ng tá»‘t:
+- âœ“ Báº¯t gĂ³i tin real-time tá»« báº¥t ká»³ interface nĂ o
+- âœ“ Há»— trá»£ 20+ protocols: TCP, UDP, DNS, ARP, ICMP, TLS, QUIC, HTTP, DHCP, IPv6, v.v
+- âœ“ Display Filter giá»‘ng Packetra (vá»›i logic AND/OR/NOT)
+- âœ“ Xem chi tiáº¿t má»—i packet (hex dump, layer details)
+- âœ“ Real-time traffic monitoring cho tá»«ng interface
+- âœ“ LÆ°u/táº£i file PCAP
+- âœ“ Color coding theo protocol
+- âœ“ Conversation tracking
+- âœ“ Menubar & Toolbar hoĂ n chá»‰nh giá»‘ng Packetra
+- âœ“ Capture filters & Display filters
+- âœ“ Windows Npcap integration
 
-## Cài Đặt
+## CĂ i Äáº·t
 
-### Yêu cầu
+### YĂªu cáº§u
 - Python 3.8+
-- Windows, macOS, hoặc Linux
+- Windows, macOS, hoáº·c Linux
 
-### Bước 1: Clone hoặc tải project
+### BÆ°á»›c 1: Clone hoáº·c táº£i project
 ```bash
 cd path/to/Packetra
 ```
 
-### Bước 2: Cài đặt dependencies
+### BÆ°á»›c 2: CĂ i Ä‘áº·t dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### Bước 3: Chạy ứng dụng
+### BÆ°á»›c 3: Cháº¡y á»©ng dá»¥ng
 ```bash
 python main.py
 ```
 
-**Trên Windows**: Ứng dụng sẽ tự động kiểm tra và cài Npcap nếu cần.
+**TrĂªn Windows**: á»¨ng dá»¥ng sáº½ tá»± Ä‘á»™ng kiá»ƒm tra vĂ  cĂ i Npcap náº¿u cáº§n.
 
-## ⚠️ Windows: Cài đặt Npcap
+## â ï¸ Windows: CĂ i Ä‘áº·t Npcap
 
-**Npcap** là driver cần thiết để bắt gói tin trên Windows.
+**Npcap** lĂ  driver cáº§n thiáº¿t Ä‘á»ƒ báº¯t gĂ³i tin trĂªn Windows.
 
-### Tùy chọn 1: Tự động (khuyến khích)
-- Chạy `python main.py`
-- Ứng dụng sẽ nhận ra Npcap chưa cài
-- Chọn "Yes" để tự động cài đặt
-- Hoàn tất trình cài đặt UAC
+### TĂ¹y chá»n 1: Tá»± Ä‘á»™ng (khuyáº¿n khĂ­ch)
+- Cháº¡y `python main.py`
+- á»¨ng dá»¥ng sáº½ nháº­n ra Npcap chÆ°a cĂ i
+- Chá»n "Yes" Ä‘á»ƒ tá»± Ä‘á»™ng cĂ i Ä‘áº·t
+- HoĂ n táº¥t trĂ¬nh cĂ i Ä‘áº·t UAC
 
-### Tùy chọn 2: Cài đặt thủ công
-1. Download Npcap từ https://nmap.org/npcap/
-2. Chạy `npcap-setup.exe` 
-3. Khởi động lại máy tính
-4. Chạy Packetra
+### TĂ¹y chá»n 2: CĂ i Ä‘áº·t thá»§ cĂ´ng
+1. Download Npcap tá»« https://nmap.org/npcap/
+2. Cháº¡y `npcap-setup.exe` 
+3. Khá»Ÿi Ä‘á»™ng láº¡i mĂ¡y tĂ­nh
+4. Cháº¡y Packetra
 
-## 🎯 Cách Sử Dụng Cơ Bản
+## đŸ¯ CĂ¡ch Sá»­ Dá»¥ng CÆ¡ Báº£n
 
-### Bước 1: Chọn Interface
+### BÆ°á»›c 1: Chá»n Interface
 ```
-1. Chạy: python main.py
-2. Ứng dụng mở "Select Interface" screen
-3. Xem danh sách network interface + traffic real-time
-4. Chọn interface muốn capture
-5. (Tùy chọn) Nhập Capture Filter: tcp port 443
-6. Bấm "Start Capture"
-```
-
-### Bước 2: Bắt Gói Tin
-```
-- Gói tin sẽ hiển thị real-time ở Packet Table
-- Xem chi tiết: nhấn trên 1 packet
-- Xem hex dump: tab bên phải
+1. Cháº¡y: python main.py
+2. á»¨ng dá»¥ng má»Ÿ "Select Interface" screen
+3. Xem danh sĂ¡ch network interface + traffic real-time
+4. Chá»n interface muá»‘n capture
+5. (TĂ¹y chá»n) Nháº­p Capture Filter: tcp port 443
+6. Báº¥m "Start Capture"
 ```
 
-### Bước 3: Lọc Gói Tin
+### BÆ°á»›c 2: Báº¯t GĂ³i Tin
 ```
-Input Display Filter ở trên cùng:
-- tcp (chỉ TCP)
-- udp (chỉ UDP)  
-- dns (chỉ DNS)
-- http (chỉ HTTP)
-- tcp.port==443 (cổng 443)
-- ip.src==192.168.1.1 (từ IP cụ thể)
-- not arp (không ARP)
-- tcp and port==80 (TCP và cổng 80)
-
-Nhấn Enter hoặc nút ➡ để áp dụng
+- GĂ³i tin sáº½ hiá»ƒn thá»‹ real-time á»Ÿ Packet Table
+- Xem chi tiáº¿t: nháº¥n trĂªn 1 packet
+- Xem hex dump: tab bĂªn pháº£i
 ```
 
-### Bước 4: Lưu/Tải PCAP
+### BÆ°á»›c 3: Lá»c GĂ³i Tin
 ```
-- Lưu: Ctrl+S hoặc File > Save
-- Tải: Ctrl+O hoặc File > Open
-- File được lưu dạng .pcap
+Input Display Filter á»Ÿ trĂªn cĂ¹ng:
+- tcp (chá»‰ TCP)
+- udp (chá»‰ UDP)  
+- dns (chá»‰ DNS)
+- http (chá»‰ HTTP)
+- tcp.port==443 (cá»•ng 443)
+- ip.src==192.168.1.1 (tá»« IP cá»¥ thá»ƒ)
+- not arp (khĂ´ng ARP)
+- tcp and port==80 (TCP vĂ  cá»•ng 80)
+
+Nháº¥n Enter hoáº·c nĂºt â¡ Ä‘á»ƒ Ă¡p dá»¥ng
 ```
 
-## 📊 Display Filter - Cú Pháp Chi Tiết
+### BÆ°á»›c 4: LÆ°u/Táº£i PCAP
+```
+- LÆ°u: Ctrl+S hoáº·c File > Save
+- Táº£i: Ctrl+O hoáº·c File > Open
+- File Ä‘Æ°á»£c lÆ°u dáº¡ng .pcap
+```
 
-### Protocols (đơn giản)
+## đŸ“ Display Filter - CĂº PhĂ¡p Chi Tiáº¿t
+
+### Protocols (Ä‘Æ¡n giáº£n)
 ```
 tcp, udp, dns, http, arp, icmp, icmpv6, 
 tls, quic, dhcp, mdns, ip, ipv6, eth
@@ -107,34 +107,34 @@ tls, quic, dhcp, mdns, ip, ipv6, eth
 
 ### IP Filtering
 ```
-ip.src==192.168.1.1          # Nguồn từ IP này
-ip.dst==10.0.0.1             # Đích tới IP này
-ip.addr==172.16.0.1          # Từ hoặc tới IP này
+ip.src==192.168.1.1          # Nguá»“n tá»« IP nĂ y
+ip.dst==10.0.0.1             # ÄĂ­ch tá»›i IP nĂ y
+ip.addr==172.16.0.1          # Tá»« hoáº·c tá»›i IP nĂ y
 ```
 
 ### Port Filtering
 ```
-tcp.port==443                # TCP cổng 443
-udp.port==53                 # UDP cổng 53 (DNS)
-port==8080                   # Cổng 8080 (TCP hoặc UDP)
+tcp.port==443                # TCP cá»•ng 443
+udp.port==53                 # UDP cá»•ng 53 (DNS)
+port==8080                   # Cá»•ng 8080 (TCP hoáº·c UDP)
 ```
 
 ### Frame/Length
 ```
-frame.number==5              # Frame số 5
-frame.len==64                # Gói tin 64 bytes
-contains==example.com        # Chứa text
+frame.number==5              # Frame sá»‘ 5
+frame.len==64                # GĂ³i tin 64 bytes
+contains==example.com        # Chá»©a text
 ```
 
 ### Logical Operators
 ```
-tcp and port==443            # TCP AND cổng 443
-dns or icmp                  # DNS hoặc ICMP
-not arp                      # Không ARP
-(tcp or udp) and port==80    # (TCP hoặc UDP) AND cổng 80
+tcp and port==443            # TCP AND cá»•ng 443
+dns or icmp                  # DNS hoáº·c ICMP
+not arp                      # KhĂ´ng ARP
+(tcp or udp) and port==80    # (TCP hoáº·c UDP) AND cá»•ng 80
 ```
 
-## 🎨 Menu Actions
+## đŸ¨ Menu Actions
 
 | Menu | Action | Shortcut |
 |------|--------|----------|
@@ -158,57 +158,57 @@ not arp                      # Không ARP
 | | Protocol Hierarchy | - |
 | **Help** | About | - | 
 
-## 🛠️ Toolbar Buttons
+## đŸ› ï¸ Toolbar Buttons
 
-| Icon | Tên | Chức năng |
+| Icon | TĂªn | Chá»©c nÄƒng |
 |------|------|----------|
-| ▶ | Start | Bắt đầu capture |
-| ■ | Stop | Dừng capture |
-| ⟳ | Restart | Khởi động lại |
-| ⚙ | Options | Cài đặt |
-| 📂 | Open | Tải PCAP file |
-| 💾 | Save | Lưu PCAP file |
-| 🔍 | Find | Tìm kiếm |
-| 🎨 | Colors | Color rules |
+| â–¶ | Start | Báº¯t Ä‘áº§u capture |
+| â–  | Stop | Dá»«ng capture |
+| âŸ³ | Restart | Khá»Ÿi Ä‘á»™ng láº¡i |
+| â™ | Options | CĂ i Ä‘áº·t |
+| đŸ“‚ | Open | Táº£i PCAP file |
+| đŸ’¾ | Save | LÆ°u PCAP file |
+| đŸ” | Find | TĂ¬m kiáº¿m |
+| đŸ¨ | Colors | Color rules |
 
-## 📋 Giao Diện Chi Tiết
+## đŸ“‹ Giao Diá»‡n Chi Tiáº¿t
 
-### Packet Table (Trên)
-- Danh sách gói tin capture được
-- Màu code theo protocol (TCP=xanh, UDP=xanh lá, DNS=cam, etc.)
-- Click vào 1 hàng để xem chi tiết
+### Packet Table (TrĂªn)
+- Danh sĂ¡ch gĂ³i tin capture Ä‘Æ°á»£c
+- MĂ u code theo protocol (TCP=xanh, UDP=xanh lĂ¡, DNS=cam, etc.)
+- Click vĂ o 1 hĂ ng Ä‘á»ƒ xem chi tiáº¿t
 
-### Packet Details (Dưới trái)
-- Tree structure các layer
-- Ví dụ: Frame → Ethernet → IP → TCP → HTTP
-- Expand/collapse để xem chi tiết từng layer
+### Packet Details (DÆ°á»›i trĂ¡i)
+- Tree structure cĂ¡c layer
+- VĂ­ dá»¥: Frame â†’ Ethernet â†’ IP â†’ TCP â†’ HTTP
+- Expand/collapse Ä‘á»ƒ xem chi tiáº¿t tá»«ng layer
 
-### Hex View (Dưới phải)
-- Hex dump của gói tin
+### Hex View (DÆ°á»›i pháº£i)
+- Hex dump cá»§a gĂ³i tin
 - Format: offset, hex bytes, ASCII
-- Read-only (không chỉnh sửa)
+- Read-only (khĂ´ng chá»‰nh sá»­a)
 
-## ⚡ Keyboard Shortcuts
+## â¡ Keyboard Shortcuts
 
 ```
-Ctrl+O              Tải file PCAP
-Ctrl+S              Lưu PCAP
+Ctrl+O              Táº£i file PCAP
+Ctrl+S              LÆ°u PCAP
 Ctrl+E              Start/Stop capture
-Ctrl+F              Find gói tin
+Ctrl+F              Find gĂ³i tin
 Ctrl+Z/Y            Undo/Redo
 Ctrl+Plus/Minus     Zoom In/Out
 F11                 Fullscreen
-Enter (trong filter) Áp dụng filter
+Enter (trong filter) Ăp dá»¥ng filter
 ```
 
-## 🐛 Troubleshooting
+## đŸ› Troubleshooting
 
-### ❌ "ModuleNotFoundError: No module named 'scapy'"
+### âŒ "ModuleNotFoundError: No module named 'scapy'"
 ```bash
 pip install scapy PySide6 psutil
 ```
 
-### ❌ "No capture capabilities" (Linux/macOS)
+### âŒ "No capture capabilities" (Linux/macOS)
 ```bash
 # Linux
 sudo apt-get install libpcap-dev
@@ -219,310 +219,310 @@ brew install libpcap
 pip install scapy
 ```
 
-### ❌ "Npcap not installed" (Windows)
-- Chạy app với Admin privileges
-- Hoặc cài Npcap thủ công
+### âŒ "Npcap not installed" (Windows)
+- Cháº¡y app vá»›i Admin privileges
+- Hoáº·c cĂ i Npcap thá»§ cĂ´ng
 
-### ❌ Ứng dụng crash khi capture
-- Kiểm tra interface có available không
-- Thử dùng capture filter khác
-- Restart ứng dụng
+### âŒ á»¨ng dá»¥ng crash khi capture
+- Kiá»ƒm tra interface cĂ³ available khĂ´ng
+- Thá»­ dĂ¹ng capture filter khĂ¡c
+- Restart á»©ng dá»¥ng
 
-### ❌ Không thấy gói tin
-- Kiểm tra interface có chọn đúng
-- Kiểm tra capture filter có quá hẹp không
-- Thử `tcpdump -i <interface> -n` để test
+### âŒ KhĂ´ng tháº¥y gĂ³i tin
+- Kiá»ƒm tra interface cĂ³ chá»n Ä‘Ăºng
+- Kiá»ƒm tra capture filter cĂ³ quĂ¡ háº¹p khĂ´ng
+- Thá»­ `tcpdump -i <interface> -n` Ä‘á»ƒ test
 
-## 📞 Support
+## đŸ“ Support
 
-- GitHub Issues: [báo cáo lỗi]
+- GitHub Issues: [bĂ¡o cĂ¡o lá»—i]
 - Email: support@packetra.dev
 - Documentation: README.md
 
-## 📄 License
+## đŸ“„ License
 
-MIT License - Tự do sử dụng, sửa đổi, phân phối
+MIT License - Tá»± do sá»­ dá»¥ng, sá»­a Ä‘á»•i, phĂ¢n phá»‘i
 
 ---
 
-**Vui lòng contact nếu gặp vấn đề!**
+**Vui lĂ²ng contact náº¿u gáº·p váº¥n Ä‘á»!**
 
-## 🚀 CẬP NHẬT NHANH (5 phút)
+## đŸ€ Cáº¬P NHáº¬T NHANH (5 phĂºt)
 
-Bước 1: Giải nén
-    - Giải nén Packetra.zip
+BÆ°á»›c 1: Giáº£i nĂ©n
+    - Giáº£i nĂ©n Packetra.zip
     - cd DATN-Packetra
 
-Bước 2: Tạo Virtual Environment (tùy chọn)
+BÆ°á»›c 2: Táº¡o Virtual Environment (tĂ¹y chá»n)
     - python -m venv venv
     - venv\Scripts\activate  (Windows)
     - source venv/bin/activate  (macOS/Linux)
 
-Bước 3: Cài đặt Dependencies
+BÆ°á»›c 3: CĂ i Ä‘áº·t Dependencies
     - pip install -r requirements.txt
-    - (Windows) Chấp nhận UAC khi cài Npcap
+    - (Windows) Cháº¥p nháº­n UAC khi cĂ i Npcap
 
-Bước 4: Chạy
+BÆ°á»›c 4: Cháº¡y
     - python main.py
 
-✅ XONG!
+âœ… XONG!
 
-## 📚 CÁC FILE TÀI LIỆU
+## đŸ“ CĂC FILE TĂ€I LIá»†U
 
-📖 README.md                    - Đầy đủ tài liệu & tính năng
-📖 INSTALLATION.md             - Hướng dẫn cài đặt chi tiết
-📖 CHANGELOG.md                - Ghi chép thay đổi v1.0
-📖 QUICK_START.txt             - File này
+đŸ“– README.md                    - Äáº§y Ä‘á»§ tĂ i liá»‡u & tĂ­nh nÄƒng
+đŸ“– INSTALLATION.md             - HÆ°á»›ng dáº«n cĂ i Ä‘áº·t chi tiáº¿t
+đŸ“– CHANGELOG.md                - Ghi chĂ©p thay Ä‘á»•i v1.0
+đŸ“– QUICK_START.txt             - File nĂ y
 
-## 🎯 CÁC KEYBOARD SHORTCUTS
+## đŸ¯ CĂC KEYBOARD SHORTCUTS
 
-Ctrl+O              - Tải PCAP file
-Ctrl+S              - Lưu PCAP
+Ctrl+O              - Táº£i PCAP file
+Ctrl+S              - LÆ°u PCAP
 Ctrl+E              - Start/Stop capture
-Ctrl+F              - Find gói tin
+Ctrl+F              - Find gĂ³i tin
 Ctrl+Plus/Minus     - Zoom
 F11                 - Fullscreen
-Enter               - Áp dụng filter
+Enter               - Ăp dá»¥ng filter
 
-## 🎨 BASIC FILTER EXAMPLES
+## đŸ¨ BASIC FILTER EXAMPLES
 
-tcp                 → Chỉ TCP
-udp                 → Chỉ UDP
-dns                 → Chỉ DNS
-http                → Chỉ HTTP
-tcp.port==443       → TCP cổng 443
-ip.src==192.168.*   → Từ IP này
-not arp             → Không ARP
-tcp and port==80    → TCP và cổng 80
+tcp                 â†’ Chá»‰ TCP
+udp                 â†’ Chá»‰ UDP
+dns                 â†’ Chá»‰ DNS
+http                â†’ Chá»‰ HTTP
+tcp.port==443       â†’ TCP cá»•ng 443
+ip.src==192.168.*   â†’ Tá»« IP nĂ y
+not arp             â†’ KhĂ´ng ARP
+tcp and port==80    â†’ TCP vĂ  cá»•ng 80
 
-## 💡 MẸO
+## đŸ’¡ Máº¸O
 
-1. Interface chậm?
-   → Dùng Capture Filter để lọc tại nguồn
-   → VD: tcp port 443 (chỉ bắt TCP cổng 443)
+1. Interface cháº­m?
+   â†’ DĂ¹ng Capture Filter Ä‘á»ƒ lá»c táº¡i nguá»“n
+   â†’ VD: tcp port 443 (chá»‰ báº¯t TCP cá»•ng 443)
 
-2. Muốn xem chi tiết packet?
-   → Click vào 1 hàng trong Packet Table
-   → Xem "Packet Details" trái + "Hex View" phải
+2. Muá»‘n xem chi tiáº¿t packet?
+   â†’ Click vĂ o 1 hĂ ng trong Packet Table
+   â†’ Xem "Packet Details" trĂ¡i + "Hex View" pháº£i
 
-3. Muốn chuyển interface?
-   → Menu Capture → Interfaces
-   → Hoặc nhấn button "⚙" trong toolbar
+3. Muá»‘n chuyá»ƒn interface?
+   â†’ Menu Capture â†’ Interfaces
+   â†’ Hoáº·c nháº¥n button "â™" trong toolbar
 
-4. Lưu capture?
-   → Ctrl+S hoặc Menu File → Save
-   → File được lưu dạng .pcap
-   → Có thể mở lại bằng "Ctrl+O"
+4. LÆ°u capture?
+   â†’ Ctrl+S hoáº·c Menu File â†’ Save
+   â†’ File Ä‘Æ°á»£c lÆ°u dáº¡ng .pcap
+   â†’ CĂ³ thá»ƒ má»Ÿ láº¡i báº±ng "Ctrl+O"
 
-5. Display Filter không hoạt động?
-   → Nhấn Enter hoặc nút "➡"
-   → Xem README.md để cú pháp chi tiết
+5. Display Filter khĂ´ng hoáº¡t Ä‘á»™ng?
+   â†’ Nháº¥n Enter hoáº·c nĂºt "â¡"
+   â†’ Xem README.md Ä‘á»ƒ cĂº phĂ¡p chi tiáº¿t
 
-## 🐛 CÓ VẤN ĐỀ?
+## đŸ› CĂ“ Váº¤N Äá»€?
 
-❌ "ModuleNotFoundError"
-   → pip install scapy PySide6 psutil
+âŒ "ModuleNotFoundError"
+   â†’ pip install scapy PySide6 psutil
 
-❌ "Npcap not installed" (Windows)
-   → Chạy với Admin privileges
-   → Hoặc cài Npcap thủ công
+âŒ "Npcap not installed" (Windows)
+   â†’ Cháº¡y vá»›i Admin privileges
+   â†’ Hoáº·c cĂ i Npcap thá»§ cĂ´ng
 
-❌ Không capture được gói tin
-   → Kiểm tra interface chọn đúng
-   → Thử tắt firewall tạm
-   → Kiểm tra capture filter
+âŒ KhĂ´ng capture Ä‘Æ°á»£c gĂ³i tin
+   â†’ Kiá»ƒm tra interface chá»n Ä‘Ăºng
+   â†’ Thá»­ táº¯t firewall táº¡m
+   â†’ Kiá»ƒm tra capture filter
 
-❌ Ứng dụng crash
-   → Thử chạy lại
-   → Kiểm tra Python version >= 3.8
-   → Xem INSTALLATION.md
+âŒ á»¨ng dá»¥ng crash
+   â†’ Thá»­ cháº¡y láº¡i
+   â†’ Kiá»ƒm tra Python version >= 3.8
+   â†’ Xem INSTALLATION.md
 
-## 📞 LIÊN HỆ / HỖ TRỢ
+## đŸ“ LIĂN Há»† / Há»– TRá»¢
 
-Xem README.md cho liên hệ chi tiết.
+Xem README.md cho liĂªn há»‡ chi tiáº¿t.
 
-## 🎯 CẤU TRÚC DỰ ÁN
+## đŸ¯ Cáº¤U TRĂC Dá»° ĂN
 
 DATN-Packetra/
-├── main.py                      Entry point
-├── core/                        Logic parsing packet
-│   ├── capture.py              Sniffer (Scapy)
-│   ├── parser.py               Parse packets
-│   ├── filtering.py            Display filter
-│   └── formatters.py           Display format
-├── gui/                         User interface
-│   ├── application.py          Main window
-│   ├── capture_view.py         Capture UI
-│   ├── interface_selector_view.py  Interface chooser
-│   └── *.py                    GUI components
-└── utils/                       Helper functions
-    ├── network_utils.py        Network
-    ├── pcap_io.py             File I/O
-    └── system_check.py        Npcap check
+â”œâ”€â”€ main.py                      Entry point
+â”œâ”€â”€ core/                        Logic parsing packet
+â”‚   â”œâ”€â”€ capture.py              Sniffer (Scapy)
+â”‚   â”œâ”€â”€ parser.py               Parse packets
+â”‚   â”œâ”€â”€ filtering.py            Display filter
+â”‚   â””â”€â”€ formatters.py           Display format
+â”œâ”€â”€ gui/                         User interface
+â”‚   â”œâ”€â”€ application.py          Main window
+â”‚   â”œâ”€â”€ capture_view.py         Capture UI
+â”‚   â”œâ”€â”€ interface_selector_view.py  Interface chooser
+â”‚   â””â”€â”€ *.py                    GUI components
+â””â”€â”€ utils/                       Helper functions
+    â”œâ”€â”€ network_utils.py        Network
+    â”œâ”€â”€ pcap_io.py             File I/O
+    â””â”€â”€ system_check.py        Npcap check
 
-## ✅ FEATURES
+## âœ… FEATURES
 
-✓ Capture packets real-time
-✓ Support 20+ protocols (TCP, UDP, DNS, HTTP, TLS, etc.)
-✓ Display filtering with AND/OR/NOT
-✓ Packet details tree view
-✓ Hex dump viewer
-✓ Save/load PCAP files
-✓ Real-time traffic monitoring
-✓ Protocol color coding
-✓ Conversation tracking
-✓ Complete Packetra-like menu/toolbar
-✓ Keyboard shortcuts
-✓ Cross-platform (Windows, macOS, Linux)
+âœ“ Capture packets real-time
+âœ“ Support 20+ protocols (TCP, UDP, DNS, HTTP, TLS, etc.)
+âœ“ Display filtering with AND/OR/NOT
+âœ“ Packet details tree view
+âœ“ Hex dump viewer
+âœ“ Save/load PCAP files
+âœ“ Real-time traffic monitoring
+âœ“ Protocol color coding
+âœ“ Conversation tracking
+âœ“ Complete Packetra-like menu/toolbar
+âœ“ Keyboard shortcuts
+âœ“ Cross-platform (Windows, macOS, Linux)
 
-## 🎊 CẬP NHẬT NHANH - 5 PHÚT TỪ ĐÂY ĐÃ XONG!
+## đŸ Cáº¬P NHáº¬T NHANH - 5 PHĂT Tá»ª ÄĂ‚Y ÄĂƒ XONG!
 
-Giờ hãy mở app và bắt đầu capture! 🚀
-  → python main.py
+Giá» hĂ£y má»Ÿ app vĂ  báº¯t Ä‘áº§u capture! đŸ€
+  â†’ python main.py
 
-Chúc bạn sử dụng vui vẻ! 😊
+ChĂºc báº¡n sá»­ dá»¥ng vui váº»! đŸ˜
 
-═══════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 Version: 1.0
 Release Date: May 7, 2026
 License: MIT
-Status: ✅ Production Ready
+Status: âœ… Production Ready
 
-## 🎨 Giao Diện
+## đŸ¨ Giao Diá»‡n
 
 ```
-┌─────────────────────────────────────────────────┐
-│ File Edit View Capture Analyze Statistics Help  │
-├─────────────────────────────────────────────────┤
-│ ▶ ■ ⟳ ⚙ | 📂 💾 | 🔍 🎨                   │
-├─────────────────────────────────────────────────┤
-│ Apply a display filter ... [➡] [✕]            │
-├─────────────────────────────────────────────────┤
-│                                                  │
-│  Packet Table                                    │
-│  No. | Time | Source | Destination | Protocol  │
-│      |      |        |             |           │
-├──────────────────┬──────────────────────────────┤
-│  Packet Details  │  Hex View                   │
-│  (Tree)          │  00 01 02 03 04 05 ...     │
-│                  │                             │
-├──────────────────┴──────────────────────────────┤
-│ Status: "Packets: 1234 | Displayed: 456..."    │
-└─────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚ File Edit View Capture Analyze Statistics Help  â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚ â–¶ â–  âŸ³ â™ | đŸ“‚ đŸ’¾ | đŸ” đŸ¨                   â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚ Apply a display filter ... [â¡] [âœ•]            â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                  â”‚
+â”‚  Packet Table                                    â”‚
+â”‚  No. | Time | Source | Destination | Protocol  â”‚
+â”‚      |      |        |             |           â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  Packet Details  â”‚  Hex View                   â”‚
+â”‚  (Tree)          â”‚  00 01 02 03 04 05 ...     â”‚
+â”‚                  â”‚                             â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚ Status: "Packets: 1234 | Displayed: 456..."    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
-## 📁 Cấu Trúc Project
+## đŸ“ Cáº¥u TrĂºc Project
 
 ```
 Packetra/
-├── main.py                 # Entry point
-├── requirements.txt        # Dependencies
-├── core/
-│   ├── capture.py         # Packet sniffer (Scapy)
-│   ├── parser.py          # Parse packet data
-│   ├── filtering.py       # Display filter logic
-│   ├── formatters.py      # Hex/tree formatters
-│   ├── models.py          # Data models
-│
-├── gui/
-│   ├── application.py          # Main window
-│   ├── interface_selector_view.py  # Interface chooser
-│   ├── capture_view.py         # Capture UI
-│   ├── packet_table.py         # Packet list table
-│   ├── packet_details.py       # Packet details tree
-│   ├── hex_view.py            # Hex dump viewer
-│
-└── utils/
-    ├── network_utils.py        # Network operations
-    ├── pcap_io.py             # PCAP I/O
-    ├── system_check.py        # Npcap check
+â”œâ”€â”€ main.py                 # Entry point
+â”œâ”€â”€ requirements.txt        # Dependencies
+â”œâ”€â”€ core/
+â”‚   â”œâ”€â”€ capture.py         # Packet sniffer (Scapy)
+â”‚   â”œâ”€â”€ parser.py          # Parse packet data
+â”‚   â”œâ”€â”€ filtering.py       # Display filter logic
+â”‚   â”œâ”€â”€ formatters.py      # Hex/tree formatters
+â”‚   â”œâ”€â”€ models.py          # Data models
+â”‚
+â”œâ”€â”€ gui/
+â”‚   â”œâ”€â”€ application.py          # Main window
+â”‚   â”œâ”€â”€ interface_selector_view.py  # Interface chooser
+â”‚   â”œâ”€â”€ capture_view.py         # Capture UI
+â”‚   â”œâ”€â”€ packet_table.py         # Packet list table
+â”‚   â”œâ”€â”€ packet_details.py       # Packet details tree
+â”‚   â”œâ”€â”€ hex_view.py            # Hex dump viewer
+â”‚
+â””â”€â”€ utils/
+    â”œâ”€â”€ network_utils.py        # Network operations
+    â”œâ”€â”€ pcap_io.py             # PCAP I/O
+    â”œâ”€â”€ system_check.py        # Npcap check
 ```
 
-## 🔧 Menu Actions
+## đŸ”§ Menu Actions
 
 ### File
-- Open... (Ctrl+O) - Tải PCAP file
-- Save... (Ctrl+S) - Lưu PCAP file
-- Save As... (Ctrl+Shift+S) - Lưu với tên mới
-- Export As... - Xuất định dạng khác
+- Open... (Ctrl+O) - Táº£i PCAP file
+- Save... (Ctrl+S) - LÆ°u PCAP file
+- Save As... (Ctrl+Shift+S) - LÆ°u vá»›i tĂªn má»›i
+- Export As... - Xuáº¥t Ä‘á»‹nh dáº¡ng khĂ¡c
 - Print... (Ctrl+P) - In
-- Exit (Ctrl+Q) - Thoát
+- Exit (Ctrl+Q) - ThoĂ¡t
 
 ### Edit
 - Undo/Redo, Cut/Copy/Paste
 - Find... (Ctrl+F)
-- Preferences - Cài đặt ứng dụng
+- Preferences - CĂ i Ä‘áº·t á»©ng dá»¥ng
 
 ### View
 - Zoom In/Out
 - Fullscreen (F11)
 
 ### Capture
-- Interfaces... - Chọn interface
-- Start (Ctrl+E) - Bắt đầu capture
-- Stop (Ctrl+E) - Dừng capture
-- Restart - Khởi động lại
+- Interfaces... - Chá»n interface
+- Start (Ctrl+E) - Báº¯t Ä‘áº§u capture
+- Stop (Ctrl+E) - Dá»«ng capture
+- Restart - Khá»Ÿi Ä‘á»™ng láº¡i
 
 ### Analyze
-- Follow Stream - Theo dõi luồng gói
-- Decode As... - Giải mã theo protocol
-- Display Filters - Quản lý filters
+- Follow Stream - Theo dĂµi luá»“ng gĂ³i
+- Decode As... - Giáº£i mĂ£ theo protocol
+- Display Filters - Quáº£n lĂ½ filters
 
 ### Statistics
-- Summary - Tóm tắt capture
-- Protocol Hierarchy - Phân bố protocol
-- Conversations - Các cuộc trò chuyện
-- Endpoints - Các điểm cuối
-- I/O Graph - Biểu đồ I/O
+- Summary - TĂ³m táº¯t capture
+- Protocol Hierarchy - PhĂ¢n bá»‘ protocol
+- Conversations - CĂ¡c cuá»™c trĂ² chuyá»‡n
+- Endpoints - CĂ¡c Ä‘iá»ƒm cuá»‘i
+- I/O Graph - Biá»ƒu Ä‘á»“ I/O
 
-## 📝 Ghi Chú
+## đŸ“ Ghi ChĂº
 
-- **Capture Filter** (lọc tại nguồn): Áp dụng lúc bắt gói tin
-- **Display Filter** (lọc hiển thị): Áp dụng trên gói đã bắt
-- Bấm "Interfaces" (Capture → Interfaces) để chuyển sang interface khác
-- Dữ liệu tạm sẽ bị mất khi chuyển interface
+- **Capture Filter** (lá»c táº¡i nguá»“n): Ăp dá»¥ng lĂºc báº¯t gĂ³i tin
+- **Display Filter** (lá»c hiá»ƒn thá»‹): Ăp dá»¥ng trĂªn gĂ³i Ä‘Ă£ báº¯t
+- Báº¥m "Interfaces" (Capture â†’ Interfaces) Ä‘á»ƒ chuyá»ƒn sang interface khĂ¡c
+- Dá»¯ liá»‡u táº¡m sáº½ bá»‹ máº¥t khi chuyá»ƒn interface
 
-## 🐛 Troubleshooting
+## đŸ› Troubleshooting
 
-### Lỗi "Npcap not installed" (Windows)
-- Chạy ứng dụng với Administrator privileges
-- Hoặc cài Npcap thủ công từ https://nmap.org/npcap/
+### Lá»—i "Npcap not installed" (Windows)
+- Cháº¡y á»©ng dá»¥ng vá»›i Administrator privileges
+- Hoáº·c cĂ i Npcap thá»§ cĂ´ng tá»« https://nmap.org/npcap/
 
-### Không bắt được gói tin
-- Kiểm tra bạn đã chọn đúng interface
-- Thử dùng Capture Filter (VD: `tcp port 443`)
-- Kiểm tra firewall
+### KhĂ´ng báº¯t Ä‘Æ°á»£c gĂ³i tin
+- Kiá»ƒm tra báº¡n Ä‘Ă£ chá»n Ä‘Ăºng interface
+- Thá»­ dĂ¹ng Capture Filter (VD: `tcp port 443`)
+- Kiá»ƒm tra firewall
 
-### Ứng dụng bị lệch màn hình
-- Bấn View → Reset Zoom (Ctrl+0)
+### á»¨ng dá»¥ng bá»‹ lá»‡ch mĂ n hĂ¬nh
+- Báº¥n View â†’ Reset Zoom (Ctrl+0)
 
-## 📄 License
+## đŸ“„ License
 
 MIT License
 
-## 👨‍💻 Contributing
+## đŸ‘¨â€đŸ’» Contributing
 
-Đóng góp ý kiến: issues, pull requests, hoặc báo cáo bugs!
+ÄĂ³ng gĂ³p Ă½ kiáº¿n: issues, pull requests, hoáº·c bĂ¡o cĂ¡o bugs!
 
 ---
 
-**Vui lòng báo cáo lỗi hoặc đề xuất tính năng mới!**
+**Vui lĂ²ng bĂ¡o cĂ¡o lá»—i hoáº·c Ä‘á» xuáº¥t tĂ­nh nÄƒng má»›i!**
 
-## 📝 CHANGELOG
+## đŸ“ CHANGELOG
 
 ## Version 1.0 - 2026-05-07
 
-### ✨ Major Features
+### âœ¨ Major Features
 
-#### 🎨 New Unified UI Architecture
-- **Single Application Window** - Hợp nhất 2 màn hình thành 1 framework chung
-- **QStackedWidget** - Chuyển đổi mượt mà giữa Interface Selector và Capture View
-- **Shared Toolbar & Menubar** - Dùng chung giữa 2 view
-- **Shared Statusbar** - Hiển thị trạng thái thống nhất
+#### đŸ¨ New Unified UI Architecture
+- **Single Application Window** - Há»£p nháº¥t 2 mĂ n hĂ¬nh thĂ nh 1 framework chung
+- **QStackedWidget** - Chuyá»ƒn Ä‘á»•i mÆ°á»£t mĂ  giá»¯a Interface Selector vĂ  Capture View
+- **Shared Toolbar & Menubar** - DĂ¹ng chung giá»¯a 2 view
+- **Shared Statusbar** - Hiá»ƒn thá»‹ tráº¡ng thĂ¡i thá»‘ng nháº¥t
 
-#### 🖥️ Complete Menubar Implementation
-Tất cả các menu hoạt động như Packetra:
+#### đŸ–¥ï¸ Complete Menubar Implementation
+Táº¥t cáº£ cĂ¡c menu hoáº¡t Ä‘á»™ng nhÆ° Packetra:
 - **File Menu**: Open, Save, Save As, Export, Print, Exit
 - **Edit Menu**: Undo, Redo, Cut, Copy, Paste, Find, Preferences
 - **View Menu**: Zoom In/Out, Fullscreen
@@ -531,133 +531,133 @@ Tất cả các menu hoạt động như Packetra:
 - **Statistics Menu**: Summary, Protocol Hierarchy, Conversations, Endpoints, I/O Graph
 - **Help Menu**: Contents, About, About Qt
 
-#### 🔧 Complete Toolbar Implementation
+#### đŸ”§ Complete Toolbar Implementation
 - Start/Stop/Restart buttons
 - Open/Save PCAP files
-- Find gói tin
+- Find gĂ³i tin
 - Color rules
 - Settings/Options
 
-### 🔄 Refactored Components
+### đŸ”„ Refactored Components
 
 #### `gui/application.py` (NEW)
-- **ApplicationWindow**: Main window chứa tất cả logic chính
-- **QStackedWidget**: Quản lý 2 view (Selector + Capture)
-- **Signal/Slot**: Kết nối tất cả actions
+- **ApplicationWindow**: Main window chá»©a táº¥t cáº£ logic chĂ­nh
+- **QStackedWidget**: Quáº£n lĂ½ 2 view (Selector + Capture)
+- **Signal/Slot**: Káº¿t ná»‘i táº¥t cáº£ actions
 
 #### `gui/interface_selector_view.py` (Refactored)
-- Chuyển từ `InterfaceSelector` (QWidget) 
-- Thêm `Signal: capture_started` để gửi event
-- Loại bỏ logic window cũ
-- Thêm kết nối buttons/signals
+- Chuyá»ƒn tá»« `InterfaceSelector` (QWidget) 
+- ThĂªm `Signal: capture_started` Ä‘á»ƒ gá»­i event
+- Loáº¡i bá» logic window cÅ©
+- ThĂªm káº¿t ná»‘i buttons/signals
 
 #### `gui/capture_view.py` (NEW - Refactored from main_window.py)
-- Chuyển từ `MainWindow` thành widget thường
-- Loại bỏ toolbar/menubar (dùng chung từ app)
-- Thêm method `set_interface()` để đặt interface động
-- Thêm `Signal: status_changed` để gửi status
-- Thêm method `focus_filter()`, `show_summary()`, `show_conversations()`
-- Thêm method `is_capturing()` để check trạng thái
+- Chuyá»ƒn tá»« `MainWindow` thĂ nh widget thÆ°á»ng
+- Loáº¡i bá» toolbar/menubar (dĂ¹ng chung tá»« app)
+- ThĂªm method `set_interface()` Ä‘á»ƒ Ä‘áº·t interface Ä‘á»™ng
+- ThĂªm `Signal: status_changed` Ä‘á»ƒ gá»­i status
+- ThĂªm method `focus_filter()`, `show_summary()`, `show_conversations()`
+- ThĂªm method `is_capturing()` Ä‘á»ƒ check tráº¡ng thĂ¡i
 
-### 🎯 New Actions & Features
+### đŸ¯ New Actions & Features
 
 #### Menu Actions
-- ✅ File → Open/Save/Save As (hoạt động)
-- ✅ Edit → Find (focus vào filter)
-- ✅ Capture → Interfaces (chuyển về selector)
-- ✅ Capture → Start/Stop/Restart (hoạt động)
-- ✅ Statistics → Summary (show tóm tắt)
-- ✅ Statistics → Conversations (show conversations)
-- ✅ Help → About (hiển thị thông tin)
+- âœ… File â†’ Open/Save/Save As (hoáº¡t Ä‘á»™ng)
+- âœ… Edit â†’ Find (focus vĂ o filter)
+- âœ… Capture â†’ Interfaces (chuyá»ƒn vá» selector)
+- âœ… Capture â†’ Start/Stop/Restart (hoáº¡t Ä‘á»™ng)
+- âœ… Statistics â†’ Summary (show tĂ³m táº¯t)
+- âœ… Statistics â†’ Conversations (show conversations)
+- âœ… Help â†’ About (hiá»ƒn thá»‹ thĂ´ng tin)
 
 #### Toolbar Actions
-- ✅ All buttons hoạt động và connected
-- ✅ Disabled/Enabled based on mode (Selector vs Capture)
+- âœ… All buttons hoáº¡t Ä‘á»™ng vĂ  connected
+- âœ… Disabled/Enabled based on mode (Selector vs Capture)
 
-### 📦 Project Structure
+### đŸ“¦ Project Structure
 ```
 Packetra/
-├── main.py                           # Entry point (simplified)
-├── requirements.txt                   # Dependencies
-├── README.md                          # Tài liệu chính
-├── INSTALLATION.md                    # Hướng dẫn cài đặt
-├── CHANGELOG.md                       # File này
-├── .gitignore                         # Git ignore
-│
-├── core/
-│   ├── __init__.py                   # (NEW) Package init
-│   ├── capture.py                    # PacketSniffer (unchanged)
-│   ├── parser.py                     # PacketParser (unchanged)
-│   ├── filtering.py                  # DisplayFilter (unchanged)
-│   ├── formatters.py                 # Formatters (unchanged)
-│   ├── models.py                     # PacketRecord (unchanged)
-│
-├── gui/
-│   ├── __init__.py                   # (NEW) Package init
-│   ├── application.py                # (NEW) ApplicationWindow main
-│   ├── interface_selector_view.py     # (NEW) Refactored selector
-│   ├── capture_view.py               # (NEW) Refactored main_window
-│   ├── packet_table.py               # PacketTable (unchanged)
-│   ├── packet_details.py             # PacketDetailsTree (unchanged)
-│   ├── hex_view.py                   # PacketHexView (unchanged)
-│   ├── interface_selector.py         # (OLD - kept for reference)
-│   ├── main_window.py                # (OLD - kept for reference)
-│
-└── utils/
-    ├── __init__.py                   # (NEW) Package init
-    ├── network_utils.py              # get_interfaces, get_traffic (unchanged)
-    ├── pcap_io.py                    # PCAP I/O (unchanged)
-    ├── system_check.py               # Npcap check (unchanged)
+â”œâ”€â”€ main.py                           # Entry point (simplified)
+â”œâ”€â”€ requirements.txt                   # Dependencies
+â”œâ”€â”€ README.md                          # TĂ i liá»‡u chĂ­nh
+â”œâ”€â”€ INSTALLATION.md                    # HÆ°á»›ng dáº«n cĂ i Ä‘áº·t
+â”œâ”€â”€ CHANGELOG.md                       # File nĂ y
+â”œâ”€â”€ .gitignore                         # Git ignore
+â”‚
+â”œâ”€â”€ core/
+â”‚   â”œâ”€â”€ __init__.py                   # (NEW) Package init
+â”‚   â”œâ”€â”€ capture.py                    # PacketSniffer (unchanged)
+â”‚   â”œâ”€â”€ parser.py                     # PacketParser (unchanged)
+â”‚   â”œâ”€â”€ filtering.py                  # DisplayFilter (unchanged)
+â”‚   â”œâ”€â”€ formatters.py                 # Formatters (unchanged)
+â”‚   â”œâ”€â”€ models.py                     # PacketRecord (unchanged)
+â”‚
+â”œâ”€â”€ gui/
+â”‚   â”œâ”€â”€ __init__.py                   # (NEW) Package init
+â”‚   â”œâ”€â”€ application.py                # (NEW) ApplicationWindow main
+â”‚   â”œâ”€â”€ interface_selector_view.py     # (NEW) Refactored selector
+â”‚   â”œâ”€â”€ capture_view.py               # (NEW) Refactored main_window
+â”‚   â”œâ”€â”€ packet_table.py               # PacketTable (unchanged)
+â”‚   â”œâ”€â”€ packet_details.py             # PacketDetailsTree (unchanged)
+â”‚   â”œâ”€â”€ hex_view.py                   # PacketHexView (unchanged)
+â”‚   â”œâ”€â”€ interface_selector.py         # (OLD - kept for reference)
+â”‚   â”œâ”€â”€ main_window.py                # (OLD - kept for reference)
+â”‚
+â””â”€â”€ utils/
+    â”œâ”€â”€ __init__.py                   # (NEW) Package init
+    â”œâ”€â”€ network_utils.py              # get_interfaces, get_traffic (unchanged)
+    â”œâ”€â”€ pcap_io.py                    # PCAP I/O (unchanged)
+    â”œâ”€â”€ system_check.py               # Npcap check (unchanged)
 ```
 
-### 🎨 UI Improvements
-- ✅ Unified frame - không có 2 window riêng rẽ
-- ✅ Smooth switching giữa Selector → Capture view
-- ✅ All toolbar buttons consistent
-- ✅ Statusbar thống nhất
-- ✅ Keyboard shortcuts support
+### đŸ¨ UI Improvements
+- âœ… Unified frame - khĂ´ng cĂ³ 2 window riĂªng ráº½
+- âœ… Smooth switching giá»¯a Selector â†’ Capture view
+- âœ… All toolbar buttons consistent
+- âœ… Statusbar thá»‘ng nháº¥t
+- âœ… Keyboard shortcuts support
 
-### 📋 Capture Flow
-1. App start → Show interface selector
+### đŸ“‹ Capture Flow
+1. App start â†’ Show interface selector
 2. Select interface + capture filter
-3. Click "Start Capture" → Switch to capture view
+3. Click "Start Capture" â†’ Switch to capture view
 4. Capture packets + display/filter
-5. Can go back to interface selector via "Capture → Interfaces"
+5. Can go back to interface selector via "Capture â†’ Interfaces"
 
-### 🔒 Backward Compatibility
-- ✅ Cấu trúc core/ không thay đổi
-- ✅ Packet parsing logic không đổi
-- ✅ All existing features still work
-- ✅ Old files kept as backup
+### đŸ”’ Backward Compatibility
+- âœ… Cáº¥u trĂºc core/ khĂ´ng thay Ä‘á»•i
+- âœ… Packet parsing logic khĂ´ng Ä‘á»•i
+- âœ… All existing features still work
+- âœ… Old files kept as backup
 
-### 📚 Documentation
-- ✅ README.md - Complete feature list & usage
-- ✅ INSTALLATION.md - Setup & usage guide
-- ✅ CHANGELOG.md - This file
-- ✅ Display filter examples
-- ✅ Keyboard shortcuts
-- ✅ Troubleshooting section
+### đŸ“ Documentation
+- âœ… README.md - Complete feature list & usage
+- âœ… INSTALLATION.md - Setup & usage guide
+- âœ… CHANGELOG.md - This file
+- âœ… Display filter examples
+- âœ… Keyboard shortcuts
+- âœ… Troubleshooting section
 
-### ✅ Testing
-- ✅ Python syntax check - OK
-- ✅ All imports verified
-- ✅ Signal/slot connections valid
-- ✅ File structure complete
+### âœ… Testing
+- âœ… Python syntax check - OK
+- âœ… All imports verified
+- âœ… Signal/slot connections valid
+- âœ… File structure complete
 
-### 🚀 What's Working
-- ✅ Capture packets real-time
-- ✅ Switch between interfaces
-- ✅ Display filtering (AND/OR/NOT)
-- ✅ Packet details viewing
-- ✅ Hex dump viewing
-- ✅ Save/Load PCAP files
-- ✅ Color coding by protocol
-- ✅ Real-time traffic monitoring
-- ✅ Protocol detection
-- ✅ All menu actions
-- ✅ All toolbar buttons
+### đŸ€ What's Working
+- âœ… Capture packets real-time
+- âœ… Switch between interfaces
+- âœ… Display filtering (AND/OR/NOT)
+- âœ… Packet details viewing
+- âœ… Hex dump viewing
+- âœ… Save/Load PCAP files
+- âœ… Color coding by protocol
+- âœ… Real-time traffic monitoring
+- âœ… Protocol detection
+- âœ… All menu actions
+- âœ… All toolbar buttons
 
-### 🎯 Future Enhancements (Not in v1.0)
+### đŸ¯ Future Enhancements (Not in v1.0)
 - Conversation analysis (advanced)
 - Stream following
 - Packet coloring rules editor
@@ -690,8 +690,8 @@ Packetra/
    ```
 
 3. **Delete old files** (optional):
-   - `gui/interface_selector.py` → no longer used
-   - `gui/main_window.py` → replaced by application.py + capture_view.py
+   - `gui/interface_selector.py` â†’ no longer used
+   - `gui/main_window.py` â†’ replaced by application.py + capture_view.py
 
 4. **Update requirements.txt** if needed
 
@@ -715,776 +715,777 @@ Packetra/
 
 ## ARCHITECTURE DIAGRAM
 
-╔═══════════════════════════════════════════════════════════════════════════════╗
-║                    PACKETRA v1.0 - ARCHITECTURE DIAGRAM                     ║
-╚═══════════════════════════════════════════════════════════════════════════════╝
+â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+â•‘                    PACKETRA v1.0 - ARCHITECTURE DIAGRAM                     â•‘
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         UNIFIED APPLICATION WINDOW                         │
-│                      (gui/application.py - NEW)                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-         │
-         ├─ Menubar
-         │  ├─ File (Open, Save, Exit)
-         │  ├─ Edit (Find, Copy, Paste)
-         │  ├─ View (Zoom, Fullscreen)
-         │  ├─ Capture (Interfaces, Start, Stop, Restart)
-         │  ├─ Analyze (Follow Stream, Decode, Filters)
-         │  ├─ Statistics (Summary, Conversations, Endpoints)
-         │  └─ Help (About, Documentation)
-         │
-         ├─ Toolbar
-         │  ├─ ▶ Start  |  ■ Stop  |  ⟳ Restart
-         │  ├─ ⚙ Options
-         │  ├─ 📂 Open  |  💾 Save
-         │  ├─ 🔍 Find  |  🎨 Colors
-         │  └─ (All buttons connected & working)
-         │
-         ├─ QStackedWidget (Content Area)
-         │  │
-         │  ├─ Page 0: InterfaceSelectorView (gui/interface_selector_view.py - NEW)
-         │  │  │
-         │  │  ├─ Display Filter Input
-         │  │  ├─ Capture Filter Input
-         │  │  ├─ Network Interfaces List
-         │  │  │   ├─ Real-time Traffic (KB/s)
-         │  │  │   └─ Sparkline Chart ▁▂▃▄▅▆▇█
-         │  │  ├─ Interface Scope Combo
-         │  │  │   ├─ All interfaces shown
-         │  │  │   ├─ Only active interfaces
-         │  │  │   └─ Wireless only
-         │  │  └─ "Start Capture" Button
-         │  │      └─ emit: capture_started(iface, name, filter)
-         │  │
-         │  └─ Page 1: CaptureView (gui/capture_view.py - NEW)
-         │     │
-         │     ├─ Display Filter Bar
-         │     │  ├─ Input Field
-         │     │  ├─ ➡ Apply Button
-         │     │  └─ ✕ Clear Button
-         │     │
-         │     └─ Content Area (QSplitter)
-         │        │
-         │        ├─ Upper: PacketTable (gui/packet_table.py)
-         │        │  ├─ No. | Time | Source | Destination | Protocol | Length | Info
-         │        │  ├─ Color coding by protocol
-         │        │  │  ├─ TCP (light blue)
-         │        │  │  ├─ UDP (light green)
-         │        │  │  ├─ DNS (light orange)
-         │        │  │  ├─ ARP (light red)
-         │        │  │  └─ ... (20+ protocols)
-         │        │  └─ cellClicked → show_details()
-         │        │
-         │        └─ Lower: QSplitter (Horizontal)
-         │           │
-         │           ├─ Left: PacketDetailsTree (gui/packet_details.py)
-         │           │  └─ Tree structure:
-         │           │     ├─ Frame
-         │           │     │  ├─ Encapsulation: Ethernet
-         │           │     │  ├─ Arrival Time: ...
-         │           │     │  └─ Protocols: ...
-         │           │     ├─ Ethernet II
-         │           │     │  ├─ Source MAC
-         │           │     │  └─ Destination MAC
-         │           │     ├─ IP
-         │           │     │  ├─ Version, Header Length, TTL
-         │           │     │  └─ Source/Destination IP
-         │           │     ├─ TCP/UDP
-         │           │     │  ├─ Source/Destination Port
-         │           │     │  ├─ Sequence/Acknowledgement
-         │           │     │  └─ Flags
-         │           │     └─ ... (all protocol layers)
-         │           │
-         │           └─ Right: PacketHexView (gui/hex_view.py)
-         │              └─ Hex Dump
-         │                 ├─ Offset | 00 01 02 03 04 05 06 07 | ASCII
-         │                 ├─ 0000   | 00 01 02 03 04 05 06 07 | .......
-         │                 └─ ...
-         │
-         └─ Statusbar
-            └─ Status message: "Packets: 1234 | Displayed: 456 | ..."
-
-
-
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                           CORE LOGIC LAYER                                  │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ core/capture.py - PacketSniffer (QThread)                         │   │
-│  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  run()                  → QThread.run() with Scapy sniff()        │   │
-│  │  packet_captured        → Signal(packet)                          │   │
-│  │  error_occurred         → Signal(error_msg)                       │   │
-│  │  status_changed         → Signal(status)                          │   │
-│  │  handle_packet()        → Emit packet_captured                    │   │
-│  │  stop()                 → Set running = False                     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│           │                                                                  │
-│           ├──onfigurator  └──────────────────────────────────────────┐   │
-│  │  parse(packet)          → PacketRecord                           │   │
-│  │  _extract_endpoints()   → Extract src/dst IP/MAC                │   │
-│  │  _extract_ports()       → Extract TCP/UDP ports                 │   │
-│  │  _guess_protocol()      → Identify protocol (TCP, DNS, HTTP...) │   │
-│  │  _build_info()          → Build info string for each protocol   │   │
-│  │  conversations          → Counter[(src, sport, dst, dport, proto)]   │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│           │                                                                  │
-│           ├─────────────────────────────────────────────────────────┐   │
-│  │ core/filtering.py - DisplayFilter                               │   │
-│  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  matches(record, expr)  → BNF-like filter parser                │   │
-│  │  _parse_or/and/not()    → Recursive descent parser              │   │
-│  │  _match_atom()          → Match: protocol, ip.src, tcp.port, etc│   │
-│  │  Supports:                                                       │   │
-│  │    - tcp, udp, dns, http (protocols)                            │   │
-│  │    - ip.src==, ip.dst==, tcp.port== (properties)               │   │
-│  │    - not, and, or (logic)                                       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│           │                                                                  │
-│           ├─────────────────────────────────────────────────────────┐   │
-│  │ core/formatters.py - Formatting Functions                       │   │
-│  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  hex_dump(packet)       → Offset | Hex Bytes | ASCII            │   │
-│  │  packet_summary_tree()  → Tree structure of all layers          │   │
-│  │  _frame_section()       → Frame info (time, length, protocols)  │   │
-│  │  _ether_section()       → Ethernet details                      │   │
-│  │  _ip_section()          → IP details                            │   │
-│  │  _tcp_section()         → TCP details                           │   │
-│  │  _dns_section()         → DNS details                           │   │
-│  │  ... (20+ layer formatters)                                     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│           │                                                                  │
-│           └─ core/models.py - Data Models
-│              └─ PacketRecord: dataclass containing packet data
-│                 ├─ number, epoch_time, relative_time
-│                 ├─ length, src, dst, protocol, info
-│                 ├─ layers, sport, dport
-│                 ├─ stream_hint, metadata
-│                 └─ raw (Scapy packet object)
-│
-└──────────────────────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                         UNIFIED APPLICATION WINDOW                         â”‚
+â”‚                      (gui/application.py - NEW)                            â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+         â”‚
+         â”œâ”€ Menubar
+         â”‚  â”œâ”€ File (Open, Save, Exit)
+         â”‚  â”œâ”€ Edit (Find, Copy, Paste)
+         â”‚  â”œâ”€ View (Zoom, Fullscreen)
+         â”‚  â”œâ”€ Capture (Interfaces, Start, Stop, Restart)
+         â”‚  â”œâ”€ Analyze (Follow Stream, Decode, Filters)
+         â”‚  â”œâ”€ Statistics (Summary, Conversations, Endpoints)
+         â”‚  â””â”€ Help (About, Documentation)
+         â”‚
+         â”œâ”€ Toolbar
+         â”‚  â”œâ”€ â–¶ Start  |  â–  Stop  |  âŸ³ Restart
+         â”‚  â”œâ”€ â™ Options
+         â”‚  â”œâ”€ đŸ“‚ Open  |  đŸ’¾ Save
+         â”‚  â”œâ”€ đŸ” Find  |  đŸ¨ Colors
+         â”‚  â””â”€ (All buttons connected & working)
+         â”‚
+         â”œâ”€ QStackedWidget (Content Area)
+         â”‚  â”‚
+         â”‚  â”œâ”€ Page 0: InterfaceSelectorView (gui/interface_selector_view.py - NEW)
+         â”‚  â”‚  â”‚
+         â”‚  â”‚  â”œâ”€ Display Filter Input
+         â”‚  â”‚  â”œâ”€ Capture Filter Input
+         â”‚  â”‚  â”œâ”€ Network Interfaces List
+         â”‚  â”‚  â”‚   â”œâ”€ Real-time Traffic (KB/s)
+         â”‚  â”‚  â”‚   â””â”€ Sparkline Chart â–â–‚â–ƒâ–„â–…â–†â–‡â–ˆ
+         â”‚  â”‚  â”œâ”€ Interface Scope Combo
+         â”‚  â”‚  â”‚   â”œâ”€ All interfaces shown
+         â”‚  â”‚  â”‚   â”œâ”€ Only active interfaces
+         â”‚  â”‚  â”‚   â””â”€ Wireless only
+         â”‚  â”‚  â””â”€ "Start Capture" Button
+         â”‚  â”‚      â””â”€ emit: capture_started(iface, name, filter)
+         â”‚  â”‚
+         â”‚  â””â”€ Page 1: CaptureView (gui/capture_view.py - NEW)
+         â”‚     â”‚
+         â”‚     â”œâ”€ Display Filter Bar
+         â”‚     â”‚  â”œâ”€ Input Field
+         â”‚     â”‚  â”œâ”€ â¡ Apply Button
+         â”‚     â”‚  â””â”€ âœ• Clear Button
+         â”‚     â”‚
+         â”‚     â””â”€ Content Area (QSplitter)
+         â”‚        â”‚
+         â”‚        â”œâ”€ Upper: PacketTable (gui/packet_table.py)
+         â”‚        â”‚  â”œâ”€ No. | Time | Source | Destination | Protocol | Length | Info
+         â”‚        â”‚  â”œâ”€ Color coding by protocol
+         â”‚        â”‚  â”‚  â”œâ”€ TCP (light blue)
+         â”‚        â”‚  â”‚  â”œâ”€ UDP (light green)
+         â”‚        â”‚  â”‚  â”œâ”€ DNS (light orange)
+         â”‚        â”‚  â”‚  â”œâ”€ ARP (light red)
+         â”‚        â”‚  â”‚  â””â”€ ... (20+ protocols)
+         â”‚        â”‚  â””â”€ cellClicked â†’ show_details()
+         â”‚        â”‚
+         â”‚        â””â”€ Lower: QSplitter (Horizontal)
+         â”‚           â”‚
+         â”‚           â”œâ”€ Left: PacketDetailsTree (gui/packet_details.py)
+         â”‚           â”‚  â””â”€ Tree structure:
+         â”‚           â”‚     â”œâ”€ Frame
+         â”‚           â”‚     â”‚  â”œâ”€ Encapsulation: Ethernet
+         â”‚           â”‚     â”‚  â”œâ”€ Arrival Time: ...
+         â”‚           â”‚     â”‚  â””â”€ Protocols: ...
+         â”‚           â”‚     â”œâ”€ Ethernet II
+         â”‚           â”‚     â”‚  â”œâ”€ Source MAC
+         â”‚           â”‚     â”‚  â””â”€ Destination MAC
+         â”‚           â”‚     â”œâ”€ IP
+         â”‚           â”‚     â”‚  â”œâ”€ Version, Header Length, TTL
+         â”‚           â”‚     â”‚  â””â”€ Source/Destination IP
+         â”‚           â”‚     â”œâ”€ TCP/UDP
+         â”‚           â”‚     â”‚  â”œâ”€ Source/Destination Port
+         â”‚           â”‚     â”‚  â”œâ”€ Sequence/Acknowledgement
+         â”‚           â”‚     â”‚  â””â”€ Flags
+         â”‚           â”‚     â””â”€ ... (all protocol layers)
+         â”‚           â”‚
+         â”‚           â””â”€ Right: PacketHexView (gui/hex_view.py)
+         â”‚              â””â”€ Hex Dump
+         â”‚                 â”œâ”€ Offset | 00 01 02 03 04 05 06 07 | ASCII
+         â”‚                 â”œâ”€ 0000   | 00 01 02 03 04 05 06 07 | .......
+         â”‚                 â””â”€ ...
+         â”‚
+         â””â”€ Statusbar
+            â””â”€ Status message: "Packets: 1234 | Displayed: 456 | ..."
 
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                            UTILITIES LAYER                                   │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  utils/network_utils.py                                                    │
-│  ├─ get_interfaces()    → Dict[interface_name: display_name]              │
-│  └─ get_traffic()       → Dict[interface_name: total_bytes]               │
-│                                                                              │
-│  utils/pcap_io.py                                                         │
-│  ├─ load_pcap(filename)  → List[Scapy Packets]                           │
-│  └─ save_pcap(filename, packets) → Write packets to .pcap file           │
-│                                                                              │
-│  utils/system_check.py                                                    │
-│  ├─ is_npcap_installed() → Check DLLs + Windows service                  │
-│  └─ install_npcap()      → Launch Npcap installer with admin rights      │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                           CORE LOGIC LAYER                                  â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                                              â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚ core/capture.py - PacketSniffer (QThread)                         â”‚   â”‚
+â”‚  â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤   â”‚
+â”‚  â”‚  run()                  â†’ QThread.run() with Scapy sniff()        â”‚   â”‚
+â”‚  â”‚  packet_captured        â†’ Signal(packet)                          â”‚   â”‚
+â”‚  â”‚  error_occurred         â†’ Signal(error_msg)                       â”‚   â”‚
+â”‚  â”‚  status_changed         â†’ Signal(status)                          â”‚   â”‚
+â”‚  â”‚  handle_packet()        â†’ Emit packet_captured                    â”‚   â”‚
+â”‚  â”‚  stop()                 â†’ Set running = False                     â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚           â”‚                                                                  â”‚
+â”‚           â”œâ”€â”€onfigurator  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚  parse(packet)          â†’ PacketRecord                           â”‚   â”‚
+â”‚  â”‚  _extract_endpoints()   â†’ Extract src/dst IP/MAC                â”‚   â”‚
+â”‚  â”‚  _extract_ports()       â†’ Extract TCP/UDP ports                 â”‚   â”‚
+â”‚  â”‚  _guess_protocol()      â†’ Identify protocol (TCP, DNS, HTTP...) â”‚   â”‚
+â”‚  â”‚  _build_info()          â†’ Build info string for each protocol   â”‚   â”‚
+â”‚  â”‚  conversations          â†’ Counter[(src, sport, dst, dport, proto)]   â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚           â”‚                                                                  â”‚
+â”‚           â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚ core/filtering.py - DisplayFilter                               â”‚   â”‚
+â”‚  â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤   â”‚
+â”‚  â”‚  matches(record, expr)  â†’ BNF-like filter parser                â”‚   â”‚
+â”‚  â”‚  _parse_or/and/not()    â†’ Recursive descent parser              â”‚   â”‚
+â”‚  â”‚  _match_atom()          â†’ Match: protocol, ip.src, tcp.port, etcâ”‚   â”‚
+â”‚  â”‚  Supports:                                                       â”‚   â”‚
+â”‚  â”‚    - tcp, udp, dns, http (protocols)                            â”‚   â”‚
+â”‚  â”‚    - ip.src==, ip.dst==, tcp.port== (properties)               â”‚   â”‚
+â”‚  â”‚    - not, and, or (logic)                                       â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚           â”‚                                                                  â”‚
+â”‚           â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚ core/formatters.py - Formatting Functions                       â”‚   â”‚
+â”‚  â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤   â”‚
+â”‚  â”‚  hex_dump(packet)       â†’ Offset | Hex Bytes | ASCII            â”‚   â”‚
+â”‚  â”‚  packet_summary_tree()  â†’ Tree structure of all layers          â”‚   â”‚
+â”‚  â”‚  _frame_section()       â†’ Frame info (time, length, protocols)  â”‚   â”‚
+â”‚  â”‚  _ether_section()       â†’ Ethernet details                      â”‚   â”‚
+â”‚  â”‚  _ip_section()          â†’ IP details                            â”‚   â”‚
+â”‚  â”‚  _tcp_section()         â†’ TCP details                           â”‚   â”‚
+â”‚  â”‚  _dns_section()         â†’ DNS details                           â”‚   â”‚
+â”‚  â”‚  ... (20+ layer formatters)                                     â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚           â”‚                                                                  â”‚
+â”‚           â””â”€ core/models.py - Data Models
+â”‚              â””â”€ PacketRecord: dataclass containing packet data
+â”‚                 â”œâ”€ number, epoch_time, relative_time
+â”‚                 â”œâ”€ length, src, dst, protocol, info
+â”‚                 â”œâ”€ layers, sport, dport
+â”‚                 â”œâ”€ stream_hint, metadata
+â”‚                 â””â”€ raw (Scapy packet object)
+â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                           DATA FLOW DIAGRAM                                  │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│ User Action: "Start Capture"                                               │
-│      │                                                                      │
-│      └──> InterfaceSelectorView                                            │
-│           └──> capture_started.emit(iface, name, filter)                   │
-│                └──> ApplicationWindow._on_capture_started()                │
-│                     └──> show_capture_view(iface, name, filter)            │
-│                          └──> CaptureView.set_interface()                  │
-│                               └──> CaptureView.start_capture()             │
-│                                    └──> PacketSniffer.start() [QThread]    │
-│                                         │                                   │
-│                                         └──> sniff(iface, filter)          │
-│                                              │                              │
-│                                              ├──> Packet received          │
-│                                              │    └──> handle_packet()     │
-│                                              │         └──> packet_captured.emit()
-│                                              │              └──> CaptureView.add_packet()
-│                                              │                   │          │
-│                                              │                   ├──> PacketParser.parse()
-│                                              │                   │    └──> PacketRecord
-│                                              │                   │         │
-│                                              │                   ├──> DisplayFilter.matches()
-│                                              │                   │    └──> Include/Exclude
-│                                              │                   │         │
-│                                              │                   └──> PacketTable.append_record()
-│                                              │                        └──> Display in table
-│                                              │
-│                                              └──> Loop until stop()
-│
-│ User Action: Click packet row                                              │
-│      │                                                                      │
-│      └──> PacketTable.cellClicked                                          │
-│           └──> CaptureView.show_details()                                  │
-│                ├──> PacketDetailsTree.show_packet()                        │
-│                │    └──> packet_summary_tree(record)                       │
-│                │         └──> _frame_section() + _ip_section() + ...       │
-│                │              └──> Tree display                            │
-│                │                                                            │
-│                └──> PacketHexView.show_packet()                            │
-│                     └──> hex_dump(packet)                                  │
-│                          └──> Hex display                                  │
-│
-│ User Action: Apply display filter                                          │
-│      │                                                                      │
-│      └──> CaptureView.apply_display_filter()                               │
-│           └──> For each record in self.records:                            │
-│                ├──> DisplayFilter.matches(record, expr)                    │
-│                │    ├─ Parse expression (AND/OR/NOT)                       │
-│                │    └─ Check against record properties                     │
-│                │         ├─ Protocol (TCP, DNS, HTTP, etc.)                │
-│                │    │    ├─ IP addresses (ip.src, ip.dst)                 │
-│                │    │    ├─ Ports (tcp.port, udp.port)                    │
-│                │    │    └─ Other properties                               │
-│                │    │                                                       │
-│                │    └──> If match: add to visible_indices                   │
-│                │         └──> Update PacketTable display                   │
-│                │                                                            │
-│                └──> Loop through all records                               │
-│                     └──> Rebuild visible table                             │
-│
-└──────────────────────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                            UTILITIES LAYER                                   â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                                              â”‚
+â”‚  utils/network_utils.py                                                    â”‚
+â”‚  â”œâ”€ get_interfaces()    â†’ Dict[interface_name: display_name]              â”‚
+â”‚  â””â”€ get_traffic()       â†’ Dict[interface_name: total_bytes]               â”‚
+â”‚                                                                              â”‚
+â”‚  utils/pcap_io.py                                                         â”‚
+â”‚  â”œâ”€ load_pcap(filename)  â†’ List[Scapy Packets]                           â”‚
+â”‚  â””â”€ save_pcap(filename, packets) â†’ Write packets to .pcap file           â”‚
+â”‚                                                                              â”‚
+â”‚  utils/system_check.py                                                    â”‚
+â”‚  â”œâ”€ is_npcap_installed() â†’ Check DLLs + Windows service                  â”‚
+â”‚  â””â”€ install_npcap()      â†’ Launch Npcap installer with admin rights      â”‚
+â”‚                                                                              â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 
 
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                      PROTOCOL SUPPORT (20+)                                 ║
-║ ─────────────────────────────────────────────────────────────────────────── ║
-║ Layer 2: Ethernet, ARP                                                     ║
-║ Layer 3: IP, IPv6, ICMP, ICMPv6                                            ║
-║ Layer 4: TCP, UDP                                                           ║
-║ Layer 7: DNS, MDNS, DHCP, HTTP, TLS, QUIC, BOOTP                          ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                           DATA FLOW DIAGRAM                                  â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                                              â”‚
+â”‚ User Action: "Start Capture"                                               â”‚
+â”‚      â”‚                                                                      â”‚
+â”‚      â””â”€â”€> InterfaceSelectorView                                            â”‚
+â”‚           â””â”€â”€> capture_started.emit(iface, name, filter)                   â”‚
+â”‚                â””â”€â”€> ApplicationWindow._on_capture_started()                â”‚
+â”‚                     â””â”€â”€> show_capture_view(iface, name, filter)            â”‚
+â”‚                          â””â”€â”€> CaptureView.set_interface()                  â”‚
+â”‚                               â””â”€â”€> CaptureView.start_capture()             â”‚
+â”‚                                    â””â”€â”€> PacketSniffer.start() [QThread]    â”‚
+â”‚                                         â”‚                                   â”‚
+â”‚                                         â””â”€â”€> sniff(iface, filter)          â”‚
+â”‚                                              â”‚                              â”‚
+â”‚                                              â”œâ”€â”€> Packet received          â”‚
+â”‚                                              â”‚    â””â”€â”€> handle_packet()     â”‚
+â”‚                                              â”‚         â””â”€â”€> packet_captured.emit()
+â”‚                                              â”‚              â””â”€â”€> CaptureView.add_packet()
+â”‚                                              â”‚                   â”‚          â”‚
+â”‚                                              â”‚                   â”œâ”€â”€> PacketParser.parse()
+â”‚                                              â”‚                   â”‚    â””â”€â”€> PacketRecord
+â”‚                                              â”‚                   â”‚         â”‚
+â”‚                                              â”‚                   â”œâ”€â”€> DisplayFilter.matches()
+â”‚                                              â”‚                   â”‚    â””â”€â”€> Include/Exclude
+â”‚                                              â”‚                   â”‚         â”‚
+â”‚                                              â”‚                   â””â”€â”€> PacketTable.append_record()
+â”‚                                              â”‚                        â””â”€â”€> Display in table
+â”‚                                              â”‚
+â”‚                                              â””â”€â”€> Loop until stop()
+â”‚
+â”‚ User Action: Click packet row                                              â”‚
+â”‚      â”‚                                                                      â”‚
+â”‚      â””â”€â”€> PacketTable.cellClicked                                          â”‚
+â”‚           â””â”€â”€> CaptureView.show_details()                                  â”‚
+â”‚                â”œâ”€â”€> PacketDetailsTree.show_packet()                        â”‚
+â”‚                â”‚    â””â”€â”€> packet_summary_tree(record)                       â”‚
+â”‚                â”‚         â””â”€â”€> _frame_section() + _ip_section() + ...       â”‚
+â”‚                â”‚              â””â”€â”€> Tree display                            â”‚
+â”‚                â”‚                                                            â”‚
+â”‚                â””â”€â”€> PacketHexView.show_packet()                            â”‚
+â”‚                     â””â”€â”€> hex_dump(packet)                                  â”‚
+â”‚                          â””â”€â”€> Hex display                                  â”‚
+â”‚
+â”‚ User Action: Apply display filter                                          â”‚
+â”‚      â”‚                                                                      â”‚
+â”‚      â””â”€â”€> CaptureView.apply_display_filter()                               â”‚
+â”‚           â””â”€â”€> For each record in self.records:                            â”‚
+â”‚                â”œâ”€â”€> DisplayFilter.matches(record, expr)                    â”‚
+â”‚                â”‚    â”œâ”€ Parse expression (AND/OR/NOT)                       â”‚
+â”‚                â”‚    â””â”€ Check against record properties                     â”‚
+â”‚                â”‚         â”œâ”€ Protocol (TCP, DNS, HTTP, etc.)                â”‚
+â”‚                â”‚    â”‚    â”œâ”€ IP addresses (ip.src, ip.dst)                 â”‚
+â”‚                â”‚    â”‚    â”œâ”€ Ports (tcp.port, udp.port)                    â”‚
+â”‚                â”‚    â”‚    â””â”€ Other properties                               â”‚
+â”‚                â”‚    â”‚                                                       â”‚
+â”‚                â”‚    â””â”€â”€> If match: add to visible_indices                   â”‚
+â”‚                â”‚         â””â”€â”€> Update PacketTable display                   â”‚
+â”‚                â”‚                                                            â”‚
+â”‚                â””â”€â”€> Loop through all records                               â”‚
+â”‚                     â””â”€â”€> Rebuild visible table                             â”‚
+â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 
 
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                           KEY SIGNALS & SLOTS                               ║
-║ ─────────────────────────────────────────────────────────────────────────── ║
-║                                                                              ║
-║ InterfaceSelectorView                                                       ║
-║   Signal: capture_started(iface, name, filter)                             ║
-║   Slot: start_btn.clicked() → _on_start_capture()                          ║
-║                                                                              ║
-║ PacketSniffer                                                              ║
-║   Signal: packet_captured(packet)                                          ║
-║   Signal: error_occurred(msg)                                              ║
-║   Signal: status_changed(status)                                           ║
-║                                                                              ║
-║ CaptureView                                                                 ║
-║   Signal: status_changed(status)                                           ║
-║   Slot: add_packet(packet) ← packet_captured                               ║
-║   Slot: apply_display_filter()                                             ║
-║   Slot: show_details(row, col)                                             ║
-║                                                                              ║
-║ ApplicationWindow                                                           ║
-║   Slot: start_capture() ← action_start_btn.triggered                       ║
-║   Slot: stop_capture() ← action_stop_btn.triggered                         │
-║   Slot: show_interface_selector()                                          ║
-║   Slot: show_capture_view(iface, name, filter)                             │
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+â•‘                      PROTOCOL SUPPORT (20+)                                 â•‘
+â•‘ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â•‘
+â•‘ Layer 2: Ethernet, ARP                                                     â•‘
+â•‘ Layer 3: IP, IPv6, ICMP, ICMPv6                                            â•‘
+â•‘ Layer 4: TCP, UDP                                                           â•‘
+â•‘ Layer 7: DNS, MDNS, DHCP, HTTP, TLS, QUIC, BOOTP                          â•‘
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+
+â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+â•‘                           KEY SIGNALS & SLOTS                               â•‘
+â•‘ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â•‘
+â•‘                                                                              â•‘
+â•‘ InterfaceSelectorView                                                       â•‘
+â•‘   Signal: capture_started(iface, name, filter)                             â•‘
+â•‘   Slot: start_btn.clicked() â†’ _on_start_capture()                          â•‘
+â•‘                                                                              â•‘
+â•‘ PacketSniffer                                                              â•‘
+â•‘   Signal: packet_captured(packet)                                          â•‘
+â•‘   Signal: error_occurred(msg)                                              â•‘
+â•‘   Signal: status_changed(status)                                           â•‘
+â•‘                                                                              â•‘
+â•‘ CaptureView                                                                 â•‘
+â•‘   Signal: status_changed(status)                                           â•‘
+â•‘   Slot: add_packet(packet) â† packet_captured                               â•‘
+â•‘   Slot: apply_display_filter()                                             â•‘
+â•‘   Slot: show_details(row, col)                                             â•‘
+â•‘                                                                              â•‘
+â•‘ ApplicationWindow                                                           â•‘
+â•‘   Slot: start_capture() â† action_start_btn.triggered                       â•‘
+â•‘   Slot: stop_capture() â† action_stop_btn.triggered                         â”‚
+â•‘   Slot: show_interface_selector()                                          â•‘
+â•‘   Slot: show_capture_view(iface, name, filter)                             â”‚
+â•‘                                                                              â•‘
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 ## FILE INDEX
 
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
                           PACKETRA v1.0 - FILE INDEX
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-📦 PROJECT: DATN-Packetra (Network Packet Analyzer)
-📅 DATE: May 7, 2026
-⭐ STATUS: Production Ready v1.0
-📄 LICENSE: MIT
+đŸ“¦ PROJECT: DATN-Packetra (Network Packet Analyzer)
+đŸ“… DATE: May 7, 2026
+â­ STATUS: Production Ready v1.0
+đŸ“„ LICENSE: MIT
 
-═══════════════════════════════════════════════════════════════════════════════
-                          📋 DOCUMENTATION FILES
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                          đŸ“‹ DOCUMENTATION FILES
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-📖 README.md
-   ├─ Complete feature documentation
-   ├─ Installation instructions
-   ├─ Usage guide with examples
-   ├─ Display filter examples (20+)
-   ├─ Protocol support list
-   ├─ Menu & keyboard shortcuts
-   ├─ Troubleshooting section
-   └─ Contact & license info
+đŸ“– README.md
+   â”œâ”€ Complete feature documentation
+   â”œâ”€ Installation instructions
+   â”œâ”€ Usage guide with examples
+   â”œâ”€ Display filter examples (20+)
+   â”œâ”€ Protocol support list
+   â”œâ”€ Menu & keyboard shortcuts
+   â”œâ”€ Troubleshooting section
+   â””â”€ Contact & license info
 
-📖 INSTALLATION.md
-   ├─ Step-by-step installation
-   ├─ Virtual environment setup
-   ├─ Windows Npcap installation
-   ├─ macOS/Linux setup
-   ├─ Basic usage tutorial
-   ├─ Advanced filter examples
-   ├─ Menu reference table
-   ├─ Keyboard shortcuts list
-   └─ Troubleshooting guide
+đŸ“– INSTALLATION.md
+   â”œâ”€ Step-by-step installation
+   â”œâ”€ Virtual environment setup
+   â”œâ”€ Windows Npcap installation
+   â”œâ”€ macOS/Linux setup
+   â”œâ”€ Basic usage tutorial
+   â”œâ”€ Advanced filter examples
+   â”œâ”€ Menu reference table
+   â”œâ”€ Keyboard shortcuts list
+   â””â”€ Troubleshooting guide
 
-📖 QUICK_START.txt
-   ├─ 5-minute quick start
-   ├─ Basic filter examples
-   ├─ Tips & tricks
-   ├─ Basic keyboard shortcuts
-   ├─ Project structure
-   ├─ Features list
-   └─ Simple troubleshooting
+đŸ“– QUICK_START.txt
+   â”œâ”€ 5-minute quick start
+   â”œâ”€ Basic filter examples
+   â”œâ”€ Tips & tricks
+   â”œâ”€ Basic keyboard shortcuts
+   â”œâ”€ Project structure
+   â”œâ”€ Features list
+   â””â”€ Simple troubleshooting
 
-📖 CHANGELOG.md
-   ├─ Version 1.0 features
-   ├─ All implemented changes
-   ├─ File structure changes
-   ├─ Component refactoring
-   ├─ New actions & signals
-   ├─ Test results
-   ├─ Future roadmap
-   └─ Migration guide
+đŸ“– CHANGELOG.md
+   â”œâ”€ Version 1.0 features
+   â”œâ”€ All implemented changes
+   â”œâ”€ File structure changes
+   â”œâ”€ Component refactoring
+   â”œâ”€ New actions & signals
+   â”œâ”€ Test results
+   â”œâ”€ Future roadmap
+   â””â”€ Migration guide
 
-📖 ARCHITECTURE.md
-   ├─ Unified window architecture
-   ├─ All UI components diagram
-   ├─ Core logic layer
-   ├─ Utilities layer
-   ├─ Complete data flow
-   ├─ Signal/slot connections
-   ├─ Protocol support matrix
-   └─ Design patterns used
+đŸ“– ARCHITECTURE.md
+   â”œâ”€ Unified window architecture
+   â”œâ”€ All UI components diagram
+   â”œâ”€ Core logic layer
+   â”œâ”€ Utilities layer
+   â”œâ”€ Complete data flow
+   â”œâ”€ Signal/slot connections
+   â”œâ”€ Protocol support matrix
+   â””â”€ Design patterns used
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🔧 CONFIGURATION FILES
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ”§ CONFIGURATION FILES
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 requirements.txt
-├─ scapy>=2.5.0        (Packet capture & parsing)
-├─ PySide6>=6.5.0      (GUI framework)
-└─ psutil>=5.9.0       (System info)
+â”œâ”€ scapy>=2.5.0        (Packet capture & parsing)
+â”œâ”€ PySide6>=6.5.0      (GUI framework)
+â””â”€ psutil>=5.9.0       (System info)
 
 .gitignore
-├─ Python cache files
-├─ Virtual environments
-├─ IDE configurations
-├─ Log files
-├─ PCAP files (optional)
-└─ Build artifacts
+â”œâ”€ Python cache files
+â”œâ”€ Virtual environments
+â”œâ”€ IDE configurations
+â”œâ”€ Log files
+â”œâ”€ PCAP files (optional)
+â””â”€ Build artifacts
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🚀 ENTRY POINT
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ€ ENTRY POINT
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 main.py
-├─ Application entry point
-├─ Npcap availability check (Windows)
-├─ Automatic Npcap installation
-├─ ApplicationWindow initialization
-└─ Main event loop
+â”œâ”€ Application entry point
+â”œâ”€ Npcap availability check (Windows)
+├─ Npcap availability check + official download link
+â”œâ”€ ApplicationWindow initialization
+â””â”€ Main event loop
 
-═══════════════════════════════════════════════════════════════════════════════
-                         📦 CORE LOGIC (core/)
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ“¦ CORE LOGIC (core/)
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 core/__init__.py
-└─ Package initialization
+â””â”€ Package initialization
 
 core/models.py
-├─ PacketRecord dataclass
-├─ Fields: number, time, IP src/dst, protocol, info
-├─ Ports, layers, stream hint, metadata
-└─ Raw packet object storage
+â”œâ”€ PacketRecord dataclass
+â”œâ”€ Fields: number, time, IP src/dst, protocol, info
+â”œâ”€ Ports, layers, stream hint, metadata
+â””â”€ Raw packet object storage
 
 core/capture.py
-├─ PacketSniffer (QThread)
-├─ Real-time packet capture using Scapy
-├─ Signals: packet_captured, error_occurred, status_changed
-├─ Capture filter support
-├─ Thread-safe operation
+â”œâ”€ PacketSniffer (QThread)
+â”œâ”€ Real-time packet capture using Scapy
+â”œâ”€ Signals: packet_captured, error_occurred, status_changed
+â”œâ”€ Capture filter support
+â”œâ”€ Thread-safe operation
 
 core/parser.py
-├─ PacketParser class
-├─ Packet → PacketRecord conversion
-├─ Protocol identification (20+ protocols)
-├─ Endpoint & port extraction
-├─ Metadata collection (TTL, flags, etc.)
-├─ Info string generation per protocol
-└─ Conversation tracking
+â”œâ”€ PacketParser class
+â”œâ”€ Packet â†’ PacketRecord conversion
+â”œâ”€ Protocol identification (20+ protocols)
+â”œâ”€ Endpoint & port extraction
+â”œâ”€ Metadata collection (TTL, flags, etc.)
+â”œâ”€ Info string generation per protocol
+â””â”€ Conversation tracking
 
 core/filtering.py
-├─ DisplayFilter class
-├─ BNF-like expression parser
-├─ Recursive descent parsing (OR → AND → NOT)
-├─ 20+ filter types:
-│  ├─ Protocols (tcp, dns, http, etc.)
-│  ├─ IP filters (ip.src, ip.dst, ip.addr)
-│  ├─ Port filters (tcp.port, udp.port, port)
-│  ├─ Frame info (frame.number, frame.len)
-│  ├─ Content search (contains)
-│  └─ Logic operators (and, or, not)
-└─ Match() function with complex expressions
+â”œâ”€ DisplayFilter class
+â”œâ”€ BNF-like expression parser
+â”œâ”€ Recursive descent parsing (OR â†’ AND â†’ NOT)
+â”œâ”€ 20+ filter types:
+â”‚  â”œâ”€ Protocols (tcp, dns, http, etc.)
+â”‚  â”œâ”€ IP filters (ip.src, ip.dst, ip.addr)
+â”‚  â”œâ”€ Port filters (tcp.port, udp.port, port)
+â”‚  â”œâ”€ Frame info (frame.number, frame.len)
+â”‚  â”œâ”€ Content search (contains)
+â”‚  â””â”€ Logic operators (and, or, not)
+â””â”€ Match() function with complex expressions
 
 core/formatters.py
-├─ hex_dump(packet) → ASCII hex display
-├─ packet_summary_tree(packet) → Tree structure
-├─ Layer-specific formatters:
-│  ├─ _frame_section()
-│  ├─ _ether_section()
-│  ├─ _arp_section()
-│  ├─ _ip_section() / _ipv6_section()
-│  ├─ _tcp_section() / _udp_section()
-│  ├─ _dns_section()
-│  ├─ _dhcp_section()
-│  ├─ _tls_section()
-│  └─ _simple_layer_section() (20+ layers)
-└─ Protocol-specific info generation
+â”œâ”€ hex_dump(packet) â†’ ASCII hex display
+â”œâ”€ packet_summary_tree(packet) â†’ Tree structure
+â”œâ”€ Layer-specific formatters:
+â”‚  â”œâ”€ _frame_section()
+â”‚  â”œâ”€ _ether_section()
+â”‚  â”œâ”€ _arp_section()
+â”‚  â”œâ”€ _ip_section() / _ipv6_section()
+â”‚  â”œâ”€ _tcp_section() / _udp_section()
+â”‚  â”œâ”€ _dns_section()
+â”‚  â”œâ”€ _dhcp_section()
+â”‚  â”œâ”€ _tls_section()
+â”‚  â””â”€ _simple_layer_section() (20+ layers)
+â””â”€ Protocol-specific info generation
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🎨 GUI LAYER (gui/)
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ¨ GUI LAYER (gui/)
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 gui/__init__.py
-└─ Package initialization
+â””â”€ Package initialization
 
-gui/application.py ⭐ (NEW)
-├─ ApplicationWindow (main window)
-├─ Shared menubar with 7 menus
-├─ Shared toolbar (11 buttons)
-├─ QStackedWidget for 2-page layout
-├─ Shared statusbar
-├─ Signal/slot orchestration
-├─ Dynamic toolbar state management
-├─ Interface ↔ Capture view switching
-└─ All menu actions connected & working
+gui/application.py â­ (NEW)
+â”œâ”€ ApplicationWindow (main window)
+â”œâ”€ Shared menubar with 7 menus
+â”œâ”€ Shared toolbar (11 buttons)
+â”œâ”€ QStackedWidget for 2-page layout
+â”œâ”€ Shared statusbar
+â”œâ”€ Signal/slot orchestration
+â”œâ”€ Dynamic toolbar state management
+â”œâ”€ Interface â†” Capture view switching
+â””â”€ All menu actions connected & working
 
-gui/interface_selector_view.py ⭐ (NEW)
-├─ InterfaceSelectorView widget
-├─ Network interface listing
-├─ Real-time traffic monitoring (KB/s)
-├─ Sparkline traffic visualization
-├─ Capture filter input
-├─ Interface scope filtering
-├─ capture_started Signal
-└─ No window management (child widget)
+gui/interface_selector_view.py â­ (NEW)
+â”œâ”€ InterfaceSelectorView widget
+â”œâ”€ Network interface listing
+â”œâ”€ Real-time traffic monitoring (KB/s)
+â”œâ”€ Sparkline traffic visualization
+â”œâ”€ Capture filter input
+â”œâ”€ Interface scope filtering
+â”œâ”€ capture_started Signal
+â””â”€ No window management (child widget)
 
-gui/capture_view.py ⭐ (NEW)
-├─ CaptureView widget (replaces MainWindow)
-├─ Packet table display area
-├─ Packet details tree area
-├─ Hex view area
-├─ Display filter input
-├─ Capture/stop/restart methods
-├─ PCAP file load/save
-├─ Status update signals
-├─ Dynamic interface switching
-└─ No window management (child widget)
+gui/capture_view.py â­ (NEW)
+â”œâ”€ CaptureView widget (replaces MainWindow)
+â”œâ”€ Packet table display area
+â”œâ”€ Packet details tree area
+â”œâ”€ Hex view area
+â”œâ”€ Display filter input
+â”œâ”€ Capture/stop/restart methods
+â”œâ”€ PCAP file load/save
+â”œâ”€ Status update signals
+â”œâ”€ Dynamic interface switching
+â””â”€ No window management (child widget)
 
 gui/packet_table.py
-├─ PacketTable (QTableWidget)
-├─ Columns: No., Time, Source, Destination, Protocol, Length, Info
-├─ Color mapping (13+ protocols)
-├─ Row painting by protocol
-├─ append_record() method
-└─ No-edit, single-selection mode
+â”œâ”€ PacketTable (QTableWidget)
+â”œâ”€ Columns: No., Time, Source, Destination, Protocol, Length, Info
+â”œâ”€ Color mapping (13+ protocols)
+â”œâ”€ Row painting by protocol
+â”œâ”€ append_record() method
+â””â”€ No-edit, single-selection mode
 
 gui/packet_details.py
-├─ PacketDetailsTree (QTreeWidget)
-├─ Tree display of packet layers
-├─ Recursive node building
-├─ Expandable/collapsible structure
-├─ show_packet() method
-└─ _add_node() helper
+â”œâ”€ PacketDetailsTree (QTreeWidget)
+â”œâ”€ Tree display of packet layers
+â”œâ”€ Recursive node building
+â”œâ”€ Expandable/collapsible structure
+â”œâ”€ show_packet() method
+â””â”€ _add_node() helper
 
 gui/hex_view.py
-├─ PacketHexView (QPlainTextEdit)
-├─ Read-only monospace display
-├─ Hex dump formatting (offset + hex + ASCII)
-├─ show_packet() method
-└─ Monospace font (Consolas)
+â”œâ”€ PacketHexView (QPlainTextEdit)
+â”œâ”€ Read-only monospace display
+â”œâ”€ Hex dump formatting (offset + hex + ASCII)
+â”œâ”€ show_packet() method
+â””â”€ Monospace font (Consolas)
 
 gui/interface_selector.py
-├─ OLD InterfaceSelector (KEPT AS BACKUP)
-├─ Can be removed if not needed
-└─ Replaced by interface_selector_view.py
+â”œâ”€ OLD InterfaceSelector (KEPT AS BACKUP)
+â”œâ”€ Can be removed if not needed
+â””â”€ Replaced by interface_selector_view.py
 
 gui/main_window.py
-├─ OLD MainWindow (KEPT AS BACKUP)
-├─ Can be removed if not needed
-└─ Replaced by application.py + capture_view.py
+â”œâ”€ OLD MainWindow (KEPT AS BACKUP)
+â”œâ”€ Can be removed if not needed
+â””â”€ Replaced by application.py + capture_view.py
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🛠️ UTILITIES (utils/)
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ› ï¸ UTILITIES (utils/)
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 utils/__init__.py
-└─ Package initialization
+â””â”€ Package initialization
 
 utils/network_utils.py
-├─ get_interfaces() → Dict[name: display_name]
-│  ├─ Uses psutil for interface list
-│  └─ Maps Scapy descriptions for display
-├─ get_traffic() → Dict[name: bytes]
-│  └─ Total bytes sent + received per interface
-└─ Real-time traffic monitoring support
+â”œâ”€ get_interfaces() â†’ Dict[name: display_name]
+â”‚  â”œâ”€ Uses psutil for interface list
+â”‚  â””â”€ Maps Scapy descriptions for display
+â”œâ”€ get_traffic() â†’ Dict[name: bytes]
+â”‚  â””â”€ Total bytes sent + received per interface
+â””â”€ Real-time traffic monitoring support
 
 utils/pcap_io.py
-├─ load_pcap(filename) → List[Packets]
-│  └─ Supports .pcap & .pcapng formats
-├─ save_pcap(filename, packets)
-│  └─ Writes packets to .pcap file
-└─ Scapy wrpcap/rdpcap wrappers
+â”œâ”€ load_pcap(filename) â†’ List[Packets]
+â”‚  â””â”€ Supports .pcap & .pcapng formats
+â”œâ”€ save_pcap(filename, packets)
+â”‚  â””â”€ Writes packets to .pcap file
+â””â”€ Scapy wrpcap/rdpcap wrappers
 
 utils/system_check.py
-├─ is_npcap_installed()
-│  ├─ Checks DLL files in System32
-│  ├─ Checks Windows service status
-│  └─ Returns True/False
-├─ install_npcap()
-│  ├─ Launches npcap-setup.exe
-│  ├─ Requests admin privileges
-│  └─ Returns success status
-└─ Windows-specific utilities
+â”œâ”€ is_npcap_installed()
+â”‚  â”œâ”€ Checks DLL files in System32
+â”‚  â”œâ”€ Checks Windows service status
+â”‚  â””â”€ Returns True/False
+â”œâ”€ install_npcap()
+│  ├─ Shows official Npcap website link
+â”‚  â”œâ”€ Requests admin privileges
+â”‚  â””â”€ Returns success status
+â””â”€ Windows-specific utilities
 
-═══════════════════════════════════════════════════════════════════════════════
-                         📊 MENU STRUCTURE
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ“ MENU STRUCTURE
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 File Menu
-├─ Open... (Ctrl+O) → Load PCAP
-├─ ───────────
-├─ Save... (Ctrl+S) → Save PCAP
-├─ Save As... (Ctrl+Shift+S) → Save as new file
-├─ ───────────
-├─ Export As... → Export formats
-├─ ───────────
-├─ Print... (Ctrl+P) → Print packets
-├─ ───────────
-└─ Exit (Ctrl+Q) → Close app
+â”œâ”€ Open... (Ctrl+O) â†’ Load PCAP
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Save... (Ctrl+S) â†’ Save PCAP
+â”œâ”€ Save As... (Ctrl+Shift+S) â†’ Save as new file
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Export As... â†’ Export formats
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Print... (Ctrl+P) â†’ Print packets
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â””â”€ Exit (Ctrl+Q) â†’ Close app
 
 Edit Menu
-├─ Undo (Ctrl+Z)
-├─ Redo (Ctrl+Y)
-├─ ───────────
-├─ Cut (Ctrl+X)
-├─ Copy (Ctrl+C)
-├─ Paste (Ctrl+V)
-├─ ───────────
-├─ Find... (Ctrl+F) → Find packets
-├─ Find Next (Ctrl+G)
-├─ ───────────
-└─ Preferences → App settings
+â”œâ”€ Undo (Ctrl+Z)
+â”œâ”€ Redo (Ctrl+Y)
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Cut (Ctrl+X)
+â”œâ”€ Copy (Ctrl+C)
+â”œâ”€ Paste (Ctrl+V)
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Find... (Ctrl+F) â†’ Find packets
+â”œâ”€ Find Next (Ctrl+G)
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â””â”€ Preferences â†’ App settings
 
 View Menu
-├─ Zoom In (Ctrl++)
-├─ Zoom Out (Ctrl+-)
-├─ Reset Zoom (Ctrl+0)
-├─ ───────────
-└─ Fullscreen (F11)
+â”œâ”€ Zoom In (Ctrl++)
+â”œâ”€ Zoom Out (Ctrl+-)
+â”œâ”€ Reset Zoom (Ctrl+0)
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â””â”€ Fullscreen (F11)
 
 Capture Menu
-├─ Interfaces... → Select interface
-├─ ───────────
-├─ Start (Ctrl+E) → Begin capture
-├─ Stop (Ctrl+E) → End capture
-└─ Restart → Reset & recapture
+â”œâ”€ Interfaces... â†’ Select interface
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Start (Ctrl+E) â†’ Begin capture
+â”œâ”€ Stop (Ctrl+E) â†’ End capture
+â””â”€ Restart â†’ Reset & recapture
 
 Analyze Menu
-├─ Follow Stream → Stream tracking
-├─ ───────────
-├─ Decode As... → Protocol override
-├─ ───────────
-└─ Display Filters → Filter management
+â”œâ”€ Follow Stream â†’ Stream tracking
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Decode As... â†’ Protocol override
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â””â”€ Display Filters â†’ Filter management
 
 Statistics Menu
-├─ Summary → Capture overview
-├─ Protocol Hierarchy → Protocol tree
-├─ ───────────
-├─ Conversations → Traffic relationships
-├─ Endpoints → IP/MAC endpoints
-└─ I/O Graph → Traffic graph
+â”œâ”€ Summary â†’ Capture overview
+â”œâ”€ Protocol Hierarchy â†’ Protocol tree
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ Conversations â†’ Traffic relationships
+â”œâ”€ Endpoints â†’ IP/MAC endpoints
+â””â”€ I/O Graph â†’ Traffic graph
 
 Help Menu
-├─ Contents (F1) → Documentation
-├─ ───────────
-├─ About Packetra → App info
-└─ About Qt → Qt version info
+â”œâ”€ Contents (F1) â†’ Documentation
+â”œâ”€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+â”œâ”€ About Packetra â†’ App info
+â””â”€ About Qt â†’ Qt version info
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🔧 TOOLBAR (7 sections)
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ”§ TOOLBAR (7 sections)
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 Capture Control:
-├─ ▶ Start      → Begin packet capture
-├─ ■ Stop       → End packet capture
-└─ ⟳ Restart    → Reset & restart
+â”œâ”€ â–¶ Start      â†’ Begin packet capture
+â”œâ”€ â–  Stop       â†’ End packet capture
+â””â”€ âŸ³ Restart    â†’ Reset & restart
 
 Settings:
-└─ ⚙ Options    → Application settings
+â””â”€ â™ Options    â†’ Application settings
 
 File Operations:
-├─ 📂 Open      → Load PCAP file
-└─ 💾 Save      → Save PCAP file
+â”œâ”€ đŸ“‚ Open      â†’ Load PCAP file
+â””â”€ đŸ’¾ Save      â†’ Save PCAP file
 
 Analysis:
-├─ 🔍 Find      → Search packets
-└─ 🎨 Colors    → Color rules
+â”œâ”€ đŸ” Find      â†’ Search packets
+â””â”€ đŸ¨ Colors    â†’ Color rules
 
-═══════════════════════════════════════════════════════════════════════════════
-                         ⌨️ KEYBOARD SHORTCUTS
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         âŒ¨ï¸ KEYBOARD SHORTCUTS
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 File Operations:
-  Ctrl+O        → Open PCAP file
-  Ctrl+S        → Save PCAP file
-  Ctrl+Shift+S  → Save As
-  Ctrl+P        → Print
-  Ctrl+Q        → Exit app
+  Ctrl+O        â†’ Open PCAP file
+  Ctrl+S        â†’ Save PCAP file
+  Ctrl+Shift+S  â†’ Save As
+  Ctrl+P        â†’ Print
+  Ctrl+Q        â†’ Exit app
 
 Editing:
-  Ctrl+Z        → Undo
-  Ctrl+Y        → Redo
-  Ctrl+X        → Cut
-  Ctrl+C        → Copy
-  Ctrl+V        → Paste
+  Ctrl+Z        â†’ Undo
+  Ctrl+Y        â†’ Redo
+  Ctrl+X        â†’ Cut
+  Ctrl+C        â†’ Copy
+  Ctrl+V        â†’ Paste
 
 Search:
-  Ctrl+F        → Find packets
-  Ctrl+G        → Find next
+  Ctrl+F        â†’ Find packets
+  Ctrl+G        â†’ Find next
 
 Capture Control:
-  Ctrl+E        → Start/Stop capture
+  Ctrl+E        â†’ Start/Stop capture
 
 View:
-  Ctrl++        → Zoom in
-  Ctrl+-        → Zoom out
-  Ctrl+0        → Reset zoom
-  F11           → Fullscreen
+  Ctrl++        â†’ Zoom in
+  Ctrl+-        â†’ Zoom out
+  Ctrl+0        â†’ Reset zoom
+  F11           â†’ Fullscreen
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🔄 SIGNALS & CONNECTIONS
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ”„ SIGNALS & CONNECTIONS
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 ApplicationWindow (main orchestrator):
-├─ Emits:
-│  ├─ (none - receives all signals)
-│
-└─ Receives:
-   ├─ iface_selector_view.capture_started
-   ├─ capture_view.status_changed
-   ├─ Menu action triggers
-   └─ Toolbar button clicks
+â”œâ”€ Emits:
+â”‚  â”œâ”€ (none - receives all signals)
+â”‚
+â””â”€ Receives:
+   â”œâ”€ iface_selector_view.capture_started
+   â”œâ”€ capture_view.status_changed
+   â”œâ”€ Menu action triggers
+   â””â”€ Toolbar button clicks
 
 InterfaceSelectorView:
-├─ Emits:
-│  └─ capture_started(iface, name, filter)
-│
-└─ Receives:
-   ├─ start_btn.clicked
-   └─ interface_scope_combo.currentTextChanged
+â”œâ”€ Emits:
+â”‚  â””â”€ capture_started(iface, name, filter)
+â”‚
+â””â”€ Receives:
+   â”œâ”€ start_btn.clicked
+   â””â”€ interface_scope_combo.currentTextChanged
 
 PacketSniffer (QThread):
-├─ Emits:
-│  ├─ packet_captured(packet)
-│  ├─ error_occurred(msg)
-│  └─ status_changed(status)
-│
-└─ Receives:
-   └─ (connected by CaptureView)
+â”œâ”€ Emits:
+â”‚  â”œâ”€ packet_captured(packet)
+â”‚  â”œâ”€ error_occurred(msg)
+â”‚  â””â”€ status_changed(status)
+â”‚
+â””â”€ Receives:
+   â””â”€ (connected by CaptureView)
 
 CaptureView:
-├─ Emits:
-│  └─ status_changed(status)
-│
-└─ Receives:
-   ├─ PacketSniffer.packet_captured
-   ├─ apply_filter_btn.clicked
-   ├─ clear_filter_btn.clicked
-   └─ table.cellClicked
+â”œâ”€ Emits:
+â”‚  â””â”€ status_changed(status)
+â”‚
+â””â”€ Receives:
+   â”œâ”€ PacketSniffer.packet_captured
+   â”œâ”€ apply_filter_btn.clicked
+   â”œâ”€ clear_filter_btn.clicked
+   â””â”€ table.cellClicked
 
-═══════════════════════════════════════════════════════════════════════════════
-                         ✅ FEATURES STATUS
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         âœ… FEATURES STATUS
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 CAPTURE:
-  ✅ Real-time packet capture
-  ✅ Capture filters (tcp port 443, etc.)
-  ✅ Multiple interfaces
-  ✅ Thread-safe threading
-  ✅ Error handling
+  âœ… Real-time packet capture
+  âœ… Capture filters (tcp port 443, etc.)
+  âœ… Multiple interfaces
+  âœ… Thread-safe threading
+  âœ… Error handling
 
 PARSING:
-  ✅ 20+ protocol support
-  ✅ Endpoint extraction (IP/MAC)
-  ✅ Port extraction (TCP/UDP)
-  ✅ Metadata collection
-  ✅ Protocol identification
-  ✅ Info string generation
+  âœ… 20+ protocol support
+  âœ… Endpoint extraction (IP/MAC)
+  âœ… Port extraction (TCP/UDP)
+  âœ… Metadata collection
+  âœ… Protocol identification
+  âœ… Info string generation
 
 FILTERING:
-  ✅ Display filter engine
-  ✅ BNF-like expression parser
-  ✅ 15+ filter types
-  ✅ AND/OR/NOT logic
-  ✅ Parentheses grouping
+  âœ… Display filter engine
+  âœ… BNF-like expression parser
+  âœ… 15+ filter types
+  âœ… AND/OR/NOT logic
+  âœ… Parentheses grouping
 
 UI:
-  ✅ Unified main window
-  ✅ Complete menubar
-  ✅ Complete toolbar
-  ✅ Shared components
-  ✅ Smooth view switching
+  âœ… Unified main window
+  âœ… Complete menubar
+  âœ… Complete toolbar
+  âœ… Shared components
+  âœ… Smooth view switching
 
 FILE I/O:
-  ✅ Load PCAP files
-  ✅ Save PCAP files
-  ✅ Multiple format support
+  âœ… Load PCAP files
+  âœ… Save PCAP files
+  âœ… Multiple format support
 
 SYSTEM:
-  ✅ Windows Npcap check
-  ✅ Automatic Npcap install
-  ✅ Cross-platform support
+  âœ… Windows Npcap check
+  âœ… Automatic Npcap install
+  âœ… Cross-platform support
 
-═══════════════════════════════════════════════════════════════════════════════
-                         🎯 DATA FLOW
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+                         đŸ¯ DATA FLOW
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 User starts app:
-  main.py → check Npcap → ApplicationWindow → InterfaceSelectorView
+  main.py â†’ check Npcap â†’ ApplicationWindow â†’ InterfaceSelectorView
 
 User selects interface & clicks "Start":
-  InterfaceSelectorView → capture_started Signal → ApplicationWindow
-  → show_capture_view() → CaptureView.set_interface()
-  → CaptureView.start_capture()
-  → PacketSniffer(iface, filter) → QThread.start()
+  InterfaceSelectorView â†’ capture_started Signal â†’ ApplicationWindow
+  â†’ show_capture_view() â†’ CaptureView.set_interface()
+  â†’ CaptureView.start_capture()
+  â†’ PacketSniffer(iface, filter) â†’ QThread.start()
 
 Packets captured:
-  Scapy.sniff() → handle_packet()
-  → packet_captured Signal → CaptureView.add_packet()
-  → PacketParser.parse() → PacketRecord
-  → DisplayFilter.matches() → check if display
-  → PacketTable.append_record()
+  Scapy.sniff() â†’ handle_packet()
+  â†’ packet_captured Signal â†’ CaptureView.add_packet()
+  â†’ PacketParser.parse() â†’ PacketRecord
+  â†’ DisplayFilter.matches() â†’ check if display
+  â†’ PacketTable.append_record()
 
 User clicks packet:
-  PacketTable.cellClicked → show_details()
-  → PacketDetailsTree.show_packet() + PacketHexView.show_packet()
-  → packet_summary_tree() + hex_dump()
-  → Render details
+  PacketTable.cellClicked â†’ show_details()
+  â†’ PacketDetailsTree.show_packet() + PacketHexView.show_packet()
+  â†’ packet_summary_tree() + hex_dump()
+  â†’ Render details
 
 User applies filter:
-  apply_filter_btn.clicked → apply_display_filter()
-  → for each record: DisplayFilter.matches()
-  → rebuild visible_indices & PacketTable
+  apply_filter_btn.clicked â†’ apply_display_filter()
+  â†’ for each record: DisplayFilter.matches()
+  â†’ rebuild visible_indices & PacketTable
 
 User saves:
-  save_btn.clicked → save_file()
-  → save_pcap(filename, records)
+  save_btn.clicked â†’ save_file()
+  â†’ save_pcap(filename, records)
 
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 Total Files: 25+
 Lines of Code: 2000+
 Documentation: 1000+ lines
-Tested: ✅ Yes
-Ready: ✅ Yes
-Status: ✅ PRODUCTION READY
+Tested: âœ… Yes
+Ready: âœ… Yes
+Status: âœ… PRODUCTION READY
 
-═══════════════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
