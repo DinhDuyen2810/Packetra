@@ -1843,7 +1843,7 @@ class ApplicationWindow(QMainWindow):
         'Packet Length Mean', 'Packet Length Std', 'Packet Length Variance', 'FIN Flag Count', 'SYN Flag Count',
         'RST Flag Count', 'PSH Flag Count', 'ACK Flag Count', 'URG Flag Count', 'CWE Flag Count',
         'ECE Flag Count', 'Down/Up Ratio', 'Average Packet Size', 'Avg Fwd Segment Size', 'Avg Bwd Segment Size',
-        'Fwd Header Length', 'Fwd Avg Bytes/Bulk', 'Fwd Avg Packets/Bulk', 'Fwd Avg Bulk Rate',
+        'Fwd Avg Bytes/Bulk', 'Fwd Avg Packets/Bulk', 'Fwd Avg Bulk Rate',
         'Bwd Avg Bytes/Bulk', 'Bwd Avg Packets/Bulk', 'Bwd Avg Bulk Rate', 'Subflow Fwd Packets',
         'Subflow Fwd Bytes', 'Subflow Bwd Packets', 'Subflow Bwd Bytes', 'Init_Win_bytes_forward',
         'Init_Win_bytes_backward', 'act_data_pkt_fwd', 'min_seg_size_forward', 'Active Mean', 'Active Std',
@@ -1853,9 +1853,10 @@ class ApplicationWindow(QMainWindow):
     AI_DROP_FOR_ML = {'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Protocol', 'Timestamp'}
     AI_DROP_FOR_INFERENCE = AI_DROP_FOR_ML | {'Label'}
     AI_MODEL_DIR = Path(__file__).resolve().parents[1] / 'ai'
-    AI_MODEL_FILE = 'xgb_ids_model.json'
+    AI_MODEL_FILE = 'ft_transformer_torchscript.pt'
+    AI_SCALER_FILE = 'standard_scaler.pkl'
     AI_LABEL_ENCODER_FILE = 'label_encoder.pkl'
-    AI_FEATURE_COLUMNS_FILE = 'feature_columns.json'
+    AI_MODEL_INFO_FILE = 'model_info.json'
     DEMO_DOC_PATH = Path(__file__).resolve().parents[1] / 'docs' / 'md' / 'demo packet.md'
     DEMO_DIR = Path(__file__).resolve().parents[1] / 'demo'
     AI_FALLBACK_LABELS = [
@@ -1877,6 +1878,7 @@ class ApplicationWindow(QMainWindow):
     ]
     AI_LABEL_DESCRIPTIONS = {
         'BENIGN': 'Luu luong binh thuong, chua thay dau hieu tan cong ro rang trong cac flow da chon.',
+        'Benign': 'Luu luong binh thuong, chua thay dau hieu tan cong ro rang trong cac flow da chon.',
         'Bot': 'Co dau hieu bot/botnet: may nguon co the dang bi dieu khien tu xa hoac tu dong tao ket noi bat thuong.',
         'DDoS': 'Co dau hieu tan cong DDoS: nhieu goi/flow tao tai lon ve dich trong thoi gian ngan.',
         'DoS GoldenEye': 'Co mau DoS GoldenEye: tan cong HTTP lam can kiet tai nguyen dich vu web.',
@@ -2779,114 +2781,23 @@ class ApplicationWindow(QMainWindow):
             result.append(name if seen == 0 else f'{name}.{seen}')
         return result
 
-    def _load_ai_model_bundle(self):
-        if self._ai_model_bundle is not None:
-            return self._ai_model_bundle
-
-        try:
-            import numpy as np
-            import xgboost as xgb
-        except Exception as exc:
-            raise RuntimeError(
-                'Thieu thu vien AI inference. Hay cai dependencies trong requirements.txt '
-                '(numpy, xgboost, scikit-learn) roi chay lai.'
-            ) from exc
-
-        model_path = self.AI_MODEL_DIR / self.AI_MODEL_FILE
-        feature_path = self.AI_MODEL_DIR / self.AI_FEATURE_COLUMNS_FILE
-        encoder_path = self.AI_MODEL_DIR / self.AI_LABEL_ENCODER_FILE
-        missing = [str(p) for p in (model_path, feature_path, encoder_path) if not p.exists()]
-        if missing:
-            raise FileNotFoundError('Thieu file model AI: ' + ', '.join(missing))
-
-        with feature_path.open('r', encoding='utf-8') as f:
-            feature_columns = json.load(f)
-        if not isinstance(feature_columns, list) or not feature_columns:
-            raise ValueError('feature_columns.json khong hop le.')
-
-        labels = list(self.AI_FALLBACK_LABELS)
-        try:
-            with encoder_path.open('rb') as f:
-                encoder = pickle.load(f)
-            encoder_classes = getattr(encoder, 'classes_', None)
-            if encoder_classes is not None:
-                labels = [str(x) for x in list(encoder_classes)]
-        except Exception:
-            # Fallback keeps inference usable when sklearn is missing, but requirements include it.
-            pass
-
-        booster = xgb.Booster()
-        booster.load_model(str(model_path))
-        self._ai_model_bundle = {
-            'np': np,
-            'xgb': xgb,
-            'booster': booster,
-            'feature_columns': [str(c).strip() for c in feature_columns],
-            'labels': labels,
-        }
-        return self._ai_model_bundle
-
-    def _coerce_ai_number(self, value) -> float:
-        if value is None:
-            return 0.0
-        if isinstance(value, bool):
-            return 1.0 if value else 0.0
-        if isinstance(value, (int, float)):
-            number = float(value)
-        else:
-            text = str(value).strip()
-            if not text:
-                return 0.0
-            if text.lower() in {'inf', '+inf', 'infinity', '+infinity'}:
-                return 0.0
-            if text.lower() in {'-inf', '-infinity', 'nan', '+nan', '-nan'}:
-                return 0.0
-            try:
-                number = float(text.replace(',', ''))
-            except Exception:
-                return 0.0
-        if math.isnan(number) or math.isinf(number):
-            return 0.0
-        return number
-
-    def _prepare_ai_feature_matrix(self, ml_header: list[str], ml_rows: list[list], feature_columns: list[str]):
-        dedup_header = self._dedupe_ai_header(ml_header)
-        col_index = {name: idx for idx, name in enumerate(dedup_header)}
-        matrix = []
-        for row in ml_rows:
-            vector = []
-            for feature in feature_columns:
-                idx = col_index.get(feature)
-                vector.append(self._coerce_ai_number(row[idx]) if idx is not None and idx < len(row) else 0.0)
-            matrix.append(vector)
-        return matrix
-
     def _predict_ai_labels(self, ml_header: list[str], ml_rows: list[list]) -> list[dict]:
         if not ml_rows:
             return []
-        bundle = self._load_ai_model_bundle()
-        matrix = self._prepare_ai_feature_matrix(ml_header, ml_rows, bundle['feature_columns'])
-        np = bundle['np']
-        xgb = bundle['xgb']
-        dmatrix = xgb.DMatrix(np.asarray(matrix, dtype=float), feature_names=bundle['feature_columns'])
-        raw_pred = bundle['booster'].predict(dmatrix)
-        labels = bundle['labels']
-
-        predictions = []
-        for pred in raw_pred:
-            arr = np.asarray(pred)
-            if arr.ndim == 0:
-                class_idx = int(round(float(arr)))
-                confidence = 1.0
-            else:
-                class_idx = int(arr.argmax())
-                confidence = float(arr[class_idx])
-            label = labels[class_idx] if 0 <= class_idx < len(labels) else str(class_idx)
-            predictions.append({
-                'label': label,
-                'confidence': confidence,
-                'class_index': class_idx,
-            })
+        adapter = self._build_flow_model_adapter()
+        if not adapter.loaded:
+            raise RuntimeError(
+                'AI model package is not ready. Hay cai torch, joblib va scikit-learn '
+                'bang cach chay: pip install -r requirements.txt'
+            )
+        predictions = adapter.predict(ml_rows)
+        if not isinstance(predictions, list):
+            if isinstance(predictions, str) and predictions == 'torch_not_available':
+                raise RuntimeError(
+                    'AI model package is missing torch/joblib/scikit-learn. '
+                    'Hay chay: pip install -r requirements.txt'
+                )
+            raise RuntimeError(f'AI model predict failed: {predictions}')
         return predictions
 
     def _build_ai_analysis_text(self, traffic_header: list[str], traffic_rows: list[list], predictions: list[dict]) -> str:
@@ -2899,8 +2810,8 @@ class ApplicationWindow(QMainWindow):
             return row[idx]
 
         total = len(predictions)
-        counts = Counter(pred['label'] for pred in predictions)
-        attack_counts = Counter({label: count for label, count in counts.items() if label != 'BENIGN'})
+        counts = Counter(str(pred.get('label', pred.get('prediction', '')) or '') for pred in predictions)
+        attack_counts = Counter({label: count for label, count in counts.items() if str(label).lower() != 'benign'})
 
         lines = ['AI Analyst result', '']
         lines.append(f'Total flows analyzed: {total}')
@@ -2912,18 +2823,26 @@ class ApplicationWindow(QMainWindow):
         lines.append('')
         if not attack_counts:
             lines.append('Current situation: mostly BENIGN traffic.')
-            lines.append(self.AI_LABEL_DESCRIPTIONS.get('BENIGN', 'Traffic looks normal.'))
+            lines.append(
+                self.AI_LABEL_DESCRIPTIONS.get(
+                    'Benign',
+                    self.AI_LABEL_DESCRIPTIONS.get('BENIGN', 'Traffic looks normal.')
+                )
+            )
         else:
             lines.append('Current situation: suspicious or attack traffic detected.')
             for label, count in attack_counts.most_common():
-                description = self.AI_LABEL_DESCRIPTIONS.get(label, 'Can kiem tra them flow lien quan.')
+                description = self.AI_LABEL_DESCRIPTIONS.get(
+                    label,
+                    self.AI_LABEL_DESCRIPTIONS.get('Benign', self.AI_LABEL_DESCRIPTIONS.get('BENIGN', 'Can kiem tra them flow lien quan.'))
+                )
                 lines.append(f'- {label}: {description}')
 
         grouped_sources = defaultdict(Counter)
         grouped_targets = defaultdict(Counter)
         for row, pred in zip(traffic_rows, predictions):
             label = pred['label']
-            if label == 'BENIGN':
+            if str(label).lower() == 'benign':
                 continue
             grouped_sources[label][str(get(row, 'Source IP', '-'))] += 1
             target = f"{get(row, 'Destination IP', '-')}: {get(row, 'Destination Port', '-')}"
@@ -2942,7 +2861,7 @@ class ApplicationWindow(QMainWindow):
             lines.append('Top suspicious flows:')
             suspicious = [
                 (row, pred) for row, pred in zip(traffic_rows, predictions)
-                if pred['label'] != 'BENIGN'
+                if str(pred.get('label', pred.get('prediction', ''))).lower() != 'benign'
             ]
             suspicious.sort(key=lambda pair: pair[1].get('confidence', 0.0), reverse=True)
             for row, pred in suspicious[:15]:
@@ -2952,8 +2871,10 @@ class ApplicationWindow(QMainWindow):
                 duration = get(row, 'Flow Duration', '-')
                 packets = get(row, 'Total Fwd Packets', '-')
                 bytes_ = get(row, 'Total Length of Fwd Packets', '-')
+                label = pred.get('label', pred.get('prediction', '-'))
+                confidence = float(pred.get('confidence', pred.get('anomaly_score', 0.0)) or 0.0)
                 lines.append(
-                    f"- {pred['label']} ({pred['confidence']:.2%}) | {src} -> {dst} | "
+                    f"- {label} ({confidence:.2%}) | {src} -> {dst} | "
                     f'proto={proto} | duration_us={duration} | fwd_pkts={packets} | fwd_bytes={bytes_}'
                 )
 
@@ -2964,9 +2885,11 @@ class ApplicationWindow(QMainWindow):
             src = f"{get(row, 'Source IP', '-')}: {get(row, 'Source Port', '-')}"
             dst = f"{get(row, 'Destination IP', '-')}: {get(row, 'Destination Port', '-')}"
             proto = get(row, 'Protocol', '-')
+            label = pred.get('label', pred.get('prediction', '-'))
+            confidence = float(pred.get('confidence', pred.get('anomaly_score', 0.0)) or 0.0)
             lines.append(
                 f"- flow#{i} {flow_id} | {src} -> {dst} | proto={proto} | "
-                f"label={pred.get('label', '-')} | confidence={float(pred.get('confidence', 0.0)):.2%}"
+                f"label={label} | confidence={confidence:.2%}"
             )
 
         return '\n'.join(lines)
@@ -4800,14 +4723,21 @@ class ApplicationWindow(QMainWindow):
 
     def _build_flow_model_adapter(self):
         model_path = self.AI_MODEL_DIR / self.AI_MODEL_FILE
-        feature_path = self.AI_MODEL_DIR / self.AI_FEATURE_COLUMNS_FILE
+        scaler_path = self.AI_MODEL_DIR / self.AI_SCALER_FILE
         encoder_path = self.AI_MODEL_DIR / self.AI_LABEL_ENCODER_FILE
+        model_info_path = self.AI_MODEL_DIR / self.AI_MODEL_INFO_FILE
         return PacketraModelAdapter(
             model_path=str(model_path),
-            feature_columns_path=str(feature_path),
             label_encoder_path=str(encoder_path),
-            fallback_labels=list(self.AI_FALLBACK_LABELS),
+            scaler_path=str(scaler_path),
+            model_info_path=str(model_info_path),
+            feature_order=self._ai_model_feature_order(),
+            fallback_labels=[],
         )
+
+    def _ai_model_feature_order(self) -> list[str]:
+        meta = {'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Protocol', 'Timestamp', 'Label'}
+        return [str(col) for col in self.AI_TRAFFIC_COLUMNS if str(col) not in meta]
 
     def _on_export_flow_csv_current(self):
         if not self.capture_view or not getattr(self.capture_view, "records", None):
