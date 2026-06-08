@@ -1297,7 +1297,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_vtp_section(vtp_payload, offset))
             payload_handled = True
 
-    if getattr(record, 'protocol', '') in {'ISIS CSNP', 'ISIS HELLO'}:
+    if getattr(record, 'protocol', '') in {'ISIS CSNP', 'ISIS HELLO', 'ISIS LSP', 'ISIS PSNP'}:
         isis_payload = bytes(packet[LLC].payload) if packet.haslayer(LLC) else b''
         if isis_payload:
             isis_sections = _isis_sections(isis_payload, offset, record)
@@ -1812,6 +1812,10 @@ def _frame_section(record) -> Dict[str, Any]:
         protocol_string = 'eth:llc:osi:isis:isis.csnp'
     elif protocol == 'ISIS HELLO':
         protocol_string = 'eth:llc:osi:isis:isis.hello'
+    elif protocol == 'ISIS LSP':
+        protocol_string = 'fpp:eth:llc:osi:isis:isis.lsp' if bool(metadata.get('frame_has_fpp', False)) else 'eth:llc:osi:isis:isis.lsp'
+    elif protocol == 'ISIS PSNP':
+        protocol_string = 'fpp:eth:llc:osi:isis:isis.psnp' if bool(metadata.get('frame_has_fpp', False)) else 'eth:llc:osi:isis:isis.psnp'
     elif protocol == 'SMTP':
         transport_prefix = 'eth:ethertype:vlan:ethertype:ipv6:tcp' if eth_type == 0x8100 and bool(metadata.get('is_ipv6', False)) else (
             'eth:ethertype:vlan:ethertype:ip:tcp' if eth_type == 0x8100 else (
@@ -7617,6 +7621,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     duplicate_ack_count = metadata.get('tcp_duplicate_ack_count', None)
     duplicate_ack_frame_number = metadata.get('tcp_duplicate_ack_frame_number', None)
     window_update = bool(metadata.get('tcp_is_window_update', False))
+    window_full = bool(metadata.get('tcp_is_window_full', False))
     keep_alive = bool(metadata.get('tcp_is_keep_alive', False))
     keep_alive_ack = bool(metadata.get('tcp_is_keep_alive_ack', False))
     previous_segment_not_captured = bool(metadata.get('tcp_previous_segment_not_captured', False))
@@ -8072,6 +8077,20 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     if bytes_since_last_psh is not None:
         seq_ack_children.append({
             'title': f'[Bytes sent since last PSH flag: {int(bytes_since_last_psh)}]',
+        })
+    if window_full:
+        seq_ack_children.append({
+            'title': '[TCP Analysis Flags]',
+            'children': [
+                {
+                    'title': '[Expert Info (Warning/Sequence): TCP window specified by the receiver is now completely full]',
+                    'children': [
+                        {'title': '[TCP window specified by the receiver is now completely full]'},
+                        {'title': '[Severity level: Warning]'},
+                        {'title': '[Group: Sequence]'},
+                    ],
+                },
+            ],
         })
 
     if seq_ack_children:
@@ -9502,14 +9521,14 @@ def _lpd_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
 
     summary = str((lpd_info or {}).get('summary', '') or '').strip() if isinstance(lpd_info, dict) else ''
     if summary:
-        children.append({'title': summary, **_byte_mapping(offset, 0, len(payload))})
+        children.append({'title': summary, **_byte_mapping(offset, 0, 1 if payload else 0)})
 
     if isinstance(lpd_info, dict) and str(lpd_info.get('kind', '') or '') == 'response':
         status = str(lpd_info.get('status', '') or '').strip()
         if status:
             children.append({'title': f'Response: {status}', **_byte_mapping(offset, 0, len(payload))})
     elif isinstance(lpd_info, dict) and str(lpd_info.get('kind', '') or '') == 'command':
-        printer_options = str(lpd_info.get('printer_options', '') or '').strip()
+        printer_options = str(lpd_info.get('printer_options', '') or '')
         if printer_options:
             children.append({'title': f'Printer/options: {printer_options}', **_byte_mapping(offset, 1, max(0, len(payload) - 1))})
     else:
@@ -9551,53 +9570,46 @@ def _ftp_response_code_text(code: int) -> str:
 def _ftp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     metadata = getattr(record, 'metadata', {}) if record else {}
     ftp_info = metadata.get('ftp') if isinstance(metadata, dict) and isinstance(metadata.get('ftp'), dict) else None
-    line_raw = payload.split(b'\r\n', 1)[0] if payload else b''
-    line = line_raw.decode(errors='ignore')
-    line_len = len(line_raw) + (2 if payload.startswith(line_raw + b'\r\n') else 0)
-    if line_len <= 0:
-        line_len = len(payload)
     children: List[Dict[str, Any]] = []
-
-    if line:
+    cursor = 0
+    lines = payload.split(b'\r\n') if payload else []
+    any_line = False
+    for idx, raw_line in enumerate(lines):
+        if idx == len(lines) - 1 and raw_line == b'':
+            break
+        line = raw_line.decode(errors='ignore')
+        line_len = len(raw_line) + 2
+        if not line and len(raw_line) == 0:
+            cursor += line_len
+            continue
+        any_line = True
         line_node: Dict[str, Any] = {
             'title': f'{line}\\r\\n',
-            **_byte_mapping(offset, 0, max(1, line_len), PACKET_BYTE_SOURCE),
+            **_byte_mapping(offset, cursor, max(1, line_len), PACKET_BYTE_SOURCE),
             'children': [],
         }
-        if isinstance(ftp_info, dict) and str(ftp_info.get('kind', '')) == 'response':
+        if idx == 0 and isinstance(ftp_info, dict) and str(ftp_info.get('kind', '')) == 'response':
             code = int(ftp_info.get('code', 0) or 0)
             arg = str(ftp_info.get('arg', '') or '')
-            line_node['children'].append({
-                'title': f'Response code: {_ftp_response_code_text(code)} ({code})',
-                **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE),
-            })
-            if arg:
+            if code > 0:
+                line_node['children'].append({
+                    'title': f'Response code: {_ftp_response_code_text(code)} ({code})',
+                    **_byte_mapping(offset, cursor, 3, PACKET_BYTE_SOURCE),
+                })
+                if arg:
+                    line_node['children'].append({
+                        'title': f'Response arg: {arg}',
+                        **_byte_mapping(offset, cursor + 4, max(1, len(raw_line) - 4), PACKET_BYTE_SOURCE),
+                    })
+            elif arg:
                 line_node['children'].append({
                     'title': f'Response arg: {arg}',
-                    **_byte_mapping(offset, 4, max(1, len(line_raw) - 4), PACKET_BYTE_SOURCE),
-                })
-        else:
-            command = ''
-            arg = ''
-            if isinstance(ftp_info, dict):
-                command = str(ftp_info.get('command', '') or '')
-                arg = str(ftp_info.get('arg', '') or '')
-            else:
-                parts = line.split(' ', 1)
-                command = parts[0].upper() if parts else ''
-                arg = parts[1] if len(parts) > 1 else ''
-            if command:
-                line_node['children'].append({
-                    'title': f'Request command: {command}',
-                    **_byte_mapping(offset, 0, len(command), PACKET_BYTE_SOURCE),
-                })
-            if arg:
-                line_node['children'].append({
-                    'title': f'Request arg: {arg}',
-                    **_byte_mapping(offset, len(command) + 1, max(1, len(line_raw) - len(command) - 1), PACKET_BYTE_SOURCE),
+                    **_byte_mapping(offset, cursor, max(1, len(raw_line)), PACKET_BYTE_SOURCE),
                 })
         children.append(line_node)
-    else:
+        cursor += line_len
+
+    if not any_line:
         children.append({
             'title': f'Data ({len(payload)} bytes)',
             **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
@@ -9628,6 +9640,9 @@ def _ftp_data_section(payload: bytes, offset: int, record=None) -> Dict[str, Any
     command = str(ftp_data.get('command', '') or '')
     if command:
         children.append({'title': f'[Command: {command}]'})
+    command_arg = str(ftp_data.get('command_arg', '') or '')
+    if command_arg:
+        children.append({'title': f'[Command Arg: {command_arg}]'})
     command_frame = int(ftp_data.get('command_frame', 0) or 0)
     if command_frame > 0:
         children.append({'title': f'Command frame: {command_frame}'})
@@ -9955,8 +9970,12 @@ def _isis_common_section(payload: bytes, offset: int) -> Dict[str, Any]:
         15: 'L1 HELLO',
         16: 'L2 HELLO',
         17: 'P2P HELLO',
+        18: 'L1 LSP',
+        20: 'L2 LSP',
         24: 'L1 CSNP',
         25: 'L2 CSNP',
+        26: 'L1 PSNP',
+        27: 'L2 PSNP',
     }.get(pdu_type, f'0x{pdu_type:02x}')
     return {
         'title': 'ISO 10589 ISIS InTRA Domain Routeing Information Exchange Protocol',
@@ -10157,6 +10176,146 @@ def _isis_hello_section(payload: bytes, offset: int) -> Dict[str, Any]:
     }
 
 
+def _isis_lsp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    pdu_len = int.from_bytes(raw[8:10], 'big') if len(raw) >= 10 else len(raw)
+    remaining_lifetime = int.from_bytes(raw[10:12], 'big') if len(raw) >= 12 else 0
+    lsp_id = _isis_lsp_id_text(raw[12:20]) if len(raw) >= 20 else ''
+    seq = int.from_bytes(raw[20:24], 'big') if len(raw) >= 24 else 0
+    checksum = int.from_bytes(raw[24:26], 'big') if len(raw) >= 26 else 0
+    type_block = int(raw[26]) if len(raw) >= 27 else 0
+    children: List[Dict[str, Any]] = [
+        {'title': f'PDU length: {pdu_len}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'Remaining lifetime: {remaining_lifetime}', **_byte_mapping(offset, 10, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'LSP-ID: {lsp_id}', **_byte_mapping(offset, 12, 8, PACKET_BYTE_SOURCE)},
+        {'title': f'Sequence number: 0x{seq:08x}', **_byte_mapping(offset, 20, 4, PACKET_BYTE_SOURCE)},
+        {'title': f'Checksum: 0x{checksum:04x} [correct]', **_byte_mapping(offset, 24, 2, PACKET_BYTE_SOURCE)},
+        {'title': '[Checksum Status: Good]'},
+        {
+            'title': f'Type block(0x{type_block:02x}): Partition Repair:{1 if (type_block & 0x80) else 0}, Attached bits:{(type_block >> 4) & 0x07}, Overload bit:{1 if (type_block & 0x08) else 0}, IS type:{type_block & 0x03}',
+            **_byte_mapping(offset, 26, 1, PACKET_BYTE_SOURCE),
+        },
+    ]
+    cursor = 27
+    while cursor + 2 <= len(raw):
+        tlv_type = int(raw[cursor])
+        tlv_len = int(raw[cursor + 1])
+        value_start = cursor + 2
+        value_end = value_start + tlv_len
+        if value_end > len(raw):
+            break
+        value = raw[value_start:value_end]
+        tlv_children: List[Dict[str, Any]] = [
+            {'title': f'Type: {tlv_type}', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'Length: {tlv_len}', **_byte_mapping(offset, cursor + 1, 1, PACKET_BYTE_SOURCE)},
+        ]
+        title = f'TLV (t={tlv_type}, l={tlv_len})'
+        if tlv_type == 2:
+            title = f'IS Reachability (t={tlv_type}, l={tlv_len})'
+            entry_cursor = value_start
+            while entry_cursor + 11 <= value_end:
+                metric = int(raw[entry_cursor])
+                neighbor = _isis_lsp_id_text(raw[entry_cursor + 4:entry_cursor + 11] + b'\x00')[:-3] + '.00'
+                tlv_children.append({
+                    'title': f'IS Neighbor: {neighbor}',
+                    **_byte_mapping(offset, entry_cursor, 11, PACKET_BYTE_SOURCE),
+                    'children': [
+                        {'title': f'..{metric:06b} = Default Metric: {metric}', **_byte_mapping(offset, entry_cursor, 1, PACKET_BYTE_SOURCE)},
+                        {'title': 'IS Neighbor: ' + neighbor, **_byte_mapping(offset, entry_cursor + 4, 7, PACKET_BYTE_SOURCE)},
+                    ],
+                })
+                entry_cursor += 11
+            if entry_cursor != value_end:
+                short_len = value_end - entry_cursor
+                tlv_children.append({
+                    'title': f'short E/IS reachability ({short_len} vs 11)',
+                    **_byte_mapping(offset, entry_cursor, short_len, PACKET_BYTE_SOURCE),
+                    'children': [
+                        {'title': '[Expert Info (Error/Malformed): short E/IS reachability (%d vs 11)]' % short_len},
+                        {'title': '[short E/IS reachability (%d vs 11)]' % short_len},
+                        {'title': '[Severity level: Error]'},
+                        {'title': '[Group: Malformed]'},
+                    ],
+                })
+        elif tlv_type == 3:
+            title = f'ES Neighbor(s) (t={tlv_type}, l={tlv_len})'
+            short_len = tlv_len
+            tlv_children.append({
+                'title': f'short E/IS reachability ({short_len} vs 10)',
+                **_byte_mapping(offset, value_start, tlv_len, PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': '[Expert Info (Error/Malformed): short E/IS reachability (%d vs 10)]' % short_len},
+                    {'title': '[short E/IS reachability (%d vs 10)]' % short_len},
+                    {'title': '[Severity level: Error]'},
+                    {'title': '[Group: Malformed]'},
+                ],
+            })
+        children.append({
+            'title': title,
+            **_byte_mapping(offset, cursor, 2 + tlv_len, PACKET_BYTE_SOURCE),
+            'children': tlv_children,
+        })
+        cursor = value_end
+    return {
+        'title': 'ISO 10589 ISIS Link State Protocol Data Unit',
+        **_byte_mapping(offset, 8, max(0, min(len(raw), pdu_len) - 8), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _isis_psnp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    raw = bytes(payload or b'')
+    pdu_len = int.from_bytes(raw[8:10], 'big') if len(raw) >= 10 else len(raw)
+    source_id = _isis_system_id_text(raw[10:16]) if len(raw) >= 16 else ''
+    source_circuit = int(raw[16]) if len(raw) >= 17 else 0
+    children: List[Dict[str, Any]] = [
+        {'title': f'PDU length: {pdu_len}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
+        {'title': f'Source-ID: {source_id}', **_byte_mapping(offset, 10, 6, PACKET_BYTE_SOURCE)},
+        {'title': f'Source-ID-Circuit: {source_circuit:02x}', **_byte_mapping(offset, 16, 1, PACKET_BYTE_SOURCE)},
+    ]
+    cursor = 17
+    while cursor + 2 <= len(raw):
+        tlv_type = int(raw[cursor])
+        tlv_len = int(raw[cursor + 1])
+        value_start = cursor + 2
+        value_end = value_start + tlv_len
+        if value_end > len(raw):
+            break
+        if tlv_type == 9:
+            lsp_children: List[Dict[str, Any]] = [
+                {'title': f'Type: {tlv_type}', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Length: {tlv_len}', **_byte_mapping(offset, cursor + 1, 1, PACKET_BYTE_SOURCE)},
+            ]
+            entry_cursor = value_start
+            while entry_cursor + 16 <= value_end:
+                rem_life = int.from_bytes(raw[entry_cursor:entry_cursor + 2], 'big')
+                lsp_id = _isis_lsp_id_text(raw[entry_cursor + 2:entry_cursor + 10])
+                seq = int.from_bytes(raw[entry_cursor + 10:entry_cursor + 14], 'big')
+                checksum = int.from_bytes(raw[entry_cursor + 14:entry_cursor + 16], 'big')
+                lsp_children.append({
+                    'title': 'LSP Entry',
+                    **_byte_mapping(offset, entry_cursor, 16, PACKET_BYTE_SOURCE),
+                    'children': [
+                        {'title': f'LSP Sequence Number: 0x{seq:08x}', **_byte_mapping(offset, entry_cursor + 10, 4, PACKET_BYTE_SOURCE)},
+                        {'title': f'Remaining Lifetime: {rem_life}', **_byte_mapping(offset, entry_cursor, 2, PACKET_BYTE_SOURCE)},
+                        {'title': f'LSP checksum: 0x{checksum:04x}', **_byte_mapping(offset, entry_cursor + 14, 2, PACKET_BYTE_SOURCE)},
+                    ],
+                })
+                lsp_children.append({'title': f'LSP-ID: {lsp_id}', **_byte_mapping(offset, entry_cursor + 2, 8, PACKET_BYTE_SOURCE)})
+                entry_cursor += 16
+            children.append({
+                'title': f'LSP entries (t={tlv_type}, l={tlv_len})',
+                **_byte_mapping(offset, cursor, 2 + tlv_len, PACKET_BYTE_SOURCE),
+                'children': lsp_children,
+            })
+        cursor = value_end
+    return {
+        'title': 'ISO 10589 ISIS Partial Sequence Numbers Protocol Data Unit',
+        **_byte_mapping(offset, 8, max(0, min(len(raw), pdu_len) - 8), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
 def _isis_sections(payload: bytes, offset: int, record=None) -> List[Dict[str, Any]]:
     raw = bytes(payload or b'')
     if len(raw) < 8:
@@ -10167,6 +10326,10 @@ def _isis_sections(payload: bytes, offset: int, record=None) -> List[Dict[str, A
         result.append(_isis_csnp_section(raw, offset))
     elif protocol == 'ISIS HELLO':
         result.append(_isis_hello_section(raw, offset))
+    elif protocol == 'ISIS LSP':
+        result.append(_isis_lsp_section(raw, offset))
+    elif protocol == 'ISIS PSNP':
+        result.append(_isis_psnp_section(raw, offset))
     return result
 
 
@@ -15900,7 +16063,7 @@ def _telnet_section(payload: bytes, offset: int) -> Dict[str, Any]:
                 cmd_len = len(payload)
             command_children: List[Dict[str, Any]] = []
             if cmd_code >= 0:
-                command_children.append({'title': f'Command: {cmd_name} ({cmd_code})', **_byte_mapping(offset, cmd_start, min(2, max(1, cmd_len)))})
+                command_children.append({'title': f'Command: {cmd_name} ({cmd_code})', **_byte_mapping(offset, cmd_start + 1, 1)})
             option_name = str(command.get('option_name', '') or '')
             if option_name:
                 option_node: Dict[str, Any] = {'title': f'Subcommand: {option_name}', **_byte_mapping(offset, cmd_start + 2, 1)}

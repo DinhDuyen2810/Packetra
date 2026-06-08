@@ -55,6 +55,7 @@ class PacketParser:
         self.tftp_sessions_by_client = {}
         self.ftp_control_streams = {}
         self.ftp_data_sessions = {}
+        self.cflow_template_cache = {}
         self.ipv4_fragment_state = {}
         self.ipv6_fragment_state = {}
         self.layer_stream_maps = {
@@ -344,6 +345,10 @@ class PacketParser:
             gre_payload = self._payload_bytes(packet)
             if b'SSH-' in gre_payload:
                 return self._ssh_banner_protocol_name(gre_payload)
+            if packet.haslayer(ICMP):
+                return 'ICMP'
+            if self._is_icmpv6_packet(packet):
+                return 'ICMPv6'
             if len(gre_payload) >= 5:
                 for i in range(0, min(len(gre_payload) - 4, 256)):
                     ct = int(gre_payload[i])
@@ -1482,6 +1487,12 @@ class PacketParser:
                 'code': code,
                 'arg': arg,
             }
+        if sport == 21:
+            return {
+                'kind': 'response',
+                'line': first,
+                'arg': first,
+            }
         parts = first.split(' ', 1)
         command = parts[0].upper().strip()
         if not command or len(command) > 8 or not command.isalpha():
@@ -1510,6 +1521,25 @@ class PacketParser:
         if p1 < 0 or p1 > 255 or p2 < 0 or p2 > 255:
             return 0
         return p1 * 256 + p2
+
+    def _ftp_epsv_port(self, text: str) -> int:
+        value = str(text or '').strip()
+        open_idx = value.rfind('(')
+        close_idx = value.rfind(')')
+        if open_idx < 0 or close_idx <= open_idx:
+            return 0
+        body = value[open_idx + 1:close_idx]
+        parts = body.split('|')
+        for item in reversed(parts):
+            token = item.strip()
+            if token.isdigit():
+                try:
+                    port = int(token)
+                except Exception:
+                    return 0
+                if 0 < port < 65536:
+                    return port
+        return 0
 
     def _update_ftp_metadata(self, packet, metadata: dict) -> None:
         tcp = self._effective_tcp_layer(packet)
@@ -1549,6 +1579,7 @@ class PacketParser:
                         if int(session_meta.get('setup_frame', 0) or 0) > frame_number:
                             continue
                         session_meta['command'] = command_upper
+                        session_meta['command_arg'] = str(stream.get('last_command_arg', '') or '')
                         session_meta['command_frame'] = frame_number
             else:
                 code = int(ftp_info.get('code', 0) or 0)
@@ -1565,6 +1596,19 @@ class PacketParser:
                             'setup_frame': frame_number,
                             'setup_method': 'PASV',
                             'command': str(stream.get('last_command', '') or ''),
+                            'command_arg': str(stream.get('last_command_arg', '') or ''),
+                            'command_frame': int(stream.get('last_command_frame', 0) or 0),
+                            'cwd': str(stream.get('cwd', '') or ''),
+                            'control_stream_key': stream_key,
+                        }
+                if code == 229:
+                    data_port = self._ftp_epsv_port(arg)
+                    if data_port > 0:
+                        self.ftp_data_sessions[(server_ip, data_port, client_ip)] = {
+                            'setup_frame': frame_number,
+                            'setup_method': 'EPSV',
+                            'command': str(stream.get('last_command', '') or ''),
+                            'command_arg': str(stream.get('last_command_arg', '') or ''),
                             'command_frame': int(stream.get('last_command_frame', 0) or 0),
                             'cwd': str(stream.get('cwd', '') or ''),
                             'control_stream_key': stream_key,
@@ -1579,6 +1623,7 @@ class PacketParser:
                 'setup_frame': int(data_meta.get('setup_frame', 0) or 0),
                 'setup_method': str(data_meta.get('setup_method', '') or ''),
                 'command': str(data_meta.get('command', '') or ''),
+                'command_arg': str(data_meta.get('command_arg', '') or ''),
                 'command_frame': int(data_meta.get('command_frame', 0) or 0),
                 'cwd': str(data_meta.get('cwd', '') or ''),
             }
@@ -1729,6 +1774,19 @@ class PacketParser:
         if int(payload[0]) != 0x83:
             return None
         pdu_type = int(payload[4]) & 0x1F
+        if pdu_type in {18, 20} and len(payload) >= 27:
+            level = 'L1' if pdu_type == 18 else 'L2'
+            return {
+                'protocol': 'ISIS LSP',
+                'pdu_type': pdu_type,
+                'level': level,
+                'pdu_length': int.from_bytes(payload[8:10], 'big'),
+                'remaining_lifetime': int.from_bytes(payload[10:12], 'big'),
+                'lsp_id': self._isis_lsp_id_text(payload[12:20]),
+                'sequence': int.from_bytes(payload[20:24], 'big'),
+                'checksum': int.from_bytes(payload[24:26], 'big'),
+                'type_block': int(payload[26]),
+            }
         if pdu_type in {24, 25} and len(payload) >= 33:
             level = 'L1' if pdu_type == 24 else 'L2'
             return {
@@ -1739,6 +1797,16 @@ class PacketParser:
                 'source_id_circuit': int(payload[16]),
                 'start_lsp_id': self._isis_lsp_id_text(payload[17:25]),
                 'end_lsp_id': self._isis_lsp_id_text(payload[25:33]),
+            }
+        if pdu_type in {26, 27} and len(payload) >= 17:
+            level = 'L1' if pdu_type == 26 else 'L2'
+            return {
+                'protocol': 'ISIS PSNP',
+                'pdu_type': pdu_type,
+                'level': level,
+                'pdu_length': int.from_bytes(payload[8:10], 'big'),
+                'source_id': self._isis_system_id_text(payload[10:16]),
+                'source_id_circuit': int(payload[16]),
             }
         if pdu_type in {15, 16, 17} and len(payload) >= 27:
             level = 'L1' if pdu_type == 15 else ('L2' if pdu_type == 16 else 'P2P')
@@ -2170,6 +2238,14 @@ class PacketParser:
             if syn_candidate is not None:
                 irtt_delta = (Decimal(str(epoch_time)) - Decimal(str(syn_candidate['epoch_time']))) * Decimal('1000')
                 irtt_ms = max(0.0, float(irtt_delta))
+                state['tcp_i_rtt_ms'] = float(irtt_ms)
+        elif irtt_ms is None:
+            cached_irtt = state.get('tcp_i_rtt_ms', None)
+            if cached_irtt is not None:
+                try:
+                    irtt_ms = float(cached_irtt)
+                except (TypeError, ValueError):
+                    irtt_ms = None
 
         if dir_packets:
             highest_dir_end = None
@@ -2312,10 +2388,10 @@ class PacketParser:
 
             sent_bytes = int(payload_len)
             for seg in reversed(dir_packets):
-                if seg['payload_len'] > 0:
-                    sent_bytes += int(seg['payload_len'])
                 if seg['psh']:
                     break
+                if seg['payload_len'] > 0:
+                    sent_bytes += int(seg['payload_len'])
             bytes_since_last_psh = int(sent_bytes)
 
         if payload_len > 0 and rev_packets and not is_retransmission and not is_duplicate_ack:
@@ -3161,6 +3237,7 @@ class PacketParser:
         source_id = int.from_bytes(payload[16:20], 'big')
 
         flowsets: list[dict] = []
+        template_domain_cache = self.cflow_template_cache.setdefault(int(source_id), {})
         cursor = 20
         while cursor + 4 <= len(payload):
             set_id = int.from_bytes(payload[cursor:cursor + 2], 'big')
@@ -3168,11 +3245,38 @@ class PacketParser:
             if set_len < 4 or cursor + set_len > len(payload):
                 break
             body_len = set_len - 4
-            flowsets.append({
+            flowset_info = {
                 'id': set_id,
                 'length': set_len,
                 'body_length': body_len,
-            })
+            }
+            if set_id == 0:
+                body = payload[cursor + 4:cursor + set_len]
+                template_ids: list[int] = []
+                body_cursor = 0
+                while body_cursor + 4 <= len(body):
+                    template_id = int.from_bytes(body[body_cursor:body_cursor + 2], 'big')
+                    field_count = int.from_bytes(body[body_cursor + 2:body_cursor + 4], 'big')
+                    record_len = 4 + (field_count * 4)
+                    if template_id < 256 or field_count <= 0 or body_cursor + record_len > len(body):
+                        break
+                    template_ids.append(template_id)
+                    template_domain_cache[int(template_id)] = {
+                        'field_count': int(field_count),
+                        'record_length': int(field_count * 4),
+                    }
+                    body_cursor += record_len
+                if template_ids:
+                    flowset_info['template_ids'] = template_ids
+            elif set_id >= 256 and body_len > 0:
+                template_meta = template_domain_cache.get(int(set_id), {})
+                record_length = int(template_meta.get('record_length', 0) or 0)
+                if record_length > 0:
+                    data_record_count = body_len // record_length
+                    if data_record_count > 0:
+                        flowset_info['data_template_id'] = int(set_id)
+                        flowset_info['data_record_count'] = int(data_record_count)
+            flowsets.append(flowset_info)
             cursor += set_len
 
         return {
@@ -6370,6 +6474,10 @@ class PacketParser:
             gre_payload = self._payload_bytes(packet)
             if b'SSH-' in gre_payload:
                 return self._ssh_banner_protocol_name(gre_payload)
+            if packet.haslayer(ICMP):
+                return 'ICMP'
+            if self._is_icmpv6_packet(packet):
+                return 'ICMPv6'
             if len(gre_payload) >= 5:
                 saw_tls = False
                 for i in range(0, min(len(gre_payload) - 4, 256)):
@@ -6871,6 +6979,7 @@ class PacketParser:
                 if imap_info is not None:
                     metadata['imap'] = imap_info
                     return 'IMAP'
+                whois_payload = self._whois_payload_for_record(packet, metadata)
                 whois_meta = metadata.get('whois') if isinstance(metadata.get('whois'), dict) else None
                 if isinstance(whois_meta, dict):
                     kind = str(whois_meta.get('kind', '') or '')
@@ -6881,7 +6990,6 @@ class PacketParser:
                         has_fin = bool(tcp_flags & 0x01)
                         if has_fin or (not whois_payload and bool(str(metadata.get('tcp_reassembled_data_hex', '') or ''))):
                             return 'WHOIS'
-                whois_payload = self._whois_payload_for_record(packet, metadata)
                 whois_info = self._whois_payload_info(whois_payload, sport, dport)
                 if whois_info is not None:
                     kind = str(whois_info.get('kind', '') or '')
@@ -8955,13 +9063,11 @@ class PacketParser:
     def _lpd_payload_info(self, payload: bytes, sport: int, dport: int) -> dict | None:
         if sport != 515 and dport != 515:
             return None
-        if not payload:
-            return {
-                'kind': 'continuation',
-                'summary': 'LPD continuation',
-            }
+        raw = bytes(payload or b'')
+        if not raw or not raw.strip(b'\x00'):
+            return None
         if sport == 515:
-            status_byte = int(payload[0])
+            status_byte = int(raw[0])
             if status_byte == 0:
                 return {
                     'kind': 'response',
@@ -8974,9 +9080,15 @@ class PacketParser:
                 'status': f'Status byte: {status_byte}',
             }
 
-        command = int(payload[0])
-        rest = payload[1:]
+        command = int(raw[0])
+        rest = raw[1:]
         text = rest.decode(errors='ignore').rstrip('\x00\r\n')
+        if command == 1:
+            return {
+                'kind': 'command',
+                'summary': 'LPC: start print / jobcmd: abort',
+                'printer_options': text,
+            }
         if command == 2:
             return {
                 'kind': 'command',
@@ -8989,7 +9101,7 @@ class PacketParser:
                 'summary': 'LPQ: print short form of queue status / jobcmd: receive data file',
                 'printer_options': text,
             }
-        if len(payload) > 8:
+        if len(raw) > 8:
             return {
                 'kind': 'continuation',
                 'summary': 'LPD continuation',
@@ -12039,9 +12151,16 @@ class PacketParser:
                 flowsets = list(cflow_info.get('flowsets', []) or [])
                 flowset_tokens = []
                 for flowset in flowsets:
-                    set_id = int(flowset.get('id', 0) or 0)
-                    if set_id >= 256:
-                        flowset_tokens.append(f'[Data:{set_id}]')
+                    flowset_id = int(flowset.get('id', 0) or 0)
+                    for template_id in list(flowset.get('template_ids', []) or []):
+                        flowset_tokens.append(f'[Data-Template:{int(template_id)}]')
+                    data_template_id = int(flowset.get('data_template_id', 0) or 0)
+                    data_record_count = int(flowset.get('data_record_count', 0) or 0)
+                    if data_template_id >= 256 and data_record_count > 0:
+                        for _ in range(data_record_count):
+                            flowset_tokens.append(f'[Data:{data_template_id}]')
+                    elif flowset_id >= 256:
+                        flowset_tokens.append(f'[Data:{flowset_id}]')
                 extra = '' if not flowset_tokens else ' ' + ' '.join(flowset_tokens)
                 return f'total: {count} (v{version}) records Obs-Domain-ID={source_id:5d}{extra}'
             if protocol == 'GRE':
@@ -12060,6 +12179,23 @@ class PacketParser:
                     except Exception:
                         pass
                 return 'Generic Routing Encapsulation'
+            if protocol == 'ISIS LSP':
+                isis_info = metadata.get('isis') if isinstance(metadata.get('isis'), dict) else self._isis_payload_info(packet)
+                if not isinstance(isis_info, dict):
+                    return 'ISIS LSP'
+                level = str(isis_info.get('level', '') or '').strip()
+                lsp_id = str(isis_info.get('lsp_id', '') or '').strip()
+                seq = int(isis_info.get('sequence', 0) or 0)
+                lifetime = int(isis_info.get('remaining_lifetime', 0) or 0)
+                return f'{level} LSP, LSP-ID: {lsp_id}, Sequence: 0x{seq:08x}, Lifetime: {lifetime:5d}s'
+            if protocol == 'ISIS PSNP':
+                isis_info = metadata.get('isis') if isinstance(metadata.get('isis'), dict) else self._isis_payload_info(packet)
+                if not isinstance(isis_info, dict):
+                    return 'ISIS PSNP'
+                level = str(isis_info.get('level', '') or '').strip()
+                source = str(isis_info.get('source_id', '') or '').strip()
+                circuit = int(isis_info.get('source_id_circuit', 0) or 0)
+                return f'{level} PSNP, Source-ID: {source}.{circuit:02x}'
             if protocol == 'TELNET':
                 tcp = self._effective_tcp_layer(packet)
                 sport = int(getattr(tcp, 'sport', 0) or 0) if tcp is not None else 0
@@ -12087,7 +12223,9 @@ class PacketParser:
                     if str(ftp_info.get('kind', '')) == 'response':
                         code = int(ftp_info.get('code', 0) or 0)
                         arg = str(ftp_info.get('arg', '') or '')
-                        return f'Response: {code} {arg}'.strip()
+                        if code > 0:
+                            return f'Response: {code} {arg}'.strip()
+                        return f'Response: {arg}'.strip()
                     command = str(ftp_info.get('command', '') or '')
                     arg = str(ftp_info.get('arg', '') or '')
                     return f'Request: {command} {arg}'.strip()
@@ -12097,8 +12235,12 @@ class PacketParser:
                 ftp_data = metadata.get('ftp_data') if isinstance(metadata.get('ftp_data'), dict) else {}
                 setup_method = str(ftp_data.get('setup_method', '') or '')
                 command = str(ftp_data.get('command', '') or '')
+                command_arg = str(ftp_data.get('command_arg', '') or '').strip()
                 method_part = f' ({setup_method})' if setup_method else ''
-                command_part = f' ({command})' if command else ''
+                if command and command_arg:
+                    command_part = f' ({command} {command_arg})'
+                else:
+                    command_part = f' ({command})' if command else ''
                 return f'FTP Data: {payload_len} bytes{method_part}{command_part}'.strip()
             if protocol == 'BFD Control':
                 effective_ip = self._effective_ip_layer(packet)
