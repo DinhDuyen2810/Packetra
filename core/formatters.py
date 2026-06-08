@@ -1371,6 +1371,31 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             raw_payload_consumed = True
         except Exception:
             pass
+    elif (
+        is_last_fragment
+        and getattr(record, 'protocol', '') in {'SIP', 'SIP/SDP', 'RTP'}
+        and str(metadata.get('udp_reassembled_payload_hex', '') or '')
+    ):
+        try:
+            udp_hex = str(metadata.get('udp_reassembled_payload_hex', '') or '')
+            udp_layer = UDP(bytes.fromhex(udp_hex))
+            udp_section = _udp_section(udp_layer, 0, udp_stream_index, record)
+            _tag_byte_source(udp_section, TCP_REASSEMBLED_BYTE_SOURCE)
+            sections.append(udp_section)
+
+            udp_payload = bytes(getattr(udp_layer, 'payload', b'')) if udp_layer is not None else b''
+            if getattr(record, 'protocol', '') in {'SIP', 'SIP/SDP'}:
+                sip_section = _sip_section(udp_payload, 8, record)
+                _tag_byte_source(sip_section, TCP_REASSEMBLED_BYTE_SOURCE)
+                sections.append(sip_section)
+            else:
+                rtp_section = _rtp_section(udp_payload, 8, record)
+                _tag_byte_source(rtp_section, TCP_REASSEMBLED_BYTE_SOURCE)
+                sections.append(rtp_section)
+            payload_handled = True
+            raw_payload_consumed = True
+        except Exception:
+            pass
 
     if packet.haslayer(DHCP):
 
@@ -7098,7 +7123,7 @@ def _ip_section(layer, offset: int, stream_index: int, record=None) -> Dict[str,
         {
             'title':
                 f'{frag_bits_pretty} = '
-                f'Fragment Offset: {frag}',
+                f'Fragment Offset: {frag * 8}',
 
             'offset': offset + 6,
             'length': 2,
@@ -11210,27 +11235,93 @@ def _sdp_section(body: bytes, offset: int) -> Dict[str, Any]:
         if not line_text:
             cursor += len(raw_line)
             continue
-        if line_text.startswith('v='):
-            title = f'Session Description Protocol Version (v): {line_text[2:]}'
-        elif line_text.startswith('o='):
-            title = f'Owner/Creator, Session Id (o): {line_text[2:]}'
-        elif line_text.startswith('s='):
-            title = f'Session Name (s): {line_text[2:]}'
-        elif line_text.startswith('c='):
-            title = f'Connection Information (c): {line_text[2:]}'
-        elif line_text.startswith('t='):
-            title = f'Time Description, active time (t): {line_text[2:]}'
-        elif line_text.startswith('m='):
-            title = f'Media Description, name and address (m): {line_text[2:]}'
-        elif line_text.startswith('a='):
-            title = f'Media Attribute (a): {line_text[2:]}'
-        else:
-            title = line_text
-        children.append({
-            'title': title,
+        node: Dict[str, Any] = {
+            'title': line_text,
             'offset': offset + cursor,
             'length': max(0, len(raw_line) - 2),
-        })
+        }
+        if line_text.startswith('v='):
+            node['title'] = f'Session Description Protocol Version (v): {line_text[2:]}'
+        elif line_text.startswith('o='):
+            node['title'] = f'Owner/Creator, Session Id (o): {line_text[2:]}'
+            parts = line_text[2:].split()
+            if len(parts) >= 6:
+                node['children'] = [
+                    {'title': f'Owner Username: {parts[0]}'},
+                    {'title': f'Session ID: {parts[1]}'},
+                    {'title': f'Session Version: {parts[2]}'},
+                    {'title': f'Owner Network Type: {parts[3]}'},
+                    {'title': f'Owner Address Type: {parts[4]}'},
+                    {'title': f'Owner Address: {parts[5]}'},
+                ]
+        elif line_text.startswith('s='):
+            node['title'] = f'Session Name (s): {line_text[2:]}'
+        elif line_text.startswith('c='):
+            node['title'] = f'Connection Information (c): {line_text[2:]}'
+            parts = line_text[2:].split()
+            if len(parts) >= 3:
+                node['children'] = [
+                    {'title': f'Connection Network Type: {parts[0]}'},
+                    {'title': f'Connection Address Type: {parts[1]}'},
+                    {'title': f'Connection Address: {parts[2]}'},
+                ]
+        elif line_text.startswith('t='):
+            node['title'] = f'Time Description, active time (t): {line_text[2:]}'
+            parts = line_text[2:].split()
+            if len(parts) >= 2:
+                node['children'] = [
+                    {'title': f'Session Start Time: {parts[0]}'},
+                    {'title': f'Session Stop Time: {parts[1]}'},
+                ]
+        elif line_text.startswith('m='):
+            node['title'] = f'Media Description, name and address (m): {line_text[2:]}'
+            parts = line_text[2:].split()
+            if len(parts) >= 3:
+                media_children: List[Dict[str, Any]] = [
+                    {'title': f'Media Type: {parts[0]}'},
+                    {'title': f'Media Port: {parts[1]}'},
+                    {'title': f'Media Protocol: {parts[2]}'},
+                ]
+                for media_format in parts[3:]:
+                    static_name = _sdp_static_payload_name(media_format)
+                    if static_name:
+                        media_children.append({'title': f'Media Format: {static_name}'})
+                    else:
+                        media_children.append({'title': f'Media Format: DynamicRTP-Type-{media_format}'})
+                node['children'] = media_children
+        elif line_text.startswith('a='):
+            node['title'] = f'Media Attribute (a): {line_text[2:]}'
+            attr_body = line_text[2:]
+            attr_name, sep, attr_value = attr_body.partition(':')
+            attr_children: List[Dict[str, Any]] = []
+            if sep:
+                attr_children.append({'title': f'Media Attribute Fieldname: {attr_name}'})
+                if attr_name == 'rtpmap':
+                    parts = attr_value.split(None, 1)
+                    if parts:
+                        attr_children.append({'title': f'Media Format: {parts[0]}'})
+                    if len(parts) > 1:
+                        mime_parts = parts[1].split('/')
+                        if mime_parts:
+                            attr_children.append({'title': f'MIME Type: {mime_parts[0]}'})
+                        if len(mime_parts) > 1:
+                            sample_rate = mime_parts[1]
+                            if parts[0] == '9' and mime_parts[0].upper() == 'G722':
+                                attr_children.append({'title': f'Sample Rate: {sample_rate} (RTP clock rate is 8kHz, actual sampling rate is 16kHz)'})
+                            else:
+                                attr_children.append({'title': f'Sample Rate: {sample_rate}'})
+                elif attr_name == 'fmtp':
+                    parts = attr_value.split(None, 1)
+                    if parts:
+                        suffix = ' [telephone-event]' if parts[0] == '100' else ''
+                        attr_children.append({'title': f'Media Format: {parts[0]}{suffix}'})
+                    if len(parts) > 1:
+                        attr_children.append({'title': f'Media format specific parameters: {parts[1]}'})
+                elif attr_name in {'rtcp', 'ptime'}:
+                    attr_children.append({'title': f'Media Attribute Value: {attr_value}'})
+            if attr_children:
+                node['children'] = attr_children
+        children.append(node)
         cursor += len(raw_line)
     return {
         'title': 'Session Description Protocol',
@@ -11265,6 +11356,40 @@ def _sip_split_uri(uri_text: str) -> Dict[str, Any]:
     else:
         result['host'] = addr_part
     return result
+
+
+def _sip_e164_children(user_text: str) -> List[Dict[str, Any]]:
+    text = str(user_text or '').strip()
+    if not text.startswith('+') or not text[1:].isdigit():
+        return []
+    digits = text[1:]
+    country_map = {
+        '49': 'Germany (Federal Republic of)',
+        '1': 'United States/Canada',
+        '44': 'United Kingdom',
+        '33': 'France',
+        '84': 'Viet Nam',
+    }
+    for size in (3, 2, 1):
+        prefix = digits[:size]
+        if prefix in country_map:
+            return [
+                {
+                    'title': f'E.164 number (MSISDN): {digits}',
+                    'children': [
+                        {'title': f'Country Code: {country_map[prefix]} ({prefix})'},
+                    ],
+                }
+            ]
+    return []
+
+
+def _sdp_static_payload_name(payload_id: str) -> str:
+    return {
+        '0': 'ITU-T G.711 PCMU',
+        '8': 'ITU-T G.711 PCMA',
+        '9': 'ITU-T G.722',
+    }.get(str(payload_id or ''), '')
 
 
 def _sip_header_children(name: str, value: str, line_offset: int) -> List[Dict[str, Any]]:
@@ -11337,7 +11462,11 @@ def _sip_header_children(name: str, value: str, line_offset: int) -> List[Dict[s
                 'contact': 'Contact URI User Part',
                 'p-asserted-identity': 'SIP PAI User Part',
             }.get(lower_name, f'{label_prefix} User Part')
-            uri_children.append({'title': f'{user_label}: {uri_parts["user"]}'})
+            user_node: Dict[str, Any] = {'title': f'{user_label}: {uri_parts["user"]}'}
+            e164_children = _sip_e164_children(uri_parts["user"])
+            if e164_children:
+                user_node['children'] = e164_children
+            uri_children.append(user_node)
         if uri_parts.get('host'):
             host_label = {
                 'to': 'SIP to address Host Part',
@@ -11409,12 +11538,25 @@ def _sip_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             line_children.append({'title': f'Method: {parts[0]}', 'offset': offset + int(first['offset']), 'length': len(parts[0])})
         if len(parts) >= 2:
             uri_offset = offset + int(first['offset']) + len(parts[0]) + 1
-            line_children.append({'title': f'Request-URI: {parts[1]}', 'offset': uri_offset, 'length': len(parts[1])})
+            uri_node: Dict[str, Any] = {'title': f'Request-URI: {parts[1]}', 'offset': uri_offset, 'length': len(parts[1])}
             uri_parts = _sip_split_uri(parts[1])
+            uri_children: List[Dict[str, Any]] = []
             if uri_parts.get('user'):
-                line_children.append({'title': f'Request-URI User Part: {uri_parts["user"]}'})
+                user_node: Dict[str, Any] = {'title': f'Request-URI User Part: {uri_parts["user"]}'}
+                e164_children = _sip_e164_children(uri_parts["user"])
+                if e164_children:
+                    user_node['children'] = e164_children
+                uri_children.append(user_node)
             if uri_parts.get('host'):
-                line_children.append({'title': f'Request-URI Host Part: {uri_parts["host"]}'})
+                uri_children.append({'title': f'Request-URI Host Part: {uri_parts["host"]}'})
+            for param in list(uri_parts.get('params', []) or []):
+                uri_children.append({'title': f'Request-URI parameter: {param}'})
+            if uri_children:
+                uri_node['children'] = uri_children
+            line_children.append(uri_node)
+        if len(parts) >= 3:
+            version_offset = offset + int(first['offset']) + len(parts[0]) + len(parts[1]) + 2
+            line_children.append({'title': f'Version: {parts[2]}', 'offset': version_offset, 'length': len(parts[2])})
         line_children.append({'title': '[Resent Packet: False]'})
         children.append({
             'title': f'Request-Line: {first_text}',
@@ -11434,7 +11576,7 @@ def _sip_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             line_children.append({'title': f'[Request Frame: {int(request_frame)}]'})
         response_time = metadata.get('sip_response_time_ms', None)
         if response_time is not None:
-            line_children.append({'title': f'[Response Time (ms): {int(float(response_time))}]'})
+            line_children.append({'title': f'[Response Time (ms): {int(math.ceil(float(response_time)))}]'})
         children.append({
             'title': f'Status-Line: {first_text}',
             'offset': offset + int(first['offset']),
@@ -22855,3 +22997,4 @@ def _data_section(layer, offset: int, length: int) -> Dict[str, Any]:
         'children': children,
     }
 
+import math

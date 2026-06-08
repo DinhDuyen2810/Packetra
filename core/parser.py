@@ -239,6 +239,7 @@ class PacketParser:
         self._update_dns_metadata(packet, record)
         self._update_radius_metadata(packet, record)
         self._update_dcerpc_record_metadata(record)
+        self._register_ip_fragment_record(packet, record)
 
         return record
 
@@ -326,7 +327,10 @@ class PacketParser:
             iface=iface,
         )
         self._track_transport_record(record)
+        if protocol in {'SIP', 'SIP/SDP'}:
+            self._update_sip_metadata(record)
         self._update_dcerpc_record_metadata(record)
+        self._register_ip_fragment_record(packet, record)
         return record
 
     def _quick_guess_protocol(self, packet, tcp_layer=None, udp_layer=None, metadata: dict | None = None) -> str:
@@ -593,7 +597,10 @@ class PacketParser:
                 if kind == 'query' and dport == 43:
                     return 'WHOIS'
                 if kind == 'answer' and sport == 43:
-                    return 'WHOIS'
+                    tcp_flags = int(getattr(tcp_layer, 'flags', 0) or 0)
+                    has_fin = bool(tcp_flags & 0x01)
+                    if has_fin or (not payload and bool(str(metadata.get('tcp_reassembled_data_hex', '') or ''))):
+                        return 'WHOIS'
             whois_payload = payload
             if not whois_payload:
                 reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
@@ -611,7 +618,7 @@ class PacketParser:
                     metadata['whois'] = whois_info
                     return 'WHOIS'
                 if kind == 'answer' and sport == 43:
-                    if (not has_fin) or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
+                    if has_fin or (not payload and bool(str(metadata.get('tcp_reassembled_data_hex', '') or ''))):
                         metadata['whois'] = whois_info
                         return 'WHOIS'
             http_info = self._http_message_length(payload)
@@ -743,7 +750,14 @@ class PacketParser:
                     return 'SIP/SDP'
                 return 'SIP'
             rtp_info = self._rtp_payload_info(payload, sport, dport)
-            if rtp_info is not None:
+            if self._should_classify_as_rtp(
+                payload,
+                rtp_info,
+                str(getattr(effective_ip, 'src', '') or ''),
+                sport,
+                str(getattr(effective_ip, 'dst', '') or ''),
+                dport,
+            ):
                 metadata['rtp'] = rtp_info
                 return 'RTP'
             snmp_info = self._snmp_payload_info(packet)
@@ -3299,7 +3313,7 @@ class PacketParser:
             3: 'GSM',
             4: 'ITU-T G.723',
             8: 'ITU-T G.711 PCMA',
-            9: 'G722',
+            9: 'ITU-T G.722',
             18: 'ITU-T G.729',
         }.get(int(payload_type), f'Payload type {int(payload_type)}')
 
@@ -3341,6 +3355,78 @@ class PacketParser:
             'header_length': header_length,
             'payload': payload[header_length:],
         }
+
+    def _rtp_matches_sdp_media(self, src: str, sport: int, dst: str, dport: int) -> dict | None:
+        endpoint_a = (str(src or ''), int(sport or 0))
+        endpoint_b = (str(dst or ''), int(dport or 0))
+        for state in self.sdp_media_by_call.values():
+            if not isinstance(state, dict):
+                continue
+            endpoints = state.get('endpoints')
+            if not isinstance(endpoints, set) or not endpoints:
+                continue
+            if endpoint_a in endpoints and endpoint_b in endpoints:
+                return state
+        return None
+
+    def _should_classify_as_rtp(
+        self,
+        payload: bytes,
+        rtp_info: dict | None,
+        src: str,
+        sport: int,
+        dst: str,
+        dport: int,
+    ) -> bool:
+        if not isinstance(rtp_info, dict):
+            return False
+        state = self._rtp_matches_sdp_media(src, sport, dst, dport)
+        if not isinstance(state, dict):
+            return False
+        endpoint_payload_types = state.get('endpoint_payload_types')
+        if not isinstance(endpoint_payload_types, dict):
+            return False
+        endpoint_a = (str(src or ''), int(sport or 0))
+        endpoint_b = (str(dst or ''), int(dport or 0))
+        allowed_types = set()
+        for endpoint in (endpoint_a, endpoint_b):
+            values = endpoint_payload_types.get(endpoint)
+            if isinstance(values, set):
+                allowed_types.update(int(value) for value in values if isinstance(value, int))
+        if not allowed_types:
+            return False
+        try:
+            payload_type = int(rtp_info.get('payload_type', -1))
+        except Exception:
+            payload_type = -1
+        return payload_type in allowed_types
+
+    def _fragment_state_key_from_metadata(self, packet, metadata: dict) -> tuple | None:
+        if not bool(metadata.get('ip_is_fragmented', False)):
+            return None
+        version = int(metadata.get('ip_fragment_version', 0) or 0)
+        proto = int(metadata.get('ip_fragment_proto', 0) or 0)
+        ident = int(metadata.get('ip_fragment_id', 0) or 0)
+        if version == 4 and packet.haslayer(IP):
+            ip_layer = packet[IP]
+            return ('ipv4', str(getattr(ip_layer, 'src', '') or ''), str(getattr(ip_layer, 'dst', '') or ''), ident, proto)
+        if version == 6 and packet.haslayer(IPv6):
+            ip6_layer = packet[IPv6]
+            return ('ipv6', str(getattr(ip6_layer, 'src', '') or ''), str(getattr(ip6_layer, 'dst', '') or ''), ident, proto)
+        return None
+
+    def _register_ip_fragment_record(self, packet, record: PacketRecord) -> None:
+        metadata = getattr(record, 'metadata', {}) or {}
+        state_key = self._fragment_state_key_from_metadata(packet, metadata)
+        if state_key is None:
+            return
+        state_map = self.ipv4_fragment_state if state_key[0] == 'ipv4' else self.ipv6_fragment_state
+        state = state_map.get(state_key)
+        if not isinstance(state, dict):
+            return
+        records = state.setdefault('records', [])
+        if isinstance(records, list) and record not in records:
+            records.append(record)
 
     def _is_cdp_packet(self, packet) -> bool:
         oui, code = self._snap_oui_code(packet)
@@ -4251,6 +4337,9 @@ class PacketParser:
                 if bool(metadata.get('dns_is_mdns_transport', False)):
                     return 'MDNS'
                 return 'DNS'
+            reassembled_app_protocol = str(metadata.get('ip_fragment_reassembled_protocol', '') or '')
+            if reassembled_app_protocol:
+                return reassembled_app_protocol
             if packet.haslayer(IP):
                 return 'IPv4'
             if packet.haslayer(IPv6):
@@ -4259,6 +4348,29 @@ class PacketParser:
         return None
 
     def _update_ip_fragment_metadata(self, packet, metadata: dict, frame_number: int) -> None:
+        def _apply_udp_reassembled_metadata(
+            target_metadata: dict,
+            udp_payload: bytes,
+            src_addr: str,
+            src_port: int,
+            dst_addr: str,
+            dst_port: int,
+        ) -> str | None:
+            app_protocol = None
+            sip_info = self._sip_payload_info(udp_payload, src_port, dst_port)
+            if sip_info is not None:
+                target_metadata['sip'] = sip_info
+                if bool(sip_info.get('has_sdp', False)):
+                    target_metadata['sdp'] = self._parse_sdp_body(bytes(sip_info.get('sdp_body', b'') or b''))
+                    app_protocol = 'SIP/SDP'
+                else:
+                    app_protocol = 'SIP'
+            rtp_info = self._rtp_payload_info(udp_payload, src_port, dst_port)
+            if self._should_classify_as_rtp(udp_payload, rtp_info, src_addr, src_port, dst_addr, dst_port):
+                target_metadata['rtp'] = rtp_info
+                app_protocol = 'RTP'
+            return app_protocol
+
         # IPv4 fragmentation
         if packet.haslayer(IP):
             ip_layer = packet[IP]
@@ -4274,7 +4386,7 @@ class PacketParser:
                 offset_bytes = int(frag_units) * 8
                 fragment_payload = bytes(getattr(ip_layer, 'payload', b''))
                 key = ('ipv4', src, dst, ident, proto)
-                state = self.ipv4_fragment_state.setdefault(key, {'parts': {}, 'frames': {}, 'has_last': False})
+                state = self.ipv4_fragment_state.setdefault(key, {'parts': {}, 'frames': {}, 'has_last': False, 'records': []})
                 state['parts'][offset_bytes] = fragment_payload
                 state['frames'][offset_bytes] = int(frame_number)
                 if not more_fragments:
@@ -4328,6 +4440,9 @@ class PacketParser:
                                 if snmp_info is not None:
                                     metadata['snmp'] = snmp_info
                                     metadata['snmp_reassembled_data_hex'] = udp_payload.hex()
+                            app_protocol = _apply_udp_reassembled_metadata(metadata, udp_payload, src, dns_src_port, dst, dns_dst_port)
+                            if app_protocol:
+                                metadata['ip_fragment_reassembled_protocol'] = app_protocol
                         if proto == 17 and len(reassembled) >= 4:
                             try:
                                 src_port = int.from_bytes(reassembled[0:2], 'big')
@@ -4336,20 +4451,66 @@ class PacketParser:
                                 stream_state = self.transport_stream_state.get(stream_key)
                             except Exception:
                                 stream_state = None
-                            if stream_state is not None:
-                                for frag_off in sorted(state['frames'].keys()):
-                                    if frag_off == offset_bytes:
-                                        continue
-                                    frag_frame = int(state['frames'].get(frag_off, 0) or 0)
-                                    stream_record = self._find_stream_record(stream_state, frag_frame)
-                                    if stream_record is None:
-                                        continue
-                                    stream_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
-                                    stream_record.info = self._build_info(
-                                        stream_record.raw,
-                                        str(stream_record.protocol or 'IPv4'),
-                                        stream_record.metadata,
-                                    )
+                        fragment_records = list(state.get('records', []) or [])
+                        for fragment_record in fragment_records:
+                            if fragment_record is None:
+                                continue
+                            fragment_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
+                            if int(getattr(fragment_record, 'number', 0) or 0) != int(frame_number):
+                                fragment_record.info = self._build_info(
+                                    fragment_record.raw,
+                                    str(fragment_record.protocol or 'IPv4'),
+                                    fragment_record.metadata,
+                                )
+
+                        if stream_state is not None:
+                            for frag_off in sorted(state['frames'].keys()):
+                                frag_frame = int(state['frames'].get(frag_off, 0) or 0)
+                                stream_record = self._find_stream_record(stream_state, frag_frame)
+                                if stream_record is None:
+                                    continue
+                                stream_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
+                                if metadata.get('ip_fragment_reassembled_protocol') and frag_frame == int(frame_number):
+                                    stream_record.metadata['ip_fragment_reassembled_protocol'] = metadata.get('ip_fragment_reassembled_protocol')
+                                    for key in ('sip', 'sdp', 'rtp', 'udp_reassembled_payload_hex'):
+                                        if key in metadata:
+                                            stream_record.metadata[key] = metadata[key]
+                                    stream_record.protocol = str(metadata.get('ip_fragment_reassembled_protocol', '') or stream_record.protocol or 'IPv4')
+                                stream_record.info = self._build_info(
+                                    stream_record.raw,
+                                    str(stream_record.protocol or 'IPv4'),
+                                    stream_record.metadata,
+                                )
+                            if metadata.get('ip_fragment_reassembled_protocol') in {'SIP', 'SIP/SDP'}:
+                                sip_meta = metadata.get('sip') if isinstance(metadata.get('sip'), dict) else None
+                                if isinstance(sip_meta, dict) and str(sip_meta.get('kind', '') or '') == 'request':
+                                    call_id = str(sip_meta.get('call_id', '') or '')
+                                    cseq_method = str(sip_meta.get('cseq_method', '') or '')
+                                    if call_id and cseq_method:
+                                        for existing_record in list(state.get('records', []) or []):
+                                            if int(getattr(existing_record, 'number', 0) or 0) == frame_number:
+                                                continue
+                                            candidate_meta = getattr(existing_record, 'metadata', {}) or {}
+                                            candidate_sip = candidate_meta.get('sip') if isinstance(candidate_meta.get('sip'), dict) else None
+                                            if not isinstance(candidate_sip, dict):
+                                                continue
+                                            if str(candidate_sip.get('kind', '') or '') != 'response':
+                                                continue
+                                            if str(candidate_sip.get('call_id', '') or '') != call_id:
+                                                continue
+                                            if str(candidate_sip.get('cseq_method', '') or '') != cseq_method:
+                                                continue
+                                            if 'sip_request_frame' not in candidate_meta:
+                                                candidate_meta['sip_request_frame'] = int(frame_number)
+                                            metadata['sip_response_frame'] = int(getattr(existing_record, 'number', 0) or 0)
+                                            response_delta = (Decimal(str(getattr(existing_record, 'epoch_time', 0.0) or 0.0)) - Decimal(str(epoch_time))) * Decimal('1000')
+                                            candidate_meta['sip_response_time_ms'] = max(0.0, float(response_delta))
+                                            existing_record.info = self._build_info(
+                                                existing_record.raw,
+                                                str(existing_record.protocol or 'SIP/SDP'),
+                                                candidate_meta,
+                                            )
+                                            break
 
         # IPv6 fragmentation header
         if packet.haslayer(IPv6) and packet.haslayer(IPv6ExtHdrFragment):
@@ -4363,7 +4524,7 @@ class PacketParser:
             dst = str(getattr(ip6_layer, 'dst', '') or '')
             fragment_payload = bytes(getattr(frag_hdr, 'payload', b''))
             key = ('ipv6', src, dst, ident, next_header)
-            state = self.ipv6_fragment_state.setdefault(key, {'parts': {}, 'frames': {}, 'has_last': False})
+            state = self.ipv6_fragment_state.setdefault(key, {'parts': {}, 'frames': {}, 'has_last': False, 'records': []})
             state['parts'][offset_bytes] = fragment_payload
             state['frames'][offset_bytes] = int(frame_number)
             if not more_fragments:
@@ -4417,6 +4578,9 @@ class PacketParser:
                             if snmp_info is not None:
                                 metadata['snmp'] = snmp_info
                                 metadata['snmp_reassembled_data_hex'] = udp_payload.hex()
+                        app_protocol = _apply_udp_reassembled_metadata(metadata, udp_payload, src, dns_src_port, dst, dns_dst_port)
+                        if app_protocol:
+                            metadata['ip_fragment_reassembled_protocol'] = app_protocol
                     if next_header == 17 and len(reassembled) >= 4:
                         try:
                             src_port = int.from_bytes(reassembled[0:2], 'big')
@@ -4425,20 +4589,66 @@ class PacketParser:
                             stream_state = self.transport_stream_state.get(stream_key)
                         except Exception:
                             stream_state = None
+                        fragment_records = list(state.get('records', []) or [])
+                        for fragment_record in fragment_records:
+                            if fragment_record is None:
+                                continue
+                            fragment_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
+                            if int(getattr(fragment_record, 'number', 0) or 0) != int(frame_number):
+                                fragment_record.info = self._build_info(
+                                    fragment_record.raw,
+                                    str(fragment_record.protocol or 'IPv6'),
+                                    fragment_record.metadata,
+                                )
+
                         if stream_state is not None:
                             for frag_off in sorted(state['frames'].keys()):
-                                if frag_off == offset_bytes:
-                                    continue
                                 frag_frame = int(state['frames'].get(frag_off, 0) or 0)
                                 stream_record = self._find_stream_record(stream_state, frag_frame)
                                 if stream_record is None:
                                     continue
                                 stream_record.metadata['ip_reassembled_in_frame'] = int(frame_number)
+                                if metadata.get('ip_fragment_reassembled_protocol') and frag_frame == int(frame_number):
+                                    stream_record.metadata['ip_fragment_reassembled_protocol'] = metadata.get('ip_fragment_reassembled_protocol')
+                                    for key in ('sip', 'sdp', 'rtp', 'udp_reassembled_payload_hex'):
+                                        if key in metadata:
+                                            stream_record.metadata[key] = metadata[key]
+                                    stream_record.protocol = str(metadata.get('ip_fragment_reassembled_protocol', '') or stream_record.protocol or 'IPv6')
                                 stream_record.info = self._build_info(
                                     stream_record.raw,
                                     str(stream_record.protocol or 'IPv6'),
                                     stream_record.metadata,
                                 )
+                            if metadata.get('ip_fragment_reassembled_protocol') in {'SIP', 'SIP/SDP'}:
+                                sip_meta = metadata.get('sip') if isinstance(metadata.get('sip'), dict) else None
+                                if isinstance(sip_meta, dict) and str(sip_meta.get('kind', '') or '') == 'request':
+                                    call_id = str(sip_meta.get('call_id', '') or '')
+                                    cseq_method = str(sip_meta.get('cseq_method', '') or '')
+                                    if call_id and cseq_method:
+                                        for existing_record in list(state.get('records', []) or []):
+                                            if int(getattr(existing_record, 'number', 0) or 0) == frame_number:
+                                                continue
+                                            candidate_meta = getattr(existing_record, 'metadata', {}) or {}
+                                            candidate_sip = candidate_meta.get('sip') if isinstance(candidate_meta.get('sip'), dict) else None
+                                            if not isinstance(candidate_sip, dict):
+                                                continue
+                                            if str(candidate_sip.get('kind', '') or '') != 'response':
+                                                continue
+                                            if str(candidate_sip.get('call_id', '') or '') != call_id:
+                                                continue
+                                            if str(candidate_sip.get('cseq_method', '') or '') != cseq_method:
+                                                continue
+                                            if 'sip_request_frame' not in candidate_meta:
+                                                candidate_meta['sip_request_frame'] = int(frame_number)
+                                            metadata['sip_response_frame'] = int(getattr(existing_record, 'number', 0) or 0)
+                                            response_delta = (Decimal(str(getattr(existing_record, 'epoch_time', 0.0) or 0.0)) - Decimal(str(epoch_time))) * Decimal('1000')
+                                            candidate_meta['sip_response_time_ms'] = max(0.0, float(response_delta))
+                                            existing_record.info = self._build_info(
+                                                existing_record.raw,
+                                                str(existing_record.protocol or 'SIP/SDP'),
+                                                candidate_meta,
+                                            )
+                                            break
 
     def _ip_fragment_info_text(self, packet, metadata: dict) -> str:
         version = int(metadata.get('ip_fragment_version', 0) or 0)
@@ -6453,7 +6663,14 @@ class PacketParser:
                     return 'SIP/SDP'
                 return 'SIP'
             rtp_info = self._rtp_payload_info(udp_payload, sport, dport)
-            if rtp_info is not None:
+            if self._should_classify_as_rtp(
+                udp_payload,
+                rtp_info,
+                str(getattr(effective_ip, 'src', '') or ''),
+                sport,
+                str(getattr(effective_ip, 'dst', '') or ''),
+                dport,
+            ):
                 metadata['rtp'] = rtp_info
                 return 'RTP'
             snmp_info = self._snmp_payload_info(packet)
@@ -6660,7 +6877,10 @@ class PacketParser:
                     if kind == 'query' and dport == 43:
                         return 'WHOIS'
                     if kind == 'answer' and sport == 43:
-                        return 'WHOIS'
+                        tcp_flags = int(getattr(effective_tcp, 'flags', 0) or 0)
+                        has_fin = bool(tcp_flags & 0x01)
+                        if has_fin or (not whois_payload and bool(str(metadata.get('tcp_reassembled_data_hex', '') or ''))):
+                            return 'WHOIS'
                 whois_payload = self._whois_payload_for_record(packet, metadata)
                 whois_info = self._whois_payload_info(whois_payload, sport, dport)
                 if whois_info is not None:
@@ -6671,7 +6891,7 @@ class PacketParser:
                         metadata['whois'] = whois_info
                         return 'WHOIS'
                     if kind == 'answer' and sport == 43:
-                        if (not has_fin) or bool(str(metadata.get('tcp_reassembled_data_hex', '') or '')):
+                        if has_fin or (not whois_payload and bool(str(metadata.get('tcp_reassembled_data_hex', '') or ''))):
                             metadata['whois'] = whois_info
                             return 'WHOIS'
             if (
@@ -9808,6 +10028,13 @@ class PacketParser:
             return
 
         server_segments = list(context.get('answer_segments_by_seq', []) or [])
+        had_prior_segments = bool(server_segments)
+        estimated_end = int(context.get('answer_expected_length', 0) or 0)
+        if not estimated_end and server_segments:
+            estimated_end = max(
+                (int(seg.get('payload_start', 0) or 0) + int(seg.get('payload_length', 0) or 0) for seg in server_segments),
+                default=0,
+            )
         if payload:
             raw_seq = int(getattr(tcp_layer, 'seq', 0) or 0)
             base_seq = context.get('answer_base_seq', None)
@@ -9831,9 +10058,23 @@ class PacketParser:
                 'tcp_start_offset_in_payload': 0,
             })
             context['answer_segments_by_seq'] = server_segments
+            estimated_end = max(estimated_end, int(payload_start + len(payload)))
 
-        if has_fin and payload:
-            context['answer_expected_length'] = int(max(0, payload_start + len(payload)))
+        if not has_fin and not had_prior_segments:
+            return
+
+        if has_fin and not payload:
+            fin_start = estimated_end
+            server_segments.append({
+                'frame_number': frame_number,
+                'payload_start': int(fin_start),
+                'payload': b'',
+                'payload_length': 0,
+                'tcp_start_offset_in_payload': 0,
+            })
+            context['answer_segments_by_seq'] = server_segments
+        if has_fin:
+            context['answer_expected_length'] = max(int(context.get('answer_expected_length', 0) or 0), int(estimated_end))
 
         expected_length = int(context.get('answer_expected_length', 0) or 0)
         if expected_length <= 0:
@@ -9865,15 +10106,20 @@ class PacketParser:
         for segment in sorted_segments:
             start = int(segment.get('payload_start', 0) or 0)
             data = bytes(segment.get('payload', b'') or b'')
-            if start >= expected_length or not data:
-                continue
-            clip_end = min(expected_length, start + len(data))
-            clip_len = max(0, clip_end - start)
-            if clip_len <= 0:
-                continue
-            assembled[start:clip_end] = data[:clip_len]
-            for idx in range(start, clip_end):
-                coverage[idx] = True
+            if data:
+                if start >= expected_length:
+                    continue
+                clip_end = min(expected_length, start + len(data))
+                clip_len = max(0, clip_end - start)
+                if clip_len <= 0:
+                    continue
+                assembled[start:clip_end] = data[:clip_len]
+                for idx in range(start, clip_end):
+                    coverage[idx] = True
+            else:
+                if start > expected_length:
+                    continue
+                clip_len = 0
             normalized_segments.append({
                 'frame_number': int(segment.get('frame_number', 0) or 0),
                 'payload_start': start,
@@ -9881,7 +10127,7 @@ class PacketParser:
                 'tcp_start_offset_in_payload': int(segment.get('tcp_start_offset_in_payload', 0) or 0),
             })
 
-        if not all(coverage):
+        if not all(coverage) and any(segment.get('payload_length', 0) for segment in normalized_segments):
             return
 
         metadata['tcp_reassembled_segments'] = normalized_segments
@@ -10325,7 +10571,7 @@ class PacketParser:
     def _register_sdp_media(self, call_id: str, setup_frame: int, sdp_info: dict) -> None:
         if not call_id or not isinstance(sdp_info, dict):
             return
-        state = self.sdp_media_by_call.setdefault(call_id, {'frames': [], 'endpoints': set()})
+        state = self.sdp_media_by_call.setdefault(call_id, {'frames': [], 'endpoints': set(), 'endpoint_payload_types': {}})
         frames = state.get('frames') if isinstance(state.get('frames'), list) else []
         if setup_frame not in frames:
             frames.append(setup_frame)
@@ -10334,6 +10580,9 @@ class PacketParser:
         endpoints = state.get('endpoints')
         if not isinstance(endpoints, set):
             endpoints = set()
+        endpoint_payload_types = state.get('endpoint_payload_types')
+        if not isinstance(endpoint_payload_types, dict):
+            endpoint_payload_types = {}
         media_list = list(sdp_info.get('media', []) or [])
         session_connection = str(sdp_info.get('session_connection', '') or '')
         for media in media_list:
@@ -10345,8 +10594,19 @@ class PacketParser:
             except Exception:
                 port = 0
             if ip_addr and port > 0:
-                endpoints.add((ip_addr, port))
+                endpoint = (ip_addr, port)
+                endpoints.add(endpoint)
+                allowed_types = endpoint_payload_types.get(endpoint)
+                if not isinstance(allowed_types, set):
+                    allowed_types = set()
+                for media_format in list(media.get('formats', []) or []):
+                    try:
+                        allowed_types.add(int(str(media_format).strip()))
+                    except Exception:
+                        continue
+                endpoint_payload_types[endpoint] = allowed_types
         state['endpoints'] = endpoints
+        state['endpoint_payload_types'] = endpoint_payload_types
 
     def _update_sip_metadata(self, record: PacketRecord) -> None:
         protocol = str(getattr(record, 'protocol', '') or '').upper()
@@ -10362,13 +10622,35 @@ class PacketParser:
         if effective_ip is None and packet.haslayer(IPv6):
             effective_ip = packet[IPv6]
         udp_layer = self._effective_udp_layer(packet, effective_ip)
-        if effective_ip is None or udp_layer is None:
+        reassembled_udp_bytes = b''
+        reassembled_sport = 0
+        reassembled_dport = 0
+        if udp_layer is None:
+            reassembled_hex = str(metadata.get('udp_reassembled_payload_hex', '') or '')
+            if reassembled_hex:
+                try:
+                    reassembled_udp_bytes = bytes.fromhex(reassembled_hex)
+                except Exception:
+                    reassembled_udp_bytes = b''
+            if len(reassembled_udp_bytes) >= 4:
+                reassembled_sport = int.from_bytes(reassembled_udp_bytes[0:2], 'big')
+                reassembled_dport = int.from_bytes(reassembled_udp_bytes[2:4], 'big')
+        if effective_ip is None or (udp_layer is None and not reassembled_udp_bytes):
             return
 
+        if udp_layer is not None:
+            sip_payload = bytes(getattr(udp_layer, 'payload', b''))
+            sip_sport = int(getattr(udp_layer, 'sport', 0) or 0)
+            sip_dport = int(getattr(udp_layer, 'dport', 0) or 0)
+        else:
+            sip_payload = reassembled_udp_bytes[8:] if len(reassembled_udp_bytes) >= 8 else b''
+            sip_sport = reassembled_sport
+            sip_dport = reassembled_dport
+
         sip_info = metadata.get('sip') if isinstance(metadata.get('sip'), dict) else self._sip_payload_info(
-            bytes(getattr(udp_layer, 'payload', b'')),
-            int(getattr(udp_layer, 'sport', 0) or 0),
-            int(getattr(udp_layer, 'dport', 0) or 0),
+            sip_payload,
+            sip_sport,
+            sip_dport,
         )
         if not isinstance(sip_info, dict):
             return
@@ -10379,18 +10661,26 @@ class PacketParser:
         kind = str(sip_info.get('kind', '') or '')
         stream_key = self._canonical_transport_key(
             str(effective_ip.src),
-            int(getattr(udp_layer, 'sport', 0) or 0),
+            sip_sport,
             str(effective_ip.dst),
-            int(getattr(udp_layer, 'dport', 0) or 0),
+            sip_dport,
             'UDP',
         )
         pending_key = (stream_key, call_id, cseq_method)
         if kind == 'request':
-            self.sip_request_pending.setdefault(pending_key, []).append(record)
+            pending_list = self.sip_request_pending.setdefault(pending_key, [])
+            if record is not None and hasattr(record, 'metadata'):
+                pending_list.append(record)
         elif kind == 'response':
             pending = self.sip_request_pending.get(pending_key)
             if pending:
-                request_record = pending[0]
+                valid_pending = [pending_record for pending_record in pending if pending_record is not None and hasattr(pending_record, 'metadata')]
+                if len(valid_pending) != len(pending):
+                    self.sip_request_pending[pending_key] = valid_pending
+                if not valid_pending:
+                    self.sip_request_pending.pop(pending_key, None)
+                    return
+                request_record = valid_pending[0]
                 request_record.metadata['sip_response_frame'] = int(record.number)
                 record.metadata['sip_request_frame'] = int(request_record.number)
                 response_delta = (Decimal(str(record.epoch_time)) - Decimal(str(request_record.epoch_time))) * Decimal('1000')
@@ -11405,11 +11695,12 @@ class PacketParser:
                 rtp_info = metadata.get('rtp') if isinstance(metadata.get('rtp'), dict) else self._rtp_payload_info(self._payload_bytes(packet), sport, dport)
                 if not isinstance(rtp_info, dict):
                     return 'Real-Time Transport Protocol'
+                marker_text = ', Mark' if bool(rtp_info.get('marker', False)) else ''
                 return (
                     f'PT={str(rtp_info.get("payload_type_name", "") or "")}, '
                     f'SSRC=0x{int(rtp_info.get("ssrc", 0) or 0):08X}, '
                     f'Seq={int(rtp_info.get("sequence", 0) or 0)}, '
-                    f'Time={int(rtp_info.get("timestamp", 0) or 0)}'
+                    f'Time={int(rtp_info.get("timestamp", 0) or 0)}{marker_text}'
                 )
             if protocol == 'UDLD':
                 return self._udld_info_text(packet)
