@@ -129,6 +129,27 @@ class CaptureDataSourceBuilder:
         return str(getattr(record, 'protocol', '') or '').upper()
 
     @staticmethod
+    def _conversation_key(record: Any) -> tuple[Any, ...] | None:
+        metadata = getattr(record, 'metadata', None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        tcp_stream = metadata.get('tcp_stream_index')
+        if isinstance(tcp_stream, int) and tcp_stream >= 0:
+            return ('tcp_stream', int(tcp_stream))
+        udp_stream = metadata.get('udp_stream_index')
+        if isinstance(udp_stream, int) and udp_stream >= 0:
+            return ('udp_stream', int(udp_stream))
+
+        src = str(getattr(record, 'src', '') or '').strip()
+        dst = str(getattr(record, 'dst', '') or '').strip()
+        sport = str(getattr(record, 'sport', '') or '').strip()
+        dport = str(getattr(record, 'dport', '') or '').strip()
+        proto = str(getattr(record, 'protocol', '') or '').strip().upper()
+        if not src and not dst:
+            return None
+        endpoints = tuple(sorted([(src, sport), (dst, dport)]))
+        return (proto, endpoints)
+
+    @staticmethod
     def _extract_dns_query(record: Any) -> str:
         raw_packet = getattr(record, 'raw', None)
         try:
@@ -348,25 +369,45 @@ class CaptureDataSourceBuilder:
                     for packet in records:
                         src_ip = str(getattr(packet, 'src', '') or '')
                         dst_ip = str(getattr(packet, 'dst', '') or '')
-                        protocol = str(getattr(packet, 'protocol', '') or '')
+                        protocol = str(getattr(packet, 'protocol', '') or '').upper()
                         length = CaptureDataSourceBuilder._to_int(getattr(packet, 'length', 0))
+                        sport = getattr(packet, 'sport', None)
+                        dport = getattr(packet, 'dport', None)
+                        metadata = getattr(packet, 'metadata', None)
+                        metadata = metadata if isinstance(metadata, dict) else {}
+                        tcp_stream_index = metadata.get('tcp_stream_index')
+                        udp_stream_index = metadata.get('udp_stream_index')
+                        key = CaptureDataSourceBuilder._conversation_key(packet)
+                        if key is None:
+                            continue
+                        if protocol not in {'TCP', 'UDP'} and not protocol:
+                            protocol = str(getattr(packet, 'protocol', '') or 'UNKNOWN').upper() or 'UNKNOWN'
 
-                        ips = sorted([src_ip, dst_ip])
-                        if ips[0] and ips[1]:
-                            key = f"{ips[0]}<->{ips[1]}:{protocol}"
+                        src_port_text = str(CaptureDataSourceBuilder._to_int(sport)) if sport is not None else '-'
+                        dst_port_text = str(CaptureDataSourceBuilder._to_int(dport)) if dport is not None else '-'
+                        label = f"{src_ip}:{src_port_text} <-> {dst_ip}:{dst_port_text} ({protocol or 'UNKNOWN'})"
+                        stream_suffix = ''
+                        if isinstance(tcp_stream_index, int) and tcp_stream_index >= 0:
+                            stream_suffix = f" TCP stream {tcp_stream_index}"
+                        elif isinstance(udp_stream_index, int) and udp_stream_index >= 0:
+                            stream_suffix = f" UDP stream {udp_stream_index}"
 
-                            if key not in conversations:
-                                conversations[key] = {
-                                    'conversation': f"{ips[0]} <-> {ips[1]} ({protocol or 'UNKNOWN'})",
-                                    'src_ip': ips[0],
-                                    'dst_ip': ips[1],
-                                    'protocol': protocol,
-                                    'packets': 0,
-                                    'bytes': 0,
-                                }
+                        if key not in conversations:
+                            conversations[key] = {
+                                'conversation': label + stream_suffix,
+                                'src_ip': src_ip or dst_ip,
+                                'dst_ip': dst_ip or src_ip,
+                                'src_port': CaptureDataSourceBuilder._to_int(sport) if sport is not None else 0,
+                                'dst_port': CaptureDataSourceBuilder._to_int(dport) if dport is not None else 0,
+                                'protocol': protocol or 'UNKNOWN',
+                                'packets': 0,
+                                'bytes': 0,
+                                'tcp_stream_index': tcp_stream_index if isinstance(tcp_stream_index, int) and tcp_stream_index >= 0 else None,
+                                'udp_stream_index': udp_stream_index if isinstance(udp_stream_index, int) and udp_stream_index >= 0 else None,
+                            }
 
-                            conversations[key]['packets'] += 1
-                            conversations[key]['bytes'] += length
+                        conversations[key]['packets'] += 1
+                        conversations[key]['bytes'] += length
 
                     cache_rows = [
                         CaptureDataSourceBuilder._with_shared_fields(item, default_protocol=str(item.get('protocol', '') or 'UNKNOWN'), default_time=0.0)

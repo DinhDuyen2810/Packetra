@@ -20,7 +20,7 @@ from scapy.layers.kerberos import Kerberos
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 from scapy.layers.tls.record import TLSApplicationData
-from core.stream_manager import get_ipv6_stream_index
+from core.stream_manager import get_ipv6_stream_index, get_tcp_stream_index
 
 PRINTABLE = set(range(32, 127))
 PACKET_BYTE_SOURCE = 'packet'
@@ -259,8 +259,25 @@ def _mpls_inner_ip(packet):
 
 
 def _effective_ip_layer(packet):
+    try:
+        if packet.haslayer(IPv6):
+            return packet[IPv6]
+    except Exception:
+        pass
     if packet.haslayer(IP):
         return packet[IP]
+    try:
+        pppoe = packet[PPPoE] if packet.haslayer(PPPoE) else None
+        if pppoe is not None and packet.haslayer(PPP):
+            ppp_protocol = int(getattr(packet[PPP], 'proto', 0) or 0)
+            if ppp_protocol == 0x0057:
+                ppp_payload = bytes(getattr(packet[PPP], 'payload', b''))
+                if len(ppp_payload) >= 40:
+                    ipv6_layer = IPv6(ppp_payload)
+                    if ipv6_layer.version == 6:
+                        return ipv6_layer
+    except Exception:
+        pass
     return _mpls_inner_ip(packet)
 
 
@@ -410,16 +427,6 @@ def _infer_padding(packet, record):
         try:
             tail_bytes = bytes(packet['Padding'])
             tail_offset = max(0, frame_len - len(tail_bytes))
-            if len(tail_bytes) >= 4:
-                padding_bytes = tail_bytes[:-4]
-                fcs_bytes = tail_bytes[-4:]
-                return (
-                    padding_bytes.hex(),
-                    len(padding_bytes),
-                    tail_offset,
-                    f'0x{fcs_bytes.hex()}',
-                    tail_offset + len(padding_bytes),
-                )
             return tail_bytes.hex(), len(tail_bytes), tail_offset, '', 0
         except Exception:
             return '', 0, 0, '', 0
@@ -435,17 +442,6 @@ def _infer_padding(packet, record):
 
     if not trailer_bytes:
         return '', 0, 0, '', 0
-
-    if len(trailer_bytes) >= 4:
-        padding_bytes = trailer_bytes[:-4]
-        fcs_bytes = trailer_bytes[-4:]
-        return (
-            padding_bytes.hex(),
-            len(padding_bytes),
-            payload_length,
-            f'0x{fcs_bytes.hex()}',
-            payload_length + len(padding_bytes),
-        )
 
     return trailer_bytes.hex(), len(trailer_bytes), payload_length, '', 0
 
@@ -575,6 +571,10 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 snap_layer = packet[SNAP] if packet.haslayer(SNAP) else None
                 sections.append(_llc_section(packet[LLC], snap_layer, offset))
                 offset += 3 + (5 if snap_layer is not None else 0)
+                if _is_cdp_packet(packet):
+                    cdp_payload = bytes(getattr(snap_layer, 'payload', b'')) if snap_layer is not None else b''
+                    sections.append(_cdp_section(cdp_payload, offset))
+                    payload_handled = True
 
         if getattr(record, 'protocol', '') == 'LACP':
             slow_payload = bytes(packet)[offset:]
@@ -663,7 +663,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
                         # For IP-over-PPP packets, consume only PPPoE+PPP headers (8 bytes)
                         # so IPv4/UDP/SIP/RTP offsets remain correct.
-                        if ppp_proto == 0x0021:
+                        if ppp_proto in {0x0021, 0x0057}:
                             offset += 8
                         else:
                             payload_handled = True
@@ -685,7 +685,11 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += 28
 
-    if effective_ip_layer is not None and not parsed_mpls_inner_ip:
+    if (
+        effective_ip_layer is not None
+        and not parsed_mpls_inner_ip
+        and int(getattr(effective_ip_layer, 'version', 4) or 4) != 6
+    ):
 
         ip_layer = effective_ip_layer
 
@@ -895,7 +899,7 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         elif getattr(record, 'protocol', '') == 'FTP-DATA' and tcp_payload:
             sections.append(_ftp_data_section(tcp_payload, offset, record))
             payload_handled = True
-        elif getattr(record, 'protocol', '') in {'HTTP', 'HTTP/XML', 'OCSP', 'IPP'} and tcp_payload:
+        elif getattr(record, 'protocol', '') in {'HTTP', 'HTTP/XML', 'RTSP', 'OCSP', 'IPP'} and tcp_payload:
             protocol_name = str(getattr(record, 'protocol', '') or '')
             http_kind = str(metadata.get('http_kind', '') or '').strip()
             http_header_len = metadata.get('http_header_len', None)
@@ -924,8 +928,6 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
                 if preliminary is not None:
                     sections.append(preliminary)
                 sections.append(_http_section(tcp_payload, offset, record))
-            if bool(metadata.get('http_has_line_based_text', False)):
-                sections.append(_http_line_based_text_section(record, offset))
             if getattr(record, 'protocol', '') == 'HTTP/XML':
                 xml_section = _xml_body_section(record, offset)
                 if xml_section is not None:
@@ -1728,7 +1730,7 @@ def _frame_section(record) -> Dict[str, Any]:
         else:
             protocol_string = 'eth:ethertype:ipv6:ipv6.hopopts:icmpv6' if has_hopopts else 'eth:ethertype:ipv6:icmpv6'
     elif protocol == 'HTTP':
-        protocol_string = 'eth:ethertype:ip:tcp:http:data-text-lines' if bool(metadata.get('http_has_line_based_text', False)) else 'eth:ethertype:ip:tcp:http'
+        protocol_string = 'eth:ethertype:ip:tcp:http'
     elif protocol == 'FTP':
         protocol_string = 'eth:ethertype:ipv6:tcp:ftp' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:ftp'
     elif protocol == 'FTP-DATA':
@@ -1859,7 +1861,7 @@ def _frame_section(record) -> Dict[str, Any]:
             protocol_string = 'eth:ethertype:vlan:ethertype:ipv6:tcp:dcerpc' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:vlan:ethertype:ip:tcp:dcerpc'
         else:
             protocol_string = 'eth:ethertype:ipv6:tcp:dcerpc' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:dcerpc'
-    elif protocol == 'SSL':
+    elif protocol.startswith('TLS') or protocol == 'SSL':
         protocol_string = 'eth:ethertype:ipv6:tcp:tls' if bool(metadata.get('is_ipv6', False)) else 'eth:ethertype:ip:tcp:tls'
     elif protocol in {'DTLS', 'DTLSv1.2'}:
         protocol_string = 'eth:ethertype:ip:udp:dtls'
@@ -3597,6 +3599,10 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                     tcp_total_len = min(len(inner_payload) - 40, tcp_header_len + tcp_payload_len)
                     sport = int(getattr(inner_tcp, 'sport', 0) or 0)
                     dport = int(getattr(inner_tcp, 'dport', 0) or 0)
+                    try:
+                        inner_tcp_stream = int(get_tcp_stream_index(str(inner_ipv6.src), sport, str(inner_ipv6.dst), dport))
+                    except Exception:
+                        inner_tcp_stream = -1
                     seq_raw = int(getattr(inner_tcp, 'seq', 0) or 0)
                     ack_raw = int(getattr(inner_tcp, 'ack', 0) or 0)
                     tcp_flags = int(getattr(inner_tcp, 'flags', 0) or 0)
@@ -3615,22 +3621,47 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                             'length': 2,
                             'children': [
                                 {
-                                    'title': '[Expert Info (Chat/Sequence): Connection establish request (SYN): server port 25]',
+                                    'title': '[Expert Info (Chat/Sequence): Connection establish request (SYN)]',
                                     'children': [
-                                        {'title': '[Connection establish request (SYN): server port 25]'},
+                                        {'title': '[Connection establish request (SYN)]'},
                                         {'title': '[Severity level: Chat]'},
                                         {'title': '[Group: Sequence]'},
                                     ],
                                 }
                             ] if (tcp_flags & 0x002) else [],
                         },
-                        {'title': f'.... .... ...{1 if (tcp_flags & 0x001) else 0} = Fin: {"Set" if (tcp_flags & 0x001) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2},
-                        {'title': '[TCP Flags: ..........S.]' if (tcp_flags & 0x002 and tcp_flags == 0x002) else '[TCP Flags]'},
+                        {'title': f'.... .... ...{1 if (tcp_flags & 0x001) else 0} = Fin: {"Set" if (tcp_flags & 0x001) else "Not set"}', 'offset': tcp_offset + 12, 'length': 2, 'children': [
+                            {
+                                'title': '[Expert Info (Chat/Sequence): Connection finish (FIN)]',
+                                'children': [
+                                    {'title': '[Connection finish (FIN)]'},
+                                    {'title': '[Severity level: Chat]'},
+                                    {'title': '[Group: Sequence]'},
+                                ],
+                            }
+                        ] if (tcp_flags & 0x001) else []},
+                        {
+                            'title': '[TCP Flags: ..........S.]' if (tcp_flags & 0x002 and tcp_flags == 0x002) else '[TCP Flags]',
+                            'children': (
+                                [
+                                    {
+                                        'title': '[Expert Info (Note/Sequence): This frame initiates the connection closing]',
+                                        'children': [
+                                            {'title': '[This frame initiates the connection closing]'},
+                                            {'title': '[Severity level: Note]'},
+                                            {'title': '[Group: Sequence]'},
+                                        ],
+                                    },
+                                ]
+                                if (tcp_flags & 0x001) and (tcp_flags & 0x010)
+                                else []
+                            ),
+                        },
                     ]
                     tcp_children = [
                         {'title': f'Source Port: {sport} ({sport})', 'offset': tcp_offset, 'length': 2},
                         {'title': f'Destination Port: smtp (25)' if dport == 25 else f'Destination Port: {dport} ({dport})', 'offset': tcp_offset + 2, 'length': 2},
-                        {'title': '[Stream index: 1]'},
+                        {'title': f'[Stream index: {inner_tcp_stream}]' if inner_tcp_stream >= 0 else '[Stream index: -1]'},
                         {'title': '[Stream Packet Number: 2]'},
                         {'title': '[Conversation completeness: Incomplete, SYN_SENT (1)]', 'children': [
                             {'title': '..0. .... = RST: Absent'},
@@ -3656,6 +3687,7 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                     if tcp_header_len > 20:
                         options_children: List[Dict[str, Any]] = []
                         opt_cursor = tcp_offset + 20
+                        sack_permitted_present = False
                         for option in getattr(inner_tcp, 'options', []) or []:
                             if not isinstance(option, tuple) or not option:
                                 continue
@@ -3667,6 +3699,7 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                                     {'title': f'MSS Value: {int(value)}', 'offset': opt_cursor + 2, 'length': 2},
                                 ]}); opt_cursor += 4
                             elif name == 'SAckOK':
+                                sack_permitted_present = True
                                 options_children.append({'title': 'TCP Option - SACK permitted', 'offset': opt_cursor, 'length': 2, 'children': [
                                     {'title': 'Kind: SACK Permitted (4)', 'offset': opt_cursor, 'length': 1},
                                     {'title': 'Length: 2', 'offset': opt_cursor + 1, 'length': 1},
@@ -3691,6 +3724,15 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                                     {'title': f'Shift count: {shift}', 'offset': opt_cursor + 2, 'length': 1},
                                     {'title': f'[Multiplier: {1 << shift}]'},
                                 ]}); opt_cursor += 3
+                        if (tcp_flags & 0x002) and not sack_permitted_present:
+                            options_children.append({
+                                'title': '[Expert Info (Note/Sequence): The SYN packet does not contain a SACK PERM option]',
+                                'children': [
+                                    {'title': '[The SYN packet does not contain a SACK PERM option]'},
+                                    {'title': '[Severity level: Note]'},
+                                    {'title': '[Group: Sequence]'},
+                                ],
+                            })
                         tcp_children.append({
                             'title': 'Options: (20 bytes), Maximum segment size, SACK permitted, Timestamps, No-Operation (NOP), Window scale' if (tcp_header_len - 20) == 20 else f'Options: ({tcp_header_len - 20} bytes)',
                             'offset': tcp_offset + 20,
@@ -3713,42 +3755,95 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                     })
             except Exception:
                 pass
-    elif icmpv6_type in {128, 129}:
-        identifier = int.from_bytes(payload[4:6], 'big') if len(payload) >= 6 else 0
-        sequence = int.from_bytes(payload[6:8], 'big') if len(payload) >= 8 else 0
+    elif icmpv6_type in {128, 129} and len(payload) >= 8:
+        identifier = int.from_bytes(payload[4:6], 'big')
+        sequence = int.from_bytes(payload[6:8], 'big')
+        echo_data = bytes(payload[8:])
+        timestamp_bytes = b''
+        data_bytes = echo_data
+        timestamp_present = len(echo_data) >= 8 and not all(32 <= byte <= 126 for byte in echo_data[:8])
+        if timestamp_present:
+            timestamp_bytes = echo_data[:8]
+            data_bytes = echo_data[8:]
+        record_metadata = getattr(record, 'metadata', {}) if record is not None else {}
         children.extend([
-            {'title': f'Identifier: 0x{identifier:04x}', 'offset': offset + 4, 'length': 2 if len(payload) >= 6 else 0},
-            {'title': f'Sequence: {sequence}', 'offset': offset + 6, 'length': 2 if len(payload) >= 8 else 0},
+            {'title': f'Identifier: 0x{identifier:04x}', 'offset': offset + 4, 'length': 2},
+            {'title': f'Sequence: {sequence}', 'offset': offset + 6, 'length': 2},
         ])
-        if len(payload) >= 32 and payload[24:28] == b'\x10\x11\x12\x13':
-            magic = int.from_bytes(payload[24:28], 'big')
-            send_ttl = int(payload[28])
-            round_no = int(payload[29])
-            checksum_tweak = int.from_bytes(payload[30:32], 'big')
-            send_ts_raw = int.from_bytes(payload[32:40], 'big') if len(payload) >= 40 else None
-            send_ts_text = ''
-            if send_ts_raw is not None:
-                try:
-                    # HiPerConTracer timestamp uses a custom epoch offset (+212,803,200 seconds).
-                    ts_ns = int(send_ts_raw) + 212_803_200_000_000_000
-                    ts_dt = datetime.fromtimestamp(ts_ns // 1_000_000_000, tz=timezone.utc)
-                    send_ts_text = f'{ts_dt.strftime("%b %d, %Y %H:%M:%S")}.{ts_ns % 1_000_000_000:09d} UTC'
-                except Exception:
-                    send_ts_text = f'0x{send_ts_raw:016x}'
-            extra_sections.append(
-                {
-                    'title': 'HiPerConTracer Trace Service',
-                    'offset': offset + 24,
-                    'length': max(0, min(len(payload) - 24, 16)),
-                    'children': [
-                        {'title': f'Magic Number: 0x{magic:08x}', 'offset': offset + 24, 'length': 4},
-                        {'title': f'Send TTL: {send_ttl}', 'offset': offset + 28, 'length': 1},
-                        {'title': f'Round: {round_no}', 'offset': offset + 29, 'length': 1},
-                        {'title': f'Checksum Tweak: 0x{checksum_tweak:04x}', 'offset': offset + 30, 'length': 2},
-                        ({'title': f'Send Time Stamp: {send_ts_text}', 'offset': offset + 32, 'length': 8} if send_ts_raw is not None else {'title': 'Send Time Stamp'}),
-                    ],
-                }
-            )
+        response_frame = int(record_metadata.get('icmpv6_response_frame', 0) or 0) if icmpv6_type == 128 else 0
+        request_frame = int(record_metadata.get('icmpv6_request_frame', 0) or 0) if icmpv6_type == 129 else 0
+        response_time_ms = float(record_metadata.get('icmpv6_response_time_ms', 0.0) or 0.0)
+        if icmpv6_type == 128 and response_frame:
+            children.append({'title': f'[Response In: {response_frame}]'})
+        if icmpv6_type == 129 and request_frame:
+            children.append({'title': f'[Request In: {request_frame}]'})
+        if icmpv6_type == 128 and response_time_ms > 0:
+            children.append({'title': f'[Response Time: {response_time_ms:.3f} milliseconds]'} )
+        ts_text = ''
+        rel_text = ''
+        if len(timestamp_bytes) == 8:
+            raw_ts = int.from_bytes(timestamp_bytes, 'little')
+            try:
+                from datetime import datetime, timezone, timedelta
+                ts_dt = datetime.fromtimestamp(raw_ts, tz=timezone(timedelta(hours=7)))
+                ts_text = ts_dt.strftime('%b %d, %Y %H:%M:%S.%f') + '000 SE Asia Standard Time'
+                if hasattr(record, 'epoch_time'):
+                    rel_ms = max(0.0, (float(getattr(record, 'epoch_time', 0.0) or 0.0) - float(raw_ts)) * 1000.0)
+                    if rel_ms < 86_400_000:
+                        rel_text = f'[Timestamp from Echo data (relative): {rel_ms:.6f} milliseconds]'
+            except Exception:
+                ts_text = f'0x{raw_ts:016x}'
+        if ts_text:
+            children.append({'title': f'Timestamp from Echo data: {ts_text}', **_byte_mapping(offset + 8, 0, 8, PACKET_BYTE_SOURCE)})
+        if rel_text:
+            children.append({'title': rel_text})
+        if data_bytes:
+            data_offset = offset + 16 if timestamp_present else offset + 8
+            children.append({'title': f'Data ({len(data_bytes)} bytes)', **_byte_mapping(data_offset, 0, len(data_bytes), PACKET_BYTE_SOURCE), 'children': [
+                {'title': f'Data: {data_bytes.hex()}', **_byte_mapping(data_offset, 0, len(data_bytes), PACKET_BYTE_SOURCE)},
+                {'title': f'[Length: {len(data_bytes)}]'},
+            ]})
+    elif icmpv6_type == 130 and len(payload) >= 28:
+        max_resp = int.from_bytes(payload[4:6], 'big')
+        reserved = int.from_bytes(payload[6:8], 'big')
+        multicast_address = str(ipaddress.IPv6Address(payload[8:24]))
+        flags = int(payload[24])
+        qrv = flags & 0x07
+        suppress_router_side = bool(flags & 0x08)
+        reserved_flags = (flags >> 4) & 0x0F
+        qqic = int(payload[25])
+        num_sources = int.from_bytes(payload[26:28], 'big')
+        children.extend([
+            {'title': f'Maximum Response Code: {max_resp}', 'offset': offset + 4, 'length': 2},
+            {'title': f'Reserved: {reserved:04x}', 'offset': offset + 6, 'length': 2},
+            {'title': f'Multicast Address: {multicast_address}', 'offset': offset + 8, 'length': 16},
+            {
+                'title': f'Flags: 0x{flags:02x}',
+                'offset': offset + 24,
+                'length': 1,
+                'children': [
+                    {'title': f'.... {1 if suppress_router_side else 0}... = Suppress Router-Side Processing: {"True" if suppress_router_side else "False"}', 'offset': offset + 24, 'length': 1},
+                    {'title': f'.... .{qrv:03b} = QRV (Querier\'s Robustness Variable): {qrv}', 'offset': offset + 24, 'length': 1},
+                    {'title': f'{reserved_flags:04b} .... = Reserved: {reserved_flags}', 'offset': offset + 24, 'length': 1},
+                ],
+            },
+            {'title': f'QQIC (Querier\'s Query Interval Code): {qqic}', 'offset': offset + 25, 'length': 1},
+            {'title': f'Number of Sources: {num_sources}', 'offset': offset + 26, 'length': 2},
+        ])
+        if num_sources > 0:
+            source_children = []
+            source_offset = 28
+            for index in range(num_sources):
+                if source_offset + 16 > len(payload):
+                    break
+                source_children.append({
+                    'title': f'Source Address [{index + 1}]: {str(ipaddress.IPv6Address(payload[source_offset:source_offset + 16]))}',
+                    'offset': offset + source_offset,
+                    'length': 16,
+                })
+                source_offset += 16
+            if source_children:
+                children.append({'title': f'Source Addresses ({len(source_children)})', 'children': source_children})
     elif icmpv6_type == 143:
         reserved = int.from_bytes(payload[4:6], 'big') if len(payload) >= 6 else 0
         record_count = int.from_bytes(payload[6:8], 'big') if len(payload) >= 8 else 0
@@ -4825,6 +4920,204 @@ def _udp_xml_section(payload: bytes, offset: int) -> Dict[str, Any]:
 
 
 def _bgp_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    def _bgp_flag_children(flags: int, base_offset: int) -> list[Dict[str, Any]]:
+        extended = bool(flags & 0x10)
+        return [
+            {'title': f'{1 if (flags & 0x80) else 0}... .... = Optional: {"Set" if (flags & 0x80) else "Not set"}', 'offset': base_offset, 'length': 1},
+            {'title': f'.{1 if (flags & 0x40) else 0}.. .... = Transitive: {"Set" if (flags & 0x40) else "Not set"}', 'offset': base_offset, 'length': 1},
+            {'title': f'..{1 if (flags & 0x20) else 0}. .... = Partial: {"Set" if (flags & 0x20) else "Not set"}', 'offset': base_offset, 'length': 1},
+            {'title': f'...{1 if extended else 0} .... = Extended-Length: {"Set" if extended else "Not set"}', 'offset': base_offset, 'length': 1},
+            {'title': f'.... {flags & 0x0F:04b} = Unused: 0x{flags & 0x0F:x}', 'offset': base_offset, 'length': 1},
+        ]
+
+    def _bgp_prefix_children(data: bytes, afi: int, base_offset: int, rel_offset: int = 0) -> list[Dict[str, Any]]:
+        children: list[Dict[str, Any]] = []
+        cursor = 0
+        while cursor < len(data):
+            prefix_len = int(data[cursor])
+            octet_len = (prefix_len + 7) // 8
+            prefix_start = cursor + 1
+            prefix_end = prefix_start + octet_len
+            if prefix_end > len(data):
+                break
+            prefix_bytes = data[prefix_start:prefix_end]
+            if afi == 2:
+                padded = prefix_bytes + (b'\x00' * max(0, 16 - len(prefix_bytes)))
+                prefix_text = str(ipaddress.IPv6Address(padded[:16]))
+            else:
+                padded = prefix_bytes + (b'\x00' * max(0, 4 - len(prefix_bytes)))
+                prefix_text = '.'.join(str(int(b)) for b in padded[:4])
+            children.append({
+                'title': f'Prefix: {prefix_text}/{prefix_len}',
+                'offset': base_offset + rel_offset + cursor,
+                'length': 1 + octet_len,
+                'children': [
+                    {'title': f'Prefix Length: {prefix_len}', 'offset': base_offset + rel_offset + cursor, 'length': 1},
+                    {'title': f'Prefix: {prefix_text}', 'offset': base_offset + rel_offset + prefix_start, 'length': octet_len},
+                ],
+            })
+            cursor = prefix_end
+        return children
+
+    def _bgp_capability_children(cap_type: int, cap_value: bytes, base_offset: int) -> list[Dict[str, Any]]:
+        children: list[Dict[str, Any]] = [
+            {'title': f'Type: {_bgp_capability_name(cap_type)} ({cap_type})', 'offset': base_offset, 'length': 1},
+            {'title': f'Length: {len(cap_value)}', 'offset': base_offset + 1, 'length': 1},
+        ]
+        if cap_type == 1 and len(cap_value) >= 4:
+            afi = int.from_bytes(cap_value[0:2], 'big')
+            reserved = int(cap_value[2])
+            safi = int(cap_value[3])
+            children.extend([
+                {'title': f'AFI: {_bgp_afi_name(afi)} ({afi})', 'offset': base_offset + 2, 'length': 2},
+                {'title': f'Reserved: {reserved:02x}', 'offset': base_offset + 4, 'length': 1},
+                {'title': f'SAFI: {_bgp_safi_name(safi)} ({safi})', 'offset': base_offset + 5, 'length': 1},
+            ])
+        elif cap_type == 65 and len(cap_value) >= 4:
+            asn = int.from_bytes(cap_value[0:4], 'big')
+            children.append({'title': f'AS Number: {asn}', 'offset': base_offset + 2, 'length': 4})
+        elif len(cap_value) == 0:
+            pass
+        else:
+            children.append({'title': f'Value: {cap_value.hex()}', 'offset': base_offset + 2, 'length': len(cap_value)})
+        return children
+
+    def _bgp_capability_name(cap_type: int) -> str:
+        return {
+            1: 'Multiprotocol extensions capability',
+            2: 'Route refresh capability',
+            65: 'Support for 4-octet AS number capability',
+            128: 'Route Refresh Capability (Cisco)',
+        }.get(int(cap_type), f'Capability ({int(cap_type)})')
+
+    def _bgp_afi_name(afi: int) -> str:
+        return {
+            1: 'IPv4',
+            2: 'IPv6',
+        }.get(int(afi), str(int(afi)))
+
+    def _bgp_safi_name(safi: int) -> str:
+        return {
+            1: 'Unicast',
+            2: 'Multicast',
+            4: 'NLRI multicast',
+        }.get(int(safi), str(int(safi)))
+
+    def _bgp_origin_name(origin: int) -> str:
+        return {
+            0: 'IGP',
+            1: 'EGP',
+            2: 'INCOMPLETE',
+        }.get(int(origin), f'Origin ({int(origin)})')
+
+    def _bgp_as_path_children(value: bytes, base_offset: int) -> list[Dict[str, Any]]:
+        children: list[Dict[str, Any]] = []
+        cursor = 0
+        segment_index = 1
+        while cursor + 2 <= len(value):
+            seg_type = int(value[cursor])
+            seg_len = int(value[cursor + 1])
+            asn_bytes = value[cursor + 2:cursor + 2 + (2 * seg_len)]
+            if cursor + 2 + (2 * seg_len) > len(value):
+                break
+            asns = [
+                int.from_bytes(asn_bytes[i:i + 2], 'big')
+                for i in range(0, len(asn_bytes), 2)
+                if i + 2 <= len(asn_bytes)
+            ]
+            seg_name = {
+                1: 'AS_SET',
+                2: 'AS_SEQUENCE',
+                3: 'AS_CONFED_SEQUENCE',
+                4: 'AS_CONFED_SET',
+            }.get(seg_type, f'Segment Type {seg_type}')
+            segment_children = [
+                {'title': f'Segment Type: {seg_name} ({seg_type})', 'offset': base_offset + cursor, 'length': 1},
+                {'title': f'Segment Length: {seg_len}', 'offset': base_offset + cursor + 1, 'length': 1},
+            ]
+            for idx, asn in enumerate(asns, start=1):
+                segment_children.append({
+                    'title': f'AS{idx}: {asn}',
+                    'offset': base_offset + cursor + 2 + ((idx - 1) * 2),
+                    'length': 2,
+                })
+            children.append({
+                'title': f'AS_PATH Segment {segment_index}: {seg_name}',
+                'offset': base_offset + cursor,
+                'length': 2 + (2 * seg_len),
+                'children': segment_children,
+            })
+            cursor += 2 + (2 * seg_len)
+            segment_index += 1
+        if not children and len(value) == 0:
+            children.append({'title': 'AS Path: empty', 'offset': base_offset, 'length': 0})
+        return children
+
+    def _bgp_mp_reach_children(value: bytes, base_offset: int) -> list[Dict[str, Any]]:
+        children: list[Dict[str, Any]] = []
+        if len(value) < 4:
+            children.append({'title': f'Value: {value.hex()}', 'offset': base_offset, 'length': len(value)})
+            return children
+        afi = int.from_bytes(value[0:2], 'big')
+        safi = int(value[2])
+        nh_len = int(value[3])
+        nh_start = 4
+        nh_end = min(len(value), nh_start + nh_len)
+        next_hop_bytes = value[nh_start:nh_end]
+        snpa_count = int(value[nh_end]) if nh_end < len(value) else 0
+        snpa_start = nh_end + 1
+        pos = snpa_start
+        children.extend([
+            {'title': f'Address family identifier (AFI): {_bgp_afi_name(afi)} ({afi})', 'offset': base_offset, 'length': 2},
+            {'title': f'Subsequent address family identifier (SAFI): {_bgp_safi_name(safi)} ({safi})', 'offset': base_offset + 2, 'length': 1},
+            {'title': f'Next hop: {ipaddress.IPv6Address(next_hop_bytes[:16]) if afi == 2 and len(next_hop_bytes) >= 16 else next_hop_bytes.hex()}', 'offset': base_offset + nh_start, 'length': nh_len},
+            {'title': f'Number of Subnetwork points of attachment (SNPA): {snpa_count}', 'offset': base_offset + nh_end, 'length': 1},
+        ])
+        if snpa_count > 0:
+            snpa_children: list[Dict[str, Any]] = []
+            for idx in range(snpa_count):
+                if pos >= len(value):
+                    break
+                snpa_len = int(value[pos])
+                snpa_start = pos + 1
+                snpa_end = min(len(value), snpa_start + snpa_len)
+                snpa_children.append({
+                    'title': f'SNPA {idx + 1}: {value[snpa_start:snpa_end].hex()}',
+                    'offset': base_offset + pos,
+                    'length': 1 + snpa_len,
+                })
+                pos = snpa_end
+            if snpa_children:
+                children.append({'title': f'SNPAs ({len(snpa_children)})', 'children': snpa_children})
+        nlri = value[pos:]
+        if nlri:
+            children.append({
+                'title': 'Network Layer Reachability Information',
+                'offset': base_offset + pos,
+                'length': len(nlri),
+                'children': _bgp_prefix_children(nlri, afi, base_offset, pos),
+            })
+        return children
+
+    def _bgp_mp_unreach_children(value: bytes, base_offset: int) -> list[Dict[str, Any]]:
+        if len(value) < 3:
+            return [{'title': f'Value: {value.hex()}', 'offset': base_offset, 'length': len(value)}]
+        afi = int.from_bytes(value[0:2], 'big')
+        safi = int(value[2])
+        nlri = value[3:]
+        children = [
+            {'title': f'Address family identifier (AFI): {_bgp_afi_name(afi)} ({afi})', 'offset': base_offset, 'length': 2},
+            {'title': f'Subsequent address family identifier (SAFI): {_bgp_safi_name(safi)} ({safi})', 'offset': base_offset + 2, 'length': 1},
+        ]
+        if nlri:
+            children.append({
+                'title': 'Withdrawn Routes',
+                'offset': base_offset + 3,
+                'length': len(nlri),
+                'children': _bgp_prefix_children(nlri, afi, base_offset, 3),
+            })
+        return children
+
     marker = payload[:16]
     length = int.from_bytes(payload[16:18], 'big') if len(payload) >= 18 else 0
     msg_type = int(payload[18]) if len(payload) >= 19 else 0
@@ -4845,6 +5138,214 @@ def _bgp_section(payload: bytes, offset: int) -> Dict[str, Any]:
     section_length = len(payload)
     if length >= 19:
         section_length = min(len(payload), length)
+
+    message_slices: list[tuple[int, int, int]] = []
+    cursor = 0
+    while cursor + 19 <= len(payload):
+        if payload[cursor:cursor + 16] != (b'\xff' * 16):
+            break
+        msg_len = int.from_bytes(payload[cursor + 16:cursor + 18], 'big')
+        if msg_len < 19 or cursor + msg_len > len(payload):
+            break
+        msg_type_slice = int(payload[cursor + 18])
+        message_slices.append((cursor, msg_len, msg_type_slice))
+        cursor += msg_len
+
+    if len(message_slices) > 1:
+        message_children: list[Dict[str, Any]] = []
+        for index, (msg_offset, msg_len, msg_type_slice) in enumerate(message_slices, start=1):
+            msg_name_slice = {
+                1: 'OPEN Message',
+                2: 'UPDATE Message',
+                3: 'NOTIFICATION Message',
+                4: 'KEEPALIVE Message',
+                5: 'ROUTE-REFRESH Message',
+            }.get(msg_type_slice, f'BGP Message ({msg_type_slice})')
+            sub_section = _bgp_section(payload[msg_offset:msg_offset + msg_len], offset + msg_offset)
+            message_children.append({
+                'title': f'Message {index}: {msg_name_slice}',
+                'offset': offset + msg_offset,
+                'length': msg_len,
+                'children': sub_section.get('children', []),
+            })
+        return {
+            'title': 'Border Gateway Protocol',
+            'offset': offset,
+            'length': section_length,
+            'children': [{
+                'title': 'Messages',
+                'offset': offset,
+                'length': section_length,
+                'children': message_children,
+            }],
+        }
+
+    if msg_type == 1 and len(payload) >= 29:
+        version = int(payload[19])
+        my_as = int.from_bytes(payload[20:22], 'big')
+        hold_time = int.from_bytes(payload[22:24], 'big')
+        bgp_identifier = str(ipaddress.IPv4Address(payload[24:28]))
+        opt_len = int(payload[28])
+        opt_start = 29
+        opt_end = min(len(payload), opt_start + opt_len)
+        children.extend([
+            {'title': f'Version: {version}', 'offset': offset + 19, 'length': 1},
+            {'title': f'My AS: {my_as}', 'offset': offset + 20, 'length': 2},
+            {'title': f'Hold Time: {hold_time}', 'offset': offset + 22, 'length': 2},
+            {'title': f'BGP Identifier: {bgp_identifier}', 'offset': offset + 24, 'length': 4},
+            {'title': f'Optional Parameters Length: {opt_len}', 'offset': offset + 28, 'length': 1},
+        ])
+        optional_children: list[Dict[str, Any]] = []
+        pos = opt_start
+        while pos + 2 <= opt_end:
+            param_type = int(payload[pos])
+            param_len = int(payload[pos + 1])
+            param_value_start = pos + 2
+            param_value_end = min(opt_end, param_value_start + param_len)
+            param_value = payload[param_value_start:param_value_end]
+            param_name = {
+                2: 'Capability',
+            }.get(param_type, f'Optional Parameter ({param_type})')
+            param_children: list[Dict[str, Any]] = [
+                {'title': f'Parameter Type: {param_name} ({param_type})', 'offset': offset + pos, 'length': 1},
+                {'title': f'Parameter Length: {param_len}', 'offset': offset + pos + 1, 'length': 1},
+            ]
+            if param_type == 2:
+                cap_children: list[Dict[str, Any]] = []
+                cap_pos = 0
+                while cap_pos + 2 <= len(param_value):
+                    cap_type = int(param_value[cap_pos])
+                    cap_len = int(param_value[cap_pos + 1])
+                    cap_value_start = cap_pos + 2
+                    cap_value_end = min(len(param_value), cap_value_start + cap_len)
+                    cap_value = param_value[cap_value_start:cap_value_end]
+                    cap_children.append({
+                        'title': f'Capability: {_bgp_capability_name(cap_type)}',
+                        'offset': offset + param_value_start + cap_pos,
+                        'length': 2 + len(cap_value),
+                        'children': _bgp_capability_children(cap_type, cap_value, offset + param_value_start + cap_pos),
+                    })
+                    if cap_len <= 0:
+                        break
+                    cap_pos = cap_value_end
+                if cap_children:
+                    param_children.append({
+                        'title': f'Capability: {_bgp_capability_name(int(param_value[0]) if param_value else 0)}',
+                        'offset': offset + param_value_start,
+                        'length': len(param_value),
+                        'children': cap_children,
+                    })
+            elif param_value:
+                param_children.append({'title': f'Value: {param_value.hex()}', 'offset': offset + param_value_start, 'length': len(param_value)})
+            optional_children.append({
+                'title': f'Optional Parameter: {param_name}',
+                'offset': offset + pos,
+                'length': 2 + len(param_value),
+                'children': param_children,
+            })
+            if param_len <= 0:
+                break
+            pos = param_value_end
+        if optional_children:
+            children.append({
+                'title': 'Optional Parameters',
+                'offset': offset + opt_start,
+                'length': opt_len,
+                'children': optional_children,
+            })
+        else:
+            children.append({'title': 'Optional Parameters', 'offset': offset + opt_start, 'length': opt_len})
+
+    elif msg_type == 2 and len(payload) >= 23:
+        withdrawn_len = int.from_bytes(payload[19:21], 'big')
+        withdrawn_start = 21
+        withdrawn_end = min(len(payload), withdrawn_start + withdrawn_len)
+        total_attr_len_offset = withdrawn_end
+        total_attr_len = int.from_bytes(payload[total_attr_len_offset:total_attr_len_offset + 2], 'big') if total_attr_len_offset + 2 <= len(payload) else 0
+        attr_start = total_attr_len_offset + 2
+        attr_end = min(len(payload), attr_start + total_attr_len)
+        children.extend([
+            {'title': f'Withdrawn Routes Length: {withdrawn_len}', 'offset': offset + 19, 'length': 2},
+        ])
+        withdrawn_children = _bgp_prefix_children(payload[withdrawn_start:withdrawn_end], 1, offset, withdrawn_start) if withdrawn_len > 0 else []
+        if withdrawn_children:
+            children.append({'title': 'Withdrawn Routes', 'offset': offset + withdrawn_start, 'length': withdrawn_len, 'children': withdrawn_children})
+        children.append({'title': f'Total Path Attribute Length: {total_attr_len}', 'offset': offset + total_attr_len_offset, 'length': 2})
+        path_children: list[Dict[str, Any]] = []
+        pos = attr_start
+        while pos + 2 <= attr_end:
+            flags = int(payload[pos])
+            attr_type = int(payload[pos + 1])
+            extended_len = bool(flags & 0x10)
+            len_field = 2 if extended_len else 1
+            if pos + 2 + len_field > attr_end:
+                break
+            if extended_len:
+                attr_len = int.from_bytes(payload[pos + 2:pos + 4], 'big')
+            else:
+                attr_len = int(payload[pos + 2])
+            value_start = pos + 2 + len_field
+            value_end = min(attr_end, value_start + attr_len)
+            value = payload[value_start:value_end]
+            attr_name = {
+                1: 'ORIGIN',
+                2: 'AS_PATH',
+                3: 'NEXT_HOP',
+                4: 'MULTI_EXIT_DISC',
+                5: 'LOCAL_PREF',
+                6: 'ATOMIC_AGGREGATE',
+                7: 'AGGREGATOR',
+                8: 'COMMUNITY',
+                14: 'MP_REACH_NLRI',
+                15: 'MP_UNREACH_NLRI',
+                16: 'EXTENDED COMMUNITIES',
+            }.get(attr_type, f'Path Attribute ({attr_type})')
+            flag_label = (
+                f'Flags: 0x{flags:02x}, '
+                f'{"Optional" if (flags & 0x80) else "Transitive" if (flags & 0x40) else "Well-known"}, '
+                f'{"Non-transitive" if (flags & 0x80) else "Transitive" if (flags & 0x40) else "Well-known"}, '
+                f'{"Partial" if (flags & 0x20) else "Complete"}'
+            )
+            flag_children = _bgp_flag_children(flags, offset + pos)
+            attr_children: list[Dict[str, Any]] = [
+                {'title': flag_label, 'offset': offset + pos, 'length': 1, 'children': flag_children},
+                {'title': f'Type Code: {attr_name} ({attr_type})', 'offset': offset + pos + 1, 'length': 1},
+                {'title': f'Length: {attr_len}', 'offset': offset + value_start - len_field, 'length': len_field},
+            ]
+            if attr_type == 1 and len(value) >= 1:
+                origin = int(value[0])
+                attr_children.append({'title': f'Origin: {_bgp_origin_name(origin)} ({origin})', 'offset': offset + value_start, 'length': 1})
+            elif attr_type == 2:
+                as_children = _bgp_as_path_children(value, offset + value_start)
+                if as_children:
+                    attr_children.append({'title': 'AS Path', 'offset': offset + value_start, 'length': len(value), 'children': as_children})
+                else:
+                    attr_children.append({'title': 'AS Path: empty', 'offset': offset + value_start, 'length': len(value)})
+            elif attr_type == 3 and len(value) >= 4:
+                attr_children.append({'title': f'Next Hop: {str(ipaddress.IPv4Address(value[:4]))}', 'offset': offset + value_start, 'length': 4})
+            elif attr_type == 4 and len(value) >= 4:
+                attr_children.append({'title': f'Multiple exit discriminator: {int.from_bytes(value[:4], "big")}', 'offset': offset + value_start, 'length': 4})
+            elif attr_type == 5 and len(value) >= 4:
+                attr_children.append({'title': f'Local preference: {int.from_bytes(value[:4], "big")}', 'offset': offset + value_start, 'length': 4})
+            elif attr_type == 14:
+                mp_children = _bgp_mp_reach_children(value, offset + value_start)
+                attr_children.extend(mp_children)
+            elif attr_type == 15:
+                mp_children = _bgp_mp_unreach_children(value, offset + value_start)
+                attr_children.extend(mp_children)
+            elif value:
+                attr_children.append({'title': f'Value: {value.hex()}', 'offset': offset + value_start, 'length': len(value)})
+            path_children.append({
+                'title': f'Path Attribute - {attr_name}' + (f': {_bgp_origin_name(int(value[0]))}' if attr_type == 1 and len(value) >= 1 else (f': {int.from_bytes(value[:4], "big")}' if attr_type in {4, 5} and len(value) >= 4 else '')),
+                'offset': offset + pos,
+                'length': max(0, value_end - pos),
+                'children': attr_children,
+            })
+            if value_end <= pos:
+                break
+            pos = value_end
+        if path_children:
+            children.append({'title': 'Path attributes', 'offset': offset + attr_start, 'length': max(0, attr_end - attr_start), 'children': path_children})
 
     return {
         'title': f'Border Gateway Protocol - {msg_name}',
@@ -5026,7 +5527,7 @@ def _vlan_section(layer, offset: int) -> Dict[str, Any]:
     vlan = int(getattr(layer, 'vlan', 0) or 0)
     inner_type = int(getattr(layer, 'type', 0) or 0)
     children = [
-        {'title': f'000{prio}. .... .... .... = Priority: {"Network Control" if prio == 7 else "Best Effort (default)" if prio == 0 else prio}', 'offset': offset, 'length': 2},
+        {'title': f'{prio:03b}. .... .... .... = Priority: {"Network Control" if prio == 7 else "Best Effort (default)" if prio == 0 else prio}', 'offset': offset, 'length': 2},
         {'title': f'...{dei} .... .... .... = DEI: {"Eligible" if dei else "Ineligible"}', 'offset': offset, 'length': 2},
         {'title': f'.... {vlan:012b} = ID: {vlan}', 'offset': offset, 'length': 2},
     ]
@@ -5453,14 +5954,6 @@ def _vtp_timestamp_text(value: bytes) -> str:
 def _vtp_section(payload: bytes, offset: int) -> Dict[str, Any]:
     version = int(payload[0]) if len(payload) >= 1 else 0
     code = int(payload[1]) if len(payload) >= 2 else 0
-    followers = int(payload[2]) if len(payload) >= 3 else 0
-    domain_len = int(payload[3]) if len(payload) >= 4 else 0
-    domain_raw = payload[4:36] if len(payload) >= 36 else b''
-    domain = domain_raw[:domain_len].decode(errors='ignore')
-    revision = int.from_bytes(payload[36:40], 'big') if len(payload) >= 40 else 0
-    updater = _ipv4_text(payload[40:44]) if len(payload) >= 44 else '0.0.0.0'
-    ts = _vtp_timestamp_text(payload[44:56]) if len(payload) >= 56 else ''
-    md5 = payload[56:72].hex() if len(payload) >= 72 else ''
     code_name = {
         0x01: 'Summary Advertisement',
         0x02: 'Subset Advertisement',
@@ -5469,14 +5962,92 @@ def _vtp_section(payload: bytes, offset: int) -> Dict[str, Any]:
     children = [
         {'title': f'Version: 0x{version:02x}', 'offset': offset, 'length': 1},
         {'title': f'Code: {code_name} (0x{code:02x})', 'offset': offset + 1, 'length': 1},
+    ]
+
+    if code == 0x02:
+        seq_num = int(payload[2]) if len(payload) >= 3 else 0
+        domain_len = int(payload[3]) if len(payload) >= 4 else 0
+        domain_raw = payload[4:36] if len(payload) >= 36 else payload[4:]
+        domain = domain_raw[:domain_len].decode(errors='ignore')
+        revision_offset = 36
+        revision = int.from_bytes(payload[revision_offset:revision_offset + 4], 'big') if len(payload) >= revision_offset + 4 else 0
+        children.extend([
+            {'title': f'Sequence Number: {seq_num}', 'offset': offset + 2, 'length': 1},
+            {'title': f'Management Domain Length: {domain_len}', 'offset': offset + 3, 'length': 1},
+            {'title': f'Management Domain: {domain}', 'offset': offset + 4, 'length': min(32, len(domain_raw)), 'children': [
+                {'title': f'Management Domain Text: {domain}', 'offset': offset + 4, 'length': min(domain_len, len(domain_raw))},
+                {'title': f'Management Domain Padding: {domain_raw[domain_len:].hex()}', 'offset': offset + 4 + domain_len, 'length': max(0, len(domain_raw) - domain_len)},
+            ]},
+            {'title': f'Configuration Revision Number: {revision}', 'offset': offset + revision_offset, 'length': 4},
+        ])
+
+        pos = revision_offset + 4
+        vlan_index = 1
+        while pos + 1 <= len(payload):
+            vlan_len = int(payload[pos])
+            if vlan_len < 13 or pos + vlan_len > len(payload):
+                break
+            vlan_value = payload[pos + 1:pos + vlan_len]
+            status = int(vlan_value[0]) if len(vlan_value) >= 1 else 0
+            vlan_type = int(vlan_value[1]) if len(vlan_value) >= 2 else 0
+            vlan_name_len = int(vlan_value[2]) if len(vlan_value) >= 3 else 0
+            isl_vlan_id = int.from_bytes(vlan_value[3:5], 'big') if len(vlan_value) >= 5 else 0
+            mtu_size = int.from_bytes(vlan_value[5:7], 'big') if len(vlan_value) >= 7 else 0
+            index_802_10 = int.from_bytes(vlan_value[7:11], 'big') if len(vlan_value) >= 11 else 0
+            vlan_name_raw = vlan_value[11:]
+            vlan_name = vlan_name_raw[:vlan_name_len].decode(errors='ignore')
+            vlan_title = vlan_name if vlan_name else f'0x{isl_vlan_id:04x}'
+            vlan_children = [
+                {'title': f'VLAN Information Length: {vlan_len}', 'offset': offset + pos, 'length': 1},
+                {'title': f'Status: 0x{status:02x}', 'offset': offset + pos + 1, 'length': 1, 'children': [
+                    {'title': f'.... ...{status & 0x01:b} = VLAN suspended: {"True" if (status & 0x01) else "False"}', 'offset': offset + pos + 1, 'length': 1},
+                ]},
+                {'title': f'VLAN Type: {vlan_type}', 'offset': offset + pos + 2, 'length': 1},
+                {'title': f'VLAN Name Length: {vlan_name_len}', 'offset': offset + pos + 3, 'length': 1},
+                {'title': f'ISL VLAN ID: 0x{isl_vlan_id:04x}', 'offset': offset + pos + 4, 'length': 2},
+                {'title': f'MTU Size: {mtu_size}', 'offset': offset + pos + 6, 'length': 2},
+                {'title': f'802.10 Index: 0x{index_802_10:08x}', 'offset': offset + pos + 8, 'length': 4},
+                {'title': f'VLAN Name: {vlan_name}', 'offset': offset + pos + 12, 'length': max(0, min(vlan_name_len, len(vlan_name_raw))), 'children': [
+                    {'title': f'VLAN Name Text: {vlan_name}', 'offset': offset + pos + 12, 'length': max(0, min(vlan_name_len, len(vlan_name_raw)))},
+                    {'title': f'Padding: {vlan_name_raw[vlan_name_len:].hex()}', 'offset': offset + pos + 12 + vlan_name_len, 'length': max(0, len(vlan_name_raw) - vlan_name_len)},
+                ]},
+            ]
+            children.append({
+                'title': f'VLAN Information #{vlan_index}: {vlan_title}',
+                'offset': offset + pos,
+                'length': vlan_len,
+                'children': vlan_children,
+            })
+            pos += vlan_len
+            vlan_index += 1
+
+        return {
+            'title': 'VLAN Trunking Protocol',
+            'offset': offset,
+            'length': len(payload),
+            'children': children,
+        }
+
+    followers = int(payload[2]) if len(payload) >= 3 else 0
+    domain_len = int(payload[3]) if len(payload) >= 4 else 0
+    domain_raw = payload[4:36] if len(payload) >= 36 else b''
+    domain = domain_raw[:domain_len].decode(errors='ignore')
+    revision = int.from_bytes(payload[36:40], 'big') if len(payload) >= 40 else 0
+    updater = _ipv4_text(payload[40:44]) if len(payload) >= 44 else '0.0.0.0'
+    ts = _vtp_timestamp_text(payload[44:56]) if len(payload) >= 56 else ''
+    md5 = payload[56:72].hex() if len(payload) >= 72 else ''
+    children.extend([
         {'title': f'Followers: {followers}', 'offset': offset + 2, 'length': 1},
         {'title': f'Management Domain Length: {domain_len}', 'offset': offset + 3, 'length': 1},
-        {'title': f'Management Domain: {domain}', 'offset': offset + 4, 'length': 32},
+        {'title': f'Management Domain: {domain}', 'offset': offset + 4, 'length': 32, 'children': [
+            {'title': f'Management Domain Text: {domain}', 'offset': offset + 4, 'length': min(domain_len, len(domain_raw))},
+            {'title': f'Management Domain Padding: {domain_raw[domain_len:].hex()}', 'offset': offset + 4 + domain_len, 'length': max(0, len(domain_raw) - domain_len)},
+        ]},
         {'title': f'Configuration Revision Number: {revision}', 'offset': offset + 36, 'length': 4},
         {'title': f'Updater Identity: {updater}', 'offset': offset + 40, 'length': 4},
         {'title': f'Update Timestamp: {ts}', 'offset': offset + 44, 'length': 12},
         {'title': f'MD5 Digest: {md5}', 'offset': offset + 56, 'length': 16},
-    ]
+    ])
     return {
         'title': 'VLAN Trunking Protocol',
         'offset': offset,
@@ -7015,11 +7586,14 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
     ack_frame_number = metadata.get('tcp_ack_frame_number', None)
     ack_rtt_ms = metadata.get('tcp_ack_rtt_ms', None)
+    irtt_ms = metadata.get('tcp_i_rtt_ms', None)
     ack_ambiguous = bool(metadata.get('tcp_ack_ambiguous', False))
     duplicate_ack = bool(metadata.get('tcp_is_duplicate_ack', False))
     duplicate_ack_count = metadata.get('tcp_duplicate_ack_count', None)
     duplicate_ack_frame_number = metadata.get('tcp_duplicate_ack_frame_number', None)
     window_update = bool(metadata.get('tcp_is_window_update', False))
+    keep_alive = bool(metadata.get('tcp_is_keep_alive', False))
+    keep_alive_ack = bool(metadata.get('tcp_is_keep_alive_ack', False))
     previous_segment_not_captured = bool(metadata.get('tcp_previous_segment_not_captured', False))
     port_numbers_reused = bool(metadata.get('tcp_port_numbers_reused', False))
     bytes_in_flight = metadata.get('tcp_bytes_in_flight', None)
@@ -7160,6 +7734,16 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                         f'{"Set" if flag_bits["SYN"] else "Not set"}',
                     'offset': offset + 13,
                     'length': 1,
+                    'children': [
+                        {
+                            'title': f'[Expert Info (Chat/Sequence): Connection establish request (SYN): server port {dport}]',
+                            'children': [
+                                {'title': f'[Connection establish request (SYN): server port {dport}]'},
+                                {'title': '[Severity level: Chat]'},
+                                {'title': '[Group: Sequence]'},
+                            ],
+                        }
+                    ] if bool(flag_bits["SYN"]) and not bool(flag_bits["ACK"]) else [],
                 },
                 {
                     'title':
@@ -7168,9 +7752,33 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                         f'{"Set" if flag_bits["FIN"] else "Not set"}',
                     'offset': offset + 13,
                     'length': 1,
+                    'children': [
+                        {
+                            'title': '[Expert Info (Chat/Sequence): Connection finish (FIN)]',
+                            'children': [
+                                {'title': '[Connection finish (FIN)]'},
+                                {'title': '[Severity level: Chat]'},
+                                {'title': '[Group: Sequence]'},
+                            ],
+                        },
+                    ] if bool(flag_bits["FIN"]) else [],
                 },
                 {
                     'title': f'[TCP Flags: {tcp_flag_marks}]',
+                    'children': (
+                        [
+                            {
+                                'title': '[Expert Info (Note/Sequence): This frame initiates the connection closing]',
+                                'children': [
+                                    {'title': '[This frame initiates the connection closing]'},
+                                    {'title': '[Severity level: Note]'},
+                                    {'title': '[Group: Sequence]'},
+                                ],
+                            }
+                        ]
+                        if bool(flag_bits["FIN"]) and bool(flag_bits["ACK"]) and not bool(flag_bits["RST"])
+                        else []
+                    ),
                 },
             ]
         },
@@ -7325,6 +7933,20 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
             'title': '[TCP Analysis Flags]',
             'children': tcp_analysis_children,
         })
+    elif keep_alive_ack:
+        seq_ack_children.append({
+            'title': '[TCP Analysis Flags]',
+            'children': [
+                {
+                    'title': '[Expert Info (Note/Sequence): ACK to a TCP keep-alive segment]',
+                    'children': [
+                        {'title': '[ACK to a TCP keep-alive segment]'},
+                        {'title': '[Severity level: Note]'},
+                        {'title': '[Group: Sequence]'},
+                    ],
+                },
+            ],
+        })
     elif duplicate_ack:
         seq_ack_children.append({
             'title': '[TCP Analysis Flags]',
@@ -7366,6 +7988,20 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                 },
             ],
         })
+    elif keep_alive:
+        seq_ack_children.append({
+            'title': '[TCP Analysis Flags]',
+            'children': [
+                {
+                    'title': '[Expert Info (Note/Sequence): TCP keep-alive segment]',
+                    'children': [
+                        {'title': '[TCP keep-alive segment]'},
+                        {'title': '[Severity level: Note]'},
+                        {'title': '[Group: Sequence]'},
+                    ],
+                },
+            ],
+        })
     if ack_frame_number is not None:
         ack_child = {
             'title': f'[This is an ACK to the segment in frame: {int(ack_frame_number)}]',
@@ -7385,6 +8021,10 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     if ack_rtt_ms is not None:
         seq_ack_children.append({
             'title': f'[The RTT to ACK the segment was: {float(ack_rtt_ms):.6f} milliseconds]',
+        })
+    if irtt_ms is not None:
+        seq_ack_children.append({
+            'title': f'[iRTT: {float(irtt_ms):.6f} milliseconds]',
         })
     if previous_segment_not_captured:
         seq_ack_children.append({
@@ -7429,6 +8069,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
         option_children = []
         option_titles = []
         option_offset = offset + 20
+        sack_permitted_present = False
         for opt in options:
             try:
                 name, value = opt
@@ -7476,6 +8117,7 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
                     option_offset += 3
                 # SACK Permitted
                 elif name == 'SAckOK':
+                    sack_permitted_present = True
                     option_titles.append('SACK permitted')
                     option_children.append({
                         'title': 'TCP Option - SACK permitted',
@@ -7579,6 +8221,15 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
             'length': max(0, tcp_header_len - 20),
             'children': option_children
         })
+        if flag_bits['SYN'] and not sack_permitted_present:
+            children.append({
+                'title': '[Expert Info (Note/Sequence): The SYN packet does not contain a SACK PERM option]',
+                'children': [
+                    {'title': '[The SYN packet does not contain a SACK PERM option]'},
+                    {'title': '[Severity level: Note]'},
+                    {'title': '[Group: Sequence]'},
+                ],
+            })
 
     # ---- PAYLOAD ----
 
@@ -7806,8 +8457,9 @@ def _http_preliminary_section(record, offset: int) -> Dict[str, Any] | None:
     if full_request_uri:
         children.append({'title': f'[Full request URI: {full_request_uri}]'})
 
+    title = 'Real Time Streaming Protocol' if str(getattr(record, 'protocol', '') or '').upper() == 'RTSP' else 'Hypertext Transfer Protocol'
     return {
-        'title': 'Hypertext Transfer Protocol',
+        'title': title,
         **_map(0, prelim_len),
         'children': children,
     }
@@ -7996,7 +8648,7 @@ def _http_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 **_byte_mapping(0, 0, dechunked_len, 'http_dechunked'),
             })
 
-    title = 'Hypertext Transfer Protocol'
+    title = 'Real Time Streaming Protocol' if str(getattr(record, 'protocol', '') or '').upper() == 'RTSP' else 'Hypertext Transfer Protocol'
     if bool(metadata.get('http_is_chunked', False)):
         chunk_count = int(metadata.get('http_chunk_count', 0) or 0)
         if chunk_count > 0:
@@ -11768,26 +12420,28 @@ def _xml_body_section(record, offset: int) -> Dict[str, Any] | None:
         text = body.decode('utf-8', errors='strict')
     except Exception:
         text = body.decode('utf-8', errors='ignore')
-    body_offset = 0
+    use_offsets = not bool(metadata.get('http_is_reassembled', False))
+    byte_source = PACKET_BYTE_SOURCE if use_offsets else TCP_REASSEMBLED_BYTE_SOURCE
+    body_offset = int(metadata.get('http_header_len', 0) or 0) + int(metadata.get('http_payload_offset', 0) or 0)
     lines: List[Dict[str, Any]] = []
     cursor = 0
     for raw_line in text.splitlines(keepends=True):
         raw_bytes = raw_line.encode('utf-8', errors='ignore')
-        line_text = raw_line.rstrip('\r\n')
+        line_text = raw_line.rstrip('\r\n').lstrip()
         if line_text:
             lines.append({
                 'title': line_text,
-                **_byte_mapping(offset, body_offset + cursor, len(raw_bytes), DECODED_UTF8_BYTE_SOURCE),
+                **_byte_mapping(offset, body_offset + cursor, len(raw_bytes), byte_source),
             })
         cursor += len(raw_bytes)
     if not lines:
         lines.append({
             'title': text,
-            **_byte_mapping(offset, body_offset, len(body), DECODED_UTF8_BYTE_SOURCE),
+            **_byte_mapping(offset, body_offset, len(body), byte_source),
         })
     return {
         'title': 'eXtensible Markup Language',
-        **_byte_mapping(offset, body_offset, len(body), DECODED_UTF8_BYTE_SOURCE),
+        **_byte_mapping(offset, body_offset, len(body), byte_source),
         'children': lines,
     }
 
@@ -16257,9 +16911,72 @@ def _capwap_wtp_radio_configuration_node(element: Dict[str, Any], payload_offset
     return _capwap_element_node(element, payload_offset, children)
 
 
+def _capwap_add_station_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Mac Length: {int(parsed.get("mac_length", 0) or 0)}', 1, 1),
+        (f'MAC address: {str(parsed.get("mac_address", "") or "")}', 2, 6),
+    ])
+    return _capwap_element_node(element, payload_offset, children)
+
+
+def _capwap_ieee_80211_station_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
+    parsed = element.get('parsed', {}) or {}
+    value_offset = payload_offset + int(element.get('value_offset', 0) or 0)
+    children = _capwap_element_base_children(element, payload_offset)
+    supported_rates = list(parsed.get('supported_rates', []) or [])
+    rate_lines: List[Dict[str, Any]] = []
+    rate_offset = value_offset + 14
+    for index, rate in enumerate(supported_rates):
+        rate_lines.append({
+            'title': f'Supported Rates: {((rate & 0x7F) / 2):g}{"(B)" if (rate & 0x80) else ""} (0x{rate:02x})',
+            'offset': rate_offset + index,
+            'length': 1,
+        })
+    capabilities = int(parsed.get('capabilities', 0) or 0)
+    capabilities_children = [
+        {'title': '0... .... .... .... = ESS: Yes' if capabilities & 0x0001 else '0... .... .... .... = ESS: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.0.. .... .... .... = IBSS: Yes' if capabilities & 0x0002 else '.0.. .... .... .... = IBSS: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '..0. .... .... .... = CF-Pollable: Yes' if capabilities & 0x0004 else '..0. .... .... .... = CF-Pollable: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '...0 .... .... .... = CF-Poll Request: Yes' if capabilities & 0x0008 else '...0 .... .... .... = CF-Poll Request: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... 0... .... .... = Privacy: Yes' if capabilities & 0x0010 else '.... 0... .... .... = Privacy: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .1.. .... .... = Short Preamble: Yes' if capabilities & 0x0020 else '.... .1.. .... .... = Short Preamble: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... ..0. .... .... = PBCC: Yes' if capabilities & 0x0040 else '.... ..0. .... .... = PBCC: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... ...0 .... .... = Channel Agility: Yes' if capabilities & 0x0080 else '.... ...0 .... .... = Channel Agility: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... 0... .... = Spectrum Management: Yes' if capabilities & 0x0100 else '.... .... 0... .... = Spectrum Management: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... .0.. .... = QoS: Yes' if capabilities & 0x0200 else '.... .... .0.. .... = QoS: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... ..0. .... = Short Slot Time: Yes' if capabilities & 0x0400 else '.... .... ..0. .... = Short Slot Time: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... ...0 .... = APSD: Yes' if capabilities & 0x0800 else '.... .... ...0 .... = APSD: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... .... 0... = Reserved: Yes' if capabilities & 0x1000 else '.... .... .... 0... = Reserved: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... .... .0.. = DSSS-OFDM: Yes' if capabilities & 0x2000 else '.... .... .... .0.. = DSSS-OFDM: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... .... ..0. = Delayed Block ACK: Yes' if capabilities & 0x4000 else '.... .... .... ..0. = Delayed Block ACK: No', 'offset': value_offset + 10, 'length': 2},
+        {'title': '.... .... .... ...1 = Immediate Block ACK: Yes' if capabilities & 0x8000 else '.... .... .... ...1 = Immediate Block ACK: No', 'offset': value_offset + 10, 'length': 2},
+    ]
+    _capwap_extend_field_nodes(children, value_offset, [
+        (f'Radio ID: {int(parsed.get("radio_id", 0) or 0)}', 0, 1),
+        (f'Association ID: {int(parsed.get("association_id", 0) or 0)}', 1, 2),
+        (f'Flags: 0x{int(parsed.get("flags", 0) or 0):02x}', 3, 1),
+        (f'MAC Address: {str(parsed.get("mac_address", "") or "")}', 4, 6),
+        (f'Capabilities: 0x{capabilities:04x}', 10, 2),
+        (f'WLAN ID: {int(parsed.get("wlan_id", 0) or 0)}', 12, 2),
+    ])
+    children.append({
+        'title': f'Supported Rates ({len(rate_lines)})',
+        'offset': value_offset + 14,
+        'length': max(0, len(supported_rates)),
+        'children': rate_lines,
+    })
+    return _capwap_element_node(element, payload_offset, children)
+
+
 def _capwap_message_element_node(element: Dict[str, Any], payload_offset: int) -> Dict[str, Any]:
     element_type = int(element.get('type', 0) or 0)
     parsed = element.get('parsed', {}) or {}
+    if element_type == 8:
+        return _capwap_add_station_node(element, payload_offset)
     if element_type == 1:
         return _capwap_ac_descriptor_node(element, payload_offset)
     if element_type == 2:
@@ -16318,6 +17035,8 @@ def _capwap_message_element_node(element: Dict[str, Any], payload_offset: int) -
         return _capwap_direct_sequence_control_node(element, payload_offset)
     if element_type == 1030:
         return _capwap_mac_operation_node(element, payload_offset)
+    if element_type == 1036:
+        return _capwap_ieee_80211_station_node(element, payload_offset)
     if element_type == 1032:
         return _capwap_multi_domain_node(element, payload_offset)
     if element_type == 1040:
@@ -16712,6 +17431,22 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
     raw = bytes(layer)
     metadata = getattr(record, 'metadata', {}) if record else {}
     protocol_name = str(getattr(record, 'protocol', '') or '')
+    def _dns_header_plausible(data: bytes) -> bool:
+        if len(data) < 12:
+            return False
+        qdcount = int.from_bytes(data[4:6], 'big')
+        ancount = int.from_bytes(data[6:8], 'big')
+        nscount = int.from_bytes(data[8:10], 'big')
+        arcount = int.from_bytes(data[10:12], 'big')
+        total = qdcount + ancount + nscount + arcount
+        return all(count <= 4096 for count in (qdcount, ancount, nscount, arcount)) and total <= 8192
+
+    if len(raw) >= 14:
+        tcp_len = int.from_bytes(raw[0:2], 'big')
+        if 12 <= tcp_len <= len(raw) - 2:
+            stripped = raw[2:2 + tcp_len]
+            if _dns_header_plausible(stripped) and not _dns_header_plausible(raw):
+                raw = stripped
     if len(raw) < 12:
         return {
             'title': 'Multicast Domain Name System' if protocol_name == 'MDNS' else 'Domain Name System',
@@ -16783,20 +17518,33 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
         {'title': f'Additional RRs: {arcount}', 'offset': offset + 10, 'length': 2},
     ]
 
+    dns_malformed = any(count > 2048 for count in (qdcount, ancount, nscount, arcount)) or (qdcount + ancount + nscount + arcount) > 4096
+
+    def _dns_display_name(name: str) -> str:
+        text = str(name or '')
+        if not text:
+            return ''
+        if any((ord(ch) < 32 and ch not in {'\t', '\n', '\r'}) or not ch.isprintable() for ch in text):
+            return ''
+        return text
+
     pos = 12
     question_children = []
     for _ in range(qdcount):
+        if pos + 4 > len(raw):
+            break
         name, next_pos = _dns_read_name(raw, pos)
-        if next_pos + 4 > len(raw):
+        if next_pos <= pos or next_pos + 4 > len(raw):
             break
         qtype = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
         qclass_raw = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
         qclass = qclass_raw & 0x7FFF
         qu_question = bool(qclass_raw & 0x8000)
-        name_len = max(0, len(name.encode('utf-8')))
+        name_display = _dns_display_name(name) if dns_malformed else name
+        name_len = max(0, len(name_display.encode('utf-8')))
         label_count = len([part for part in name.split('.') if part])
         type_title = f'Type: {_dns_type_label(qtype)}'
-        title = f'{name}: type {_dns_type_name(qtype)}, class {_dns_class_name(qclass)}'
+        title = f'{name_display or "<Root>"}: type {_dns_type_name(qtype)}, class {_dns_class_name(qclass)}'
         if protocol_name == 'MDNS' and qu_question:
             title += ', "QU" question'
         question_children.append({
@@ -16804,7 +17552,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             'offset': offset + pos,
             'length': next_pos + 4 - pos,
             'children': [
-                {'title': f'Name: {name}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                {'title': f'Name: {name_display or "<Root>"}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
                 {'title': f'[Name Length: {name_len}]'},
                 {'title': f'[Label Count: {label_count}]'},
                 {'title': type_title, 'offset': offset + next_pos, 'length': 2},
@@ -16832,8 +17580,10 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
         nonlocal pos
         items = []
         for _ in range(count):
+            if pos + 10 > len(raw):
+                break
             name, next_pos = _dns_read_name(raw, pos)
-            if next_pos + 10 > len(raw):
+            if next_pos <= pos or next_pos + 10 > len(raw):
                 break
             rr_type = int.from_bytes(raw[next_pos:next_pos + 2], 'big')
             rr_class_raw = int.from_bytes(raw[next_pos + 2:next_pos + 4], 'big')
@@ -16857,8 +17607,9 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
                 }.get(rr_type, 'Name')
             elif rr_type == 28:
                 value_title = 'AAAA Address'
-            rr_title = f'{name}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}'
-            if rr_type == 41 and not name:
+            name_display = _dns_display_name(name) if dns_malformed else name
+            rr_title = f'{name_display or "<Root>"}: type {_dns_type_name(rr_type)}, class {_dns_class_name(rr_class)}'
+            if rr_type == 41 and not name_display:
                 rr_title = '<Root>: type OPT'
             if protocol_name == 'MDNS' and cache_flush:
                 rr_title += ', cache flush'
@@ -16871,7 +17622,7 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             elif rdata_text and rr_type not in {41, 46, 48}:
                 rr_title += f', {rdata_text}'
             rr_children = [
-                {'title': f'Name: {name or "<Root>"}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
+                {'title': f'Name: {name_display or "<Root>"}', 'offset': offset + pos, 'length': max(0, next_pos - pos)},
                 {'title': type_title, 'offset': offset + next_pos, 'length': 2},
                 {'title': f'Class: {_dns_class_name(rr_class)} (0x{rr_class:04x})', 'offset': offset + next_pos + 2, 'length': 2} if rr_type != 41 else {'title': f'UDP payload size: {rr_class_raw}', 'offset': offset + next_pos + 2, 'length': 2},
             ]
@@ -17078,6 +17829,15 @@ def _dns_section(layer, offset: int, record=None) -> Dict[str, Any]:
             'offset': additional_start,
             'length': max(0, additional_end - additional_start),
             'children': additionals,
+        })
+
+    if dns_malformed:
+        children.append({
+            'title': 'Malformed Packet: DNS',
+            'children': [
+                {'title': '[Malformed Packet: DNS]'},
+                {'title': '[Expert Info (Error/Malformed): Malformed Packet (Exception occurred)]'},
+            ],
         })
 
     response_frame = metadata.get('dns_response_frame')
@@ -17422,9 +18182,29 @@ def _dhcpv6_option_name(code: int) -> str:
     return {
         1: 'Client Identifier',
         2: 'Server Identifier',
+        3: 'Identity Association for Non-temporary Address',
+        4: 'Identity Association for Temporary Address',
+        5: 'IA Address',
         6: 'Option Request',
+        7: 'Preference',
         8: 'Elapsed time',
+        9: 'Relay Message',
+        11: 'Authentication',
+        12: 'Server Unicast',
+        13: 'Status Code',
+        14: 'Rapid Commit',
+        15: 'User Class',
+        16: 'Vendor Class',
+        17: 'Vendor-specific Information',
+        18: 'Interface-ID',
+        19: 'Reconfigure Message',
+        20: 'Reconfigure Accept',
+        21: 'SIP Servers Domain Name List',
+        22: 'SIP Servers IPv6 Address List',
         23: 'DNS recursive name server',
+        24: 'Domain Search List',
+        25: 'Identity Association for Prefix Delegation',
+        26: 'IA Prefix',
         39: 'Client Fully Qualified Domain Name',
     }.get(int(code), f'Option {int(code)}')
 
@@ -17448,9 +18228,32 @@ def _dhcpv6_requested_option_name(code: int) -> str:
     return {
         1: 'Client Identifier',
         2: 'Server Identifier',
+        3: 'Identity Association for Non-temporary Address',
+        4: 'Identity Association for Temporary Address',
+        5: 'IA Address',
         23: 'DNS recursive name server',
         24: 'Domain Search List',
+        25: 'Identity Association for Prefix Delegation',
+        26: 'IA Prefix',
+        16: 'Vendor Class',
+        17: 'Vendor-specific Information',
     }.get(int(code), _dhcpv6_option_name(code))
+
+
+def _dhcpv6_status_name(code: int) -> str:
+    return {
+        0: 'Success',
+        1: 'UnspecFail',
+        2: 'NoAddrsAvail',
+        3: 'NoBinding',
+        4: 'NotOnLink',
+        5: 'UseMulticast',
+        6: 'NoPrefixAvail',
+        7: 'UnknownQueryType',
+        8: 'MalformedQuery',
+        9: 'NotConfigured',
+        10: 'NotAllowed',
+    }.get(int(code), f'Status {int(code)}')
 
 
 def _dhcpv6_duid_time_text(raw_time: int) -> str:
@@ -17464,29 +18267,56 @@ def _dhcpv6_duid_time_text(raw_time: int) -> str:
         return str(int(raw_time))
 
 
-def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
-    msg_type = int(payload[0]) if len(payload) >= 1 else 0
-    xid = int.from_bytes(payload[1:4], 'big') if len(payload) >= 4 else 0
-    children: List[Dict[str, Any]] = [
-        {'title': f'Message type: {_dhcpv6_message_name(msg_type)} ({msg_type})', 'offset': offset, 'length': 1 if len(payload) >= 1 else 0},
-        {'title': f'Transaction ID: 0x{xid:06x}', 'offset': offset + 1, 'length': 3 if len(payload) >= 4 else 0},
-    ]
+def _dhcpv6_parse_option_nodes(data: bytes, base_offset: int) -> List[Dict[str, Any]]:
+    def _ascii_text(raw_value: bytes) -> str:
+        try:
+            text = raw_value.decode(errors='ignore').strip()
+        except Exception:
+            text = ''
+        return text
 
-    cursor = 4
-    while cursor + 4 <= len(payload):
-        option_code = int.from_bytes(payload[cursor:cursor + 2], 'big')
-        option_length = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+    def _parse_name_list(raw_value: bytes, start_offset: int) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        pos = 0
+        idx = 1
+        while pos + 2 <= len(raw_value):
+            name_len = int.from_bytes(raw_value[pos:pos + 2], 'big')
+            name_start = pos + 2
+            name_end = name_start + name_len
+            if name_end > len(raw_value):
+                break
+            name_bytes = raw_value[name_start:name_end]
+            name_text = _ascii_text(name_bytes)
+            if not name_text and name_bytes:
+                name_text = name_bytes.hex()
+            items.append({
+                'title': f'Class Data {idx}: {name_text}',
+                'offset': start_offset + pos,
+                'length': 2 + name_len,
+            })
+            pos = name_end
+            idx += 1
+        return items
+
+    def _parse_nested_options(raw_value: bytes, start_offset: int) -> List[Dict[str, Any]]:
+        return _dhcpv6_parse_option_nodes(raw_value, start_offset)
+
+    options: List[Dict[str, Any]] = []
+    cursor = 0
+    while cursor + 4 <= len(data):
+        option_code = int.from_bytes(data[cursor:cursor + 2], 'big')
+        option_length = int.from_bytes(data[cursor + 2:cursor + 4], 'big')
         value_start = cursor + 4
         value_end = value_start + option_length
-        if value_end > len(payload):
+        if value_end > len(data):
             break
 
-        option_offset = offset + cursor
-        option_value_offset = offset + value_start
-        option_value = payload[value_start:value_end]
+        option_offset = base_offset + cursor
+        option_value_offset = base_offset + value_start
+        option_value = data[value_start:value_end]
         option_name = _dhcpv6_option_name(option_code)
         option_children: List[Dict[str, Any]] = [
-            {'title': f'Option: {option_name} ({option_code})', 'offset': option_offset, 'length': 2},
+            {'title': f'Option Code: {option_name} ({option_code})', 'offset': option_offset, 'length': 2},
             {'title': f'Length: {option_length}', 'offset': option_offset + 2, 'length': 2},
         ]
 
@@ -17508,32 +18338,116 @@ def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
                 ])
             elif duid_type == 4 and len(option_value) >= 18:
                 option_children.append({'title': f'UUID: {option_value[2:18].hex()}', 'offset': option_value_offset + 2, 'length': 16})
+        elif option_code in {3, 4, 25}:
+            if len(option_value) >= 4:
+                iaid = int.from_bytes(option_value[0:4], 'big')
+                option_children.append({'title': f'IAID: 0x{iaid:08x}', 'offset': option_value_offset, 'length': 4})
+            if option_code in {3, 25} and len(option_value) >= 12:
+                t1 = int.from_bytes(option_value[4:8], 'big')
+                t2 = int.from_bytes(option_value[8:12], 'big')
+                option_children.append({'title': f'T1: {t1}', 'offset': option_value_offset + 4, 'length': 4})
+                option_children.append({'title': f'T2: {t2}', 'offset': option_value_offset + 8, 'length': 4})
+                if len(option_value) > 12:
+                    nested = _parse_nested_options(option_value[12:], option_value_offset + 12)
+                    if nested:
+                        option_children.append({'title': 'Options', 'offset': option_value_offset + 12, 'length': len(option_value) - 12, 'children': nested})
+            elif option_code == 4 and len(option_value) > 4:
+                nested = _parse_nested_options(option_value[4:], option_value_offset + 4)
+                if nested:
+                    option_children.append({'title': 'Options', 'offset': option_value_offset + 4, 'length': len(option_value) - 4, 'children': nested})
+        elif option_code == 5 and len(option_value) >= 24:
+            ipv6_addr = _ipv6_address_text(option_value[0:16])
+            preferred = int.from_bytes(option_value[16:20], 'big')
+            valid = int.from_bytes(option_value[20:24], 'big')
+            option_children.extend([
+                {'title': f'IPv6 address: {ipv6_addr}', 'offset': option_value_offset, 'length': 16},
+                {'title': f'Preferred lifetime: {preferred}', 'offset': option_value_offset + 16, 'length': 4},
+                {'title': f'Valid lifetime: {valid}', 'offset': option_value_offset + 20, 'length': 4},
+            ])
+            if len(option_value) > 24:
+                nested = _parse_nested_options(option_value[24:], option_value_offset + 24)
+                if nested:
+                    option_children.append({'title': 'Options', 'offset': option_value_offset + 24, 'length': len(option_value) - 24, 'children': nested})
         elif option_code == 6:
             for index in range(0, len(option_value), 2):
                 if index + 2 > len(option_value):
                     break
                 requested_code = int.from_bytes(option_value[index:index + 2], 'big')
-                option_children.append(
-                    {
-                        'title': f'Requested Option code: {_dhcpv6_requested_option_name(requested_code)} ({requested_code})',
-                        'offset': option_value_offset + index,
-                        'length': 2,
-                    }
-                )
+                option_children.append({
+                    'title': f'Requested Option: {_dhcpv6_requested_option_name(requested_code)} ({requested_code})',
+                    'offset': option_value_offset + index,
+                    'length': 2,
+                })
+        elif option_code == 7 and len(option_value) >= 1:
+            preference = int(option_value[0])
+            option_children.append({'title': f'Preference: {preference}', 'offset': option_value_offset, 'length': 1})
         elif option_code == 8:
             elapsed = int.from_bytes(option_value[:2], 'big') if len(option_value) >= 2 else 0
             option_children.append({'title': f'Elapsed time: {elapsed * 10}ms', 'offset': option_value_offset, 'length': min(2, len(option_value))})
-        elif option_code == 23:
+        elif option_code == 9:
+            option_children.append({'title': f'Relay Message: {option_value.hex()}', 'offset': option_value_offset, 'length': len(option_value)})
+        elif option_code == 11:
+            option_children.append({'title': f'Authentication Data: {option_value.hex()}', 'offset': option_value_offset, 'length': len(option_value)})
+        elif option_code == 12 and len(option_value) >= 16:
+            option_children.append({'title': f'Server unicast address: {_ipv6_address_text(option_value[:16])}', 'offset': option_value_offset, 'length': 16})
+        elif option_code == 13 and len(option_value) >= 2:
+            status_code = int.from_bytes(option_value[:2], 'big')
+            status_text = _dhcpv6_status_name(status_code)
+            option_children.extend([
+                {'title': f'Status Code: {status_text} ({status_code})', 'offset': option_value_offset, 'length': 2},
+                {'title': f'Status Message: {_ascii_text(option_value[2:])}', 'offset': option_value_offset + 2, 'length': max(0, len(option_value) - 2)},
+            ])
+        elif option_code == 14:
+            option_children.append({'title': 'Rapid Commit', 'offset': option_value_offset, 'length': len(option_value)})
+        elif option_code == 15:
+            option_children.extend(_parse_name_list(option_value, option_value_offset))
+        elif option_code == 16 and len(option_value) >= 4:
+            enterprise_id = int.from_bytes(option_value[:4], 'big')
+            option_children.append({'title': f'Enterprise ID: {enterprise_id}', 'offset': option_value_offset, 'length': 4})
+            option_children.extend(_parse_name_list(option_value[4:], option_value_offset + 4))
+        elif option_code == 17 and len(option_value) >= 4:
+            enterprise_id = int.from_bytes(option_value[:4], 'big')
+            option_children.append({'title': f'Enterprise ID: {enterprise_id}', 'offset': option_value_offset, 'length': 4})
+            if len(option_value) > 4:
+                option_children.append({'title': f'Option Data: {option_value[4:].hex()}', 'offset': option_value_offset + 4, 'length': len(option_value) - 4})
+        elif option_code == 18:
+            text = _ascii_text(option_value) or option_value.hex()
+            option_children.append({'title': f'Interface-ID: {text}', 'offset': option_value_offset, 'length': len(option_value)})
+        elif option_code == 19 and len(option_value) >= 1:
+            option_children.append({'title': f'Reconfigure Message: {_dhcpv6_message_name(int(option_value[0]))} ({int(option_value[0])})', 'offset': option_value_offset, 'length': 1})
+        elif option_code == 20:
+            option_children.append({'title': 'Reconfigure Accept', 'offset': option_value_offset, 'length': len(option_value)})
+        elif option_code in {21, 22, 23, 24}:
             for index in range(0, len(option_value), 16):
-                if index + 16 > len(option_value):
+                chunk = option_value[index:index + 16]
+                if not chunk:
                     break
-                option_children.append(
-                    {
-                        'title': f' {1 + (index // 16)} DNS server address: {_ipv6_address_text(option_value[index:index + 16])}',
-                        'offset': option_value_offset + index,
-                        'length': 16,
-                    }
-                )
+                try:
+                    text = _ipv6_address_text(chunk) if len(chunk) == 16 else chunk.decode(errors='ignore')
+                except Exception:
+                    text = chunk.hex()
+                label = {
+                    21: 'SIP server domain',
+                    22: 'SIP server address',
+                    23: 'DNS server address',
+                    24: 'Domain search item',
+                }.get(option_code, 'Value')
+                option_children.append({'title': f'{label}: {text}', 'offset': option_value_offset + index, 'length': len(chunk)})
+        elif option_code == 26 and len(option_value) >= 25:
+            preferred = int.from_bytes(option_value[0:4], 'big')
+            valid = int.from_bytes(option_value[4:8], 'big')
+            prefix_len = int(option_value[8])
+            prefix = _ipv6_address_text(option_value[9:25])
+            option_children.extend([
+                {'title': f'Preferred lifetime: {preferred}', 'offset': option_value_offset, 'length': 4},
+                {'title': f'Valid lifetime: {valid}', 'offset': option_value_offset + 4, 'length': 4},
+                {'title': f'IPv6 prefix length: {prefix_len}', 'offset': option_value_offset + 8, 'length': 1},
+                {'title': f'IPv6 prefix: {prefix}', 'offset': option_value_offset + 9, 'length': 16},
+            ])
+            if len(option_value) > 25:
+                nested = _parse_nested_options(option_value[25:], option_value_offset + 25)
+                if nested:
+                    option_children.append({'title': 'Options', 'offset': option_value_offset + 25, 'length': len(option_value) - 25, 'children': nested})
         elif option_code == 39:
             option_children.append(
                 {
@@ -17555,10 +18469,10 @@ def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
                     ],
                 }
             )
-        else:
+        elif option_value:
             option_children.append({'title': f'Value: {option_value.hex()}', 'offset': option_value_offset, 'length': len(option_value)})
 
-        children.append(
+        options.append(
             {
                 'title': option_name,
                 'offset': option_offset,
@@ -17567,6 +18481,17 @@ def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
             }
         )
         cursor = value_end
+    return options
+
+
+def _dhcpv6_section(payload: bytes, offset: int) -> Dict[str, Any]:
+    msg_type = int(payload[0]) if len(payload) >= 1 else 0
+    xid = int.from_bytes(payload[1:4], 'big') if len(payload) >= 4 else 0
+    children: List[Dict[str, Any]] = [
+        {'title': f'Message type: {_dhcpv6_message_name(msg_type)} ({msg_type})', 'offset': offset, 'length': 1 if len(payload) >= 1 else 0},
+        {'title': f'Transaction ID: 0x{xid:06x}', 'offset': offset + 1, 'length': 3 if len(payload) >= 4 else 0},
+    ]
+    children.extend(_dhcpv6_parse_option_nodes(payload[4:], offset + 4))
 
     return {
         'title': 'DHCPv6',
@@ -20316,6 +21241,7 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
         })
 
     pos = 0
+    client_hello_version: int | None = None
     while pos + 5 <= len(tls_bytes):
         content_type = int(tls_bytes[pos])
         version = int.from_bytes(tls_bytes[pos + 1:pos + 3], 'big')
@@ -20412,6 +21338,7 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
 
                 if hs_type == 1 and len(hs_body) >= 34:
                     hello_version = int.from_bytes(hs_body[cursor:cursor + 2], 'big')
+                    client_hello_version = hello_version
                     handshake_children.append({'title': f'Version: {tls_clienthello_version_name(hello_version)} (0x{hello_version:04x})', 'offset': hs_abs + 4 + cursor, 'length': 2})
                     cursor += 2
                     random_bytes = hs_body[cursor:cursor + 32]
@@ -20631,7 +21558,10 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
                 hs_pos += hs_total
 
             if hs_names:
-                record_title = f'{record_version_name(version)} Record Layer: Handshake Protocol: {", ".join(hs_names)}'
+                if hs_names == ['Client Hello'] and client_hello_version is not None:
+                    record_title = f'{version_name(client_hello_version)} Record Layer: Handshake Protocol: {", ".join(hs_names)}'
+                else:
+                    record_title = f'{record_version_name(version)} Record Layer: Handshake Protocol: {", ".join(hs_names)}'
         elif content_type == 20 and len(record_payload) >= 1:
             if int(record_payload[0]) == 1:
                 record_title = f'{record_version_name(version)} Record Layer: Change Cipher Spec Protocol: Change Cipher Spec'
@@ -20679,25 +21609,32 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
 def _mpls_section(payload: bytes, offset: int) -> Dict[str, Any]:
     if len(payload) < 4:
         return {'title': 'MPLS (incomplete)', 'offset': offset, 'length': len(payload), 'children': []}
-    
+
     label_exp_s_ttl = int.from_bytes(payload[0:4], 'big')
     label = (label_exp_s_ttl >> 12) & 0xFFFFF
     exp = (label_exp_s_ttl >> 9) & 0x7
     s_bit = (label_exp_s_ttl >> 8) & 1
     ttl = label_exp_s_ttl & 0xFF
-    
-    label_bin = format((label_exp_s_ttl >> 12), '020b')
-    exp_bin = format((label_exp_s_ttl >> 9) & 0x7, '03b')
-    s_bin = format((label_exp_s_ttl >> 8) & 1, '01b')
-    ttl_bin = format(ttl, '08b')
-    
+
+    def _mpls_bit_line(field_start_bit: int, field_width: int, field_value: int) -> str:
+        bits = ['.'] * 32
+        value_bits = format(field_value, f'0{field_width}b')
+        for idx, bit_char in enumerate(value_bits):
+            bits[field_start_bit + idx] = bit_char
+        return ' '.join(''.join(bits[i:i + 4]) for i in range(0, 32, 4))
+
+    label_bits = _mpls_bit_line(0, 20, label)
+    exp_bits = _mpls_bit_line(20, 3, exp)
+    s_bits = _mpls_bit_line(23, 1, s_bit)
+    ttl_bits = _mpls_bit_line(24, 8, ttl)
+
     children = [
-        {'title': f'{label_bin} .... .... .... = MPLS Label: {label} (0x{label:05x})', 'offset': offset, 'length': 3},
-        {'title': f'.... {exp_bin}. .... .... .... = MPLS Experimental Bits: {exp}', 'offset': offset + 2, 'length': 1},
-        {'title': f'.... ...{s_bin} .... .... .... = MPLS Bottom Of Label Stack: {s_bit}', 'offset': offset + 2, 'length': 1},
-        {'title': f'.... .... {ttl_bin} = MPLS TTL: {ttl}', 'offset': offset + 3, 'length': 1},
+        {'title': f'{label_bits} = MPLS Label: {label} (0x{label:05x})', 'offset': offset, 'length': 3},
+        {'title': f'{exp_bits} = MPLS Experimental Bits: {exp}', 'offset': offset, 'length': 4},
+        {'title': f'{s_bits} = MPLS Bottom Of Label Stack: {s_bit}', 'offset': offset, 'length': 4},
+        {'title': f'{ttl_bits} = MPLS TTL: {ttl}', 'offset': offset, 'length': 4},
     ]
-    
+
     return {
         'title': f'MultiProtocol Label Switching Header, Label: {label}, Exp: {exp}, S: {s_bit}, TTL: {ttl}',
         'offset': offset,
@@ -20921,8 +21858,9 @@ def _ospf_section(payload: bytes, offset: int) -> Dict[str, Any]:
             {'title': f'Designated Router: {designated}', 'offset': body_offset + 12, 'length': 4},
             {'title': f'Backup Designated Router: {backup}', 'offset': body_offset + 16, 'length': 4},
         ]
-        for neighbor in neighbors:
-            hello_children.append({'title': f'Active Neighbor: {neighbor}'})
+        for idx, neighbor in enumerate(neighbors):
+            neighbor_offset = body_offset + 20 + (idx * 4)
+            hello_children.append({'title': f'Active Neighbor: {neighbor}', 'offset': neighbor_offset, 'length': 4})
         children.append({'title': 'OSPF Hello Packet', 'offset': body_offset, 'length': len(body), 'children': hello_children})
 
     elif msg_type == 2 and len(body) >= 8:
@@ -21224,12 +22162,54 @@ def _cdp_section(payload: bytes, offset: int) -> Dict[str, Any]:
                     ]})
                     record_pos = addr_len_offset + 2 + addr_len
             children.append({'title': 'Addresses', 'offset': offset + pos, 'length': tlv_len, 'children': addr_children})
+        elif tlv_type == 0x0008:
+            hello_children = [
+                {'title': 'Type: Protocol Hello (0x0008)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+            ]
+            oui = tlv_value[0:3] if len(tlv_value) >= 3 else b''
+            proto_id = int.from_bytes(tlv_value[3:5], 'big') if len(tlv_value) >= 5 else 0
+            cluster_master = _ipv4_text(tlv_value[5:9]) if len(tlv_value) >= 9 else '0.0.0.0'
+            unknown_ip = _ipv4_text(tlv_value[9:13]) if len(tlv_value) >= 13 else '0.0.0.0'
+            version_value = int(tlv_value[13]) if len(tlv_value) >= 14 else 0
+            sub_version = int(tlv_value[14]) if len(tlv_value) >= 15 else 0
+            status = int(tlv_value[15]) if len(tlv_value) >= 16 else 0
+            unknown_flag = int(tlv_value[16]) if len(tlv_value) >= 17 else 0
+            commander_mac = ':'.join(f'{b:02x}' for b in tlv_value[17:23]) if len(tlv_value) >= 23 else ''
+            switch_mac = ':'.join(f'{b:02x}' for b in tlv_value[23:29]) if len(tlv_value) >= 29 else ''
+            tail_unknown = int(tlv_value[29]) if len(tlv_value) >= 30 else 0
+            management_vlan = int.from_bytes(tlv_value[30:32], 'big') if len(tlv_value) >= 32 else 0
+            protocol_name = {0x0112: 'Cluster Management'}.get(proto_id, f'0x{proto_id:04x}')
+            hello_children.extend([
+                {'title': f'OUI: 0x{oui.hex()} (Cisco)' if len(oui) == 3 else f'OUI: 0x{oui.hex()}', 'offset': offset + pos + 4, 'length': 3},
+                {'title': f'Protocol ID: 0x{proto_id:04x} ({protocol_name})', 'offset': offset + pos + 7, 'length': 2},
+                {'title': f'Cluster Master IP: {cluster_master}', 'offset': offset + pos + 9, 'length': 4},
+                {'title': f'UNKNOWN (IP?): {unknown_ip}', 'offset': offset + pos + 13, 'length': 4},
+                {'title': f'Version?: 0x{version_value:02x}', 'offset': offset + pos + 17, 'length': 1},
+                {'title': f'Sub Version?: 0x{sub_version:02x}', 'offset': offset + pos + 18, 'length': 1},
+                {'title': f'Status?: 0x{status:02x}', 'offset': offset + pos + 19, 'length': 1},
+                {'title': f'UNKNOWN: 0x{unknown_flag:02x}', 'offset': offset + pos + 20, 'length': 1},
+                {'title': f'Cluster Commander MAC: {commander_mac}', 'offset': offset + pos + 21, 'length': 6},
+                {'title': f'Switch\'s MAC: {switch_mac}', 'offset': offset + pos + 27, 'length': 6},
+                {'title': f'UNKNOWN: 0x{tail_unknown:02x}', 'offset': offset + pos + 33, 'length': 1},
+                {'title': f'Management VLAN: {management_vlan}', 'offset': offset + pos + 34, 'length': 2},
+            ])
+            if len(tlv_value) > 32:
+                hello_children.append({'title': f'Padding: {tlv_value[32:].hex()}', 'offset': offset + pos + 36, 'length': max(0, len(tlv_value) - 32)})
+            children.append({'title': f'Protocol Hello: {protocol_name}', 'offset': offset + pos, 'length': tlv_len, 'children': hello_children})
         elif tlv_type == 0x0003:
             value = tlv_value.decode(errors='ignore').rstrip('\x00')
             children.append({'title': f'Port ID: {value}', 'offset': offset + pos, 'length': tlv_len, 'children': [
                 {'title': 'Type: Port ID (0x0003)', 'offset': offset + pos, 'length': 2},
                 {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
                 {'title': f'Sent through Interface: {value}', 'offset': offset + pos + 4, 'length': len(tlv_value)},
+            ]})
+        elif tlv_type == 0x000a and len(tlv_value) >= 2:
+            native_vlan = int.from_bytes(tlv_value[:2], 'big')
+            children.append({'title': f'Native VLAN: {native_vlan}', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Native VLAN (0x000a)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Native VLAN: {native_vlan}', 'offset': offset + pos + 4, 'length': 2},
             ]})
         elif tlv_type == 0x0004 and len(tlv_value) >= 4:
             capabilities = int.from_bytes(tlv_value[0:4], 'big')
@@ -21247,6 +22227,51 @@ def _cdp_section(payload: bytes, offset: int) -> Dict[str, Any]:
                 {'title': f'Capabilities: 0x{capabilities:08x}', 'offset': capabilities_offset, 'length': 4, 'children': capabilities_children},
             ]
             children.append({'title': 'Capabilities', 'offset': offset + pos, 'length': tlv_len, 'children': cap_children})
+        elif tlv_type == 0x0012 and len(tlv_value) >= 1:
+            trust_bitmap = int(tlv_value[0])
+            children.append({'title': f'Trust Bitmap: 0x{trust_bitmap:02x}', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Trust Bitmap (0x0012)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Trust Bitmap: {trust_bitmap:02x}', 'offset': offset + pos + 4, 'length': 1},
+            ]})
+        elif tlv_type == 0x0013 and len(tlv_value) >= 1:
+            untrusted_cos = int(tlv_value[0])
+            children.append({'title': f'Untrusted Port CoS: 0x{untrusted_cos:02x}', 'offset': offset + pos, 'length': tlv_len, 'children': [
+                {'title': 'Type: Untrusted Port CoS (0x0013)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+                {'title': f'Untrusted Port CoS: {untrusted_cos:02x}', 'offset': offset + pos + 4, 'length': 1},
+            ]})
+        elif tlv_type == 0x0016:
+            addr_children = [
+                {'title': 'Type: Management Addresses (0x0016)', 'offset': offset + pos, 'length': 2},
+                {'title': f'Length: {tlv_len}', 'offset': offset + pos + 2, 'length': 2},
+            ]
+            if len(tlv_value) >= 4:
+                number = int.from_bytes(tlv_value[0:4], 'big')
+                addr_children.append({'title': f'Number of addresses: {number}', 'offset': offset + pos + 4, 'length': 4})
+                record_pos = 4
+                for _ in range(number):
+                    if record_pos + 4 > len(tlv_value):
+                        break
+                    proto_type = tlv_value[record_pos]
+                    proto_len = tlv_value[record_pos + 1]
+                    proto = tlv_value[record_pos + 2:record_pos + 2 + proto_len]
+                    addr_len_offset = record_pos + 2 + proto_len
+                    if addr_len_offset + 2 > len(tlv_value):
+                        break
+                    addr_len = int.from_bytes(tlv_value[addr_len_offset:addr_len_offset + 2], 'big')
+                    addr_value = tlv_value[addr_len_offset + 2:addr_len_offset + 2 + addr_len]
+                    ip_addr = '.'.join(str(b) for b in addr_value) if len(addr_value) == 4 else addr_value.hex()
+                    record_offset = offset + pos + 4 + record_pos
+                    addr_children.append({'title': f'IP address: {ip_addr}', 'offset': record_offset, 'length': 1 + 1 + proto_len + 2 + addr_len, 'children': [
+                        {'title': f'Protocol type: NLPID (0x{proto_type:02x})', 'offset': record_offset, 'length': 1},
+                        {'title': f'Protocol length: {proto_len}', 'offset': record_offset + 1, 'length': 1},
+                        {'title': 'Protocol: IP' if proto == b'\\xcc' else f'Protocol: {proto.hex()}', 'offset': record_offset + 2, 'length': proto_len},
+                        {'title': f'Address length: {addr_len}', 'offset': record_offset + 2 + proto_len, 'length': 2},
+                        {'title': f'IP Address: {ip_addr}', 'offset': record_offset + 4 + proto_len, 'length': addr_len},
+                    ]})
+                    record_pos = addr_len_offset + 2 + addr_len
+            children.append({'title': 'Management Addresses', 'offset': offset + pos, 'length': tlv_len, 'children': addr_children})
         elif tlv_type == 0x0009:
             value = tlv_value.decode(errors='ignore').rstrip('\x00')
             children.append({'title': f'VTP Management Domain: {value}', 'offset': offset + pos, 'length': tlv_len, 'children': [
@@ -21608,6 +22633,7 @@ def _l2tpv3_section(payload: bytes, offset: int) -> Dict[str, Any]:
         if len(payload) >= 24:
             avp_flags = int.from_bytes(payload[16:18], 'big')
             avp_len = avp_flags & 0x03FF
+            avp_len_bits = format(avp_len, '010b')
             vendor_id = int.from_bytes(payload[18:20], 'big') if len(payload) >= 20 else 0
             avp_type = int.from_bytes(payload[20:22], 'big') if len(payload) >= 22 else 0
             message_type = int.from_bytes(payload[22:24], 'big') if len(payload) >= 24 else 0
@@ -21622,7 +22648,7 @@ def _l2tpv3_section(payload: bytes, offset: int) -> Dict[str, Any]:
             avp_children = [
                 {'title': f'1... .... .... .... = Mandatory: {"True" if avp_flags & 0x8000 else "False"}', 'offset': offset + 16, 'length': 2},
                 {'title': f'.{1 if avp_flags & 0x4000 else 0}.. .... .... .... = Hidden: {"True" if avp_flags & 0x4000 else "False"}', 'offset': offset + 16, 'length': 2},
-                {'title': f'.... ..{format(avp_len, "08b")[0:2]} {format(avp_len, "08b")[2:]} = Length: {avp_len}', 'offset': offset + 16, 'length': 2},
+                {'title': f'.... ..{avp_len_bits[:2]} {avp_len_bits[2:6]} {avp_len_bits[6:]} = Control Message AVP Length: {avp_len}', 'offset': offset + 16, 'length': 2},
                 {'title': f'Vendor ID: {"Reserved" if vendor_id == 0 else vendor_id} ({vendor_id})', 'offset': offset + 18, 'length': 2},
                 {'title': f'AVP Type: {"Control Message" if avp_type == 0 else avp_type} ({avp_type})', 'offset': offset + 20, 'length': 2},
                 {'title': f'Message Type: {message_name} ({message_type})', 'offset': offset + 22, 'length': 2},

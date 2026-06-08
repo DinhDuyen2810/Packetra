@@ -8696,7 +8696,7 @@ class ApplicationWindow(QMainWindow):
         metadata = getattr(record, 'metadata', {}) or {}
         if metadata.get('tcp_stream_index') is not None or protocol == 'TCP':
             candidates.append('TCP')
-        if metadata.get('udp_stream_index') is not None or protocol == 'UDP':
+        if metadata.get('udp_stream_index') is not None or protocol.startswith('UDP'):
             candidates.append('UDP')
         if raw is not None and raw.haslayer(IP):
             candidates.append('IPv4')

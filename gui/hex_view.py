@@ -310,7 +310,6 @@ class PacketBytesView(QWidget):
             'tcp_reassembled': PacketHexView(),
             'radius_eap_reassembled': PacketHexView(),
             'radius_eap_tls_reassembled': PacketHexView(),
-            'decoded_utf8': PacketHexView(),
             'http_dechunked': PacketHexView(),
             'zabbix_uncompressed': PacketHexView(),
         }
@@ -406,19 +405,6 @@ class PacketBytesView(QWidget):
                 sources.append(
                     ('radius_eap_tls_reassembled', f'Reassembled EAP-TLS ({len(eap_tls_reassembled)} bytes)', eap_tls_reassembled)
                 )
-
-        decoded_utf8 = b''
-        http_body = bytes(metadata.get('http_body', b'') or b'')
-        if http_body:
-            try:
-                http_body.decode('utf-8', errors='strict')
-                decoded_utf8 = http_body
-            except Exception:
-                decoded_utf8 = b''
-        if decoded_utf8 and protocol_name != 'IPP':
-            sources.append(
-                ('decoded_utf8', f'Decoded UTF-8 text ({len(decoded_utf8)} bytes)', decoded_utf8)
-            )
 
         dechunked_body = bytes(metadata.get('http_dechunked_body', b'') or b'')
         if dechunked_body:
