@@ -157,8 +157,8 @@ class PacketDetailsTree(QTreeWidget):
                     if not comment_lines:
                         comment_lines = [packet_comment]
                     comment_children = []
-                    for idx, line in enumerate(comment_lines, start=1):
-                        comment_children.append({'title': f'Line {idx}: {line}'})
+                    for line in comment_lines:
+                        comment_children.append({'title': line})
                     comment_node = {
                         'title': 'Packet Comment',
                         'children': comment_children,

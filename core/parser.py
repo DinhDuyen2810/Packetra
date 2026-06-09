@@ -56,6 +56,8 @@ class PacketParser:
         self.ftp_control_streams = {}
         self.ftp_data_sessions = {}
         self.cflow_template_cache = {}
+        self.smb2_pending_requests = {}
+        self.smb2_preauth_hashes = {}
         self.ipv4_fragment_state = {}
         self.ipv6_fragment_state = {}
         self.layer_stream_maps = {
@@ -199,7 +201,6 @@ class PacketParser:
             if not any(str(layer).upper().startswith('DHCP6') or str(layer).upper() == 'DHCPV6' for layer in layers):
                 layers.append('DHCPV6')
         self._update_ldap_stream_reassembly(packet, protocol, metadata)
-        self._update_ldap_request_response_metadata(packet, protocol, metadata, int(number), epoch_time)
         info = self._build_info(packet, protocol, metadata)
 
         if sport is not None or dport is not None:
@@ -226,6 +227,8 @@ class PacketParser:
         self._update_h264_ts_reassembly(record, packet)
 
         self._track_transport_record(record)
+        self._update_kerberos_record_metadata(record)
+        self._update_ldap_request_response_metadata(packet, protocol, record.metadata, int(number), epoch_time, record)
         self._update_http_metadata(record)
         self._update_smtp_metadata(record)
         self._update_imap_metadata(record)
@@ -239,6 +242,7 @@ class PacketParser:
         self._update_icmpv6_echo_metadata(packet, record)
         self._update_dns_metadata(packet, record)
         self._update_radius_metadata(packet, record)
+        self._update_smb2_metadata(record)
         self._update_dcerpc_record_metadata(record)
         self._register_ip_fragment_record(packet, record)
 
@@ -301,7 +305,6 @@ class PacketParser:
             if gre_endpoints is not None:
                 src, dst = gre_endpoints
         if protocol == 'TCP':
-            self._update_ldap_request_response_metadata(packet, protocol, metadata, int(number), epoch_time)
             info = self._build_info(packet, protocol, metadata)
         else:
             info = self._quick_info(packet, protocol, effective_tcp, effective_udp, metadata)
@@ -328,8 +331,11 @@ class PacketParser:
             iface=iface,
         )
         self._track_transport_record(record)
+        self._update_kerberos_record_metadata(record)
+        self._update_ldap_request_response_metadata(packet, protocol, record.metadata, int(number), epoch_time, record)
         if protocol in {'SIP', 'SIP/SDP'}:
             self._update_sip_metadata(record)
+        self._update_smb2_metadata(record)
         self._update_dcerpc_record_metadata(record)
         self._register_ip_fragment_record(packet, record)
         return record
@@ -437,6 +443,8 @@ class PacketParser:
         if packet.haslayer('CLDAP'):
             return 'CLDAP'
         if packet.haslayer('SMB2_Header'):
+            if bool(metadata.get('tcp_is_retransmission', False)):
+                return 'TCP'
             if tcp_layer is not None:
                 embedded = self._dcerpc_embedded_payload_info(self._payload_bytes(packet), metadata)
                 if embedded is not None:
@@ -512,6 +520,8 @@ class PacketParser:
                 if isinstance(nbss_info, dict) and bool(nbss_info.get('is_fragment', False)):
                     metadata['nbss'] = nbss_info
                     return 'NBSS'
+                if bool(metadata.get('tcp_is_retransmission', False)):
+                    return 'TCP'
                 if packet.haslayer('SMB2_Header'):
                     return 'SMB2'
                 if packet.haslayer('SMB_Header'):
@@ -2223,6 +2233,8 @@ class PacketParser:
                     if self._tcp_seq_geq(seg_ack, end_seq_raw):
                         is_spurious_retransmission = True
                         break
+            if is_spurious_retransmission and (packet.haslayer('SMB2_Header') or packet.haslayer('SMB_Header')):
+                is_spurious_retransmission = False
             if is_spurious_retransmission:
                 metadata['tcp_is_spurious_retransmission'] = True
             if is_out_of_order:
@@ -2497,6 +2509,60 @@ class PacketParser:
 
         state.setdefault('records', []).append(record)
         record.metadata[f'{proto.lower()}_completeness_flags'] = int(state.get('completeness_flags', 0) or 0)
+
+    def _update_kerberos_record_metadata(self, record: PacketRecord) -> None:
+        metadata = getattr(record, 'metadata', {}) or {}
+        packet = getattr(record, 'raw', None)
+        if not isinstance(metadata, dict) or packet is None or str(getattr(record, 'protocol', '') or '').upper() != 'KRB5':
+            return
+        effective_ip = self._effective_ip_layer(packet)
+        if effective_ip is None and packet.haslayer(IPv6):
+            effective_ip = packet[IPv6]
+        tcp_layer = self._effective_tcp_layer(packet, effective_ip)
+        if effective_ip is None or tcp_layer is None:
+            return
+        src = str(effective_ip.src)
+        dst = str(effective_ip.dst)
+        sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+        dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+        stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
+        state = self.transport_stream_state.get(stream_key)
+        if state is None:
+            return
+        rec_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+        try:
+            payload = bytes.fromhex(rec_hex) if rec_hex else self._payload_bytes(packet)
+        except Exception:
+            payload = self._payload_bytes(packet)
+        if len(payload) < 5:
+            return
+        app_tag = int(payload[4]) & 0x1F
+        if app_tag not in {10, 11, 12, 13, 30}:
+            return
+        if app_tag in {10, 12}:
+            return
+        if metadata.get('kerberos_request_frame') is not None:
+            return
+        expected = {11: {'AS-REQ'}, 13: {'TGS-REQ'}, 30: {'AS-REQ', 'TGS-REQ'}}
+        for stream_record in reversed(state.get('records', [])[:-1]):
+            try:
+                if str(getattr(stream_record, 'protocol', '') or '').upper() != 'KRB5':
+                    continue
+                if int(getattr(stream_record, 'number', 0) or 0) >= int(getattr(record, 'number', 0) or 0):
+                    continue
+                if stream_record.metadata.get('kerberos_response_frame') is not None:
+                    continue
+                info_text = str(getattr(stream_record, 'info', '') or '').upper()
+                if not any(name in info_text for name in expected.get(app_tag, set())):
+                    continue
+                delta_us = round(max(0.0, float(getattr(record, 'epoch_time', 0.0) or 0.0) - float(getattr(stream_record, 'epoch_time', 0.0) or 0.0)) * 1_000_000.0, 3)
+                metadata['kerberos_request_frame'] = int(getattr(stream_record, 'number', 0) or 0)
+                metadata['kerberos_response_time_us'] = delta_us
+                stream_record.metadata['kerberos_response_frame'] = int(getattr(record, 'number', 0) or 0)
+                stream_record.metadata['kerberos_response_time_us'] = delta_us
+                break
+            except Exception:
+                continue
 
     def _safe_attr(self, obj, name, default=None):
         try:
@@ -6405,7 +6471,13 @@ class PacketParser:
         return len(payload) >= 4 and int(payload[0]) in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
 
     def _dhcpv6_client_id(self, payload: bytes) -> str:
-        cursor = 4
+        if len(payload) < 4:
+            return ''
+        msg_type = int(payload[0])
+        if msg_type in {12, 13} and len(payload) >= 34:
+            cursor = 34
+        else:
+            cursor = 4
         while cursor + 4 <= len(payload):
             option_code = int.from_bytes(payload[cursor:cursor + 2], 'big')
             option_length = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
@@ -6413,6 +6485,10 @@ class PacketParser:
             value_end = value_start + option_length
             if value_end > len(payload):
                 break
+            if option_code == 9:
+                nested = self._dhcpv6_client_id(payload[value_start:value_end])
+                if nested:
+                    return nested
             if option_code == 1:
                 return payload[value_start:value_end].hex()
             cursor = value_end
@@ -6423,8 +6499,31 @@ class PacketParser:
         if len(payload) < 4:
             return None
         msg_type = int(payload[0])
-        xid = int.from_bytes(payload[1:4], 'big')
-        info = f'{self._dhcpv6_message_name(msg_type)} XID: 0x{xid:06x}'
+        msg_name = self._dhcpv6_message_name(msg_type)
+        if msg_type in {12, 13} and len(payload) >= 34:
+            link_addr = str(ipaddress.IPv6Address(payload[2:18]))
+            nested = payload
+            cursor = 34
+            relay_msg = b''
+            while cursor + 4 <= len(payload):
+                option_code = int.from_bytes(payload[cursor:cursor + 2], 'big')
+                option_length = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+                value_start = cursor + 4
+                value_end = value_start + option_length
+                if value_end > len(payload):
+                    break
+                if option_code == 9:
+                    relay_msg = payload[value_start:value_end]
+                    nested = relay_msg
+                    break
+                cursor = value_end
+            inner_name = self._dhcpv6_message_name(int(nested[0])) if len(nested) >= 1 else ''
+            xid = int.from_bytes(nested[1:4], 'big') if len(nested) >= 4 else 0
+            relay_label = 'Relay-forw' if msg_type == 12 else 'Relay-reply'
+            info = f'{relay_label} L: {link_addr} {inner_name} XID: 0x{xid:06x}'
+        else:
+            xid = int.from_bytes(payload[1:4], 'big')
+            info = f'{msg_name} XID: 0x{xid:06x}'
         client_id = self._dhcpv6_client_id(payload)
         if client_id:
             info += f' CID: {client_id} '
@@ -6624,6 +6723,8 @@ class PacketParser:
         if packet.haslayer('CLDAP'):
             return 'CLDAP'
         if packet.haslayer('SMB2_Header'):
+            if bool(metadata.get('tcp_is_retransmission', False)):
+                return 'TCP'
             if effective_tcp is not None:
                 embedded = self._dcerpc_embedded_payload_info(self._payload_bytes(packet), metadata)
                 if embedded is not None:
@@ -6839,6 +6940,8 @@ class PacketParser:
                 if isinstance(nbss_info, dict) and bool(nbss_info.get('is_fragment', False)):
                     metadata['nbss'] = nbss_info
                     return 'NBSS'
+                if bool(metadata.get('tcp_is_retransmission', False)):
+                    return 'TCP'
                 if packet.haslayer('SMB2_Header'):
                     return 'SMB2'
                 if packet.haslayer('SMB_Header'):
@@ -7745,20 +7848,26 @@ class PacketParser:
         except Exception:
             return
 
-    def _update_ldap_request_response_metadata(self, packet, protocol: str, metadata: dict, frame_no: int, epoch_time: float) -> None:
+    def _update_ldap_request_response_metadata(self, packet, protocol: str, metadata: dict, frame_no: int, epoch_time: float, record: PacketRecord | None = None) -> None:
         try:
-            if str(protocol or '').upper() != 'LDAP':
+            proto_name = str(protocol or '').upper()
+            if proto_name not in {'LDAP', 'CLDAP'}:
                 return
             if not isinstance(metadata, dict):
                 return
-            stream_index = int(metadata.get('tcp_stream_index', -1) or -1)
+            if proto_name == 'CLDAP':
+                stream_index = int(metadata.get('udp_stream_index', -1))
+            else:
+                stream_index = int(metadata.get('tcp_stream_index', -1))
             if stream_index < 0:
                 return
             payload = b''
-            if packet is not None and packet.haslayer(TCP):
+            if proto_name == 'CLDAP' and packet is not None and packet.haslayer(UDP):
+                payload = bytes(getattr(packet[UDP], 'payload', b'') or b'')
+            elif packet is not None and packet.haslayer(TCP):
                 payload = bytes(getattr(packet[TCP], 'payload', b'') or b'')
             reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
-            if reassembled_hex:
+            if proto_name != 'CLDAP' and reassembled_hex:
                 try:
                     cand = bytes.fromhex(reassembled_hex)
                 except Exception:
@@ -7787,7 +7896,7 @@ class PacketParser:
             for mid, op, _ in msgs:
                 # request ops
                 if op in {0x60, 0x63, 0x66, 0x68, 0x6b, 0x6e}:
-                    self.ldap_pending_requests[(key_base, int(mid))] = (int(frame_no), float(epoch_time))
+                    self.ldap_pending_requests[(key_base, int(mid))] = (int(frame_no), float(epoch_time), record)
                     self.ldap_result_counts[(key_base, int(mid))] = 0
                     continue
                 if op in {0x64}:
@@ -7798,10 +7907,14 @@ class PacketParser:
                 if op in {0x61, 0x64, 0x65, 0x67, 0x69, 0x73}:
                     req = self.ldap_pending_requests.get((key_base, int(mid)))
                     if req is not None:
-                        req_frame, req_time = req
+                        req_frame, req_time = req[0], req[1]
+                        req_record = req[2] if len(req) > 2 else None
                         metadata['ldap_response_to_frame'] = int(req_frame)
                         metadata['ldap_response_time_us'] = max(0.0, (float(epoch_time) - float(req_time)) * 1_000_000.0)
                         metadata['ldap_result_total'] = int(self.ldap_result_counts.get((key_base, int(mid)), 0) or 0)
+                        if req_record is not None and isinstance(getattr(req_record, 'metadata', None), dict):
+                            req_record.metadata['ldap_response_frame'] = int(frame_no)
+                            req_record.metadata['ldap_response_time_us'] = metadata['ldap_response_time_us']
         except Exception:
             return
 
@@ -10026,7 +10139,19 @@ class PacketParser:
         stream_key = self._canonical_transport_key(src, sport, dst, dport, 'TCP')
         state = self.transport_stream_state.get(stream_key)
         if state is None:
-            return
+            state = self.transport_stream_state.setdefault(stream_key, {})
+
+        def _kerb_msg_type(buf: bytes) -> int:
+            try:
+                data = bytes(buf or b'')
+                if len(data) < 5:
+                    return -1
+                app_tag = int(data[4])
+                if app_tag in {0x6A, 0x6B, 0x6C, 0x6D, 0x7E}:
+                    return app_tag & 0x1F
+            except Exception:
+                return -1
+            return -1
 
         frame_number = int(metadata.get('frame_number', 0) or 0)
         dir_key = (src, sport, dst, dport)
@@ -10034,6 +10159,75 @@ class PacketParser:
         if not isinstance(pending_by_dir, dict):
             pending_by_dir = {}
             state['kerberos_pending_by_dir'] = pending_by_dir
+        pending_messages = state.setdefault('kerberos_request_messages', [])
+        if not isinstance(pending_messages, list):
+            pending_messages = []
+            state['kerberos_request_messages'] = pending_messages
+
+        def _record_message(msg_type: int) -> None:
+            nonlocal pending_messages
+            if msg_type in {10, 12}:
+                pending_messages.append({
+                    'frame': frame_number,
+                    'epoch': float(epoch_time),
+                    'dir': dir_key,
+                    'msg_type': msg_type,
+                })
+                return
+            if msg_type not in {11, 13, 30}:
+                return
+            expected = {11: {10}, 13: {12}, 30: {10, 12}}
+            req_idx = -1
+            req_entry = None
+            for idx, entry in enumerate(pending_messages):
+                if not isinstance(entry, dict):
+                    continue
+                if tuple(entry.get('dir', ())) == dir_key:
+                    continue
+                if int(entry.get('msg_type', -1) or -1) not in expected.get(msg_type, set()):
+                    continue
+                req_idx = idx
+                req_entry = entry
+                break
+            if req_entry is None:
+                for stream_record in reversed(state.get('records', []) or []):
+                    try:
+                        if int(getattr(stream_record, 'number', 0) or 0) >= frame_number:
+                            continue
+                        if str(getattr(stream_record, 'protocol', '') or '').upper() != 'KRB5':
+                            continue
+                        record_meta = getattr(stream_record, 'metadata', {}) or {}
+                        if record_meta.get('kerberos_response_frame') is not None:
+                            continue
+                        candidate_hex = str(record_meta.get('tcp_reassembled_data_hex', '') or '')
+                        candidate_payload = bytes.fromhex(candidate_hex) if candidate_hex else self._payload_bytes(getattr(stream_record, 'raw', None))
+                        candidate_type = _kerb_msg_type(candidate_payload)
+                        if candidate_type < 0:
+                            info_text = str(getattr(stream_record, 'info', '') or '').upper()
+                            if 'AS-REQ' in info_text:
+                                candidate_type = 10
+                            elif 'TGS-REQ' in info_text:
+                                candidate_type = 12
+                        if candidate_type not in expected.get(msg_type, set()):
+                            continue
+                        req_entry = {'frame': int(getattr(stream_record, 'number', 0) or 0), 'epoch': float(getattr(stream_record, 'epoch_time', 0.0) or 0.0)}
+                        break
+                    except Exception:
+                        continue
+            if req_entry is None:
+                return
+            req_frame = int(req_entry.get('frame', 0) or 0)
+            delta_us = round(max(0.0, float(epoch_time) - float(req_entry.get('epoch', epoch_time) or epoch_time)) * 1_000_000.0, 3)
+            metadata['kerberos_request_frame'] = req_frame
+            metadata['kerberos_response_time_us'] = delta_us
+            req_record = self._find_stream_record(state, req_frame)
+            if req_record is not None and isinstance(getattr(req_record, 'metadata', None), dict):
+                req_record.metadata['kerberos_response_frame'] = frame_number
+                req_record.metadata['kerberos_response_time_us'] = delta_us
+            try:
+                pending_messages.pop(req_idx)
+            except Exception:
+                pass
 
         pending = pending_by_dir.get(dir_key) if isinstance(pending_by_dir.get(dir_key), dict) else None
         segment = {
@@ -10049,7 +10243,10 @@ class PacketParser:
             record_mark = int.from_bytes(payload[0:4], 'big') & 0x7FFFFFFF
             total_len = 4 + record_mark
             # Kerberos TCP record mark must be sane and larger than current segment to require reassembly.
-            if record_mark <= 0 or total_len <= len(payload) or total_len > 262144:
+            if record_mark <= 0 or total_len > 262144:
+                return
+            if total_len <= len(payload):
+                _record_message(_kerb_msg_type(payload[:total_len]))
                 return
             pending_by_dir[dir_key] = {
                 'expected_total_len': int(total_len),
@@ -10085,6 +10282,9 @@ class PacketParser:
         metadata['tcp_reassembled_segments'] = segments
         metadata['tcp_reassembled_length'] = int(expected_total_len)
         metadata['tcp_reassembled_data_hex'] = bytes(full_payload).hex()
+
+        msg_type = _kerb_msg_type(full_payload)
+        _record_message(msg_type)
 
         for segment_entry in segments[:-1]:
             seg_frame = int(segment_entry.get('frame_number', 0) or 0)
@@ -12673,6 +12873,7 @@ class PacketParser:
                 3: 'Port unreachable',
                 4: 'Fragmentation needed',
                 5: 'Source route failed',
+                13: 'Communication administratively filtered',
             },
             11: {
                 0: 'Time to live exceeded in transit',
@@ -12877,6 +13078,63 @@ class PacketParser:
         record.metadata['radius_time_from_request_ms'] = max(0.0, float(delta_ms))
         if not pending:
             self.radius_request_pending.pop(req_key, None)
+
+    def _update_smb2_metadata(self, record: PacketRecord) -> None:
+        if str(getattr(record, 'protocol', '') or '') != 'SMB2':
+            return
+        metadata = getattr(record, 'metadata', None)
+        packet = getattr(record, 'raw', None)
+        if not isinstance(metadata, dict) or packet is None or not packet.haslayer(TCP):
+            return
+        if bool(metadata.get('tcp_is_retransmission', False)):
+            return
+        try:
+            payload = self._payload_bytes(packet)
+        except Exception:
+            payload = b''
+        if len(payload) < 68:
+            return
+        if payload[0:4] == b'\xfeSMB':
+            smb2 = payload
+        elif payload[4:8] == b'\xfeSMB':
+            smb2 = payload[4:]
+        else:
+            return
+        if len(smb2) < 64:
+            return
+        stream_index = int(metadata.get('tcp_stream_index', -1))
+        if stream_index < 0:
+            return
+        try:
+            import hashlib
+            prev_hash = self.smb2_preauth_hashes.get(stream_index, b'\x00' * 64)
+            new_hash = hashlib.sha512(prev_hash + smb2).digest()
+            self.smb2_preauth_hashes[stream_index] = new_hash
+            metadata['smb2_preauth_hash_hex'] = new_hash.hex()
+        except Exception:
+            pass
+        try:
+            cmd = int.from_bytes(smb2[12:14], 'little')
+            msg_id = int.from_bytes(smb2[24:32], 'little')
+            flags = int.from_bytes(smb2[16:20], 'little')
+        except Exception:
+            return
+        key = (stream_index, cmd, msg_id)
+        is_response = bool(flags & 0x1)
+        if not is_response:
+            self.smb2_pending_requests[key] = record
+            return
+        request_record = self.smb2_pending_requests.get(key)
+        if request_record is None:
+            return
+        request_record.metadata['smb2_response_frame'] = int(record.number)
+        metadata['smb2_request_frame'] = int(request_record.number)
+        try:
+            delta_us = round(max(0.0, float(record.epoch_time) - float(request_record.epoch_time)) * 1_000_000.0, 3)
+            request_record.metadata['smb2_response_time_us'] = delta_us
+            metadata['smb2_response_time_us'] = delta_us
+        except Exception:
+            pass
 
     def _to_text(self, value):
         if isinstance(value, bytes):
