@@ -58,6 +58,7 @@ class PacketParser:
         self.cflow_template_cache = {}
         self.smb2_pending_requests = {}
         self.smb2_preauth_hashes = {}
+        self.smb2_tree_paths = {}
         self.ipv4_fragment_state = {}
         self.ipv6_fragment_state = {}
         self.layer_stream_maps = {
@@ -84,6 +85,7 @@ class PacketParser:
         self.ldap_result_counts = {}
         self.ldap_stream_reassembly = {}
         self.h264_ts_stream_state = {}
+        self.rdpudp_tls_stream_versions = {}
         self.ws_col_info_cache = {}
 
     def set_capture_file_path(self, capture_file_path: str) -> None:
@@ -201,6 +203,15 @@ class PacketParser:
             if not any(str(layer).upper().startswith('DHCP6') or str(layer).upper() == 'DHCPV6' for layer in layers):
                 layers.append('DHCPV6')
         self._update_ldap_stream_reassembly(packet, protocol, metadata)
+        if protocol == 'TCP':
+            reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+            if reassembled_hex:
+                try:
+                    ldap_payload = bytes.fromhex(reassembled_hex)
+                except Exception:
+                    ldap_payload = b''
+                if ldap_payload and self._ldap_payload_is_complete(ldap_payload) and (self._looks_like_ldap_payload(ldap_payload) or self._contains_ldap_message(ldap_payload)):
+                    protocol = 'LDAP'
         info = self._build_info(packet, protocol, metadata)
 
         if sport is not None or dport is not None:
@@ -438,6 +449,8 @@ class PacketParser:
             if packet.haslayer(DNS):
                 metadata['icmpv6_contains_dns'] = True
             return 'ICMPv6'
+        if tcp_layer is not None and bool(metadata.get('tcp_is_retransmission', False)):
+            return 'TCP'
         if packet.haslayer('KerberosTCPHeader') or packet.haslayer('Kerberos'):
             return 'KRB5'
         if packet.haslayer('CLDAP'):
@@ -535,12 +548,15 @@ class PacketParser:
                 if packet.haslayer('KerberosTCPHeader') or packet.haslayer('Kerberos'):
                     return 'KRB5'
             ldap_ports = {389, 3268, 3269}
-            if (sport in ldap_ports or dport in ldap_ports) and (self._looks_like_ldap_payload(payload) or self._contains_ldap_message(payload)):
+            ldap_complete = self._ldap_payload_is_complete(payload)
+            if (sport in ldap_ports or dport in ldap_ports) and ldap_complete and (self._looks_like_ldap_payload(payload) or self._contains_ldap_message(payload)):
                 if stream_index >= 0:
                     self.ldap_stream_protocols.add(int(stream_index))
                 return 'LDAP'
             if sport in ldap_ports or dport in ldap_ports:
                 if stream_index >= 0 and stream_index in self.ldap_stream_protocols:
+                    if not ldap_complete and not str(metadata.get('tcp_reassembled_data_hex', '') or ''):
+                        return 'TCP'
                     return 'LDAP'
                 reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
                 if reassembled_hex:
@@ -670,6 +686,15 @@ class PacketParser:
                 rdpudp = self._rdpudp_payload_info(payload)
                 if isinstance(rdpudp, dict):
                     metadata['rdpudp'] = rdpudp
+                    tls_info = self._rdpudp_embedded_tls_info(payload, rdpudp, int(metadata.get('udp_stream_index', -1) or -1))
+                    if isinstance(tls_info, dict):
+                        metadata['tls_embedded_payload'] = bytes(tls_info.get('payload', b'') or b'')
+                        metadata['tls_embedded_offset'] = int(tls_info.get('offset', 0) or 0)
+                        metadata['tls_embedded_summaries'] = list(tls_info.get('summaries', []) or [])
+                        metadata['tls_embedded_sni'] = str(tls_info.get('sni', '') or '')
+                        metadata['tls_embedded_unknown_record'] = bool(tls_info.get('unknown_record', False))
+                        metadata['tls_embedded_transport'] = 'RDPUDP'
+                        return str(tls_info.get('protocol', 'TLSv1.2'))
                     return str(rdpudp.get('protocol', 'RDPUDP'))
             if sport == 4500 or dport == 4500:
                 udpencap = self._udpencap_payload_info(payload)
@@ -6722,6 +6747,8 @@ class PacketParser:
             return 'KRB5'
         if packet.haslayer('CLDAP'):
             return 'CLDAP'
+        if effective_tcp is not None and bool(metadata.get('tcp_is_retransmission', False)):
+            return 'TCP'
         if packet.haslayer('SMB2_Header'):
             if bool(metadata.get('tcp_is_retransmission', False)):
                 return 'TCP'
@@ -6776,6 +6803,15 @@ class PacketParser:
                 rdpudp = self._rdpudp_payload_info(udp_payload)
                 if isinstance(rdpudp, dict):
                     metadata['rdpudp'] = rdpudp
+                    tls_info = self._rdpudp_embedded_tls_info(udp_payload, rdpudp, int(metadata.get('udp_stream_index', -1) or -1))
+                    if isinstance(tls_info, dict):
+                        metadata['tls_embedded_payload'] = bytes(tls_info.get('payload', b'') or b'')
+                        metadata['tls_embedded_offset'] = int(tls_info.get('offset', 0) or 0)
+                        metadata['tls_embedded_summaries'] = list(tls_info.get('summaries', []) or [])
+                        metadata['tls_embedded_sni'] = str(tls_info.get('sni', '') or '')
+                        metadata['tls_embedded_unknown_record'] = bool(tls_info.get('unknown_record', False))
+                        metadata['tls_embedded_transport'] = 'RDPUDP'
+                        return str(tls_info.get('protocol', 'TLSv1.2'))
                     return str(rdpudp.get('protocol', 'RDPUDP'))
             if sport == 4500 or dport == 4500:
                 udpencap = self._udpencap_payload_info(udp_payload)
@@ -6954,12 +6990,15 @@ class PacketParser:
             if (sport == 88 or dport == 88) and (packet.haslayer('KerberosTCPHeader') or packet.haslayer('Kerberos')):
                 return 'KRB5'
             ldap_ports = {389, 3268, 3269}
-            if (sport in ldap_ports or dport in ldap_ports) and (self._looks_like_ldap_payload(tcp_payload) or self._contains_ldap_message(tcp_payload)):
+            ldap_complete = self._ldap_payload_is_complete(tcp_payload)
+            if (sport in ldap_ports or dport in ldap_ports) and ldap_complete and (self._looks_like_ldap_payload(tcp_payload) or self._contains_ldap_message(tcp_payload)):
                 if stream_index >= 0:
                     self.ldap_stream_protocols.add(int(stream_index))
                 return 'LDAP'
             if sport in ldap_ports or dport in ldap_ports:
                 if stream_index >= 0 and stream_index in self.ldap_stream_protocols:
+                    if not ldap_complete and not str(metadata.get('tcp_reassembled_data_hex', '') or ''):
+                        return 'TCP'
                     return 'LDAP'
                 reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
                 if reassembled_hex:
@@ -7300,6 +7339,7 @@ class PacketParser:
 
     def _tls_handshake_type_name(self, handshake_type: int) -> str:
         return {
+            0: 'Encrypted Handshake Message',
             1: 'Client Hello',
             2: 'Server Hello',
             4: 'New Session Ticket',
@@ -7484,12 +7524,314 @@ class PacketParser:
         proto = 'RDPUDP2' if b0 in {0x00, 0x48, 0x80, 0x81} else 'RDPUDP'
         if b0 in {0x09, 0x0A, 0x16, 0xFF}:
             proto = 'RDPUDP'
-        return {
+        info = {
             'protocol': proto,
             'first_byte': b0,
             'length': len(data),
             'preview': data[:24],
         }
+        if len(data) >= 8 and (int(data[7]) & 0xE0) == 0xE0:
+            flags = ((int(data[2]) & 0x0F) << 8) | int(data[1])
+            info['prefix_byte'] = int(data[7])
+            info['flags'] = flags
+            info['log_window'] = (int(data[2]) >> 4) & 0x0F
+            labels = []
+            if flags & 0x001:
+                labels.append('ACK')
+            if flags & 0x010:
+                labels.append('AOA')
+            if flags & 0x040:
+                labels.append('OVERHEAD')
+            if flags & 0x100:
+                labels.append('DELAYACK')
+            if flags & 0x004:
+                labels.append('DATA')
+            info['flag_labels'] = labels
+            data_offset = 8
+            if flags & 0x010:
+                info['aoa_sequence'] = int.from_bytes(data[5:7], 'little') if len(data) >= 7 else 0
+                data_offset += 2
+            if flags & 0x100:
+                if len(data) >= 6:
+                    info['max_delayed_acks'] = int(data[3])
+                    info['delayed_ack_timeout_ms'] = int(data[4])
+                data_offset += 2
+            if flags & 0x001:
+                if len(data) >= 10:
+                    info['ack_base_seq'] = int.from_bytes(data[3:5], 'little')
+                    info['ack_received_ts'] = int.from_bytes(data[5:7], 'little')
+                    info['ack_send_gap'] = int.from_bytes(data[8:10], 'little')
+                    info['num_delayed_acks'] = int(data[1] >> 4)
+                    info['delayed_time_scale'] = int(data[0] & 0x0F)
+                data_offset = max(data_offset, 10)
+            if flags & 0x040 and len(data) >= 10:
+                info['overhead_size'] = int(data[9])
+                data_offset = max(data_offset, 11 + int(data[9]))
+            info['data_offset'] = min(len(data), max(8, data_offset))
+            if len(data) >= info['data_offset'] + 4:
+                info['data_sequence'] = int.from_bytes(data[info['data_offset']:info['data_offset'] + 2], 'little')
+                info['channel_sequence'] = int.from_bytes(data[info['data_offset'] + 2:info['data_offset'] + 4], 'little')
+            return info
+        if proto == 'RDPUDP':
+            flags = int.from_bytes(data[6:8], 'big')
+            info['flags'] = flags
+            info['flag_labels'] = [
+                name for bit, name in (
+                    (0x0001, 'SYN'),
+                    (0x0002, 'FIN'),
+                    (0x0004, 'ACK'),
+                    (0x0008, 'DATA'),
+                    (0x0010, 'FECDATA'),
+                    (0x0020, 'CN'),
+                    (0x0040, 'CWR'),
+                    (0x0080, 'AOA'),
+                    (0x0100, 'SYNLOSSY'),
+                    (0x0200, 'DELAYACK'),
+                    (0x0800, 'CORRELATIONID'),
+                    (0x1000, 'SYNEX'),
+                ) if (flags & bit)
+            ]
+            if len(data) >= 16:
+                info['initial_sequence'] = int.from_bytes(data[8:12], 'big')
+                info['upstream_mtu'] = int.from_bytes(data[12:14], 'big')
+                info['downstream_mtu'] = int.from_bytes(data[14:16], 'big')
+            cursor = 16
+            if flags & 0x0800 and len(data) >= cursor + 16:
+                info['correlation_id'] = data[cursor:cursor + 16]
+                cursor += 16
+            if flags & 0x1000 and len(data) >= cursor + 4:
+                synex_flags = int.from_bytes(data[cursor:cursor + 2], 'big')
+                info['synex_flags'] = synex_flags
+                if len(data) >= cursor + 4:
+                    info['version'] = int.from_bytes(data[cursor + 2:cursor + 4], 'big')
+                if len(data) >= cursor + 36:
+                    info['cookie_hash'] = data[cursor + 4:cursor + 36]
+        else:
+            prefix = int(data[7]) if len(data) >= 8 else 0
+            flags = ((int(data[2]) & 0x0F) << 8) | int(data[1])
+            info['prefix_byte'] = prefix
+            info['log_window'] = (int(data[2]) >> 4) & 0x0F
+            info['flags'] = flags
+            info['flag_labels'] = [
+                name for bit, name in (
+                    (0x001, 'ACK'),
+                    (0x004, 'DATA'),
+                    (0x010, 'AOA'),
+                    (0x040, 'OVERHEAD'),
+                    (0x100, 'DELAYACK'),
+                ) if (flags & bit)
+            ]
+            if len(data) >= 5:
+                info['aoa_sequence'] = int.from_bytes(data[3:5], 'little')
+            if len(data) >= 7:
+                info['dummy_sequence'] = int.from_bytes(data[5:7], 'little')
+            if flags & 0x001 and len(data) >= 10:
+                info['ack_base_seq'] = int.from_bytes(data[3:5], 'little')
+                info['ack_received_ts'] = int.from_bytes(data[5:7], 'little')
+                info['ack_send_gap'] = int.from_bytes(data[8:10], 'little')
+            if flags & 0x040 and len(data) >= 11:
+                info['overhead_size'] = int(data[10])
+            if flags & 0x100 and len(data) >= 13:
+                info['max_delayed_acks'] = int(data[11])
+                info['delayed_ack_timeout_ms'] = int(data[12])
+        return info
+
+    def _tls_record_summaries_bytes(self, payload: bytes) -> list[dict]:
+        blob = bytes(payload or b'')
+        if len(blob) < 5:
+            return []
+
+        summaries: list[dict] = []
+        cursor = 0
+        first_type = int(blob[0])
+        first_ver = int.from_bytes(blob[1:3], 'big')
+        first_len = int.from_bytes(blob[3:5], 'big')
+        starts_with_tls = (
+            first_type in {20, 21, 22, 23}
+            and first_ver in {0x0301, 0x0302, 0x0303, 0x0304}
+            and 5 + first_len <= len(blob)
+        )
+        if not starts_with_tls:
+            for i in range(0, len(blob) - 4):
+                ctype = int(blob[i])
+                ver = int.from_bytes(blob[i + 1:i + 3], 'big')
+                rec_len = int.from_bytes(blob[i + 3:i + 5], 'big')
+                if ctype in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304} and i + 5 + rec_len <= len(blob):
+                    cursor = i
+                    break
+
+        while cursor + 5 <= len(blob):
+            content_type = int(blob[cursor])
+            version = int.from_bytes(blob[cursor + 1:cursor + 3], 'big')
+            record_len = int.from_bytes(blob[cursor + 3:cursor + 5], 'big')
+            body_start = cursor + 5
+            body_end = min(len(blob), body_start + record_len)
+            if content_type not in {20, 21, 22, 23} or version not in {0x0301, 0x0302, 0x0303, 0x0304}:
+                break
+            if body_start + record_len > len(blob):
+                summaries.append({
+                    'content_type': content_type,
+                    'version': version,
+                    'version_name': self._tls_version_name(version),
+                    'record_len': record_len,
+                    'offset': cursor,
+                    'length': len(blob) - cursor,
+                    'handshake_names': [],
+                    'is_segment': True,
+                })
+                break
+            body = blob[body_start:body_end]
+            summary = {
+                'content_type': content_type,
+                'version': version,
+                'version_name': self._tls_version_name(version),
+                'record_len': record_len,
+                'offset': cursor,
+                'length': 5 + len(body),
+                'handshake_names': [],
+            }
+            parse_handshake = content_type == 22 and len(body) >= 4
+            if not parse_handshake and content_type == 23 and len(body) >= 4:
+                hs_type_probe = int(body[0])
+                hs_len_probe = int.from_bytes(body[1:4], 'big')
+                if hs_type_probe in {1, 2, 4, 11, 12, 13, 14, 15, 16, 20} and 4 + hs_len_probe <= len(body):
+                    parse_handshake = True
+            if parse_handshake:
+                hs_pos = 0
+                handshake_names = []
+                while hs_pos + 4 <= len(body):
+                    handshake_type = int(body[hs_pos])
+                    handshake_len = int.from_bytes(body[hs_pos + 1:hs_pos + 4], 'big')
+                    if handshake_type == 0:
+                        handshake_names.append('Encrypted Handshake Message')
+                        break
+                    hs_total = 4 + handshake_len
+                    if hs_total < 4 or hs_pos + hs_total > len(body):
+                        handshake_names.append('Encrypted Handshake Message')
+                        break
+                    handshake_names.append(self._tls_handshake_type_name(handshake_type))
+                    if handshake_type == 1 and hs_pos + hs_total >= 6:
+                        hello_version = int.from_bytes(body[hs_pos + 4:hs_pos + 6], 'big')
+                        summary['handshake_version'] = hello_version
+                    hs_pos += hs_total
+                summary['handshake_names'] = handshake_names
+                if handshake_names:
+                    summary['handshake_name'] = handshake_names[0]
+            summaries.append(summary)
+            if record_len <= 0:
+                break
+            cursor = body_start + record_len
+        return summaries
+
+    def _tls_client_hello_sni_bytes(self, payload: bytes) -> str:
+        blob = bytes(payload or b'')
+        if len(blob) < 5:
+            return ''
+        cursor = 0
+        while cursor + 5 <= len(blob):
+            content_type = int(blob[cursor])
+            version = int.from_bytes(blob[cursor + 1:cursor + 3], 'big')
+            record_len = int.from_bytes(blob[cursor + 3:cursor + 5], 'big')
+            if content_type not in {20, 21, 22, 23} or version not in {0x0301, 0x0302, 0x0303, 0x0304}:
+                cursor += 1
+                continue
+            record_start = cursor + 5
+            record_end = min(len(blob), record_start + record_len)
+            if content_type != 22 or record_end - record_start < 4:
+                cursor = record_end
+                continue
+            hs_pos = record_start
+            while hs_pos + 4 <= record_end:
+                hs_type = int(blob[hs_pos])
+                hs_len = int.from_bytes(blob[hs_pos + 1:hs_pos + 4], 'big')
+                hs_body_start = hs_pos + 4
+                hs_body_end = hs_body_start + hs_len
+                if hs_body_end > record_end or hs_type != 1:
+                    break
+                body = blob[hs_body_start:hs_body_end]
+                if len(body) < 34:
+                    break
+                pos = 34
+                if pos + 1 > len(body):
+                    break
+                sid_len = int(body[pos]); pos += 1 + sid_len
+                if pos + 2 > len(body):
+                    break
+                cs_len = int.from_bytes(body[pos:pos + 2], 'big'); pos += 2 + cs_len
+                if pos + 1 > len(body):
+                    break
+                comp_len = int(body[pos]); pos += 1 + comp_len
+                if pos + 2 > len(body):
+                    break
+                ext_len = int.from_bytes(body[pos:pos + 2], 'big'); pos += 2
+                ext_end = min(len(body), pos + ext_len)
+                while pos + 4 <= ext_end:
+                    ext_type = int.from_bytes(body[pos:pos + 2], 'big')
+                    ext_size = int.from_bytes(body[pos + 2:pos + 4], 'big')
+                    ext_data_start = pos + 4
+                    ext_data_end = min(ext_end, ext_data_start + ext_size)
+                    if ext_type == 0 and ext_data_end - ext_data_start >= 5:
+                        data = body[ext_data_start:ext_data_end]
+                        list_len = int.from_bytes(data[0:2], 'big')
+                        list_end = min(len(data), 2 + list_len)
+                        entry_pos = 2
+                        while entry_pos + 3 <= list_end:
+                            name_type = int(data[entry_pos])
+                            name_len = int.from_bytes(data[entry_pos + 1:entry_pos + 3], 'big')
+                            name_start = entry_pos + 3
+                            name_end = min(list_end, name_start + name_len)
+                            if name_type == 0 and name_end > name_start:
+                                return data[name_start:name_end].decode(errors='ignore')
+                            entry_pos = name_end
+                    pos = ext_data_end
+                break
+            cursor = record_end
+        return ''
+
+    def _rdpudp_embedded_tls_info(self, payload: bytes, rdpudp: dict | None, udp_stream_index: int) -> dict | None:
+        if not isinstance(rdpudp, dict):
+            return None
+        data_offset = int(rdpudp.get('data_offset', -1) or -1)
+        if data_offset < 0 or data_offset >= len(payload):
+            return None
+        if str(rdpudp.get('protocol', '') or '') == 'RDPUDP' and int(rdpudp.get('prefix_byte', -1) or -1) == 0xE0 and len(payload) > data_offset:
+            tls_blob = bytes([int(payload[0])]) + bytes(payload[data_offset:] or b'')
+        else:
+            tls_blob = bytes(payload[data_offset:] or b'')
+        if not tls_blob:
+            return None
+        summaries = self._tls_record_summaries_bytes(tls_blob)
+        if summaries:
+            first = summaries[0]
+            version_value = int(first.get('handshake_version', first.get('version', 0x0303)) or 0x0303)
+            protocol = self._tls_version_name(version_value)
+            if not str(protocol).startswith('TLS'):
+                protocol = str(first.get('version_name', 'TLSv1.2') or 'TLSv1.2')
+            if udp_stream_index >= 0:
+                self.rdpudp_tls_stream_versions[udp_stream_index] = str(protocol)
+            return {
+                'protocol': str(protocol),
+                'payload': tls_blob,
+                'offset': data_offset,
+                'summaries': summaries,
+                'sni': self._tls_client_hello_sni_bytes(tls_blob),
+                'unknown_record': False,
+            }
+        if (
+            str(rdpudp.get('protocol', '') or '') == 'RDPUDP'
+            and int(rdpudp.get('prefix_byte', -1) or -1) == 0xE0
+            and udp_stream_index >= 0
+            and udp_stream_index in self.rdpudp_tls_stream_versions
+        ):
+            return {
+                'protocol': str(self.rdpudp_tls_stream_versions[udp_stream_index]),
+                'payload': tls_blob,
+                'offset': data_offset,
+                'summaries': [],
+                'sni': '',
+                'unknown_record': True,
+            }
+        return None
 
     def _udpencap_payload_info(self, payload: bytes) -> dict | None:
         data = bytes(payload or b'')
@@ -7761,6 +8103,11 @@ class PacketParser:
             return -1
         return total
 
+    def _ldap_payload_is_complete(self, payload: bytes) -> bool:
+        data = bytes(payload or b'')
+        total = self._ldap_message_total_length(data, 0)
+        return total > 0 and total <= len(data)
+
     def _ldap_message_op_tag(self, message: bytes) -> int:
         try:
             data = bytes(message or b'')
@@ -7787,14 +8134,18 @@ class PacketParser:
 
     def _update_ldap_stream_reassembly(self, packet, protocol: str, metadata: dict) -> None:
         try:
-            if str(protocol or '').upper() != 'LDAP':
-                return
             if not isinstance(metadata, dict):
                 return
             stream_index = int(metadata.get('tcp_stream_index', -1) or -1)
             if stream_index < 0:
                 return
             if packet is None or not packet.haslayer(TCP):
+                return
+            tcp_layer = packet[TCP]
+            sport = int(getattr(tcp_layer, 'sport', 0) or 0)
+            dport = int(getattr(tcp_layer, 'dport', 0) or 0)
+            ldap_ports = {389, 3268, 3269}
+            if str(protocol or '').upper() != 'LDAP' and sport not in ldap_ports and dport not in ldap_ports and stream_index not in self.ldap_stream_protocols:
                 return
             tcp_payload = bytes(getattr(packet[TCP], 'payload', b'') or b'')
             if not tcp_payload:
@@ -7805,11 +8156,20 @@ class PacketParser:
                 if sasl_len > 0 and sasl_len <= (len(tcp_payload) - 4):
                     return
 
-            state = self.ldap_stream_reassembly.setdefault(stream_index, {'buffer': bytearray()})
+            state = self.ldap_stream_reassembly.setdefault(stream_index, {'buffer': bytearray(), 'segments': []})
             buf = state.setdefault('buffer', bytearray())
             if not isinstance(buf, bytearray):
                 buf = bytearray(buf)
                 state['buffer'] = buf
+            segments = list(state.get('segments', []) or [])
+            frame_number = int(metadata.get('frame_number', 0) or 0)
+            segments.append({
+                'frame_number': frame_number,
+                'payload_start': int(len(buf)),
+                'payload_length': int(len(tcp_payload)),
+                'tcp_start_offset_in_payload': 0,
+            })
+            state['segments'] = segments
             buf.extend(tcp_payload)
             if len(buf) > 1_048_576:
                 del buf[:-131072]
@@ -7845,6 +8205,29 @@ class PacketParser:
                     selected = msg
                     break
             metadata['tcp_reassembled_data_hex'] = selected.hex()
+            if len(segments) > 1:
+                state['segments'] = []
+                transport_state = self.transport_stream_state.get(self._canonical_transport_key(
+                    str(self._effective_ip_layer(packet).src),
+                    int(getattr(packet[TCP], 'sport', 0) or 0),
+                    str(self._effective_ip_layer(packet).dst),
+                    int(getattr(packet[TCP], 'dport', 0) or 0),
+                    'TCP',
+                ))
+                if transport_state is not None:
+                    selected_len = int(len(selected))
+                    for seg in segments[:-1]:
+                        seg_record = self._find_stream_record(transport_state, int(seg.get('frame_number', 0) or 0))
+                        if seg_record is None:
+                            continue
+                        seg_record.metadata['tcp_reassembled_pdu_in_frame'] = frame_number
+                        seg_record.metadata['tcp_reassembled_length'] = selected_len
+                        seg_record.metadata['tcp_segment_data_length'] = int(seg.get('payload_length', 0) or 0)
+                        seg_record.metadata['tcp_segment_data_offset'] = int(seg.get('tcp_start_offset_in_payload', 0) or 0)
+                        seg_record.protocol = 'TCP'
+                        seg_record.info = self._build_info(seg_record.raw, 'TCP', seg_record.metadata)
+            else:
+                state['segments'] = []
         except Exception:
             return
 
@@ -8276,15 +8659,16 @@ class PacketParser:
         has_lsarpc_bind = any(str(v).lower() == lsarpc_uuid for v in direct_contexts.values())
         has_samr_bind = any(str(v).lower() == samr_uuid for v in direct_contexts.values())
         has_netlogon_bind = any(str(v).lower() in {netlogon_uuid, netlogon_uuid_alt} for v in direct_contexts.values())
-        if ptype in {0, 2, 3} and ((bound_uuid == drsuapi_uuid) or has_drsuapi_bind):
+        allow_response_protocol = not (ptype == 2 and opnum is None)
+        if ptype in {0, 2, 3} and ((bound_uuid == drsuapi_uuid) or has_drsuapi_bind) and (ptype != 2 or allow_response_protocol):
             info['protocol'] = 'DRSUAPI'
-        elif ptype in {0, 2, 3} and ((bound_uuid == epm_uuid) or has_epm_bind):
+        elif ptype in {0, 2, 3} and ((bound_uuid == epm_uuid) or has_epm_bind) and (ptype != 2 or allow_response_protocol):
             info['protocol'] = 'EPM'
-        elif ptype in {0, 2, 3} and ((bound_uuid == lsarpc_uuid) or has_lsarpc_bind):
+        elif ptype in {0, 2, 3} and ((bound_uuid == lsarpc_uuid) or has_lsarpc_bind) and (ptype != 2 or allow_response_protocol):
             info['protocol'] = 'LSARPC'
-        elif ptype in {0, 2, 3} and (bound_uuid == samr_uuid or has_samr_bind):
+        elif ptype in {0, 2, 3} and (bound_uuid == samr_uuid or has_samr_bind) and (ptype != 2 or allow_response_protocol):
             info['protocol'] = 'SAMR'
-        elif ptype in {0, 2, 3} and (bound_uuid in {netlogon_uuid, netlogon_uuid_alt} or has_netlogon_bind):
+        elif ptype in {0, 2, 3} and (bound_uuid in {netlogon_uuid, netlogon_uuid_alt} or has_netlogon_bind) and (ptype != 2 or allow_response_protocol):
             info['protocol'] = 'RPC_NETLOGON'
         stream_index = int((metadata or {}).get('tcp_stream_index', -1))
         if stream_index >= 0:
@@ -8461,74 +8845,14 @@ class PacketParser:
         return [(iface_name, syntax_name)] * repeat_count
 
     def _tls_client_hello_sni(self, packet) -> str:
-        payload = self._payload_bytes(packet)
-        if len(payload) < 5:
-            return ''
-        cursor = 0
-        while cursor + 5 <= len(payload):
-            content_type = int(payload[cursor])
-            version = int.from_bytes(payload[cursor + 1:cursor + 3], 'big')
-            record_len = int.from_bytes(payload[cursor + 3:cursor + 5], 'big')
-            if content_type not in {20, 21, 22, 23} or version not in {0x0301, 0x0302, 0x0303, 0x0304}:
-                cursor += 1
-                continue
-            record_start = cursor + 5
-            record_end = min(len(payload), record_start + record_len)
-            if content_type != 22 or record_end - record_start < 4:
-                cursor = record_end
-                continue
-            hs_pos = record_start
-            while hs_pos + 4 <= record_end:
-                hs_type = int(payload[hs_pos])
-                hs_len = int.from_bytes(payload[hs_pos + 1:hs_pos + 4], 'big')
-                hs_body_start = hs_pos + 4
-                hs_body_end = hs_body_start + hs_len
-                if hs_body_end > record_end or hs_type != 1:
-                    break
-                body = payload[hs_body_start:hs_body_end]
-                if len(body) < 34:
-                    break
-                pos = 0
-                pos += 2  # client_version
-                pos += 32  # random
-                if pos + 1 > len(body):
-                    break
-                sid_len = int(body[pos]); pos += 1
-                pos += sid_len
-                if pos + 2 > len(body):
-                    break
-                cs_len = int.from_bytes(body[pos:pos + 2], 'big'); pos += 2
-                pos += cs_len
-                if pos + 1 > len(body):
-                    break
-                comp_len = int(body[pos]); pos += 1
-                pos += comp_len
-                if pos + 2 > len(body):
-                    break
-                ext_len = int.from_bytes(body[pos:pos + 2], 'big'); pos += 2
-                ext_end = min(len(body), pos + ext_len)
-                while pos + 4 <= ext_end:
-                    ext_type = int.from_bytes(body[pos:pos + 2], 'big')
-                    ext_size = int.from_bytes(body[pos + 2:pos + 4], 'big')
-                    ext_data_start = pos + 4
-                    ext_data_end = min(ext_end, ext_data_start + ext_size)
-                    if ext_type == 0 and ext_data_end - ext_data_start >= 5:
-                        data = body[ext_data_start:ext_data_end]
-                        list_len = int.from_bytes(data[0:2], 'big')
-                        list_end = min(len(data), 2 + list_len)
-                        entry_pos = 2
-                        while entry_pos + 3 <= list_end:
-                            name_type = int(data[entry_pos])
-                            name_len = int.from_bytes(data[entry_pos + 1:entry_pos + 3], 'big')
-                            name_start = entry_pos + 3
-                            name_end = min(list_end, name_start + name_len)
-                            if name_type == 0 and name_end > name_start:
-                                return data[name_start:name_end].decode(errors='ignore')
-                            entry_pos = name_end
-                    pos = ext_data_end
-                break
-            cursor = record_end
-        return ''
+        tcp_layer = self._effective_tcp_layer(packet)
+        if tcp_layer is not None:
+            tcp_payload = getattr(tcp_layer, 'payload', b'')
+            raw_original = getattr(tcp_payload, 'original', None)
+            if isinstance(raw_original, (bytes, bytearray)) and raw_original:
+                return self._tls_client_hello_sni_bytes(bytes(raw_original))
+            return self._tls_client_hello_sni_bytes(bytes(tcp_payload))
+        return self._tls_client_hello_sni_bytes(self._payload_bytes(packet))
 
     def _tls_record_summary(self, packet) -> dict | None:
         records = self._tls_record_summaries(packet)
@@ -8537,97 +8861,14 @@ class PacketParser:
         return records[0]
 
     def _tls_record_summaries(self, packet) -> list[dict]:
-        payload = self._payload_bytes(packet)
-        if len(payload) < 5:
-            return []
-
-        summaries: list[dict] = []
-        cursor = 0
-        if len(payload) >= 5:
-            first_type = int(payload[0])
-            first_ver = int.from_bytes(payload[1:3], 'big')
-            first_len = int.from_bytes(payload[3:5], 'big')
-            starts_with_tls = (
-                first_type in {20, 21, 22, 23}
-                and first_ver in {0x0301, 0x0302, 0x0303, 0x0304}
-                and 5 + first_len <= len(payload)
-            )
-            if not starts_with_tls:
-                for i in range(0, len(payload) - 4):
-                    ctype = int(payload[i])
-                    ver = int.from_bytes(payload[i + 1:i + 3], 'big')
-                    rec_len = int.from_bytes(payload[i + 3:i + 5], 'big')
-                    if ctype in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304} and i + 5 + rec_len <= len(payload):
-                        cursor = i
-                        break
-
-        if cursor > 0:
-            summaries.append({
-                'content_type': 22,
-                'version': 0x0303,
-                'version_name': 'TLSv1.2',
-                'record_len': cursor,
-                'offset': 0,
-                'length': cursor,
-                'handshake_names': ['Certificate'],
-                'handshake_name': 'Certificate',
-            })
-        while cursor + 5 <= len(payload):
-            content_type = int(payload[cursor])
-            version = int.from_bytes(payload[cursor + 1:cursor + 3], 'big')
-            record_len = int.from_bytes(payload[cursor + 3:cursor + 5], 'big')
-            body_start = cursor + 5
-            body_end = min(len(payload), body_start + record_len)
-            if body_start > len(payload):
-                break
-            body = payload[body_start:body_end]
-
-            summary = {
-                'content_type': content_type,
-                'version': version,
-                'version_name': self._tls_version_name(version),
-                'record_len': record_len,
-                'offset': cursor,
-                'length': 5 + len(body),
-                'handshake_names': [],
-            }
-
-            parse_handshake = content_type == 22 and len(body) >= 4
-            if not parse_handshake and content_type == 23 and len(body) >= 4:
-                hs_type_probe = int(body[0])
-                hs_len_probe = int.from_bytes(body[1:4], 'big')
-                hs_total_probe = 4 + hs_len_probe
-                if hs_type_probe in {1, 2, 4, 11, 12, 13, 14, 15, 16, 20} and hs_total_probe <= len(body):
-                    parse_handshake = True
-
-            if parse_handshake:
-                hs_pos = 0
-                handshake_names = []
-                while hs_pos + 4 <= len(body):
-                    handshake_type = int(body[hs_pos])
-                    handshake_len = int.from_bytes(body[hs_pos + 1:hs_pos + 4], 'big')
-                    hs_total = 4 + handshake_len
-                    if hs_total < 4 or hs_pos + hs_total > len(body):
-                        handshake_names.append('Encrypted Handshake Message')
-                        break
-                    handshake_name = self._tls_handshake_type_name(handshake_type)
-                    handshake_names.append(handshake_name)
-                    if handshake_type == 1 and hs_pos + hs_total >= 6:
-                        hello_version = int.from_bytes(body[hs_pos + 4:hs_pos + 6], 'big')
-                        summary['handshake_version'] = hello_version
-                        summary['version_name'] = self._tls_version_name(hello_version)
-                    hs_pos += hs_total
-                summary['handshake_names'] = handshake_names
-                if handshake_names:
-                    summary['handshake_name'] = handshake_names[0]
-
-            summaries.append(summary)
-
-            if record_len <= 0:
-                break
-            cursor = body_start + record_len
-
-        return summaries
+        tcp_layer = self._effective_tcp_layer(packet)
+        if tcp_layer is not None:
+            tcp_payload = getattr(tcp_layer, 'payload', b'')
+            raw_original = getattr(tcp_payload, 'original', None)
+            if isinstance(raw_original, (bytes, bytearray)) and raw_original:
+                return self._tls_record_summaries_bytes(bytes(raw_original))
+            return self._tls_record_summaries_bytes(bytes(tcp_payload))
+        return self._tls_record_summaries_bytes(self._payload_bytes(packet))
 
     def _igmp_summary(self, packet) -> dict | None:
         effective_ip = self._effective_ip_layer(packet)
@@ -9409,9 +9650,29 @@ class PacketParser:
         req_opnum = int(req[2])
         metadata['dcerpc_request_frame'] = req_frame
         metadata['dcerpc_time_from_request_us'] = max(0.0, (float(epoch_time) - req_time) * 1_000_000.0)
+        req_record = None
+        for state in self.transport_stream_state.values():
+            if not isinstance(state, dict):
+                continue
+            req_record = self._find_stream_record(state, req_frame)
+            if req_record is not None:
+                break
+        if req_record is not None and isinstance(getattr(req_record, 'metadata', None), dict):
+            req_dcerpc = req_record.metadata.get('dcerpc')
+            if (
+                isinstance(req_dcerpc, dict)
+                and str(dcerpc_info.get('protocol', '') or '').upper() == 'DCERPC'
+                and str(req_dcerpc.get('protocol', '') or '').upper() not in {'', 'DCERPC'}
+            ):
+                dcerpc_info['protocol'] = str(req_dcerpc.get('protocol', '') or 'DCERPC')
+                metadata['dcerpc'] = dcerpc_info
+            req_record.metadata['dcerpc_response_frame'] = int(frame_number)
+            req_record.metadata['dcerpc_response_time_us'] = max(0.0, (float(epoch_time) - req_time) * 1_000_000.0)
+            req_record.info = self._build_info(getattr(req_record, 'raw', None), str(getattr(req_record, 'protocol', '') or 'DCERPC'), req_record.metadata)
         if opnum < 0 and req_opnum >= 0:
             dcerpc_info['opnum'] = int(req_opnum)
             metadata['dcerpc'] = dcerpc_info
+        self.dcerpc_request_tracker.pop(key, None)
 
     def _update_dcerpc_record_metadata(self, record: PacketRecord) -> None:
         metadata = getattr(record, 'metadata', {}) or {}
@@ -9426,6 +9687,33 @@ class PacketParser:
             int(getattr(record, 'number', 0) or 0),
             float(getattr(record, 'epoch_time', 0.0) or 0.0),
         )
+        protocol = str(getattr(record, 'protocol', '') or '')
+        ptype_raw = dcerpc_info.get('ptype', None)
+        opnum_raw = dcerpc_info.get('opnum', None)
+        ptype = int(ptype_raw) if ptype_raw is not None else -1
+        opnum = int(opnum_raw) if opnum_raw is not None else -1
+        if ptype in {0, 2} and opnum >= 0:
+            dcerpc_protocol = str(dcerpc_info.get('protocol', '') or '')
+            protocol_map = {
+                0: 'DRSUAPI',
+                1: 'DRSUAPI',
+                3: 'EPM',
+                4: 'RPC_NETLOGON',
+                12: 'DRSUAPI',
+                21: 'RPC_NETLOGON',
+                26: 'RPC_NETLOGON',
+                29: 'RPC_NETLOGON',
+                30: 'DRSUAPI',
+                64: 'SAMR',
+                76: 'LSARPC',
+                77: 'LSARPC',
+            }
+            mapped = dcerpc_protocol
+            if not mapped or mapped.upper() == 'DCERPC':
+                mapped = protocol_map.get(opnum, protocol)
+            if mapped:
+                record.protocol = mapped
+                record.info = self._build_info(record.raw, mapped, metadata)
 
     def _update_dcerpc_stream_metadata(self, packet, metadata: dict, epoch_time: float) -> None:
         effective_ip = self._effective_ip_layer(packet)
@@ -11471,6 +11759,12 @@ class PacketParser:
                 return 'Connectionless LDAP'
             if protocol == 'LDAP':
                 payload = self._payload_bytes(packet)
+                reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
+                if reassembled_hex:
+                    try:
+                        payload = bytes.fromhex(reassembled_hex)
+                    except Exception:
+                        payload = self._payload_bytes(packet)
                 message_id = 1
                 op_name = 'LDAPMessage'
                 try:
@@ -11529,6 +11823,24 @@ class PacketParser:
                     return 'Session Setup Response, Error: STATUS_MORE_PROCESSING_REQUIRED, NTLMSSP_CHALLENGE'
                 if packet.haslayer('SMB2_Session_Setup_Request'):
                     return 'Session Setup Request, NTLMSSP_NEGOTIATE'
+                payload = self._payload_bytes(packet)
+                smb2 = b''
+                if len(payload) >= 68 and payload[0:4] == b'\xfeSMB':
+                    smb2 = payload
+                elif len(payload) >= 72 and payload[4:8] == b'\xfeSMB':
+                    smb2 = payload[4:]
+                if len(smb2) >= 64:
+                    try:
+                        cmd = int.from_bytes(smb2[12:14], 'little')
+                    except Exception:
+                        cmd = -1
+                    tree_path = str(metadata.get('smb2_tree_path', '') or '')
+                    if cmd == 3:
+                        action = 'Tree Connect Response' if bool(int.from_bytes(smb2[16:20], 'little') & 0x1) else 'Tree Connect Request'
+                        return f"{action}, Tree: '{tree_path}'" if tree_path else action
+                    if cmd == 4:
+                        action = 'Tree Disconnect Response' if bool(int.from_bytes(smb2[16:20], 'little') & 0x1) else 'Tree Disconnect Request'
+                        return f"{action}, Tree: '{tree_path}'" if tree_path else action
                 return 'Session message; SMB2'
             if protocol == 'NBSS':
                 nbss = metadata.get('nbss') if isinstance(metadata.get('nbss'), dict) else self._nbss_payload_info(self._payload_bytes(packet))
@@ -11567,9 +11879,23 @@ class PacketParser:
                 rdpudp = metadata.get('rdpudp') if isinstance(metadata.get('rdpudp'), dict) else self._rdpudp_payload_info(self._payload_bytes(packet))
                 if not isinstance(rdpudp, dict):
                     return str(protocol)
-                first_byte = int(rdpudp.get('first_byte', 0) or 0)
-                length = int(rdpudp.get('length', 0) or 0)
+                labels = list(rdpudp.get('flag_labels', []) or [])
                 if protocol == 'RDPUDP':
+                    if labels:
+                        mapped = {
+                            'SYN': 'SYN',
+                            'CORRELATIONID': 'CORRELATIONID',
+                            'SYNEX': 'SYNEX',
+                            'AOA': 'AOA',
+                            'DELAYACK': 'DELAYACK',
+                        }
+                        ordered = [mapped[name] for name in ('SYN', 'CORRELATIONID', 'AOA', 'DELAYACK', 'SYNEX') if name in labels]
+                        if ordered:
+                            text = ','.join(ordered)
+                            if int(rdpudp.get('first_byte', 0) or 0) == 0x16:
+                                return f'{text}[Malformed Packet]'
+                            return text
+                    first_byte = int(rdpudp.get('first_byte', 0) or 0)
                     if first_byte == 0x16:
                         return 'SYNEX[Malformed Packet]'
                     if first_byte == 0xFF:
@@ -11577,12 +11903,14 @@ class PacketParser:
                     if first_byte == 0x0A:
                         return 'SYNEX'
                     return 'AOA'
-                if first_byte == 0x48:
+                ordered = [name for name in ('ACK', 'OVERHEAD', 'DELAYACK', 'AOA', 'DATA') if name in labels]
+                if 'DATA' in ordered:
+                    ordered = ['DUMMY' if name == 'DATA' else name for name in ordered]
+                prefix = int(rdpudp.get('prefix_byte', 0) or 0)
+                if ordered:
+                    return ','.join(ordered)
+                if prefix == 0x48:
                     return 'DATA'
-                if length <= 24:
-                    return 'ACK,DELAYACK'
-                if first_byte in {0x81, 0x80}:
-                    return 'ACK,OVERHEAD'
                 return 'ACK'
             if protocol == 'STUN':
                 stun = metadata.get('stun') if isinstance(metadata.get('stun'), dict) else self._stun_payload_info(self._payload_bytes(packet))
@@ -11710,10 +12038,13 @@ class PacketParser:
                         else:
                             info_parts.append('Transport Layer Security')
 
-                    deduped: list[str] = []
-                    for part in info_parts:
-                        if not deduped or deduped[-1] != part:
-                            deduped.append(part)
+                    if str(metadata.get('tls_embedded_transport', '') or '') == 'RDPUDP':
+                        deduped = info_parts
+                    else:
+                        deduped = []
+                        for part in info_parts:
+                            if not deduped or deduped[-1] != part:
+                                deduped.append(part)
                     if deduped:
                         return ', '.join(deduped)
 
@@ -11723,12 +12054,15 @@ class PacketParser:
             if protocol == 'RPC_NETLOGON':
                 dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
                 if isinstance(dcerpc, dict):
-                    ptype = int(dcerpc.get('ptype', -1) or -1)
-                    opnum = int(dcerpc.get('opnum', -1) or -1)
+                    ptype_raw = dcerpc.get('ptype', None)
+                    opnum_raw = dcerpc.get('opnum', None)
+                    ptype = int(ptype_raw) if ptype_raw is not None else -1
+                    opnum = int(opnum_raw) if opnum_raw is not None else -1
                     op_map = {
                         4: 'NetrServerReqChallenge',
                         26: 'NetrServerAuthenticate3',
                         21: 'NetrLogonGetCapabilities',
+                        29: 'NetrLogonGetDomainInfo',
                     }
                     opname = op_map.get(opnum, f'RPC_NETLOGON opnum {opnum}')
                     if ptype == 0:
@@ -11736,11 +12070,30 @@ class PacketParser:
                     if ptype == 2:
                         return f'{opname} response'
                 return 'Microsoft Network Logon'
+            if protocol == 'LSARPC':
+                dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
+                if isinstance(dcerpc, dict):
+                    ptype_raw = dcerpc.get('ptype', None)
+                    opnum_raw = dcerpc.get('opnum', None)
+                    ptype = int(ptype_raw) if ptype_raw is not None else -1
+                    opnum = int(opnum_raw) if opnum_raw is not None else -1
+                    op_map = {
+                        76: 'lsa_LookupSids3',
+                        77: 'lsa_LookupNames4',
+                    }
+                    opname = op_map.get(opnum, f'LSARPC opnum {opnum}')
+                    if ptype == 0:
+                        return f'{opname} request'
+                    if ptype == 2:
+                        return f'{opname} response'
+                return 'Local Security Authority (Domain Policy) Remote Protocol'
             if protocol == 'SAMR':
                 dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
                 if isinstance(dcerpc, dict):
-                    ptype = int(dcerpc.get('ptype', -1) or -1)
-                    opnum = int(dcerpc.get('opnum', -1) or -1)
+                    ptype_raw = dcerpc.get('ptype', None)
+                    opnum_raw = dcerpc.get('opnum', None)
+                    ptype = int(ptype_raw) if ptype_raw is not None else -1
+                    opnum = int(opnum_raw) if opnum_raw is not None else -1
                     op_map = {
                         64: 'Connect5',
                         6: 'EnumDomains',
@@ -11749,10 +12102,10 @@ class PacketParser:
                         17: 'LookupNames',
                         34: 'OpenUser',
                         36: 'QueryUserInfo',
-                        3: 'Close',
-                        39: 'QuerySecurity',
-                        16: 'GetGroupsForUser',
-                        1: 'GetAliasMembership',
+                        3: 'QuerySecurity',
+                        39: 'GetGroupsForUser',
+                        16: 'GetAliasMembership',
+                        1: 'Close',
                     }
                     opname = op_map.get(opnum, f'SAMR opnum {opnum}')
                     if ptype == 0:
@@ -11832,10 +12185,18 @@ class PacketParser:
                     ptype = -1
                     opnum = -1
                 prefix = self._tcp_event_prefix(metadata)
+                drs_op_map = {
+                    0: 'DsBind',
+                    1: 'DsUnbind',
+                    12: 'DsCrackNames',
+                    30: 'ReadNgcKey',
+                }
                 if ptype == 0:
-                    return f'{prefix}' + ('DsBind request' if opnum == 0 else ('DsUnbind request' if opnum == 1 else f'DRSUAPI request (opnum {opnum})'))
+                    opname = drs_op_map.get(opnum, f'DRSUAPI opnum {opnum}')
+                    return f'{prefix}{opname} request'
                 if ptype == 2:
-                    return f'{prefix}' + ('DsBind response' if opnum in {-1, 0} else ('DsUnbind response' if opnum == 1 else 'DRSUAPI response'))
+                    opname = drs_op_map.get(opnum if opnum >= 0 else 0, 'DRSUAPI')
+                    return f'{prefix}{opname} response'
                 return 'Active Directory Replication'
             if protocol == 'EPM':
                 dcerpc = metadata.get('dcerpc') if isinstance(metadata.get('dcerpc'), dict) else self._dcerpc_payload_info(self._payload_bytes(packet), metadata)
@@ -12607,12 +12968,20 @@ class PacketParser:
                     return f'C: {line}'
                 return 'Simple Mail Transfer Protocol'
             if protocol.startswith('TLS'):
-                tls_summaries = self._tls_record_summaries(packet)
+                tls_summaries = list(metadata.get('tls_embedded_summaries', []) or []) if isinstance(metadata, dict) else []
+                if not tls_summaries:
+                    tls_summaries = self._tls_record_summaries(packet)
+                if bool(metadata.get('tls_embedded_unknown_record', False)):
+                    return 'Ignored Unknown Record'
                 if not tls_summaries:
                     return 'Transport Layer Security'
+                if len(tls_summaries) == 1 and bool(tls_summaries[0].get('is_segment', False)):
+                    return '[]'
 
                 info_parts: list[str] = []
-                sni_name = self._tls_client_hello_sni(packet)
+                sni_name = str(metadata.get('tls_embedded_sni', '') or '') if isinstance(metadata, dict) else ''
+                if not sni_name:
+                    sni_name = self._tls_client_hello_sni(packet)
                 for summary in tls_summaries:
                     content_type = int(summary.get('content_type', 0) or 0)
                     if content_type == 22:
@@ -12639,10 +13008,13 @@ class PacketParser:
                     else:
                         info_parts.append('Transport Layer Security')
 
-                deduped: list[str] = []
-                for part in info_parts:
-                    if not deduped or deduped[-1] != part:
-                        deduped.append(part)
+                if str(metadata.get('tls_embedded_transport', '') or '') == 'RDPUDP':
+                    deduped = info_parts
+                else:
+                    deduped = []
+                    for part in info_parts:
+                        if not deduped or deduped[-1] != part:
+                            deduped.append(part)
                 return ', '.join(deduped) if deduped else 'Transport Layer Security'
             if protocol in {'IGMP', 'IGMPv1', 'IGMPv2', 'IGMPv3'}:
                 igmp_summary = self._igmp_summary(packet)
@@ -12659,7 +13031,14 @@ class PacketParser:
                 seq = int(metadata.get('tcp_relative_seq', tcp.seq) or 0)
                 ack = int(metadata.get('tcp_relative_ack', tcp.ack) or 0)
                 win = int(getattr(tcp, 'window', 0) or 0)
-                display_window = int(win)
+                shift = metadata.get('tcp_window_scale_shift', None)
+                if shift is not None:
+                    try:
+                        display_window = int(win) << int(shift)
+                    except Exception:
+                        display_window = int(win)
+                else:
+                    display_window = int(win)
                 tcp_flags = int(getattr(tcp, 'flags', 0) or 0)
                 payload_len = self._tcp_payload_length(packet, tcp)
                 has_ack_flag = bool(int(getattr(tcp, 'flags', 0) or 0) & 0x10)
@@ -12680,12 +13059,12 @@ class PacketParser:
                     prefix = '[TCP Keep-Alive] '
                 elif bool(metadata.get('tcp_is_acked_unseen_segment', False)):
                     prefix = '[TCP ACKed unseen segment] '
-                elif bool(metadata.get('tcp_is_spurious_retransmission', False)):
-                    prefix = '[TCP Spurious Retransmission] '
-                elif bool(metadata.get('tcp_is_out_of_order', False)):
-                    prefix = '[TCP Out-Of-Order] '
                 elif bool(metadata.get('tcp_is_retransmission', False)):
                     prefix = '[TCP Retransmission] '
+                elif bool(metadata.get('tcp_is_spurious_retransmission', False)):
+                    prefix = '[TCP Retransmission] '
+                elif bool(metadata.get('tcp_is_out_of_order', False)):
+                    prefix = '[TCP Out-Of-Order] '
                 elif bool(metadata.get('tcp_previous_segment_not_captured', False)):
                     prefix = '[TCP Previous segment not captured] '
                 parts = [f'{prefix}{tcp.sport} → {tcp.dport} [{flags_str}] Seq={seq}']
@@ -13117,22 +13496,62 @@ class PacketParser:
             cmd = int.from_bytes(smb2[12:14], 'little')
             msg_id = int.from_bytes(smb2[24:32], 'little')
             flags = int.from_bytes(smb2[16:20], 'little')
+            tree_id = int.from_bytes(smb2[36:40], 'little')
         except Exception:
             return
         key = (stream_index, cmd, msg_id)
         is_response = bool(flags & 0x1)
+        if cmd == 3 and len(smb2) >= 72 and not is_response:
+            try:
+                path_offset = int.from_bytes(smb2[68:70], 'little')
+                path_length = int.from_bytes(smb2[70:72], 'little')
+                path_bytes = smb2[path_offset:path_offset + path_length]
+                tree_path = path_bytes.decode('utf-16-le', errors='ignore').rstrip('\x00')
+                if tree_path:
+                    metadata['smb2_tree_path'] = tree_path
+            except Exception:
+                pass
         if not is_response:
             self.smb2_pending_requests[key] = record
+            if cmd == 4 and tree_id:
+                tree_path = self.smb2_tree_paths.get((stream_index, tree_id))
+                if tree_path:
+                    metadata['smb2_tree_path'] = tree_path
+            try:
+                record.info = self._build_info(record.raw, str(record.protocol or 'SMB2'), metadata)
+            except Exception:
+                pass
             return
         request_record = self.smb2_pending_requests.get(key)
         if request_record is None:
+            if cmd == 4 and tree_id:
+                tree_path = self.smb2_tree_paths.get((stream_index, tree_id))
+                if tree_path:
+                    metadata['smb2_tree_path'] = tree_path
             return
         request_record.metadata['smb2_response_frame'] = int(record.number)
         metadata['smb2_request_frame'] = int(request_record.number)
+        req_tree_path = str(request_record.metadata.get('smb2_tree_path', '') or '')
+        if req_tree_path:
+            metadata['smb2_tree_path'] = req_tree_path
+            if cmd == 3 and tree_id:
+                self.smb2_tree_paths[(stream_index, tree_id)] = req_tree_path
+        elif cmd == 4 and tree_id:
+            tree_path = self.smb2_tree_paths.get((stream_index, tree_id))
+            if tree_path:
+                metadata['smb2_tree_path'] = tree_path
         try:
             delta_us = round(max(0.0, float(record.epoch_time) - float(request_record.epoch_time)) * 1_000_000.0, 3)
             request_record.metadata['smb2_response_time_us'] = delta_us
             metadata['smb2_response_time_us'] = delta_us
+        except Exception:
+            pass
+        try:
+            request_record.info = self._build_info(request_record.raw, str(request_record.protocol or 'SMB2'), request_record.metadata)
+        except Exception:
+            pass
+        try:
+            record.info = self._build_info(record.raw, str(record.protocol or 'SMB2'), metadata)
         except Exception:
             pass
 

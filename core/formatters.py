@@ -1136,9 +1136,13 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             cldap_payload = _udp_payload_bytes(packet, udp_layer)
             sections.append(_cldap_section(packet, cldap_payload, offset, record))
             payload_handled = True
+        elif str(getattr(record, 'protocol', '') or '').startswith('TLS') and str(metadata.get('tls_embedded_transport', '') or '') == 'RDPUDP':
+            rdpudp_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_rdpudp_section(packet, rdpudp_payload, offset, record))
+            payload_handled = True
         elif getattr(record, 'protocol', '') in {'RDPUDP', 'RDPUDP2'}:
             rdpudp_payload = _udp_payload_bytes(packet, udp_layer)
-            sections.append(_rdpudp_section(rdpudp_payload, offset, record))
+            sections.append(_rdpudp_section(packet, rdpudp_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'STUN':
             stun_payload = _udp_payload_bytes(packet, udp_layer)
@@ -13089,22 +13093,223 @@ def _rdp_tpkt_sections(payload: bytes, offset: int) -> List[Dict[str, Any]]:
     return [tpkt_section, cotp_section, rdp_section]
 
 
-def _rdpudp_section(data: bytes, offset: int, record=None) -> Dict[str, Any]:
+def _rdpudp_section(packet, data: bytes, offset: int, record=None) -> Dict[str, Any]:
     payload = bytes(data or b'')
     metadata = getattr(record, 'metadata', {}) if record is not None else {}
     rdpudp = metadata.get('rdpudp') if isinstance(metadata, dict) and isinstance(metadata.get('rdpudp'), dict) else {}
     protocol_name = str(rdpudp.get('protocol', '') or getattr(record, 'protocol', '') or 'RDPUDP')
     children: List[Dict[str, Any]] = []
-    if len(payload) >= 4:
-        children.append({'title': f'snSourceAck: 0x{int.from_bytes(payload[0:4], "big"):08x}', **_byte_mapping(offset, 0, 4, PACKET_BYTE_SOURCE)})
-    if len(payload) >= 6:
-        children.append({'title': f'ReceiveWindowSize: {int.from_bytes(payload[4:6], "big")}', **_byte_mapping(offset, 4, 2, PACKET_BYTE_SOURCE)})
-    if len(payload) >= 8:
-        flags = int.from_bytes(payload[6:8], 'big')
-        children.append({'title': f'Flags: 0x{flags:04x}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)})
-    if protocol_name == 'RDPUDP2' and payload:
-        first = int(payload[0])
-        children.append({'title': f'PacketPrefixByte: 0x{first:02x}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)})
+    if int(rdpudp.get('prefix_byte', -1) or -1) == 0xE0 and len(payload) >= 8:
+        flags = int(rdpudp.get('flags', 0) or 0)
+        log_window = int(rdpudp.get('log_window', 0) or 0)
+        tls_offset = int(metadata.get('tls_embedded_offset', -1) or -1) if isinstance(metadata, dict) else -1
+        bit_text = ' '.join(format(flags, '016b')[i:i + 4] for i in range(0, 16, 4))
+        children.append({
+            'title': 'PacketPrefixByte: 0xe0',
+            **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': '...0 000. = PacketType: Data (0x0)', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
+                {'title': '.... .000 = Short packet length: 0', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
+            ],
+        })
+        children.append({
+            'title': f'{bit_text} = Flags: 0x{flags:03x}, Data' if (flags & 0x004) else f'{bit_text} = Flags: 0x{flags:03x}',
+            **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE),
+            'children': [
+                {'title': f'.... .... .... ...{1 if (flags & 0x001) else 0} = Ack: {"True" if (flags & 0x001) else "False"}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .... .{1 if (flags & 0x004) else 0}.. = Data: {"True" if (flags & 0x004) else "False"}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .... {1 if (flags & 0x008) else 0}... = AckVec: 0x{1 if (flags & 0x008) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... ...{1 if (flags & 0x010) else 0} .... = AckOfAcks: 0x{1 if (flags & 0x010) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .{1 if (flags & 0x040) else 0}.. .... = OverheadSize: 0x{1 if (flags & 0x040) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+                {'title': f'.... ...{1 if (flags & 0x100) else 0} .... .... = DelayedAckInfo: 0x{1 if (flags & 0x100) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+                {'title': f'{log_window:04b} .... .... .... = LogWindow: {log_window}', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+            ],
+        })
+        if flags & 0x100 and len(payload) >= 5:
+            children.append({
+                'title': 'DelayAck',
+                **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'MaxDelayedAcks: {int(rdpudp.get("max_delayed_acks", 0) or 0)}', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'DelayedAckTimeoutInMs: {int(rdpudp.get("delayed_ack_timeout_ms", 0) or 0)}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                ],
+            })
+        if flags & 0x010:
+            children.append({
+                'title': 'Ack of Acks',
+                **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'Sequence number: 0x{int(rdpudp.get("aoa_sequence", 0) or 0):04x}', **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE)},
+                ],
+            })
+        if flags & 0x001 and len(payload) >= 10:
+            children.append({
+                'title': 'Ack',
+                **_byte_mapping(offset, 3, 7, PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'Base Seq: 0x{int(rdpudp.get("ack_base_seq", 0) or 0):04x}', **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'receivedTS: {int(rdpudp.get("ack_received_ts", 0) or 0)}', **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'sendTimeGap: {int(rdpudp.get("ack_send_gap", 0) or 0)}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... {int(rdpudp.get("num_delayed_acks", 0) or 0):04b} = NumDelayedAcks: {int(rdpudp.get("num_delayed_acks", 0) or 0)}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'{int(rdpudp.get("delayed_time_scale", 0) or 0):04b} .... = delayedTimeScale: {int(rdpudp.get("delayed_time_scale", 0) or 0)}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                ],
+            })
+        if flags & 0x040 and 'overhead_size' in rdpudp:
+            children.append({
+                'title': 'Overhead',
+                **_byte_mapping(offset, 9, 1, PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'Overhead size: {int(rdpudp.get("overhead_size", 0) or 0)}', **_byte_mapping(offset, 9, 1, PACKET_BYTE_SOURCE)},
+                ],
+            })
+        data_children: List[Dict[str, Any]] = []
+        if protocol_name == 'RDPUDP':
+            seq_off = 3
+            chan_off = 5
+        else:
+            seq_off = max(8, tls_offset - 4) if tls_offset >= 4 else 8
+            chan_off = seq_off + 2
+        if len(payload) >= chan_off + 2:
+            seq_val = int.from_bytes(payload[seq_off:seq_off + 2], 'little')
+            chan_val = int.from_bytes(payload[chan_off:chan_off + 2], 'little')
+            data_children.extend([
+                {'title': f'Sequence number: 0x{seq_val:04x}', **_byte_mapping(offset, seq_off, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'[Full sequence number: 0x{seq_val:08x}]', **_byte_mapping(offset, seq_off, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Channel sequence number: 0x{chan_val:04x}', **_byte_mapping(offset, chan_off, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'[Channel full sequence number: 0x{chan_val:08x}]', **_byte_mapping(offset, chan_off, 2, PACKET_BYTE_SOURCE)},
+            ])
+        if isinstance(metadata, dict) and metadata.get('tls_embedded_payload'):
+            tls_stream_index = int(metadata.get('udp_stream_index', -1) or -1)
+            tls_node = _tls_section_precise(packet=packet, offset=offset + max(0, tls_offset), stream_index=tls_stream_index, record=record)
+            data_children.append(tls_node)
+        children.append({
+            'title': 'Data',
+            **_byte_mapping(offset, max(0, tls_offset - 4 if protocol_name != 'RDPUDP' and tls_offset >= 4 else 3), max(4, len(payload) - max(0, tls_offset - 4 if protocol_name != 'RDPUDP' and tls_offset >= 4 else 3)), PACKET_BYTE_SOURCE),
+            'children': data_children,
+        })
+        return {
+            'title': 'UDP Remote Desktop Protocol',
+            **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+            'children': children,
+        }
+    if protocol_name == 'RDPUDP':
+        if len(payload) >= 4:
+            children.append({'title': f'snSourceAck: 0x{int.from_bytes(payload[0:4], "big"):08x}', **_byte_mapping(offset, 0, 4, PACKET_BYTE_SOURCE)})
+        if len(payload) >= 6:
+            children.append({'title': f'ReceiveWindowSize: {int.from_bytes(payload[4:6], "big")}', **_byte_mapping(offset, 4, 2, PACKET_BYTE_SOURCE)})
+        if len(payload) >= 8:
+            flags = int.from_bytes(payload[6:8], 'big')
+            flag_children = [
+                {'title': f'.... .... .... ...{1 if (flags & 0x0001) else 0} = Syn: {bool(flags & 0x0001)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .... ..{1 if (flags & 0x0002) else 0}. = Fin: {bool(flags & 0x0002)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .... .{1 if (flags & 0x0004) else 0}.. = Ack: {bool(flags & 0x0004)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .... {1 if (flags & 0x0008) else 0}... = Data: {bool(flags & 0x0008)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... ...{1 if (flags & 0x0010) else 0} .... = FECData: {bool(flags & 0x0010)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... ..{1 if (flags & 0x0020) else 0}. .... = CN: {bool(flags & 0x0020)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .{1 if (flags & 0x0040) else 0}.. .... = CWR: {bool(flags & 0x0040)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... ...{1 if (flags & 0x0080) else 0} .... .... = Ack of Acks: {bool(flags & 0x0080)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... ..{1 if (flags & 0x0100) else 0}. .... .... = Syn lossy: {bool(flags & 0x0100)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .{1 if (flags & 0x0200) else 0}.. .... .... = Ack delayed: {bool(flags & 0x0200)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'.... {1 if (flags & 0x0800) else 0}... .... .... = Correlation id: {bool(flags & 0x0800)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'...{1 if (flags & 0x1000) else 0} .... .... .... = SynEx: {bool(flags & 0x1000)}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE)},
+            ]
+            labels = []
+            if flags & 0x0001:
+                labels.append('Syn')
+            if flags & 0x0800:
+                labels.append('Correlation id')
+            if flags & 0x0004:
+                labels.append('Ack')
+            if flags & 0x0080:
+                labels.append('Ack of acks')
+            if flags & 0x0200:
+                labels.append('Ack delayed')
+            if flags & 0x1000:
+                labels.append('SynEx')
+            suffix = f", {', '.join(labels)}" if labels else ''
+            children.append({'title': f'Flags: 0x{flags:04x}{suffix}', **_byte_mapping(offset, 6, 2, PACKET_BYTE_SOURCE), 'children': flag_children})
+        if len(payload) >= 12:
+            children.append({'title': f'Initial SequenceNumber: 0x{int.from_bytes(payload[8:12], "big"):08x}', **_byte_mapping(offset, 8, 4, PACKET_BYTE_SOURCE)})
+        if len(payload) >= 14:
+            children.append({'title': f'Upstream MTU: {int.from_bytes(payload[12:14], "big")}', **_byte_mapping(offset, 12, 2, PACKET_BYTE_SOURCE)})
+        if len(payload) >= 16:
+            children.append({'title': f'DownStream MTU: {int.from_bytes(payload[14:16], "big")}', **_byte_mapping(offset, 14, 2, PACKET_BYTE_SOURCE)})
+        cursor = 16
+        if len(payload) >= 32 and (int.from_bytes(payload[6:8], 'big') & 0x0800):
+            children.append({'title': f'Correlation Id: {payload[cursor:cursor + 16].hex()}', **_byte_mapping(offset, cursor, 16, PACKET_BYTE_SOURCE)})
+            cursor += 16
+        if len(payload) >= cursor + 4 and (int.from_bytes(payload[6:8], 'big') & 0x1000):
+            synex_pos = cursor
+            synex_flags = int.from_bytes(payload[synex_pos:synex_pos + 2], 'big')
+            if synex_flags == 0 and len(payload) >= synex_pos + 20:
+                for probe in range(synex_pos, min(len(payload) - 3, synex_pos + 20)):
+                    if payload[probe:probe + 4] == b'\x00\x01\x01\x01':
+                        synex_pos = probe
+                        synex_flags = 0x0001
+                        break
+            synex_children = [
+                {'title': f'.... .... .... ...{1 if (synex_flags & 0x0001) else 0} = Version info: {bool(synex_flags & 0x0001)}', **_byte_mapping(offset, synex_pos, 2, PACKET_BYTE_SOURCE)}
+            ]
+            version = int.from_bytes(payload[synex_pos + 2:synex_pos + 4], 'big') if len(payload) >= synex_pos + 4 else 0
+            synex_node = {
+                'title': 'SynEx',
+                **_byte_mapping(offset, synex_pos, min(len(payload) - synex_pos, 36), PACKET_BYTE_SOURCE),
+                'children': [
+                    {'title': f'Flags: 0x{synex_flags:04x}', **_byte_mapping(offset, synex_pos, 2, PACKET_BYTE_SOURCE), 'children': synex_children},
+                    {'title': f'Version: UDPv2 (0x{version:04x})' if version == 0x0101 else f'Version: 0x{version:04x}', **_byte_mapping(offset, synex_pos + 2, 2, PACKET_BYTE_SOURCE)},
+                ],
+            }
+            if len(payload) >= synex_pos + 36:
+                synex_node['children'].append({'title': f'Cookie Hash: {payload[synex_pos + 4:synex_pos + 36].hex()}', **_byte_mapping(offset, synex_pos + 4, 32, PACKET_BYTE_SOURCE)})
+            children.append(synex_node)
+    else:
+        prefix = int(payload[7]) if len(payload) >= 8 else 0
+        flags = (((int(payload[2]) & 0x0F) << 8) | int(payload[1])) if len(payload) >= 3 else 0
+        prefix_children = [{'title': '...1 000. = PacketType: Dummy (0x8)', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)}]
+        prefix_children.append({'title': f'.... .{prefix & 0x0F:03b} = Short packet length: {prefix & 0x0F}', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)})
+        children.append({'title': f'PacketPrefixByte: 0x{prefix:02x}', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE), 'children': prefix_children})
+        flag_children = [
+            {'title': f'.... .... .... ...{1 if (flags & 0x001) else 0} = Ack: {bool(flags & 0x001)}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .... .{1 if (flags & 0x004) else 0}.. = Data: {bool(flags & 0x004)}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .... {1 if (flags & 0x008) else 0}... = AckVec: 0x{1 if (flags & 0x008) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... ...{1 if (flags & 0x010) else 0} .... = AckOfAcks: 0x{1 if (flags & 0x010) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .{1 if (flags & 0x040) else 0}.. .... = OverheadSize: 0x{1 if (flags & 0x040) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+            {'title': f'.... ...{1 if (flags & 0x100) else 0} .... .... = DelayedAckInfo: 0x{1 if (flags & 0x100) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
+            {'title': f'{((int(payload[2]) >> 4) & 0x0F):04b} .... .... .... = LogWindow: {(int(payload[2]) >> 4) & 0x0F}', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+        ]
+        labels = []
+        if flags & 0x001:
+            labels.append('Ack')
+        if flags & 0x040:
+            labels.append('Data')
+        children.append({'title': f'Flags: 0x{flags:x}' + (', ' + ', '.join(labels) if labels else ''), **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE), 'children': flag_children})
+        if flags & 0x010 and len(payload) >= 5:
+            children.append({'title': 'Ack of Acks', **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE), 'children': [
+                {'title': f'Sequence number: 0x{int.from_bytes(payload[3:5], "little"):04x}', **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE)}
+            ]})
+        if flags & 0x001 and len(payload) >= 10:
+            children.append({'title': 'Ack', **_byte_mapping(offset, 3, 7, PACKET_BYTE_SOURCE), 'children': [
+                {'title': f'Base Seq: 0x{int.from_bytes(payload[3:5], "little"):04x}', **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'receivedTS: {int.from_bytes(payload[5:7], "little")}', **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'sendTimeGap: {int.from_bytes(payload[8:10], "little")}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
+                {'title': '.... 0000 = NumDelayedAcks: 0', **_byte_mapping(offset, 10, 1, PACKET_BYTE_SOURCE)},
+                {'title': '0000 .... = delayedTimeScale: 0', **_byte_mapping(offset, 10, 1, PACKET_BYTE_SOURCE)},
+            ]})
+        if flags & 0x040 and len(payload) >= 11:
+            children.append({'title': 'Overhead', **_byte_mapping(offset, 10, 1, PACKET_BYTE_SOURCE), 'children': [
+                {'title': f'Overhead size: {int(payload[10])}', **_byte_mapping(offset, 10, 1, PACKET_BYTE_SOURCE)}
+            ]})
+        if flags & 0x100 and len(payload) >= 13:
+            children.append({'title': 'DelayAck', **_byte_mapping(offset, 11, 2, PACKET_BYTE_SOURCE), 'children': [
+                {'title': f'MaxDelayedAcks: {int(payload[11])}', **_byte_mapping(offset, 11, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'DelayedAckTimeoutInMs: {int(payload[12])}', **_byte_mapping(offset, 12, 1, PACKET_BYTE_SOURCE)},
+            ]})
+        if len(payload) >= 7:
+            dummy_off = 16 if (flags & 0x001 and len(payload) >= 18) else 5
+            children.append({'title': 'Dummy data', **_byte_mapping(offset, dummy_off, 2, PACKET_BYTE_SOURCE), 'children': [
+                {'title': f'Sequence number: 0x{int.from_bytes(payload[dummy_off:dummy_off + 2], "little"):04x}', **_byte_mapping(offset, dummy_off, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'[Full sequence number: 0x{int.from_bytes(payload[dummy_off:dummy_off + 2], "little"):08x}]', **_byte_mapping(offset, dummy_off, 2, PACKET_BYTE_SOURCE)},
+            ]})
     return {
         'title': 'UDP Remote Desktop Protocol',
         **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
@@ -13665,30 +13870,133 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
     command_name = cmd_names.get(cmd, f'Command {cmd}')
     status_label = status_names.get(status, f'0x{status:08x}')
 
-    def _smb2_capability_nodes(caps: int, cap_abs_offset: int | None = None) -> list[dict[str, Any]]:
-        entries = [
-            (0x00000001, 'DFS', 'This host supports DFS', 'This host does NOT support DFS'),
-            (0x00000002, 'LEASING', 'This host supports LEASING', 'This host does NOT support LEASING'),
-            (0x00000004, 'LARGE MTU', 'This host supports LARGE_MTU', 'This host does NOT support LARGE_MTU'),
-            (0x00000008, 'MULTI CHANNEL', 'This host supports MULTI CHANNEL', 'This host does NOT support MULTI CHANNEL'),
-            (0x00000010, 'PERSISTENT HANDLES', 'This host supports PERSISTENT HANDLES', 'This host does NOT support PERSISTENT HANDLES'),
-            (0x00000020, 'DIRECTORY LEASING', 'This host supports DIRECTORY LEASING', 'This host does NOT support DIRECTORY LEASING'),
-            (0x00000040, 'ENCRYPTION', 'This host supports ENCRYPTION', 'This host does NOT support ENCRYPTION'),
-            (0x00000080, 'NOTIFICATIONS', 'This host supports receiving NOTIFICATIONS', 'This host does NOT support receiving NOTIFICATIONS'),
+    def _bit_pattern(width: int, bit_values: dict[int, int | bool]) -> str:
+        bits = ['.' for _ in range(max(1, int(width)))]
+        for raw_bit, raw_value in bit_values.items():
+            bit = int(raw_bit)
+            if bit < 0 or bit >= len(bits):
+                continue
+            bits[len(bits) - 1 - bit] = '1' if int(raw_value) else '0'
+        return ' '.join(''.join(bits[i:i + 4]) for i in range(0, len(bits), 4))
+
+    def _bit_pattern_32(bit: int, set_flag: bool) -> str:
+        return _bit_pattern(32, {int(bit): bool(set_flag)})
+
+    def _bit_pattern_span(width: int, lo_bit: int, hi_bit: int, value: int) -> str:
+        bit_values: dict[int, int] = {}
+        lo = min(int(lo_bit), int(hi_bit))
+        hi = max(int(lo_bit), int(hi_bit))
+        for bit in range(lo, hi + 1):
+            bit_values[bit] = (int(value) >> (bit - lo)) & 0x1
+        return _bit_pattern(width, bit_values)
+
+    def _smb2_capability_entries() -> list[tuple[int, int, str, str, str]]:
+        return [
+            (0, 0x00000001, 'DFS', 'This host supports DFS', 'This host does NOT support DFS'),
+            (1, 0x00000002, 'LEASING', 'This host supports LEASING', 'This host does NOT support LEASING'),
+            (2, 0x00000004, 'LARGE MTU', 'This host supports LARGE_MTU', 'This host does NOT support LARGE_MTU'),
+            (3, 0x00000008, 'MULTI CHANNEL', 'This host supports MULTI CHANNEL', 'This host does NOT support MULTI CHANNEL'),
+            (4, 0x00000010, 'PERSISTENT HANDLES', 'This host supports PERSISTENT HANDLES', 'This host does NOT support PERSISTENT HANDLES'),
+            (5, 0x00000020, 'DIRECTORY LEASING', 'This host supports DIRECTORY LEASING', 'This host does NOT support DIRECTORY LEASING'),
+            (6, 0x00000040, 'ENCRYPTION', 'This host supports ENCRYPTION', 'This host does NOT support ENCRYPTION'),
+            (7, 0x00000080, 'NOTIFICATIONS', 'This host supports receiving NOTIFICATIONS', 'This host does NOT support receiving NOTIFICATIONS'),
         ]
+
+    def _smb2_capability_summary(caps: int) -> str:
+        return ', '.join([name for _bit, mask, name, _on, _off in _smb2_capability_entries() if caps & mask])
+
+    def _smb2_capability_nodes(caps: int, cap_abs_offset: int | None = None) -> list[dict[str, Any]]:
         out = []
-        for mask, name, on, off in entries:
-            node = {'title': f'.... = {name}: {on if (caps & mask) else off}'}
+        for bit, mask, name, on, off in _smb2_capability_entries():
+            node = {'title': f'{_bit_pattern_32(bit, bool(caps & mask))} = {name}: {on if (caps & mask) else off}'}
             if cap_abs_offset is not None:
                 node.update(_byte_mapping(cap_abs_offset, 0, 4, PACKET_BYTE_SOURCE))
             out.append(node)
         return out
 
-    def _bit_pattern_32(bit: int, set_flag: bool) -> str:
-        bits = ['.' for _ in range(32)]
-        idx = max(0, min(31, int(bit)))
-        bits[31 - idx] = '1' if set_flag else '0'
-        return ' '.join(''.join(bits[i:i + 4]) for i in range(0, 32, 4))
+    def _smb2_share_flag_nodes(flags: int, flags_abs_offset: int) -> list[dict[str, Any]]:
+        entries = [
+            (0, 0x00000001, 'DFS', 'True', 'False'),
+            (1, 0x00000002, 'DFS root', 'True', 'False'),
+            (8, 0x00000100, 'Restrict exclusive opens', 'True', 'False'),
+            (9, 0x00000200, 'Force shared delete', 'True', 'False'),
+            (10, 0x00000400, 'Allow namespace caching', 'True', 'False'),
+            (11, 0x00000800, 'Access based directory enum', 'True', 'False'),
+            (12, 0x00001000, 'Force level II oplock', 'True', 'False'),
+            (13, 0x00002000, 'Enable hash V1', 'True', 'False'),
+            (14, 0x00004000, 'Enable hash V2', 'True', 'False'),
+            (15, 0x00008000, 'Encrypted data required', 'True', 'False'),
+            (18, 0x00040000, 'Identity Remoting', 'True', 'False'),
+            (20, 0x00100000, 'Compressed IO', 'True', 'False'),
+            (21, 0x00200000, 'Isolated Transport', 'True', 'False'),
+        ]
+        children = [
+            {
+                'title': f'{_bit_pattern_32(bit, bool(flags & mask))} = {name}: {on if (flags & mask) else off}',
+                **_byte_mapping(flags_abs_offset, 0, 4, PACKET_BYTE_SOURCE),
+            }
+            for bit, mask, name, on, off in entries
+        ]
+        caching_policy = flags & 0x00000030
+        cache_name = {
+            0x00: 'Manual caching',
+            0x10: 'Auto caching',
+            0x20: 'VDO caching',
+            0x30: 'No caching',
+        }.get(caching_policy, f'0x{caching_policy >> 4:x}')
+        children.append({
+            'title': f'{_bit_pattern_span(32, 4, 5, caching_policy >> 4)} = Caching policy: {cache_name} (0x{caching_policy >> 4:x})',
+            **_byte_mapping(flags_abs_offset, 0, 4, PACKET_BYTE_SOURCE),
+        })
+        return children
+
+    def _smb2_share_capability_nodes(caps: int, caps_abs_offset: int) -> list[dict[str, Any]]:
+        entries = [
+            (0, 0x00000008, 'DFS', 'True', 'False'),
+            (4, 0x00000010, 'CONTINUOUS AVAILABILITY', 'True', 'False'),
+            (5, 0x00000020, 'SCALEOUT', 'True', 'False'),
+            (6, 0x00000040, 'CLUSTER', 'True', 'False'),
+            (7, 0x00000080, 'ASYMMETRIC', 'True', 'False'),
+            (8, 0x00000100, 'REDIRECT_TO_OWNER', 'True', 'False'),
+        ]
+        return [
+            {
+                'title': f'{_bit_pattern_32(bit, bool(caps & mask))} = {name}: {on if (caps & mask) else off}',
+                **_byte_mapping(caps_abs_offset, 0, 4, PACKET_BYTE_SOURCE),
+            }
+            for bit, mask, name, on, off in entries
+        ]
+
+    def _smb2_access_mask_nodes(mask_value: int, mask_abs_offset: int) -> list[dict[str, Any]]:
+        entries = [
+            (0, 0x00000001, 'Read', 'READ access', 'READ access not granted'),
+            (1, 0x00000002, 'Write', 'WRITE access', 'WRITE access not granted'),
+            (2, 0x00000004, 'Append', 'APPEND access', 'APPEND access not granted'),
+            (3, 0x00000008, 'Read EA', 'READ EXTENDED ATTRIBUTES access', 'READ EXTENDED ATTRIBUTES access not granted'),
+            (4, 0x00000010, 'Write EA', 'WRITE EXTENDED ATTRIBUTES access', 'WRITE EXTENDED ATTRIBUTES access not granted'),
+            (5, 0x00000020, 'Execute', 'EXECUTE access', 'EXECUTE access not granted'),
+            (6, 0x00000040, 'Delete Child', 'DELETE CHILD access', 'DELETE CHILD access not granted'),
+            (7, 0x00000080, 'Read Attributes', 'READ ATTRIBUTES access', 'READ ATTRIBUTES access not granted'),
+            (8, 0x00000100, 'Write Attributes', 'WRITE ATTRIBUTES access', 'WRITE ATTRIBUTES access not granted'),
+            (16, 0x00010000, 'Delete', 'DELETE access', 'DELETE access not granted'),
+            (17, 0x00020000, 'Read Control', 'READ ACCESS to owner, group and ACL of the SID', 'READ CONTROL not granted'),
+            (18, 0x00040000, 'Write DAC', 'OWNER may WRITE the DAC', 'WRITE DAC not granted'),
+            (19, 0x00080000, 'Write Owner', 'Can WRITE OWNER (take ownership)', 'WRITE OWNER not granted'),
+            (20, 0x00100000, 'Synchronize', 'Can wait on handle to SYNCHRONIZE on completion of I/O', 'SYNCHRONIZE not granted'),
+            (24, 0x01000000, 'System Security', 'SYSTEM SECURITY is set', 'SYSTEM SECURITY is not set'),
+            (25, 0x02000000, 'Maximum Allowed', 'Maximum allowed is set', 'Maximum allowed is NOT set'),
+            (28, 0x10000000, 'Generic All', 'Generic all is set', 'Generic all is NOT set'),
+            (29, 0x20000000, 'Generic Execute', 'Generic execute is set', 'Generic execute is NOT set'),
+            (30, 0x40000000, 'Generic Write', 'Generic write is set', 'Generic write is NOT set'),
+            (31, 0x80000000, 'Generic Read', 'Generic read is set', 'Generic read is NOT set'),
+        ]
+        return [
+            {
+                'title': f'{_bit_pattern_32(bit, bool(mask_value & mask))} = {name}: {on if (mask_value & mask) else off}',
+                **_byte_mapping(mask_abs_offset, 0, 4, PACKET_BYTE_SOURCE),
+            }
+            for bit, mask, name, on, off in entries
+        ]
 
     def _ntlm_flag_nodes(flags: int, flag_abs_offset: int | None = None) -> list[dict[str, Any]]:
         labels = [
@@ -13940,7 +14248,7 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     {'title': f'.... ..{1 if (sec_mode & 0x02) else 0}. = Signing required: {bool(sec_mode & 0x02)}', **_byte_mapping(offset, 68, 2, PACKET_BYTE_SOURCE)},
                 ]},
                 {'title': f'Reserved: {body[6:8].hex()}', **_byte_mapping(offset, 70, 2, PACKET_BYTE_SOURCE)},
-                {'title': f'Capabilities: 0x{caps:08x}, ' + ', '.join([name for mask, name in [(0x1,'DFS'),(0x2,'LEASING'),(0x4,'LARGE MTU'),(0x8,'MULTI CHANNEL'),(0x10,'PERSISTENT HANDLES'),(0x20,'DIRECTORY LEASING'),(0x40,'ENCRYPTION')] if caps & mask]), **_byte_mapping(offset, 72, 4, PACKET_BYTE_SOURCE), 'children': _smb2_capability_nodes(caps, offset + 72)},
+                {'title': f'Capabilities: 0x{caps:08x}' + (f', {_smb2_capability_summary(caps)}' if _smb2_capability_summary(caps) else ''), **_byte_mapping(offset, 72, 4, PACKET_BYTE_SOURCE), 'children': _smb2_capability_nodes(caps, offset + 72)},
                 {'title': f'Client Guid: {_dcerpc_uuid_from_bytes(body[12:28])}', **_byte_mapping(offset, 76, 16, PACKET_BYTE_SOURCE)},
                 {'title': f'NegotiateContextOffset: 0x{nctx_off:08x}', **_byte_mapping(offset, 92, 4, PACKET_BYTE_SOURCE)},
                 {'title': f'NegotiateContextCount: {nctx_cnt}', **_byte_mapping(offset, 96, 2, PACKET_BYTE_SOURCE)},
@@ -14050,7 +14358,7 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 {'title': f'Dialect: {dial_name} (0x{dialect:04x})', **_byte_mapping(offset, 68, 2, PACKET_BYTE_SOURCE)},
                 {'title': f'Reserved: {int.from_bytes(body[6:8], "little")}', **_byte_mapping(offset, 70, 2, PACKET_BYTE_SOURCE)},
                 {'title': f'Server Guid: {_dcerpc_uuid_from_bytes(body[8:24])}', **_byte_mapping(offset, 72, 16, PACKET_BYTE_SOURCE)},
-                {'title': f'Capabilities: 0x{caps:08x}, ' + ', '.join([name for mask, name in [(0x1,'DFS'),(0x2,'LEASING'),(0x4,'LARGE MTU')] if caps & mask]), **_byte_mapping(offset, 88, 4, PACKET_BYTE_SOURCE), 'children': _smb2_capability_nodes(caps, offset + 88)},
+                {'title': f'Capabilities: 0x{caps:08x}' + (f', {_smb2_capability_summary(caps)}' if _smb2_capability_summary(caps) else ''), **_byte_mapping(offset, 88, 4, PACKET_BYTE_SOURCE), 'children': _smb2_capability_nodes(caps, offset + 88)},
                 {'title': f'Max Transaction Size: {int.from_bytes(body[28:32], "little")}', **_byte_mapping(offset, 92, 4, PACKET_BYTE_SOURCE)},
                 {'title': f'Max Read Size: {int.from_bytes(body[32:36], "little")}', **_byte_mapping(offset, 96, 4, PACKET_BYTE_SOURCE)},
                 {'title': f'Max Write Size: {int.from_bytes(body[36:40], "little")}', **_byte_mapping(offset, 100, 4, PACKET_BYTE_SOURCE)},
@@ -14092,7 +14400,7 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 {'title': f'[Preauth Hash: {str(metadata.get("smb2_preauth_hash_hex", "") or "")}]'} if metadata.get('smb2_preauth_hash_hex') else {'title': '[Preauth Hash: <MISSING>]'},
                 {'title': f'Flags: {int(body[2])}', **_byte_mapping(offset, 66, 1, PACKET_BYTE_SOURCE), 'children': [{'title': f'.... ...{1 if (int(body[2]) & 0x01) else 0} = Session Binding Request: {bool(int(body[2]) & 0x01)}', **_byte_mapping(offset, 66, 1, PACKET_BYTE_SOURCE)}]},
                 {'title': f'Security mode: 0x{sec_mode:02x}, Signing required', **_byte_mapping(offset, 67, 1, PACKET_BYTE_SOURCE), 'children': [{'title': f'.... ...{1 if (sec_mode & 0x01) else 0} = Signing enabled: {bool(sec_mode & 0x01)}', **_byte_mapping(offset, 67, 1, PACKET_BYTE_SOURCE)}, {'title': f'.... ..{1 if (sec_mode & 0x02) else 0}. = Signing required: {bool(sec_mode & 0x02)}', **_byte_mapping(offset, 67, 1, PACKET_BYTE_SOURCE)}]},
-                {'title': f'Capabilities: 0x{caps:08x}, ' + ('DFS' if (caps & 0x1) else '').rstrip(', '), **_byte_mapping(offset, 68, 4, PACKET_BYTE_SOURCE), 'children': _smb2_capability_nodes(caps, offset + 68)},
+                {'title': f'Capabilities: 0x{caps:08x}' + (f', {_smb2_capability_summary(caps)}' if _smb2_capability_summary(caps) else ''), **_byte_mapping(offset, 68, 4, PACKET_BYTE_SOURCE), 'children': _smb2_capability_nodes(caps, offset + 68)},
                 {'title': f'Channel: None (0x{int.from_bytes(body[8:12], "little"):08x})', **_byte_mapping(offset, 72, 4, PACKET_BYTE_SOURCE)},
                 {'title': f'Previous Session Id: 0x{int.from_bytes(body[16:24], "little"):016x}', **_byte_mapping(offset, 80, 8, PACKET_BYTE_SOURCE)},
                 {'title': f'Blob Offset: 0x{sec_off:08x}', **_byte_mapping(offset, 76, 2, PACKET_BYTE_SOURCE)},
@@ -14224,6 +14532,56 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
                         **_byte_mapping(offset, blob_start + ntlm_pos, len(blob) - ntlm_pos, PACKET_BYTE_SOURCE),
                         'children': ntlm_children,
                     })
+        elif cmd == 3 and (not is_response) and len(body) >= 8:
+            path_flags = int.from_bytes(body[2:4], 'little')
+            path_off = int.from_bytes(body[4:6], 'little')
+            path_len = int.from_bytes(body[6:8], 'little')
+            path_end = min(len(data), path_off + path_len)
+            try:
+                tree_name = data[path_off:path_end].decode('utf-16-le', errors='replace').rstrip('\x00')
+            except Exception:
+                tree_name = ''
+            body_children.extend([
+                {'title': f'StructureSize: 0x{int.from_bytes(body[0:2], "little"):04x}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'0000 0000 0000 100. = Fixed Part Length: {int.from_bytes(body[0:2], "little") >> 1}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... .... .... ...{int.from_bytes(body[0:2], "little") & 0x1} = Dynamic Part: {bool(int.from_bytes(body[0:2], "little") & 0x1)}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Flags: 0x{path_flags:04x}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'{_bit_pattern_32(0, bool(path_flags & 0x0001))[-19:]} = Cluster Reconnect: {"Set" if (path_flags & 0x0001) else "Not set"}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'{_bit_pattern_32(1, bool(path_flags & 0x0002))[-19:]} = Redirect To Owner: {"Set" if (path_flags & 0x0002) else "Not set"}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'{_bit_pattern_32(2, bool(path_flags & 0x0004))[-19:]} = Extension Present: {"Set" if (path_flags & 0x0004) else "Not set"}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'{_bit_pattern_span(16, 3, 15, path_flags >> 3)} = Reserved: 0x{path_flags >> 3:04x}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Tree: {tree_name if tree_name else "<MISSING>"}', **_byte_mapping(offset, path_off, max(0, path_end - path_off), PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'Blob Offset: 0x{path_off:08x}', **_byte_mapping(offset, 68, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'Blob Length: {path_len}', **_byte_mapping(offset, 70, 2, PACKET_BYTE_SOURCE)},
+                ]},
+            ])
+        elif cmd == 3 and is_response and len(body) >= 16:
+            share_type = int(body[2]) if len(body) > 2 else 0
+            share_type_name = {0x01: 'Disk', 0x02: 'Named pipe', 0x03: 'Printer'}.get(share_type, f'0x{share_type:02x}')
+            share_flags = int.from_bytes(body[4:8], 'little')
+            share_caps = int.from_bytes(body[8:12], 'little')
+            access_mask = int.from_bytes(body[12:16], 'little')
+            body_children.extend([
+                {'title': f'StructureSize: 0x{int.from_bytes(body[0:2], "little"):04x}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'0000 0000 0001 000. = Fixed Part Length: {int.from_bytes(body[0:2], "little") >> 1}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... .... .... ...{int.from_bytes(body[0:2], "little") & 0x1} = Dynamic Part: {bool(int.from_bytes(body[0:2], "little") & 0x1)}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Share Type: {share_type_name} (0x{share_type:02x})', **_byte_mapping(offset, 66, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Reserved: {body[3:4].hex()}', **_byte_mapping(offset, 67, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'Share flags: 0x{share_flags:08x}', **_byte_mapping(offset, 68, 4, PACKET_BYTE_SOURCE), 'children': _smb2_share_flag_nodes(share_flags, offset + 68)},
+                {'title': f'Share Capabilities: 0x{share_caps:08x}', **_byte_mapping(offset, 72, 4, PACKET_BYTE_SOURCE), 'children': _smb2_share_capability_nodes(share_caps, offset + 72)},
+                {'title': f'Access Mask: 0x{access_mask:08x}', **_byte_mapping(offset, 76, 4, PACKET_BYTE_SOURCE), 'children': _smb2_access_mask_nodes(access_mask, offset + 76)},
+            ])
+        elif cmd == 4 and len(body) >= 4:
+            body_children.extend([
+                {'title': f'StructureSize: 0x{int.from_bytes(body[0:2], "little"):04x}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'0000 0000 0000 010. = Fixed Part Length: {int.from_bytes(body[0:2], "little") >> 1}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... .... .... ...{int.from_bytes(body[0:2], "little") & 0x1} = Dynamic Part: {bool(int.from_bytes(body[0:2], "little") & 0x1)}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Reserved: {body[2:4].hex()}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+            ])
 
         children.append({
             'title': body_title,
@@ -14245,6 +14603,8 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
     payload = _tcp_payload_bytes(packet, tcp_layer) if tcp_layer is not None else b''
     byte_source = PACKET_BYTE_SOURCE
     base_offset = offset
+    record_mark_len = 4
+    show_record_mark = True
     reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
     if reassembled_hex:
         try:
@@ -14260,19 +14620,31 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
             byte_source = TCP_REASSEMBLED_BYTE_SOURCE
             base_offset = 0
 
-    if len(payload) < 4:
+    if len(payload) < 1:
         return {'title': 'Kerberos', **_byte_mapping(base_offset, 0, max(1, len(payload)), byte_source), 'children': []}
 
-    rec_len = int.from_bytes(payload[0:4], 'big') & 0x7FFFFFFF
+    def _valid_krb_record_mark(buf: bytes) -> bool:
+        if len(buf) < 4:
+            return False
+        ln = int.from_bytes(buf[0:4], 'big') & 0x7FFFFFFF
+        return 0 < ln <= (len(buf) - 4)
+
+    if not _valid_krb_record_mark(payload):
+        record_mark_len = 0
+        show_record_mark = False
+
+    rec_len = int.from_bytes(payload[0:4], 'big') & 0x7FFFFFFF if len(payload) >= 4 else 0
+    krb_payload = payload[record_mark_len:]
+    content_base = int(base_offset + record_mark_len) if byte_source == PACKET_BYTE_SOURCE else int(record_mark_len)
     root = None
     if packet.haslayer('Kerberos'):
         try:
             root = getattr(packet['Kerberos'], 'root', None)
         except Exception:
             root = None
-    if root is None and len(payload) > 4:
+    if root is None and krb_payload:
         try:
-            parsed = Kerberos(payload[4:])
+            parsed = Kerberos(krb_payload)
             root = getattr(parsed, 'root', None)
         except Exception:
             root = None
@@ -14379,7 +14751,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
         ]
 
     def _parse_principal(buf: bytes, pos: int, label: str, map_base: int | None = None) -> dict[str, Any] | None:
-        use_base = base_offset if map_base is None else int(map_base)
+        use_base = content_base if map_base is None else int(map_base)
         try:
             t, s, e, _ = _ber_tlv(buf, pos)
             if t != 0x30:
@@ -14395,7 +14767,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 if inner is not None:
                     vv, s0, e0 = inner
                     nt = _principal_name_type_label(vv)
-                    kids.append({'title': f'name-type: {nt} ({vv})', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'name-type: {nt} ({vv})', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA1:
                 st, u0, u1, _ = _ber_tlv(buf, a1)
                 if st == 0x30:
@@ -14408,15 +14780,15 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                             break
                         txt, s0, e0 = sub
                         item_label = 'CNameString' if label == 'cname' else ('SNameString' if label == 'sname' else 'NameString')
-                        items.append({'title': f'{item_label}: {txt}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                        items.append({'title': f'{item_label}: {txt}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
                         _, _, _, q = _ber_tlv(buf, q)
                         idx += 1
-                    kids.append({'title': f'{_principal_string_label(label)}: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(use_base, u0 + 4, u1 - u0, byte_source), 'children': items})
+                    kids.append({'title': f'{_principal_string_label(label)}: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(use_base, u0, u1 - u0, byte_source), 'children': items})
             p = n1
-        return {'title': label, **_byte_mapping(use_base, s + 4, e - s, byte_source), 'children': kids}
+        return {'title': label, **_byte_mapping(use_base, s, e - s, byte_source), 'children': kids}
 
     def _parse_encrypted_data(buf: bytes, pos: int, label: str, map_base: int | None = None) -> dict[str, Any] | None:
-        use_base = base_offset if map_base is None else int(map_base)
+        use_base = content_base if map_base is None else int(map_base)
         try:
             t, s, e, _ = _ber_tlv(buf, pos)
             if t != 0x30:
@@ -14431,20 +14803,20 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 inner = _ber_int_at(buf, a1)
                 if inner is not None:
                     vv, s0, e0 = inner
-                    kids.append({'title': f'etype: {_etype_name(vv)} ({vv})', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'etype: {_etype_name(vv)} ({vv})', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA1:
                 inner = _ber_int_at(buf, a1)
                 if inner is not None:
                     vv, s0, e0 = inner
-                    kids.append({'title': f'kvno: {vv}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'kvno: {vv}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA2:
                 st, u0, u1, _ = _ber_tlv(buf, a1)
                 if st == 0x04:
                     raw = bytes(buf[u0:u1])
                     title = f'cipher: {raw.hex()}' if len(raw) <= 160 else f'cipher […]: {_hex_preview_local(raw)}'
-                    kids.append({'title': title, **_byte_mapping(use_base, u0 + 4, u1 - u0, byte_source)})
+                    kids.append({'title': title, **_byte_mapping(use_base, u0, u1 - u0, byte_source)})
             p = n1
-        return {'title': label, **_byte_mapping(use_base, s + 4, e - s, byte_source), 'children': kids}
+        return {'title': label, **_byte_mapping(use_base, s, e - s, byte_source), 'children': kids}
 
     def _parse_padata_sequence(buf: bytes, pos: int, label: str) -> dict[str, Any] | None:
         try:
@@ -14471,7 +14843,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     if inner is not None:
                         vv, s0, e0 = inner
                         padata_type_val = vv
-                        item_children.append({'title': f'padata-type: {ptype_names.get(vv, vv)} ({vv})', **_byte_mapping(base_offset, s0 + 4, e0 - s0, byte_source)})
+                        item_children.append({'title': f'padata-type: {ptype_names.get(vv, vv)} ({vv})', **_byte_mapping(content_base, s0, e0 - s0, byte_source)})
                 elif t2 == 0xA2:
                     st, u0, u1, _ = _ber_tlv(buf, a2)
                     if st == 0x04:
@@ -14495,7 +14867,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                                                 inner2 = _ber_int_at(raw_val, a5)
                                                 if inner2 is not None:
                                                     vv2, _, _ = inner2
-                                                    entry_children.append({'title': f'etype: {_etype_name(vv2)} ({vv2})', **_byte_mapping(base_offset, u0 + 4 + x, max(1, n5 - x), byte_source)})
+                                                    entry_children.append({'title': f'etype: {_etype_name(vv2)} ({vv2})', **_byte_mapping(content_base, u0 + x, max(1, n5 - x), byte_source)})
                                             elif t5 == 0xA1:
                                                 st2, u2, v2, _ = _ber_tlv(raw_val, a5)
                                                 if st2 in {0x1A, 0x1B, 0x0C, 0x04}:
@@ -14503,52 +14875,26 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                                                         salt = raw_val[u2:v2].decode('utf-8', errors='replace')
                                                     except Exception:
                                                         salt = raw_val[u2:v2].hex()
-                                                    entry_children.append({'title': f'salt: {salt}', **_byte_mapping(base_offset, u0 + 4 + x, max(1, n5 - x), byte_source)})
+                                                    entry_children.append({'title': f'salt: {salt}', **_byte_mapping(content_base, u0 + x, max(1, n5 - x), byte_source)})
                                             x = n5
-                                        seq_children.append({'title': 'ETYPE-INFO2-ENTRY', **_byte_mapping(base_offset, u0 + 4 + r, max(1, n4 - r), byte_source), 'children': entry_children})
+                                        seq_children.append({'title': 'ETYPE-INFO2-ENTRY', **_byte_mapping(content_base, u0 + r, max(1, n4 - r), byte_source), 'children': entry_children})
                                         r = n4
                                     padata_children = seq_children
                             except Exception:
                                 padata_children = []
                         elif padata_type_val == 1:
-                            padata_children = []
-                            try:
-                                parsed_tok = Kerberos(raw_val)
-                                parsed_root = getattr(parsed_tok, 'root', None)
-                            except Exception:
-                                parsed_root = None
-                            if parsed_root is not None:
-                                try:
-                                    scapy_tree = _scapy_packet_nodes(
-                                        parsed_root,
-                                        title='Kerberos',
-                                        max_depth=10,
-                                        base_offset=base_offset + u0 + 4,
-                                        byte_source=byte_source,
-                                        source_bytes=raw_val,
-                                    )
-                                    padata_children = [{
-                                        'title': 'Kerberos',
-                                        **_byte_mapping(base_offset, u0 + 4, len(raw_val), byte_source),
-                                        'children': [{
-                                            'title': 'ap-req',
-                                            **_byte_mapping(base_offset, u0 + 4, len(raw_val), byte_source),
-                                            'children': list(scapy_tree.get('children', []) or []),
-                                        }],
-                                    }]
-                                except Exception:
-                                    padata_children = []
-                        value_node = {'title': f'padata-value: {raw_val.hex()}' if raw_val else 'padata-value: <MISSING>', **_byte_mapping(base_offset, u0 + 4, u1 - u0, byte_source), 'children': padata_children}
+                            padata_children = _parse_ap_req_token(raw_val, content_base + u0)
+                        value_node = {'title': f'padata-value: {raw_val.hex()}' if raw_val else 'padata-value: <MISSING>', **_byte_mapping(content_base, u0, u1 - u0, byte_source), 'children': padata_children}
                         if item_children and str(item_children[-1].get('title', '')).startswith('padata-type:'):
                             item_children[-1].setdefault('children', []).append(value_node)
                         else:
                             item_children.append(value_node)
                 q = n2
             padata_label = ptype_names.get(padata_type_val, padata_type_val) if padata_type_val is not None else idx
-            items.append({'title': f'PA-DATA {padata_label}', **_byte_mapping(base_offset, a1 + 4, b1 - a1, byte_source), 'children': item_children})
+            items.append({'title': f'PA-DATA {padata_label}', **_byte_mapping(content_base, a1, b1 - a1, byte_source), 'children': item_children})
             p = n1
             idx += 1
-        return {'title': f'{label}: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(base_offset, s + 4, e - s, byte_source), 'children': items}
+        return {'title': f'{label}: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(content_base, s, e - s, byte_source), 'children': items}
 
     def _parse_padata_raw(raw_buf: bytes, abs_off: int, label: str) -> dict[str, Any] | None:
         ptype_names = {149: 'PA-REQ-ENC-PA-REP', 19: 'PA-ETYPE-INFO2', 2: 'PA-ENC-TIMESTAMP', 16: 'PA-PK-AS-REQ', 15: 'PA-PK-AS-REP-19', 1: 'PA-TGS-REQ'}
@@ -14631,66 +14977,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                                     padata_children.append({'title': 'ETYPE-INFO2-ENTRY', **_byte_mapping(child_base, rr, n4 - rr, byte_source), 'children': entry_children})
                                     rr = n4
                         elif padata_type_val == 1:
-                            padata_children = []
-                            try:
-                                t_tok, s_tok, e_tok, _ = _ber_tlv(raw_val, 0)
-                            except Exception:
-                                t_tok = -1; s_tok = e_tok = 0
-                            if t_tok == 0x6E:
-                                try:
-                                    seq_tok, q0_tok, q1_tok, _ = _ber_tlv(raw_val, s_tok)
-                                except Exception:
-                                    seq_tok = -1; q0_tok = q1_tok = 0
-                                if seq_tok == 0x30:
-                                    app_children: list[dict[str, Any]] = []
-                                    pp = q0_tok
-                                    while pp < q1_tok:
-                                        try:
-                                            tt_tok, aa_tok, bb_tok, nn_tok = _ber_tlv(raw_val, pp)
-                                        except Exception:
-                                            break
-                                        if tt_tok == 0xA0:
-                                            inner2 = _ber_int_at(raw_val, aa_tok)
-                                            if inner2 is not None:
-                                                vv2, s2, e2 = inner2
-                                                app_children.append({'title': f'pvno: {vv2}', **_byte_mapping(child_base, s2, e2 - s2, byte_source)})
-                                        elif tt_tok == 0xA1:
-                                            inner2 = _ber_int_at(raw_val, aa_tok)
-                                            if inner2 is not None:
-                                                vv2, s2, e2 = inner2
-                                                app_children.append({'title': f'msg-type: {_msg_name(vv2)} ({vv2})', **_byte_mapping(child_base, s2, e2 - s2, byte_source)})
-                                        elif tt_tok == 0xA2:
-                                            try:
-                                                bt, bs, be, _ = _ber_tlv(raw_val, aa_tok)
-                                            except Exception:
-                                                bt = -1; bs = be = 0
-                                            if bt == 0x03 and be - bs >= 2:
-                                                pad = int(raw_val[bs])
-                                                bits = bytes(raw_val[bs + 1:be])
-                                                v = int.from_bytes(bits, 'big')
-                                                app_children.append({'title': f'Padding: {pad}', **_byte_mapping(child_base, bs, 1, byte_source)})
-                                                app_children.append({'title': f'ap-options: {bits.hex()}', **_byte_mapping(child_base, bs + 1, len(bits), byte_source), 'children': [
-                                                    {'title': f'0... .... = reserved: {bool(v & 0x80)}', **_byte_mapping(child_base, bs + 1, len(bits), byte_source)},
-                                                    {'title': f'.0.. .... = use-session-key: {bool(v & 0x40)}', **_byte_mapping(child_base, bs + 1, len(bits), byte_source)},
-                                                    {'title': f'..0. .... = mutual-required: {bool(v & 0x20)}', **_byte_mapping(child_base, bs + 1, len(bits), byte_source)},
-                                                ]})
-                                        elif tt_tok == 0xA3:
-                                            try:
-                                                node = _parse_ticket(raw_val, aa_tok, child_base)
-                                            except Exception:
-                                                node = None
-                                            if node is not None:
-                                                app_children.append(node)
-                                        elif tt_tok == 0xA4:
-                                            try:
-                                                node = _parse_encrypted_data(raw_val, aa_tok, 'authenticator', child_base)
-                                            except Exception:
-                                                node = None
-                                            if node is not None:
-                                                app_children.append(node)
-                                        pp = nn_tok
-                                    if app_children:
-                                        padata_children = [{'title': 'Kerberos', **_byte_mapping(child_base, 0, len(raw_val), byte_source), 'children': [{'title': 'ap-req', **_byte_mapping(child_base, 0, len(raw_val), byte_source), 'children': app_children}]}]
+                            padata_children = _parse_ap_req_token(raw_val, child_base)
                         value_node = {'title': f'padata-value: {raw_val.hex()}' if raw_val else 'padata-value: <MISSING>', **_byte_mapping(abs_off, u0, u1 - u0, byte_source), 'children': padata_children}
                         if item_children and str(item_children[-1].get('title', '')).startswith('padata-type:'):
                             item_children[-1].setdefault('children', []).append(value_node)
@@ -14703,7 +14990,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
         return {'title': f'{label}: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(abs_off, 0, len(raw_buf), byte_source), 'children': items}
 
     def _parse_kdc_req_body(buf: bytes, pos: int, map_base: int | None = None) -> dict[str, Any] | None:
-        use_base = base_offset if map_base is None else int(map_base)
+        use_base = content_base if map_base is None else int(map_base)
         try:
             t, s, e, _ = _ber_tlv(buf, pos)
             if t != 0x30:
@@ -14720,8 +15007,8 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     raw_bits = bytes(buf[u0:u1])
                     pad = int(raw_bits[0]) if raw_bits else 0
                     bit_payload = raw_bits[1:] if len(raw_bits) > 1 else b''
-                    kids.append({'title': f'Padding: {pad}', **_byte_mapping(use_base, u0 + 4, 1 if raw_bits else 0, byte_source)})
-                    kids.append({'title': f'kdc-options: {bit_payload.hex()}', **_byte_mapping(use_base, u0 + 5, len(bit_payload), byte_source), 'children': _parse_kdc_options_bits(bit_payload)})
+                    kids.append({'title': f'Padding: {pad}', **_byte_mapping(use_base, u0, 1 if raw_bits else 0, byte_source)})
+                    kids.append({'title': f'kdc-options: {bit_payload.hex()}', **_byte_mapping(use_base, u0 + 1, len(bit_payload), byte_source), 'children': _parse_kdc_options_bits(bit_payload)})
             elif t1 == 0xA1:
                 node = _parse_principal(buf, a1, 'cname', use_base)
                 if node is not None:
@@ -14730,7 +15017,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 sub = _ber_string_at(buf, a1)
                 if sub is not None:
                     txt, s0, e0 = sub
-                    kids.append({'title': f'realm: {txt}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'realm: {txt}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA3:
                 node = _parse_principal(buf, a1, 'sname', use_base)
                 if node is not None:
@@ -14740,12 +15027,12 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 if sub is not None:
                     txt, s0, e0 = sub
                     label_local = {0xA4: 'from', 0xA5: 'till', 0xA6: 'rtime'}.get(t1, 'time')
-                    kids.append({'title': f'{label_local}: {_kerb_time_text(txt)}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'{label_local}: {_kerb_time_text(txt)}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA7:
                 inner = _ber_int_at(buf, a1)
                 if inner is not None:
                     vv, s0, e0 = inner
-                    kids.append({'title': f'nonce: {vv}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'nonce: {vv}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA8:
                 st, u0, u1, _ = _ber_tlv(buf, a1)
                 if st == 0x30:
@@ -14757,15 +15044,15 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                         if inner is None:
                             break
                         vv, s0, e0 = inner
-                        items.append({'title': f'ENCTYPE: {_etype_name(vv)} ({vv})', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                        items.append({'title': f'ENCTYPE: {_etype_name(vv)} ({vv})', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
                         _, _, _, q = _ber_tlv(buf, q)
                         idx += 1
-                    kids.append({'title': f'etype: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(use_base, u0 + 4, u1 - u0, byte_source), 'children': items})
+                    kids.append({'title': f'etype: {len(items)} item' + ('s' if len(items) != 1 else ''), **_byte_mapping(use_base, u0, u1 - u0, byte_source), 'children': items})
             p = n1
-        return {'title': 'req-body', **_byte_mapping(use_base, s + 4, e - s, byte_source), 'children': kids}
+        return {'title': 'req-body', **_byte_mapping(use_base, s, e - s, byte_source), 'children': kids}
 
     def _parse_ticket(buf: bytes, pos: int, map_base: int | None = None) -> dict[str, Any] | None:
-        use_base = base_offset if map_base is None else int(map_base)
+        use_base = content_base if map_base is None else int(map_base)
         try:
             t, s, e, _ = _ber_tlv(buf, pos)
             if t != 0x61:
@@ -14783,12 +15070,12 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 inner = _ber_int_at(buf, a1)
                 if inner is not None:
                     vv, s0, e0 = inner
-                    kids.append({'title': f'tkt-vno: {vv}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'tkt-vno: {vv}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA1:
                 sub = _ber_string_at(buf, a1)
                 if sub is not None:
                     txt, s0, e0 = sub
-                    kids.append({'title': f'realm: {txt}', **_byte_mapping(use_base, s0 + 4, e0 - s0, byte_source)})
+                    kids.append({'title': f'realm: {txt}', **_byte_mapping(use_base, s0, e0 - s0, byte_source)})
             elif t1 == 0xA2:
                 node = _parse_principal(buf, a1, 'sname', use_base)
                 if node is not None:
@@ -14798,18 +15085,85 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                 if node is not None:
                     kids.append(node)
             p = n1
-        return {'title': 'ticket', **_byte_mapping(use_base, s + 4, e - s, byte_source), 'children': kids}
+        return {'title': 'ticket', **_byte_mapping(use_base, s, e - s, byte_source), 'children': kids}
 
-    children: List[Dict[str, Any]] = [
-        {
+    def _parse_ap_req_token(raw_val: bytes, map_base: int) -> list[dict[str, Any]]:
+        try:
+            t_tok, s_tok, _e_tok, _ = _ber_tlv(raw_val, 0)
+        except Exception:
+            return []
+        if t_tok != 0x6E:
+            return []
+        try:
+            seq_tok, q0_tok, q1_tok, _ = _ber_tlv(raw_val, s_tok)
+        except Exception:
+            return []
+        if seq_tok != 0x30:
+            return []
+        app_children: list[dict[str, Any]] = []
+        pp = q0_tok
+        while pp < q1_tok:
+            try:
+                tt_tok, aa_tok, _bb_tok, nn_tok = _ber_tlv(raw_val, pp)
+            except Exception:
+                break
+            if tt_tok == 0xA0:
+                inner2 = _ber_int_at(raw_val, aa_tok)
+                if inner2 is not None:
+                    vv2, s2, e2 = inner2
+                    app_children.append({'title': f'pvno: {vv2}', **_byte_mapping(map_base, s2, e2 - s2, byte_source)})
+            elif tt_tok == 0xA1:
+                inner2 = _ber_int_at(raw_val, aa_tok)
+                if inner2 is not None:
+                    vv2, s2, e2 = inner2
+                    app_children.append({'title': f'msg-type: {_msg_name(vv2)} ({vv2})', **_byte_mapping(map_base, s2, e2 - s2, byte_source)})
+            elif tt_tok == 0xA2:
+                try:
+                    bt, bs, be, _ = _ber_tlv(raw_val, aa_tok)
+                except Exception:
+                    bt = -1
+                    bs = be = 0
+                if bt == 0x03 and be - bs >= 2:
+                    pad = int(raw_val[bs])
+                    bits = bytes(raw_val[bs + 1:be])
+                    v = int.from_bytes(bits, 'big') if bits else 0
+                    app_children.append({'title': f'Padding: {pad}', **_byte_mapping(map_base, bs, 1, byte_source)})
+                    app_children.append({'title': f'ap-options: {bits.hex()}', **_byte_mapping(map_base, bs + 1, len(bits), byte_source), 'children': [
+                        {'title': f'0... .... = reserved: {bool(v & 0x80)}', **_byte_mapping(map_base, bs + 1, len(bits), byte_source)},
+                        {'title': f'.0.. .... = use-session-key: {bool(v & 0x40)}', **_byte_mapping(map_base, bs + 1, len(bits), byte_source)},
+                        {'title': f'..0. .... = mutual-required: {bool(v & 0x20)}', **_byte_mapping(map_base, bs + 1, len(bits), byte_source)},
+                    ]})
+            elif tt_tok == 0xA3:
+                node = _parse_ticket(raw_val, aa_tok, map_base)
+                if node is not None:
+                    app_children.append(node)
+            elif tt_tok == 0xA4:
+                node = _parse_encrypted_data(raw_val, aa_tok, 'authenticator', map_base)
+                if node is not None:
+                    app_children.append(node)
+            pp = nn_tok
+        if not app_children:
+            return []
+        return [{
+            'title': 'Kerberos',
+            **_byte_mapping(map_base, 0, len(raw_val), byte_source),
+            'children': [{
+                'title': 'ap-req',
+                **_byte_mapping(map_base, 0, len(raw_val), byte_source),
+                'children': app_children,
+            }],
+        }]
+
+    children: List[Dict[str, Any]] = []
+    if show_record_mark:
+        children.append({
             'title': f'Record Mark: {rec_len} bytes',
             **_byte_mapping(base_offset, 0, 4, byte_source),
             'children': [
                 {'title': '0... .... .... .... .... .... .... .... = Reserved: Not set', **_byte_mapping(base_offset, 0, 4, byte_source)},
                 {'title': f'.{rec_len:031b} = Record Length: {rec_len}', **_byte_mapping(base_offset, 0, 4, byte_source)},
             ],
-        },
-    ]
+        })
 
     def _decode_krb_payload(buf: bytes) -> dict[str, Any] | None:
         try:
@@ -14831,12 +15185,12 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
-                        local_children.append({'title': f'pvno: {vv}', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'pvno: {vv}', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xA2:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
-                        local_children.append({'title': f'msg-type: {_msg_name(vv)} ({vv})', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'msg-type: {_msg_name(vv)} ({vv})', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xA3:
                     node = _parse_padata_sequence(buf, a1, 'padata')
                     if node is not None:
@@ -14850,12 +15204,12 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
-                        local_children.append({'title': f'pvno: {vv}', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'pvno: {vv}', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xA1:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
-                        local_children.append({'title': f'msg-type: {_msg_name(vv)} ({vv})', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'msg-type: {_msg_name(vv)} ({vv})', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xA2:
                     node = _parse_padata_sequence(buf, a1, 'padata')
                     if node is not None:
@@ -14864,7 +15218,7 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     sub = _ber_string_at(buf, a1)
                     if sub is not None:
                         txt, s0i, e0i = sub
-                        local_children.append({'title': f'crealm: {txt}', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'crealm: {txt}', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xA4:
                     node = _parse_principal(buf, a1, 'cname')
                     if node is not None:
@@ -14882,26 +15236,26 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
-                        local_children.append({'title': f'pvno: {vv}', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'pvno: {vv}', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xA1:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
-                        local_children.append({'title': f'msg-type: {_msg_name(vv)} ({vv})', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'msg-type: {_msg_name(vv)} ({vv})', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 in {0xA4, 0xA9}:
                     sub = _ber_string_at(buf, a1)
                     if sub is not None:
                         txt, s0i, e0i = sub
                         label = 'stime' if t1 == 0xA4 else 'realm'
-                        local_children.append({'title': f'{label}: {_kerb_time_text(txt)}', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                        local_children.append({'title': f'{label}: {_kerb_time_text(txt)}', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 in {0xA5, 0xA6}:
                     inner = _ber_int_at(buf, a1)
                     if inner is not None:
                         vv, s0i, e0i = inner
                         if t1 == 0xA5:
-                            local_children.append({'title': f'susec: {vv}', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                            local_children.append({'title': f'susec: {vv}', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                         else:
-                            local_children.append({'title': f'error-code: {_krb_error_name(vv)} ({vv})', **_byte_mapping(base_offset, s0i + 4, e0i - s0i, byte_source)})
+                            local_children.append({'title': f'error-code: {_krb_error_name(vv)} ({vv})', **_byte_mapping(content_base, s0i, e0i - s0i, byte_source)})
                 elif t1 == 0xAA:
                     node = _parse_principal(buf, a1, 'sname')
                     if node is not None:
@@ -14913,21 +15267,21 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
                         st = -1; u0 = u1 = 0
                     if st == 0x04:
                         raw_val = bytes(buf[u0:u1])
-                        node = _parse_padata_raw(raw_val, base_offset + u0 + 4, 'e-data')
+                        node = _parse_padata_raw(raw_val, content_base + u0, 'e-data')
                         local_children.append({
                             'title': f'e-data: {raw_val.hex()}' if raw_val else 'e-data: <MISSING>',
-                            **_byte_mapping(base_offset, u0 + 4, u1 - u0, byte_source),
+                            **_byte_mapping(content_base, u0, u1 - u0, byte_source),
                             'children': (node.get('children', []) if node is not None else []),
                         })
             p = n1
-        return {'title': msg_name, **_byte_mapping(base_offset, 4, max(1, len(payload) - 4), byte_source), 'children': local_children}
+        return {'title': msg_name, **_byte_mapping(content_base, 0, max(1, len(buf)), byte_source), 'children': local_children}
 
-    manual_tree = _decode_krb_payload(payload[4:]) if len(payload) > 4 else None
+    manual_tree = _decode_krb_payload(krb_payload) if krb_payload else None
     if manual_tree is not None:
         _fill_tree_byte_ranges_from_payload(
             manual_tree,
-            payload[4:],
-            (int(base_offset + 4) if byte_source == PACKET_BYTE_SOURCE else 4),
+            krb_payload,
+            content_base,
             byte_source,
         )
         children.append(manual_tree)
@@ -14936,16 +15290,16 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
             root,
             title=msg_name,
             max_depth=10,
-            base_offset=(int(base_offset + 4) if byte_source == PACKET_BYTE_SOURCE else 4),
+            base_offset=content_base,
             byte_source=byte_source,
-            source_bytes=payload[4:],
+            source_bytes=krb_payload,
         )
-        asn1_tree.update(_byte_mapping(base_offset, 4, max(1, len(payload) - 4), byte_source))
+        asn1_tree.update(_byte_mapping(content_base, 0, max(1, len(krb_payload)), byte_source))
         children.append(asn1_tree)
     else:
         children.append({
             'title': msg_name,
-            **_byte_mapping(base_offset, 4, max(1, len(payload) - 4), byte_source),
+            **_byte_mapping(content_base, 0, max(1, len(krb_payload)), byte_source),
         })
     response_in = int(metadata.get('kerberos_response_frame', 0) or 0) if isinstance(metadata, dict) else 0
     response_to = int(metadata.get('kerberos_request_frame', 0) or 0) if isinstance(metadata, dict) else 0
@@ -14996,6 +15350,13 @@ def _krb5_section(packet, offset: int, record=None) -> Dict[str, Any]:
 
 def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    if packet is not None and packet.haslayer('CLDAP'):
+        try:
+            layer_payload = bytes(packet['CLDAP'])
+            if layer_payload:
+                payload = layer_payload
+        except Exception:
+            pass
     root: Dict[str, Any] = {
         'title': 'Connectionless Lightweight Directory Access Protocol',
         **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
@@ -15467,7 +15828,7 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
                         ttype, stype, etype, ntype = _ber_tlv(payload, cur_attr)
                         atype = _octet_text(bytes(payload[stype:etype])) if ttype == 0x04 else '<MISSING>'
                         cur_attr = ntype
-                        tvals, svals, evals, _ = _ber_tlv(payload, cur_attr)
+                        tvals, svals, evals, nvals = _ber_tlv(payload, cur_attr)
                         val_nodes = []
                         if tvals == 0x31:
                             vp = svals
@@ -15484,7 +15845,7 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
                             **_byte_mapping(offset, ap, nn_attr - ap, PACKET_BYTE_SOURCE),
                             'children': [
                                 {'title': f'type: {atype}', **_byte_mapping(offset, stype, etype - stype, PACKET_BYTE_SOURCE)},
-                                {'title': f'vals: {len(val_nodes)} item' + ('s' if len(val_nodes) != 1 else ''), **_byte_mapping(offset, svals, evals - svals, PACKET_BYTE_SOURCE), 'children': val_nodes},
+                                {'title': f'vals: {len(val_nodes)} item' + ('s' if len(val_nodes) != 1 else ''), **_byte_mapping(offset, cur_attr, nvals - cur_attr, PACKET_BYTE_SOURCE), 'children': val_nodes},
                             ],
                         })
                         ap = nn_attr
@@ -15535,10 +15896,42 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
                 end = max(r[1] for r in attr_ranges)
                 attrs_wrapper_map = {'offset': start, 'length': max(1, end - start)}
             done_nodes = []
-            payload_bytes = bytes(payload or b'')
-            parts = payload_bytes.split(b'\x30\x0c\x02\x01')
-            if len(parts) > 1:
-                done_nodes = [{'title': 'LDAPMessage searchResDone(1) success', 'children': [{'title': 'messageID: 1'}, {'title': 'protocolOp: searchResDone (5)'}, {'title': 'searchResDone', 'children': [{'title': 'resultCode: success (0)'}, {'title': 'matchedDN: <MISSING>'}, {'title': 'errorMessage: <MISSING>'}]}]}]
+            try:
+                _, _, _, first_msg_end = _ber_tlv(payload, 0)
+                if first_msg_end < len(payload):
+                    tt_done, ss_done, ee_done, nn_done = _ber_tlv(payload, first_msg_end)
+                    if tt_done == 0x30:
+                        cur_done = ss_done
+                        mid_pos = cur_done
+                        t_mid, s_mid, e_mid, n_mid = _ber_tlv(payload, cur_done)
+                        done_mid = int.from_bytes(payload[s_mid:e_mid], 'big', signed=False) if t_mid in {0x02, 0x0A} else msg_id
+                        cur_done = n_mid
+                        t_op, s_op, e_op, n_op = _ber_tlv(payload, cur_done)
+                        if t_op == 0x65:
+                            op_children = []
+                            cur_op = s_op
+                            t_code, s_code, e_code, n_code = _ber_tlv(payload, cur_op)
+                            code = int.from_bytes(payload[s_code:e_code], 'big', signed=False) if t_code in {0x02, 0x0A} else 0
+                            op_children.append({'title': f'resultCode: {"success" if code == 0 else code} ({code})', **_byte_mapping(offset, s_code, max(1, e_code - s_code), PACKET_BYTE_SOURCE)})
+                            cur_op = n_code
+                            t_dn, s_dn, e_dn, n_dn = _ber_tlv(payload, cur_op)
+                            dn_val = _octet_text(bytes(payload[s_dn:e_dn])) if t_dn == 0x04 else '<MISSING>'
+                            op_children.append({'title': f'matchedDN: {dn_val if dn_val else "<MISSING>"}', **_byte_mapping(offset, cur_op, max(1, n_dn - cur_op), PACKET_BYTE_SOURCE)})
+                            cur_op = n_dn
+                            t_err, s_err, e_err, n_err = _ber_tlv(payload, cur_op)
+                            err_val = _octet_text(bytes(payload[s_err:e_err])) if t_err == 0x04 else '<MISSING>'
+                            op_children.append({'title': f'errorMessage: {err_val if err_val else "<MISSING>"}', **_byte_mapping(offset, cur_op, max(1, n_err - cur_op), PACKET_BYTE_SOURCE)})
+                            done_nodes = [{
+                                'title': f'LDAPMessage searchResDone({done_mid}) {"success" if code == 0 else code}',
+                                **_byte_mapping(offset, first_msg_end, max(1, nn_done - first_msg_end), PACKET_BYTE_SOURCE),
+                                'children': [
+                                    {'title': f'messageID: {done_mid}', **_byte_mapping(offset, mid_pos, max(1, n_mid - mid_pos), PACKET_BYTE_SOURCE)},
+                                    {'title': 'protocolOp: searchResDone (5)', **_byte_mapping(offset, cur_done, max(1, n_op - cur_done), PACKET_BYTE_SOURCE)},
+                                    {'title': 'searchResDone', **_byte_mapping(offset, s_op, max(1, e_op - s_op), PACKET_BYTE_SOURCE), 'children': op_children},
+                                ],
+                            }]
+            except Exception:
+                done_nodes = []
             msg = {
                 'title': f'LDAPMessage searchResEntry({msg_id}) "<ROOT>" [1 result]',
                 **msg_map,
@@ -15562,6 +15955,7 @@ def _cldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str
 def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     data = bytes(payload or b'')
     parse_data = data
+    tree_length = len(data)
     metadata = getattr(record, 'metadata', {}) if record is not None else {}
     used_reassembled = False
     if isinstance(metadata, dict):
@@ -15574,6 +15968,7 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
             if cand:
                 parse_data = cand
                 offset = 0
+                tree_length = len(cand)
                 used_reassembled = True
     if (not used_reassembled) and packet is not None and packet.haslayer(TCP):
         try:
@@ -15685,6 +16080,132 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
             else:
                 nodes.append({'title': f'[Time: {time_us:.3f} microseconds]'})
         return nodes
+
+    def _backfill_search_res_entry_mapping(child_nodes: list[dict[str, Any]], chunks: list[bytes], base_offset: int) -> None:
+        chunk_index = 0
+        for child in child_nodes:
+            if not isinstance(child, dict):
+                continue
+            title = str(child.get('title', ''))
+            if not title.startswith('LDAPMessage searchResEntry('):
+                continue
+            if chunk_index >= len(chunks):
+                break
+            chunk = bytes(chunks[chunk_index] or b'')
+            cursor_local = sum(len(bytes(x or b'')) for x in chunks[:chunk_index])
+            chunk_index += 1
+            try:
+                tt_msg, ss_msg, ee_msg, _ = _ber_tlv(chunk, 0)
+                cur_msg = ss_msg
+                msgid_map: dict[str, Any] = {}
+                t_mid, s_mid, e_mid, n_mid = _ber_tlv(chunk, cur_msg)
+                if t_mid in {0x02, 0x0A}:
+                    cur_msg = n_mid
+                    msgid_map = _byte_mapping(base_offset, cursor_local + ss_msg, max(1, cur_msg - ss_msg), PACKET_BYTE_SOURCE)
+                tt_res, ss_res, ee_res, n_res = _ber_tlv(chunk, cur_msg)
+                proto_map = _byte_mapping(base_offset, cursor_local + cur_msg, max(1, n_res - cur_msg), PACKET_BYTE_SOURCE)
+                proto_body_map = _byte_mapping(base_offset, cursor_local + ss_res, max(1, ee_res - ss_res), PACKET_BYTE_SOURCE)
+                child.update(_byte_mapping(base_offset, cursor_local, len(chunk), PACKET_BYTE_SOURCE))
+                msg_children = list(child.get('children', []) or [])
+                if len(msg_children) < 3:
+                    continue
+                msg_children[0].update(msgid_map)
+                msg_children[1].update(proto_map)
+                if 'offset' not in msg_children[1]:
+                    msg_children[1]['offset'] = base_offset + cursor_local + cur_msg
+                    msg_children[1]['length'] = max(1, n_res - cur_msg)
+                msg_children[2].update(proto_body_map)
+                inner_children = list(msg_children[2].get('children', []) or [])
+                if len(inner_children) < 2:
+                    continue
+                cur_res = ss_res
+                tobj, sobj, eobj, nobj = _ber_tlv(chunk, cur_res)
+                object_map = _byte_mapping(base_offset, cursor_local + cur_res, max(1, nobj - cur_res), PACKET_BYTE_SOURCE) if tobj == 0x04 else {}
+                inner_children[0].update(object_map)
+                cur_res = nobj
+                ta, sa, ea, nattrs = _ber_tlv(chunk, cur_res)
+                attrs_map = _byte_mapping(base_offset, cursor_local + cur_res, max(1, nattrs - cur_res), PACKET_BYTE_SOURCE) if ta == 0x30 else {}
+                inner_children[1].update(attrs_map)
+                attr_nodes = list(inner_children[1].get('children', []) or [])
+                ap = sa
+                attr_index = 0
+                while ta == 0x30 and ap < ea and attr_index < len(attr_nodes):
+                    try:
+                        tt_attr, ss_attr, ee_attr, nn_attr = _ber_tlv(chunk, ap)
+                        if tt_attr != 0x30:
+                            break
+                        attr_node = attr_nodes[attr_index]
+                        attr_node.update(_byte_mapping(base_offset, cursor_local + ap, max(1, nn_attr - ap), PACKET_BYTE_SOURCE))
+                        attr_children = list(attr_node.get('children', []) or [])
+                        if len(attr_children) >= 2:
+                            cur_attr = ss_attr
+                            ttype, stype, etype, ntype = _ber_tlv(chunk, cur_attr)
+                            attr_children[0].update(_byte_mapping(base_offset, cursor_local + stype, max(1, etype - stype), PACKET_BYTE_SOURCE))
+                            cur_attr = ntype
+                            tvals, svals, evals, nvals = _ber_tlv(chunk, cur_attr)
+                            attr_children[1].update(_byte_mapping(base_offset, cursor_local + cur_attr, max(1, nvals - cur_attr), PACKET_BYTE_SOURCE))
+                            val_nodes = list(attr_children[1].get('children', []) or [])
+                            vp = svals
+                            val_index = 0
+                            while tvals == 0x31 and vp < evals and val_index < len(val_nodes):
+                                _tv, _sv, _ev, nv = _ber_tlv(chunk, vp)
+                                val_nodes[val_index].update(_byte_mapping(base_offset, cursor_local + vp, max(1, nv - vp), PACKET_BYTE_SOURCE))
+                                vp = nv
+                                val_index += 1
+                        ap = nn_attr
+                        attr_index += 1
+                    except Exception:
+                        break
+                fallback_search_pos = 0
+                for attr_node in attr_nodes:
+                    attr_children = list(attr_node.get('children', []) or [])
+                    if len(attr_children) < 2:
+                        continue
+                    atype = str(attr_children[0].get('title', '')).removeprefix('type: ').strip()
+                    type_bytes = atype.encode('utf-8', errors='ignore')
+                    type_tlv = b'\x04' + bytes([len(type_bytes)]) + type_bytes if type_bytes and len(type_bytes) < 0x80 else type_bytes
+                    existing_attr_offset = int(attr_node.get('offset', -1) or -1)
+                    existing_attr_length = int(attr_node.get('length', 0) or 0)
+                    if existing_attr_offset >= base_offset + cursor_local and existing_attr_length > 0:
+                        attr_start = existing_attr_offset - base_offset - cursor_local
+                        attr_end = attr_start + existing_attr_length
+                        type_pos = chunk.find(type_tlv, attr_start) if type_tlv else -1
+                    else:
+                        type_pos = chunk.find(type_tlv, fallback_search_pos) if type_tlv else -1
+                        attr_start = max(0, type_pos - 3) if type_pos >= 0 else -1
+                        attr_end = type_pos + max(1, len(type_tlv)) if type_pos >= 0 else -1
+                    if type_pos < 0:
+                        continue
+                    type_data_pos = type_pos + (2 if type_tlv.startswith(b'\x04') else 0)
+                    attr_children[0].update(_byte_mapping(base_offset, cursor_local + type_data_pos, max(1, len(type_bytes)), PACKET_BYTE_SOURCE))
+                    vals_node = attr_children[1]
+                    val_nodes = list(vals_node.get('children', []) or [])
+                    value_search_pos = type_pos + len(type_tlv)
+                    for val_node in val_nodes:
+                        if isinstance(val_node.get('offset', None), int):
+                            value_search_pos = max(value_search_pos, int(val_node['offset']) - base_offset - cursor_local + int(val_node.get('length', 0) or 0))
+                            attr_end = max(attr_end, value_search_pos)
+                            continue
+                        val_title = str(val_node.get('title', ''))
+                        if ': ' not in val_title:
+                            continue
+                        value_text = val_title.split(': ', 1)[1]
+                        value_bytes = value_text.encode('utf-8', errors='ignore')
+                        value_pos = chunk.find(value_bytes, value_search_pos) if value_bytes else -1
+                        if value_pos < 0:
+                            continue
+                        value_tlv_pos = value_pos - 2 if value_pos >= 2 and chunk[value_pos - 2] == 0x04 else value_pos
+                        next_pos = value_pos + len(value_bytes)
+                        if value_tlv_pos < value_pos:
+                            next_pos = max(next_pos, value_tlv_pos + 2 + len(value_bytes))
+                        val_node.update(_byte_mapping(base_offset, cursor_local + value_tlv_pos, max(1, next_pos - value_tlv_pos), PACKET_BYTE_SOURCE))
+                        attr_end = max(attr_end, next_pos)
+                        value_search_pos = next_pos
+                    vals_node.update(_byte_mapping(base_offset, cursor_local + type_pos + len(type_tlv), max(1, attr_end - (type_pos + len(type_tlv))), PACKET_BYTE_SOURCE))
+                    attr_node.update(_byte_mapping(base_offset, cursor_local + attr_start, max(1, attr_end - attr_start), PACKET_BYTE_SOURCE))
+                    fallback_search_pos = attr_end
+            except Exception:
+                continue
 
     def _netlogon_request_version_nodes(flags_val: int) -> list[dict[str, Any]]:
         entries = [
@@ -16773,30 +17294,95 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
             elif op_name == 'LDAP_SearchResponseEntry':
                 obj = _scalar(getattr(op, 'objectName', '')).strip('\x00')
                 attrs = list(getattr(op, 'attributes', []) or [])
+                msgid_map = {}
+                proto_map = {}
+                proto_body_map = {}
+                object_map = {}
+                attrs_map = {}
                 attr_nodes: List[Dict[str, Any]] = []
-                for a in attrs:
-                    atype = _ldap_text(getattr(a, 'type', getattr(a, 'attributeType', ''))).strip('\x00')
-                    vals = list(getattr(a, 'vals', getattr(a, 'values', [])) or [])
-                    vnodes = []
-                    for v in vals:
-                        vt = _ldap_attr_value_text(v)
-                        if atype.lower() == 'supportedcapabilities':
-                            vnodes.append({'title': f'OID: {vt}'})
-                        else:
-                            vnodes.append({'title': f'AttributeValue: {vt}'})
-                    attr_nodes.append({
-                        'title': f'PartialAttributeList item {atype}',
-                        'children': [
-                            {'title': f'type: {atype}'},
-                            {'title': f'vals: {len(vals)} item' + ('s' if len(vals) != 1 else ''), 'children': vnodes},
-                        ],
-                    })
+                try:
+                    tt_msg, ss_msg, ee_msg, _ = _ber_tlv(chunk, 0)
+                    cur_msg = ss_msg
+                    msgid_info = _ber_int_local(chunk, cur_msg)
+                    if msgid_info is not None:
+                        _, _, _, cur_msg = msgid_info
+                        msgid_map = _byte_mapping(offset, cursor + ss_msg, max(1, cur_msg - ss_msg), PACKET_BYTE_SOURCE)
+                    tt_res, ss_res, ee_res, _ = _ber_tlv(chunk, cur_msg)
+                    proto_map = _byte_mapping(offset, cursor + cur_msg, max(1, ee_res - cur_msg), PACKET_BYTE_SOURCE)
+                    proto_body_map = _byte_mapping(offset, cursor + ss_res, max(1, ee_res - ss_res), PACKET_BYTE_SOURCE)
+                    cur_res = ss_res
+                    tobj, sobj, eobj, nobj = _ber_tlv(chunk, cur_res)
+                    if tobj == 0x04:
+                        obj_bytes = bytes(chunk[sobj:eobj])
+                        obj = _octet_text(obj_bytes).strip('\x00')
+                        object_map = _byte_mapping(offset, cursor + cur_res, max(1, nobj - cur_res), PACKET_BYTE_SOURCE)
+                    cur_res = nobj
+                    ta, sa, ea, nattrs = _ber_tlv(chunk, cur_res)
+                    if ta == 0x30:
+                        attrs_map = _byte_mapping(offset, cursor + cur_res, max(1, nattrs - cur_res), PACKET_BYTE_SOURCE)
+                        ap = sa
+                        parsed_attrs: List[Dict[str, Any]] = []
+                        while ap < ea:
+                            tt_attr, ss_attr, ee_attr, nn_attr = _ber_tlv(chunk, ap)
+                            if tt_attr != 0x30:
+                                break
+                            cur_attr = ss_attr
+                            ttype, stype, etype, ntype = _ber_tlv(chunk, cur_attr)
+                            atype = _octet_text(bytes(chunk[stype:etype])) if ttype == 0x04 else '<MISSING>'
+                            cur_attr = ntype
+                            tvals, svals, evals, nvals = _ber_tlv(chunk, cur_attr)
+                            val_nodes: List[Dict[str, Any]] = []
+                            value_count = 0
+                            if tvals == 0x31:
+                                vp = svals
+                                while vp < evals:
+                                    tv, sv, ev, nv = _ber_tlv(chunk, vp)
+                                    raw_val = bytes(chunk[sv:ev]) if tv == 0x04 else b''
+                                    value_text = _octet_text(raw_val) if raw_val else _ldap_attr_value_text(raw_val)
+                                    title_prefix = 'OID' if atype.lower() == 'supportedcapabilities' else 'AttributeValue'
+                                    val_nodes.append({
+                                        'title': f'{title_prefix}: {value_text if value_text else raw_val.hex()}',
+                                        **_byte_mapping(offset, cursor + vp, max(1, nv - vp), PACKET_BYTE_SOURCE),
+                                    })
+                                    value_count += 1
+                                    vp = nv
+                            parsed_attrs.append({
+                                'title': f'PartialAttributeList item {atype}',
+                                **_byte_mapping(offset, cursor + ap, max(1, nn_attr - ap), PACKET_BYTE_SOURCE),
+                                'children': [
+                                    {'title': f'type: {atype}', **_byte_mapping(offset, cursor + stype, max(1, etype - stype), PACKET_BYTE_SOURCE)},
+                                    {'title': f'vals: {value_count} item' + ('s' if value_count != 1 else ''), **_byte_mapping(offset, cursor + cur_attr, max(1, nvals - cur_attr), PACKET_BYTE_SOURCE), 'children': val_nodes},
+                                ],
+                            })
+                            ap = nn_attr
+                        if parsed_attrs:
+                            attr_nodes = parsed_attrs
+                except Exception:
+                    pass
+                if not attr_nodes:
+                    for a in attrs:
+                        atype = _ldap_text(getattr(a, 'type', getattr(a, 'attributeType', ''))).strip('\x00')
+                        vals = list(getattr(a, 'vals', getattr(a, 'values', [])) or [])
+                        vnodes = []
+                        for v in vals:
+                            vt = _ldap_attr_value_text(v)
+                            if atype.lower() == 'supportedcapabilities':
+                                vnodes.append({'title': f'OID: {vt}'})
+                            else:
+                                vnodes.append({'title': f'AttributeValue: {vt}'})
+                        attr_nodes.append({
+                            'title': f'PartialAttributeList item {atype}',
+                            'children': [
+                                {'title': f'type: {atype}'},
+                                {'title': f'vals: {len(vals)} item' + ('s' if len(vals) != 1 else ''), 'children': vnodes},
+                            ],
+                        })
                 msg_children = [
-                    {'title': f'messageID: {message_id}'},
-                    {'title': 'protocolOp: searchResEntry (4)'},
-                    {'title': 'searchResEntry', 'children': [
-                        {'title': f'objectName: {obj if obj else "<MISSING>"}'},
-                        {'title': f'attributes: {len(attrs)} item' + ('s' if len(attrs) != 1 else ''), 'children': attr_nodes},
+                    {'title': f'messageID: {message_id}', **msgid_map},
+                    {'title': 'protocolOp: searchResEntry (4)', **proto_map},
+                    {'title': 'searchResEntry', **proto_body_map, 'children': [
+                        {'title': f'objectName: {obj if obj else "<MISSING>"}', **object_map},
+                        {'title': f'attributes: {len(attr_nodes)} item' + ('s' if len(attr_nodes) != 1 else ''), **attrs_map, 'children': attr_nodes},
                     ]},
                 ]
                 msg_children.extend(_ldap_request_response_nodes())
@@ -16875,12 +17461,13 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         except Exception:
             children.append({'title': 'LDAPMessage', **_byte_mapping(offset, cursor, len(chunk), PACKET_BYTE_SOURCE)})
         cursor += len(chunk)
+    _backfill_search_res_entry_mapping(children, messages, offset)
     root = {
         'title': 'Lightweight Directory Access Protocol',
-        **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE),
+        **_byte_mapping(offset, 0, tree_length, PACKET_BYTE_SOURCE),
         'children': children,
     }
-    return _normalize_tree_byte_ranges(root, offset, len(data), PACKET_BYTE_SOURCE)
+    return _normalize_tree_byte_ranges(root, offset, tree_length, PACKET_BYTE_SOURCE)
 
 
 def _mpeg_ts_section(payload: bytes, offset: int) -> Dict[str, Any]:
@@ -21966,6 +22553,60 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
                 token_tree.append({'title': f'mechListMIC: {mic.hex()}', 'offset': base_offset + spnego_body_offset + p, 'length': n - p})
         p = n
 
+    normalized_tree: list[dict[str, Any]] = []
+    for node in token_tree:
+        if not isinstance(node, dict):
+            normalized_tree.append(node)
+            continue
+        title = str(node.get('title', '') or '')
+        if title.startswith('responseToken '):
+            hex_start = title.find(': ')
+            if hex_start >= 0:
+                node['title'] = f'responseToken: {title[hex_start + 2:]}'
+        elif title.startswith('mechToken '):
+            hex_start = title.find(': ')
+            if hex_start >= 0:
+                node['title'] = f'mechToken: {title[hex_start + 2:]}'
+        elif title.startswith('krb5_blob ') and ': ' in title:
+            hex_part = title.split(': ', 1)[1]
+            node['title'] = f'krb5_blob: {hex_part}'
+        elif title.startswith('mechListMIC: '):
+            mic_hex = title.split(': ', 1)[1]
+            try:
+                mic = bytes.fromhex(mic_hex)
+            except Exception:
+                mic = b''
+            if len(mic) >= 16 and int.from_bytes(mic[0:2], 'little') == 0x0404:
+                flags = int(mic[2])
+                labels = []
+                if flags & 0x04:
+                    labels.append('AcceptorSubkey')
+                if flags & 0x02:
+                    labels.append('Sealed')
+                if flags & 0x01:
+                    labels.append('SendByAcceptor')
+                suffix = f", {', '.join(labels)}" if labels else ''
+                normalized_tree.append(node)
+                normalized_tree.append({
+                    'title': f'krb5_blob: {mic.hex()}',
+                    'offset': int(node.get('offset', base_offset)),
+                    'length': int(node.get('length', len(mic)) or len(mic)),
+                    'children': [
+                        {'title': 'krb5_tok_id: KRB_TOKEN_CFX_GetMic (0x0404)'},
+                        {'title': f'krb5_cfx_flags: 0x{flags:02x}{suffix}', 'children': [
+                            {'title': f'.... .{1 if (flags & 0x04) else 0}.. = AcceptorSubkey: {"Set" if (flags & 0x04) else "Not set"}'},
+                            {'title': f'.... ..{1 if (flags & 0x02) else 0}. = Sealed: {"Set" if (flags & 0x02) else "Not set"}'},
+                            {'title': f'.... ...{1 if (flags & 0x01) else 0} = SendByAcceptor: {"Set" if (flags & 0x01) else "Not set"}'},
+                        ]},
+                        {'title': f'krb5_filler: {mic[3:8].hex()}'},
+                        {'title': f'krb5_cfx_seq: {int.from_bytes(mic[8:16], "big")}'},
+                        {'title': f'krb5_sgn_cksum: {mic[16:].hex()}'},
+                    ],
+                })
+                continue
+        normalized_tree.append(node)
+    token_tree = normalized_tree
+
     if token_kind == 'init' and not any(str(n.get('title', '')).startswith('mechTypes:') for n in token_tree if isinstance(n, dict)):
         mech_markers = [
             ('1.2.840.48018.1.2.2', 'MS KRB5 - Microsoft Kerberos 5', bytes.fromhex('06092a864882f712010202')),
@@ -22210,11 +22851,13 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                     feat = int(ts_ver)
                     if feat == 1:
                         feat = 3
-                    ctx_children.append({
+                    ctx_children[-1]['children'].append({
                         'title': f'Bind Time Features: 0x{feat:04x}, Security Context Multiplexing Supported, Keep Connection On Orphan Supported',
+                        'offset': offset + transfer_cursor + 16,
+                        'length': 4,
                         'children': [
-                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}'},
-                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}'},
+                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}', 'offset': offset + transfer_cursor + 16, 'length': 4},
+                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}', 'offset': offset + transfer_cursor + 16, 'length': 4},
                         ],
                     })
                 transfer_cursor += 20
@@ -22291,9 +22934,11 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                         feat = 3
                     children[-1]['children'].append({
                         'title': f'Bind Time Features: 0x{feat:04x}, Security Context Multiplexing Supported, Keep Connection On Orphan Supported',
+                        'offset': offset + cursor + 20,
+                        'length': 4,
                         'children': [
-                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}'},
-                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}'},
+                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}', 'offset': offset + cursor + 20, 'length': 4},
+                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}', 'offset': offset + cursor + 20, 'length': 4},
                         ],
                     })
                 cursor += 24
@@ -22313,7 +22958,154 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         if auth_start > stub_start:
             stub_len = auth_start - stub_start
             stub_hex = payload[stub_start:auth_start].hex()
-            show_response_stub = not (ptype == 2 and req_frame > 0 and protocol_name != 'EPM')
+            decoded_stub_nodes: list[dict[str, Any]] = []
+            if protocol_name == 'EPM' and opnum == 3:
+                stub = payload[stub_start:auth_start]
+                try:
+                    def _epm_uuid_name(uuid_text: str) -> str:
+                        uuid_l = str(uuid_text or '').lower()
+                        if uuid_l == 'e3514235-4b06-11d1-ab04-00c04fc2dcd2':
+                            return 'DRSUAPI'
+                        if uuid_l == '8a885d04-1ceb-11c9-9fe8-08002b104860':
+                            return '32bit NDR'
+                        return str(uuid_text or '')
+
+                    def _epm_tower_node(buf: bytes, cursor: int, referent_id: int) -> tuple[dict[str, Any], int]:
+                        tower_children: list[dict[str, Any]] = [{'title': f'Referent ID: 0x{referent_id:016x}'}]
+                        if cursor < len(buf) and buf[cursor] == 0 and cursor + 5 <= len(buf):
+                            maybe_len = int.from_bytes(buf[cursor + 1:cursor + 5], byteorder)
+                            if 0 < maybe_len <= len(buf):
+                                tower_children.append({'title': f'NDR-Padding: {buf[cursor:cursor + 1].hex()}'})
+                                cursor += 1
+                        if cursor + 14 > len(buf):
+                            return {'title': 'Tower pointer:', 'children': tower_children}, len(buf)
+                        tower_len = int.from_bytes(buf[cursor:cursor + 4], byteorder)
+                        tower_len_dup = int.from_bytes(buf[cursor + 8:cursor + 12], byteorder)
+                        floor_count = int.from_bytes(buf[cursor + 12:cursor + 14], byteorder)
+                        tower_children.extend([
+                            {'title': f'Length: {tower_len}'},
+                            {'title': f'Length: {tower_len_dup}'},
+                            {'title': f'Number of floors: {floor_count}'},
+                        ])
+                        floor_cursor = cursor + 14
+                        for floor_index in range(floor_count):
+                            if floor_cursor + 5 > len(buf):
+                                break
+                            lhs_len = int.from_bytes(buf[floor_cursor:floor_cursor + 2], byteorder)
+                            proto_id = int(buf[floor_cursor + 2])
+                            lhs_end = floor_cursor + 2 + lhs_len
+                            if lhs_end + 2 > len(buf):
+                                break
+                            rhs_len = int.from_bytes(buf[lhs_end:lhs_end + 2], byteorder)
+                            rhs_start = lhs_end + 2
+                            rhs_end = min(len(buf), rhs_start + rhs_len)
+                            floor_children = [
+                                {'title': f'LHS Length: {lhs_len}'},
+                            ]
+                            floor_title = f'Floor {floor_index + 1}'
+                            if proto_id == 0x0D and lhs_len >= 19 and floor_cursor + 23 <= len(buf):
+                                floor_uuid = _dcerpc_uuid_from_bytes(buf[floor_cursor + 3:floor_cursor + 19])
+                                iface_name = _epm_uuid_name(floor_uuid)
+                                major = int.from_bytes(buf[floor_cursor + 19:floor_cursor + 21], byteorder)
+                                minor = int.from_bytes(buf[rhs_start:rhs_start + min(2, max(0, rhs_end - rhs_start))], byteorder) if rhs_end - rhs_start >= 2 else 0
+                                floor_title = f'Floor {floor_index + 1} UUID: {iface_name}'
+                                floor_children.extend([
+                                    {'title': 'Protocol: UUID (0x0d)'},
+                                    {'title': f'UUID: {iface_name} ({floor_uuid})'},
+                                    {'title': f'Version: {major}.00'},
+                                    {'title': f'RHS Length: {rhs_len}'},
+                                    {'title': f'Version Minor: {minor}'},
+                                ])
+                            elif proto_id == 0x0B:
+                                floor_title = f'Floor {floor_index + 1} RPC connection-oriented protocol'
+                                floor_children.extend([
+                                    {'title': 'Protocol: RPC connection-oriented protocol (0x0b)'},
+                                    {'title': f'RHS Length: {rhs_len}'},
+                                ])
+                            elif proto_id == 0x07:
+                                port = int.from_bytes(buf[rhs_start:rhs_end], 'big') if rhs_end - rhs_start >= 2 else 0
+                                floor_title = f'Floor {floor_index + 1} TCP Port:{port}'
+                                floor_children.extend([
+                                    {'title': 'Protocol: DOD TCP (0x07)'},
+                                    {'title': f'RHS Length: {rhs_len}'},
+                                    {'title': f'TCP Port: {port}'},
+                                ])
+                            elif proto_id == 0x09:
+                                ip_text = '.'.join(str(int(x)) for x in buf[rhs_start:rhs_end]) if rhs_end - rhs_start >= 4 else '0.0.0.0'
+                                floor_title = f'Floor {floor_index + 1} IP:{ip_text}'
+                                floor_children.extend([
+                                    {'title': 'Protocol: DOD IP (0x09)'},
+                                    {'title': f'RHS Length: {rhs_len}'},
+                                    {'title': f'IP: {ip_text}'},
+                                ])
+                            else:
+                                floor_children.extend([
+                                    {'title': f'Protocol: 0x{proto_id:02x}'},
+                                    {'title': f'RHS Length: {rhs_len}'},
+                                ])
+                            tower_children.append({'title': floor_title, 'children': floor_children})
+                            floor_cursor = rhs_end
+                        return {'title': 'Tower pointer:', 'children': tower_children}, floor_cursor
+
+                    if ptype == 0 and len(stub) >= 144:
+                        uuid_ref = int.from_bytes(stub[0:8], byteorder)
+                        tower_ref = int.from_bytes(stub[24:32], byteorder)
+                        tower_node, tower_end = _epm_tower_node(stub, 32, tower_ref)
+                        handle_hex = stub[tower_end:tower_end + 20].hex() if tower_end + 20 <= len(stub) else ''
+                        max_towers = int.from_bytes(stub[tower_end + 20:tower_end + 24], byteorder) if tower_end + 24 <= len(stub) else 0
+                        decoded_stub_nodes.append({
+                            'title': 'DCE/RPC Endpoint Mapper, Map',
+                            'offset': offset + stub_start,
+                            'length': stub_len,
+                            'children': [
+                                {'title': 'Operation: Map (3)'},
+                                {'title': 'UUID pointer:', 'children': [
+                                    {'title': f'Referent ID: 0x{uuid_ref:016x}'},
+                                    {'title': 'UUID: 00000000-0000-0000-0000-000000000000'},
+                                ]},
+                                tower_node,
+                                {'title': f'Handle: {handle_hex}'},
+                                {'title': f'Max Towers: {max_towers}'},
+                            ],
+                        })
+                    elif ptype == 2 and len(stub) >= 120:
+                        handle_hex = stub[0:20].hex()
+                        num_towers = int.from_bytes(stub[20:24], byteorder)
+                        max_count = int.from_bytes(stub[24:28], byteorder)
+                        array_offset = int.from_bytes(stub[32:36], byteorder)
+                        actual_count = int.from_bytes(stub[40:44], byteorder)
+                        refs = []
+                        ref_cursor = 48
+                        for _ in range(actual_count):
+                            if ref_cursor + 8 > len(stub):
+                                break
+                            refs.append(int.from_bytes(stub[ref_cursor:ref_cursor + 8], byteorder))
+                            ref_cursor += 8
+                        tower_cursor = ref_cursor
+                        tower_nodes = []
+                        for ref_id in refs:
+                            tower_node, tower_cursor = _epm_tower_node(stub, tower_cursor, ref_id)
+                            tower_nodes.append(tower_node)
+                        decoded_stub_nodes.append({
+                            'title': 'DCE/RPC Endpoint Mapper, Map',
+                            'offset': offset + stub_start,
+                            'length': stub_len,
+                            'children': [
+                                {'title': 'Operation: Map (3)'},
+                                {'title': f'Handle: {handle_hex}'},
+                                {'title': f'Num Towers: {num_towers}'},
+                                {'title': 'Tower array:', 'children': [
+                                    {'title': f'Max Count: {max_count}'},
+                                    {'title': f'Offset: {array_offset}'},
+                                    {'title': f'Actual Count: {actual_count}'},
+                                    *tower_nodes,
+                                ]},
+                                {'title': f'Return code: 0x{int.from_bytes(stub[-4:], byteorder):08x}'},
+                            ],
+                        })
+                except Exception:
+                    decoded_stub_nodes = []
+            show_response_stub = not (ptype == 2 and req_frame > 0 and protocol_name != 'EPM' and auth_trailer_len == 0)
             if no_bind_info and show_response_stub:
                 note = f'No bind info for interface Context ID {context_id} - capture start too late?'
                 children.append({'title': note})
@@ -22333,7 +23125,7 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 })
             if auth_trailer_len > 0 and show_response_stub:
                 children.append({
-                    'title': f'Stub data [...]: {stub_hex}',
+                    'title': f'Encrypted stub data [...]: {stub_hex}',
                     'offset': offset + stub_start,
                     'length': stub_len,
                 })
@@ -22341,8 +23133,9 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 stub_children = [
                     {'title': f'Payload stub data ({stub_len} bytes)', 'offset': offset + stub_start, 'length': stub_len},
                 ]
-                if not (ptype == 2 and protocol_name == 'EPM'):
+                if protocol_name != 'EPM':
                     stub_children.append({'title': f'Stub data [...]: {stub_hex}', 'offset': offset + stub_start, 'length': stub_len})
+                stub_children.extend(decoded_stub_nodes)
                 children.append({
                     'title': f'Complete stub data ({stub_len} bytes)',
                     'offset': offset + stub_start,
@@ -22562,6 +23355,17 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
 
     if ptype == 2 and opnum is not None:
         children.append({'title': f'[Opnum: {opnum}]'})
+    if ptype == 0:
+        resp_frame = int(metadata.get('dcerpc_response_frame', 0) or 0) if isinstance(metadata, dict) else 0
+        resp_time_us = float(metadata.get('dcerpc_response_time_us', 0.0) or 0.0) if isinstance(metadata, dict) else 0.0
+        if resp_frame > 0:
+            children.append({'title': f'[Response in frame: {resp_frame}]'})
+        if resp_time_us > 0:
+            rounded_resp_time_us = float(int(resp_time_us + 0.5))
+            if rounded_resp_time_us >= 1000.0:
+                children.append({'title': f'[Time to response: {rounded_resp_time_us / 1000.0:.6f} milliseconds]'})
+            else:
+                children.append({'title': f'[Time to response: {rounded_resp_time_us:.3f} microseconds]'})
     if ptype == 2 and req_frame > 0:
         children.append({'title': f'[Request in frame: {req_frame}]'})
     if ptype == 2 and req_time_us > 0:
@@ -22577,11 +23381,89 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             op_title = 'DsBind'
         elif opnum == 1:
             op_title = 'DsUnbind'
+        elif opnum == 12:
+            op_title = 'DsCrackNames'
+        elif opnum == 30:
+            op_title = 'ReadNgcKey'
         children.append({
             'title': f'Active Directory Replication, {op_title}',
             'offset': offset + 24,
             'length': max(0, frag_len - 24),
             'children': [{'title': f'Operation: {op_title} ({0 if opnum == 0 else 1 if opnum == 1 else opnum if opnum is not None else -1})'}],
+        })
+    elif protocol_name == 'RPC_NETLOGON':
+        op_map = {
+            4: 'NetrServerReqChallenge',
+            21: 'NetrLogonGetCapabilities',
+            26: 'NetrServerAuthenticate3',
+            29: 'NetrLogonGetDomainInfo',
+        }
+        op_title = op_map.get(opnum, f'RPC_NETLOGON opnum {opnum}')
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})'}]
+        if ptype == 0 and resp_frame > 0:
+            op_children.append({'title': f'[Response in frame: {resp_frame}]'})
+        if ptype == 2 and req_frame > 0:
+            op_children.append({'title': f'[Request in frame: {req_frame}]'})
+        children.append({
+            'title': f'Microsoft Network Logon, {op_title}',
+            'offset': offset + 24,
+            'length': max(0, frag_len - 24),
+            'children': op_children,
+        })
+    elif protocol_name == 'LSARPC':
+        op_map = {
+            76: 'lsa_LookupSids3',
+            77: 'lsa_LookupNames4',
+        }
+        op_title = op_map.get(opnum, f'LSARPC opnum {opnum}')
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})'}]
+        if ptype == 0 and resp_frame > 0:
+            op_children.append({'title': f'[Response in frame: {resp_frame}]'})
+        if ptype == 2 and req_frame > 0:
+            op_children.append({'title': f'[Request in frame: {req_frame}]'})
+        children.append({
+            'title': f'Local Security Authority, {op_title}',
+            'offset': offset + 24,
+            'length': max(0, frag_len - 24),
+            'children': op_children,
+        })
+    elif protocol_name == 'SAMR':
+        op_map = {
+            64: 'Connect5',
+            6: 'EnumDomains',
+            5: 'LookupDomain',
+            7: 'OpenDomain',
+            17: 'LookupNames',
+            34: 'OpenUser',
+            36: 'QueryUserInfo',
+            3: 'QuerySecurity',
+            39: 'GetGroupsForUser',
+            16: 'GetAliasMembership',
+            1: 'Close',
+        }
+        op_title = op_map.get(opnum, f'SAMR opnum {opnum}')
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})'}]
+        if ptype == 0 and resp_frame > 0:
+            op_children.append({'title': f'[Response in frame: {resp_frame}]'})
+        if ptype == 2 and req_frame > 0:
+            op_children.append({'title': f'[Request in frame: {req_frame}]'})
+        children.append({
+            'title': f'SAMR (pidl), {op_title}',
+            'offset': offset + 24,
+            'length': max(0, frag_len - 24),
+            'children': op_children,
+        })
+    elif protocol_name == 'EPM' and opnum == 3:
+        op_children = [{'title': 'Operation: Map (3)'}]
+        if ptype == 0 and resp_frame > 0:
+            op_children.append({'title': f'[Response in frame: {resp_frame}]'})
+        if ptype == 2 and req_frame > 0:
+            op_children.append({'title': f'[Request in frame: {req_frame}]'})
+        children.append({
+            'title': 'DCE/RPC Endpoint Mapper, Map',
+            'offset': offset + 24,
+            'length': max(0, frag_len - 24),
+            'children': op_children,
         })
 
     result = {
@@ -23112,14 +23994,18 @@ def _dtls_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
 
 
 def _tls_section_precise(packet, offset: int, stream_index: int, record=None) -> Dict[str, Any]:
+    meta = getattr(record, 'metadata', {}) if record is not None else {}
+    embedded_payload = bytes(meta.get('tls_embedded_payload', b'') or b'') if isinstance(meta, dict) else b''
+    embedded_unknown = bool(meta.get('tls_embedded_unknown_record', False)) if isinstance(meta, dict) else False
     tcp_layer = _effective_tcp_layer(packet)
-    if tcp_layer is not None:
+    if embedded_payload:
+        tls_bytes_raw = embedded_payload
+    elif tcp_layer is not None:
         tls_bytes_raw = _tcp_payload_bytes(packet, tcp_layer)
     else:
         try:
             tls_bytes_raw = bytes(packet[TLS])
         except Exception:
-            # Accept raw TLS byte buffers wrapped as generic Scapy packets.
             tls_bytes_raw = bytes(packet)
 
     # Use TCP-reassembled TLS payload if available (e.g. fragmented Certificate)
@@ -23130,6 +24016,40 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
         if _reassembled:
             tls_bytes_raw = bytes(_reassembled)
             _is_reassembled = True
+
+    if embedded_unknown and tls_bytes_raw:
+        return {
+            'title': 'Transport Layer Security',
+            'offset': offset,
+            'length': len(tls_bytes_raw),
+            'children': [{
+                'title': 'Ignored Unknown Record',
+                'offset': offset,
+                'length': len(tls_bytes_raw),
+                'children': [{
+                    'title': '[Expert Info (Warning/Protocol): Ignored Unknown Record]',
+                    'children': [
+                        {'title': '[Ignored Unknown Record]'},
+                        {'title': '[Severity level: Warning]'},
+                        {'title': '[Group: Protocol]'},
+                    ],
+                }],
+            }],
+        }
+    if len(tls_bytes_raw) >= 5:
+        first_type = int(tls_bytes_raw[0])
+        first_ver = int.from_bytes(tls_bytes_raw[1:3], 'big')
+        first_len = int.from_bytes(tls_bytes_raw[3:5], 'big')
+        if first_type in {20, 21, 22, 23} and first_ver in {0x0301, 0x0302, 0x0303, 0x0304} and (5 + first_len) > len(tls_bytes_raw):
+            return {
+                'title': 'Transport Layer Security',
+                'offset': offset,
+                'length': len(tls_bytes_raw),
+                'children': [
+                    {'title': f'[Stream index: {stream_index}]'},
+                    {'title': f'TLS segment data ({len(tls_bytes_raw)} bytes)', 'offset': offset, 'length': len(tls_bytes_raw)},
+                ],
+            }
 
     scan_start = 0
     if len(tls_bytes_raw) >= 5:
