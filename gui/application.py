@@ -2598,7 +2598,51 @@ class ApplicationWindow(QMainWindow):
             f'"{feature_name}" coming soon.',
         )
 
+    def _parse_ai_numeric_selector(self, selector: str, available_numbers: list[int], subject_label: str) -> list[int]:
+        text = str(selector or '').strip().lower()
+        available = sorted(set(int(v) for v in available_numbers))
+        available_set = set(available)
+        if not available:
+            return []
+
+        if text in {'all', '*'}:
+            return available
+
+        result = set()
+        tokens = [t.strip() for t in text.split(',') if t.strip()]
+        if not tokens:
+            raise ValueError(f'Hãy nhập {subject_label} (vd: 5,8,10-20) hoặc all.')
+
+        for token in tokens:
+            if '-' in token:
+                parts = [p.strip() for p in token.split('-', 1)]
+                if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                    raise ValueError(f'Khoảng không hợp lệ: {token}')
+                start = int(parts[0])
+                end = int(parts[1])
+                if start > end:
+                    start, end = end, start
+                for value in range(start, end + 1):
+                    if value in available_set:
+                        result.add(value)
+                continue
+
+            if not token.isdigit():
+                raise ValueError(f'Giá trị không hợp lệ: {token}')
+            value = int(token)
+            if value in available_set:
+                result.add(value)
+
+        selected = sorted(result)
+        if not selected:
+            raise ValueError(f'Không có {subject_label} nào khớp với lựa chọn hiện tại.')
+        return selected
+
+    def _parse_ai_conversation_selector(self, selector: str, available_numbers: list[int]) -> list[int]:
+        return self._parse_ai_numeric_selector(selector, available_numbers, 'conversation')
+
     def _parse_ai_packet_selector(self, selector: str, available_numbers: list[int]) -> list[int]:
+        return self._parse_ai_numeric_selector(selector, available_numbers, 'gói tin')
         text = str(selector or '').strip().lower()
         available = sorted(set(int(v) for v in available_numbers))
         available_set = set(available)
@@ -2664,11 +2708,13 @@ class ApplicationWindow(QMainWindow):
         std_v = variance ** 0.5
         return mean_v, std_v, max_v, min_v
 
-    def _build_ai_traffic_rows(self, records: list) -> list[list]:
+    def _build_ai_flows(self, records: list):
         packets = [getattr(r, 'raw', None) for r in records if getattr(r, 'raw', None) is not None]
         if not packets:
             return []
-        flows = FlowFeatureExtractor(flow_timeout_seconds=240.0, cic_compat_mode=False).extract_from_packets(packets)
+        return FlowFeatureExtractor(flow_timeout_seconds=240.0, cic_compat_mode=False).extract_from_packets(packets)
+
+    def _build_ai_traffic_rows_from_flows(self, flows) -> list[list]:
         rows = []
         source_key_map = {
             'Flow ID': 'Flow ID',
@@ -2769,6 +2815,150 @@ class ApplicationWindow(QMainWindow):
                     row.append(feat.get(source_key_map.get(name, ''), 0))
             rows.append(row)
         return rows
+
+    def _ai_conversation_filter_expression(self, record) -> str:
+        if record is None:
+            return ''
+        metadata = getattr(record, 'metadata', {}) or {}
+        src = str(getattr(record, 'src', '') or '')
+        dst = str(getattr(record, 'dst', '') or '')
+        raw = getattr(record, 'raw', None)
+        tcp_stream = metadata.get('tcp_stream_index')
+        if isinstance(tcp_stream, int) and tcp_stream >= 0:
+            return f'tcp.stream == {int(tcp_stream)}'
+        udp_stream = metadata.get('udp_stream_index')
+        if isinstance(udp_stream, int) and udp_stream >= 0:
+            return f'udp.stream == {int(udp_stream)}'
+        if raw is not None and raw.haslayer(IPv6) and src and dst:
+            return f'ipv6.addr == {src} && ipv6.addr == {dst}'
+        if raw is not None and raw.haslayer(IP) and src and dst:
+            return f'ip.addr == {src} && ip.addr == {dst}'
+        if src and dst:
+            return f'eth.addr == {src} && eth.addr == {dst}'
+        return ''
+
+    def _format_ai_conversation_label(self, entry: dict) -> str:
+        protocol = str(entry.get('protocol', '') or '').upper()
+        src = str(entry.get('src', '') or '')
+        dst = str(entry.get('dst', '') or '')
+        sport = entry.get('sport', None)
+        dport = entry.get('dport', None)
+        left = f'{src}:{sport}' if sport not in (None, '', 'None') else src
+        right = f'{dst}:{dport}' if dport not in (None, '', 'None') else dst
+        packet_count = int(entry.get('packet_count', 0) or 0)
+        return f'#{int(entry.get("index", 0) or 0)} [{protocol}] {left} <-> {right} ({packet_count} packets)'
+
+    def _build_ai_conversation_catalog(self, records: list) -> list[dict]:
+        cv = self.capture_view
+        if cv is None:
+            return []
+        grouped = {}
+        for record in list(records or []):
+            key = cv._conversation_key_for_record(record)
+            if key is None:
+                continue
+            grouped.setdefault(key, []).append(record)
+        entries = []
+        sorted_groups = sorted(
+            grouped.values(),
+            key=lambda rows: min(int(getattr(row, 'number', 0) or 0) for row in rows) if rows else 0,
+        )
+        for idx, rows in enumerate(sorted_groups, start=1):
+            first = rows[0]
+            metadata = getattr(first, 'metadata', {}) or {}
+            protocol = str(getattr(first, 'protocol', '') or '').upper()
+            if isinstance(metadata.get('tcp_stream_index'), int):
+                protocol = 'TCP'
+            elif isinstance(metadata.get('udp_stream_index'), int):
+                protocol = 'UDP'
+            entry = {
+                'index': int(idx),
+                'key': cv._conversation_key_for_record(first),
+                'records': list(rows),
+                'first_packet': int(getattr(first, 'number', 0) or 0),
+                'filter_expression': self._ai_conversation_filter_expression(first),
+                'protocol': protocol,
+                'src': str(getattr(first, 'src', '') or ''),
+                'dst': str(getattr(first, 'dst', '') or ''),
+                'sport': getattr(first, 'sport', None),
+                'dport': getattr(first, 'dport', None),
+                'packet_count': len(rows),
+                'tcp_stream_index': metadata.get('tcp_stream_index', None),
+                'udp_stream_index': metadata.get('udp_stream_index', None),
+            }
+            entry['label'] = self._format_ai_conversation_label(entry)
+            entries.append(entry)
+        return entries
+
+    def _ai_flow_lookup_key_from_row(self, row: list, traffic_header: list[str]):
+        index = {str(name): idx for idx, name in enumerate(traffic_header)}
+
+        def _row_value(field, default=''):
+            idx = index.get(str(field), None)
+            if idx is None or idx >= len(row):
+                return default
+            return row[idx]
+
+        proto = str(_row_value('Protocol', '') or '').upper()
+        src = str(_row_value('Source IP', '') or '')
+        dst = str(_row_value('Destination IP', '') or '')
+        sport = str(_row_value('Source Port', '') or '')
+        dport = str(_row_value('Destination Port', '') or '')
+        endpoints = tuple(sorted([(src, sport), (dst, dport)]))
+        return proto, endpoints
+
+    def _build_ai_action_groups(self, traffic_header: list[str], traffic_rows: list[list], predictions: list[dict], conversation_catalog: list[dict]) -> list[dict]:
+        conversation_by_endpoint = {}
+        for entry in list(conversation_catalog or []):
+            proto = str(entry.get('protocol', '') or '').upper()
+            src = str(entry.get('src', '') or '')
+            dst = str(entry.get('dst', '') or '')
+            sport = str(entry.get('sport', '') or '')
+            dport = str(entry.get('dport', '') or '')
+            endpoints = tuple(sorted([(src, sport), (dst, dport)]))
+            conversation_by_endpoint.setdefault((proto, endpoints), entry)
+
+        index = {str(name): idx for idx, name in enumerate(traffic_header)}
+        grouped = {}
+        for row, pred in zip(traffic_rows, predictions):
+            label = str(pred.get('label', pred.get('prediction', 'Unknown')) or 'Unknown')
+            description = self.AI_LABEL_DESCRIPTIONS.get(label, self.AI_LABEL_DESCRIPTIONS.get(label.upper(), ''))
+            confidence = float(pred.get('confidence', pred.get('anomaly_score', 0.0)) or 0.0)
+            conversation = conversation_by_endpoint.get(self._ai_flow_lookup_key_from_row(row, traffic_header))
+            src = str(row[index['Source IP']]) if 'Source IP' in index and index['Source IP'] < len(row) else ''
+            dst = str(row[index['Destination IP']]) if 'Destination IP' in index and index['Destination IP'] < len(row) else ''
+            sport = str(row[index['Source Port']]) if 'Source Port' in index and index['Source Port'] < len(row) else ''
+            dport = str(row[index['Destination Port']]) if 'Destination Port' in index and index['Destination Port'] < len(row) else ''
+            proto = str(row[index['Protocol']]) if 'Protocol' in index and index['Protocol'] < len(row) else ''
+            flow_text = f'{src}:{sport} -> {dst}:{dport} | {proto} | confidence {confidence:.2%}'
+            group = grouped.setdefault(
+                label,
+                {
+                    'action': label,
+                    'description': description,
+                    'count': 0,
+                    'children': [],
+                },
+            )
+            group['count'] += 1
+            child_text = flow_text
+            filter_expression = ''
+            first_packet = None
+            if conversation is not None:
+                child_text = f'{conversation["label"]} | {flow_text}'
+                filter_expression = str(conversation.get('filter_expression', '') or '')
+                first_packet = int(conversation.get('first_packet', 0) or 0)
+            group['children'].append(
+                {
+                    'text': child_text,
+                    'filter_expression': filter_expression,
+                    'first_packet': first_packet,
+                }
+            )
+        return sorted(grouped.values(), key=lambda item: (-int(item.get('count', 0) or 0), str(item.get('action', ''))))
+
+    def _build_ai_traffic_rows(self, records: list) -> list[list]:
+        return self._build_ai_traffic_rows_from_flows(self._build_ai_flows(records))
 
     def _traffic_to_ml(self, traffic_header: list[str], traffic_rows: list[list]) -> tuple[list[str], list[list]]:
         keep_indices = [
@@ -3130,6 +3320,15 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _open_ai_analyst_dialog(self):
+        existing_dialog = getattr(self, '_ai_analyst_dialog', None)
+        if existing_dialog is not None:
+            try:
+                existing_dialog.show()
+                existing_dialog.raise_()
+                existing_dialog.activateWindow()
+                return
+            except Exception:
+                self._ai_analyst_dialog = None
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
             QMessageBox.information(self, 'AI Analyst', 'Khong co capture de phan tich.')
             return
@@ -3142,82 +3341,228 @@ class ApplicationWindow(QMainWindow):
         record_by_number = {}
         for rec in records:
             record_by_number.setdefault(int(rec.number), rec)
+        conversation_catalog = self._build_ai_conversation_catalog(records)
+        conversation_numbers = [int(item.get('index', 0) or 0) for item in conversation_catalog]
+        conversation_by_number = {int(item.get('index', 0) or 0): item for item in conversation_catalog}
 
         dialog = QDialog(self)
         dialog.setWindowTitle('AI Analyst')
         root = QVBoxLayout(dialog)
 
-        root.addWidget(QLabel('Nhap goi tin: 1 goi, nhieu goi cach nhau dau phay, khoang a-b, hoac all'))
-        packet_input = QLineEdit(dialog)
-        packet_input.setPlaceholderText('Vi du: 5,8,10-20 hoac all')
+        selector_panel = QFrame(dialog)
+        selector_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        selector_layout = QHBoxLayout(selector_panel)
+
+        left_panel = QWidget(selector_panel)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('Mode phân tích:'))
+        mode_combo = QComboBox(left_panel)
+        mode_combo.addItems(['Theo gói tin', 'Theo conversation'])
+        mode_row.addWidget(mode_combo, 1)
+        left_layout.addLayout(mode_row)
+
+        input_title = QLabel('Nhập gói tin', left_panel)
+        left_layout.addWidget(input_title)
+        input_hint = QLabel('Hỗ trợ: 1 gói, nhiều gói cách nhau dấu phẩy, khoảng a-b, hoặc all', left_panel)
+        left_layout.addWidget(input_hint)
+
+        packet_input = QLineEdit(left_panel)
+        packet_input.setPlaceholderText('Ví dụ: 5,8,10-20 hoặc all')
         packet_input.setText('all')
-        root.addWidget(packet_input)
-        status = QTextEdit(dialog)
-        status.setReadOnly(True)
-        status.setMinimumHeight(280)
-        root.addWidget(status)
+        left_layout.addWidget(packet_input)
+
+        conversation_input = QLineEdit(left_panel)
+        conversation_input.setPlaceholderText('Ví dụ: 1,3,5-8 hoặc all')
+        conversation_input.setText('all')
+        left_layout.addWidget(conversation_input)
 
         button_row = QHBoxLayout()
-        build_btn = QPushButton('Phan tich bang model', dialog)
-        close_btn = QPushButton('Dong', dialog)
-        button_row.addWidget(build_btn)
+        analyze_btn = QPushButton('Phân tích', left_panel)
+        close_btn = QPushButton('Đóng', left_panel)
+        button_row.addWidget(analyze_btn)
         button_row.addStretch()
         button_row.addWidget(close_btn)
-        root.addLayout(button_row)
+        left_layout.addLayout(button_row)
 
-        state = {
-            'traffic_header': None,
-            'traffic_rows': None,
-            'ml_header': None,
-            'ml_rows': None,
-            'predictions': None,
-        }
+        right_panel = QWidget(selector_panel)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        conversation_list = QListWidget(right_panel)
+        for entry in conversation_catalog:
+            conversation_list.addItem(str(entry.get('label', '') or ''))
+        right_layout.addWidget(conversation_list, 1)
+
+        selector_layout.addWidget(left_panel, 3)
+        selector_layout.addWidget(right_panel, 2)
+        root.addWidget(selector_panel)
+
+        result_summary = QLabel(
+            f'Sẵn sàng phân tích. Có {len(packet_numbers)} gói tin và {len(conversation_catalog)} conversation khả dụng.',
+            dialog,
+        )
+        root.addWidget(result_summary)
+
+        result_tree = QTreeWidget(dialog)
+        result_tree.setColumnCount(2)
+        result_tree.setHeaderLabels(['Action', 'Count'])
+        result_tree.setRootIsDecorated(True)
+        result_tree.setAlternatingRowColors(True)
+        result_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        result_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        root.addWidget(result_tree, 1)
+
+        def _update_mode_ui():
+            is_conversation_mode = (mode_combo.currentIndex() == 1)
+            input_title.setText('Nhập số thứ tự conversation' if is_conversation_mode else 'Nhập gói tin')
+            input_hint.setText(
+                'Hỗ trợ: 1 mục, nhiều mục cách nhau dấu phẩy, khoảng a-b, hoặc all'
+                if is_conversation_mode
+                else 'Hỗ trợ: 1 gói, nhiều gói cách nhau dấu phẩy, khoảng a-b, hoặc all'
+            )
+            packet_input.setVisible(not is_conversation_mode)
+            conversation_input.setVisible(is_conversation_mode)
+            right_panel.setVisible(is_conversation_mode)
+
+        def _collect_selected_records():
+            mode = str(mode_combo.currentText() or '')
+            if mode == 'Theo conversation':
+                selected_conversations = self._parse_ai_conversation_selector(conversation_input.text(), conversation_numbers)
+                seen_numbers = set()
+                selected_records = []
+                for conv_no in selected_conversations:
+                    entry = conversation_by_number.get(int(conv_no))
+                    if not entry:
+                        continue
+                    for rec in list(entry.get('records', []) or []):
+                        packet_no = int(getattr(rec, 'number', 0) or 0)
+                        if packet_no in seen_numbers:
+                            continue
+                        seen_numbers.add(packet_no)
+                        selected_records.append(rec)
+                return selected_records, f'{len(selected_conversations)} conversation'
+            selected_numbers = self._parse_ai_packet_selector(packet_input.text(), packet_numbers)
+            selected_records = [record_by_number[n] for n in selected_numbers if n in record_by_number]
+            return selected_records, f'{len(selected_numbers)} gói tin'
+
+        def _render_result_groups(groups):
+            result_tree.clear()
+            for group in list(groups or []):
+                description = str(group.get('description', '') or '').strip()
+                parent_text = str(group.get('action', '') or '')
+                if description:
+                    parent_text = f'{parent_text} - {description}'
+                parent = QTreeWidgetItem(result_tree)
+                parent.setText(0, parent_text)
+                parent.setText(1, str(int(group.get('count', 0) or 0)))
+                for child_info in list(group.get('children', []) or []):
+                    child = QTreeWidgetItem(parent)
+                    child.setText(0, str(child_info.get('text', '') or ''))
+                    child.setText(1, '')
+                    child.setData(0, Qt.UserRole, str(child_info.get('filter_expression', '') or ''))
+                    child.setData(0, Qt.UserRole + 1, int(child_info.get('first_packet', 0) or 0))
+            result_tree.collapseAll()
+
+        def _apply_conversation_entry(entry):
+            if not isinstance(entry, dict):
+                return
+            filter_expression = str(entry.get('filter_expression', '') or '').strip()
+            first_packet = int(entry.get('first_packet', 0) or 0)
+            if not filter_expression:
+                return
+            self._set_display_filter_text(filter_expression, apply_now=True)
+            if first_packet > 0 and self.capture_view is not None:
+                self.capture_view.goto_packet_number(first_packet)
+            self.raise_()
+            self.activateWindow()
 
         def _build():
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            analyze_btn.setEnabled(False)
+            result_summary.setText('Loading... đang phân tích dữ liệu AI Analyst.')
+            QApplication.processEvents()
             try:
-                selected_numbers = self._parse_ai_packet_selector(packet_input.text(), packet_numbers)
-                selected_records = [record_by_number[n] for n in selected_numbers if n in record_by_number]
+                selected_records, selection_text = _collect_selected_records()
                 if not selected_records:
-                    raise ValueError('Khong chon duoc goi hop le.')
+                    raise ValueError('Không chọn được dữ liệu hợp lệ để phân tích.')
 
+                flows = self._build_ai_flows(selected_records)
                 traffic_header = list(self.AI_TRAFFIC_COLUMNS)
-                traffic_rows = self._build_ai_traffic_rows(selected_records)
+                traffic_rows = self._build_ai_traffic_rows_from_flows(flows)
                 if any(len(row) != len(traffic_header) for row in traffic_rows):
-                    raise ValueError('Loi schema: so cot TrafficLabelling khong khop header.')
+                    raise ValueError('Lỗi schema: số cột TrafficLabelling không khớp header.')
 
                 ml_header, ml_rows = self._traffic_to_ml(traffic_header, traffic_rows)
                 if any(len(row) != len(ml_header) for row in ml_rows):
-                    raise ValueError('Loi schema: so cot inference feature khong khop header.')
+                    raise ValueError('Lỗi schema: số cột inference feature không khớp header.')
                 if any(str(col).strip().lower() == 'label' for col in ml_header):
-                    raise ValueError('Loi schema: cot Label van con trong feature inference.')
+                    raise ValueError('Lỗi schema: cột Label vẫn còn trong feature inference.')
 
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
-                analysis_text = self._build_ai_analysis_text(traffic_header, traffic_rows, predictions)
-
-                state['traffic_header'] = traffic_header
-                state['traffic_rows'] = traffic_rows
-                state['ml_header'] = ml_header
-                state['ml_rows'] = ml_rows
-                state['predictions'] = predictions
-
-                status.setPlainText(
-                    f"Da phan tich xong bang model AI Analyst\n"
-                    f"- So goi chon: {len(selected_records)}\n"
-                    f"- TrafficLabelling rows: {len(traffic_rows)} | cols: {len(traffic_header)}\n"
-                    f"- Inference feature rows: {len(ml_rows)} | cols: {len(ml_header)} | Label removed\n\n"
-                    f"- Flow mode: Strict Upstream (single standard mode)\n"
-                    f"{analysis_text}"
+                action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
+                _render_result_groups(action_groups)
+                result_summary.setText(
+                    f'Đã phân tích {selection_text} -> {len(flows)} flow, {len(action_groups)} action.'
                 )
             except Exception as exc:
-                status.setPlainText(f'Loi AI Analyst: {exc}')
+                result_tree.clear()
+                result_summary.setText(f'Lỗi AI Analyst: {exc}')
+            finally:
+                analyze_btn.setEnabled(True)
+                QApplication.restoreOverrideCursor()
+                QApplication.processEvents()
 
-        build_btn.clicked.connect(_build)
+        def _handle_result_click(item, _column):
+            if item is None:
+                return
+            filter_expression = str(item.data(0, Qt.UserRole) or '').strip()
+            first_packet = int(item.data(0, Qt.UserRole + 1) or 0)
+            if not filter_expression:
+                item.setExpanded(not item.isExpanded())
+                return
+            self._set_display_filter_text(filter_expression, apply_now=True)
+            if first_packet > 0 and self.capture_view is not None:
+                self.capture_view.goto_packet_number(first_packet)
+            self.raise_()
+            self.activateWindow()
+
+        def _use_conversation_number():
+            row = int(conversation_list.currentRow())
+            if row < 0 or row >= len(conversation_catalog):
+                return
+            conversation_input.setText(str(int(conversation_catalog[row].get('index', 0) or 0)))
+
+        def _filter_selected_conversation():
+            row = int(conversation_list.currentRow())
+            if row < 0 or row >= len(conversation_catalog):
+                return
+            entry = conversation_catalog[row]
+            conversation_input.setText(str(int(entry.get('index', 0) or 0)))
+            _apply_conversation_entry(entry)
+
+        mode_combo.currentIndexChanged.connect(_update_mode_ui)
+        analyze_btn.clicked.connect(_build)
         close_btn.clicked.connect(dialog.accept)
         packet_input.returnPressed.connect(_build)
+        conversation_input.returnPressed.connect(_build)
+        result_tree.itemClicked.connect(_handle_result_click)
+        result_tree.itemDoubleClicked.connect(_handle_result_click)
+        conversation_list.itemDoubleClicked.connect(lambda _item: _filter_selected_conversation())
+        _update_mode_ui()
 
-        dialog.resize(980, 680)
+        dialog.resize(1120, 760)
+        selector_panel.setMaximumHeight(max(140, int(dialog.height() * 0.2)))
         self._fit_widget_90(dialog)
-        dialog.exec()
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._ai_analyst_dialog = dialog
+        dialog.destroyed.connect(lambda *_args: setattr(self, '_ai_analyst_dialog', None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def show_interface_selector(self):
         """Hiển thị màn hình chọn interface"""
