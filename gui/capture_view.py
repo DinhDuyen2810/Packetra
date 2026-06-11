@@ -31,10 +31,12 @@ from gui.hex_view import PacketBytesView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
 from utils.pcap_io import (
+    clone_capture_metadata,
     load_capture_metadata,
     iter_pcap_packets,
     normalize_capture_extension,
     save_capture_file,
+    save_capture_file_with_metadata,
     save_pcapng_file_comment,
     save_pcapng_packet_comments,
 )
@@ -961,7 +963,12 @@ class CaptureView(QWidget):
         packet_interface_id = packet_interfaces.get(packet_number, None)
         if packet_interface_id is not None:
             for interface in interfaces:
-                if int(interface.get('interface_id', -1) or -1) == int(packet_interface_id):
+                try:
+                    raw_interface_id = interface.get('interface_id', -1)
+                    parsed_interface_id = -1 if raw_interface_id is None else int(raw_interface_id)
+                except Exception:
+                    parsed_interface_id = -1
+                if parsed_interface_id == int(packet_interface_id):
                     selected_interface = interface
                     break
 
@@ -999,7 +1006,32 @@ class CaptureView(QWidget):
 
     def _persist_capture_records(self, records, file_path: str, file_format: str, compression: str) -> str:
         packets = [r.raw for r in records]
-        return save_capture_file(file_path, packets, file_format=file_format, compression=compression)
+        metadata_to_save = None
+        if str(file_format or '').strip().lower() == 'pcapng':
+            metadata_to_save = clone_capture_metadata(self.capture_metadata)
+            metadata_to_save.file_comment = str(self.capture_comments or '')
+            metadata_to_save.packet_comments = {}
+            metadata_to_save.packet_interfaces = {}
+            for new_idx, record in enumerate(list(records or []), start=1):
+                comment = str(getattr(record, 'packet_comment', '') or '').strip()
+                if comment:
+                    metadata_to_save.packet_comments[int(new_idx)] = comment
+                record_meta = getattr(record, 'metadata', {}) or {}
+                has_interface_id = 'frame_interface_id' in record_meta or hasattr(record, 'interface_id')
+                interface_id = record_meta.get('frame_interface_id', getattr(record, 'interface_id', 0))
+                try:
+                    interface_id = int(interface_id or 0)
+                except Exception:
+                    interface_id = 0
+                if has_interface_id:
+                    metadata_to_save.packet_interfaces[int(new_idx)] = interface_id
+        return save_capture_file_with_metadata(
+            file_path,
+            packets,
+            metadata=metadata_to_save,
+            file_format=file_format,
+            compression=compression,
+        )
 
     def _apply_ring_buffer_limit(self):
         output = self.output_settings or {}
@@ -3182,11 +3214,28 @@ class CaptureView(QWidget):
                 fmt_path = os.path.splitext(file_path)[0]
             file_format = 'pcapng' if fmt_path.lower().endswith('.pcapng') else 'pcap'
 
-            save_capture_file(file_path, [r.raw for r in self.records], file_format=file_format, compression=compression)
-            self._remember_recent_file(self.loaded_file_path)
-            self._set_dirty(False)
+            metadata_to_save = None
             if file_format == 'pcapng':
-                self.save_packet_comments_to_file()
+                metadata_to_save = clone_capture_metadata(self.capture_metadata)
+                metadata_to_save.file_comment = str(self.capture_comments or '')
+                metadata_to_save.packet_comments = self._collect_packet_comments_for_persistence()
+            save_capture_file_with_metadata(
+                file_path,
+                [r.raw for r in self.records],
+                metadata=metadata_to_save,
+                file_format=file_format,
+                compression=compression,
+            )
+            self._remember_recent_file(self.loaded_file_path)
+            if file_format == 'pcapng':
+                self.capture_metadata = metadata_to_save
+                self._set_dirty(False)
+                self._update_status(f'Saved to {self.loaded_file_path}')
+                return True
+            self._set_dirty(self._has_pcapng_only_metadata())
+            if self._has_pcapng_only_metadata():
+                self._update_status('Saved packet bytes to pcap, but pcapng metadata requires pcapng to persist')
+                return True
             self._update_status(f'Saved to {self.loaded_file_path}')
             return True
 
@@ -3194,17 +3243,29 @@ class CaptureView(QWidget):
         if not filename:
             return False
 
-        saved_path = save_capture_file(
+        metadata_to_save = None
+        if selected_format == 'pcapng':
+            metadata_to_save = clone_capture_metadata(self.capture_metadata)
+            metadata_to_save.file_comment = str(self.capture_comments or '')
+            metadata_to_save.packet_comments = self._collect_packet_comments_for_persistence()
+        saved_path = save_capture_file_with_metadata(
             filename,
             [r.raw for r in self.records],
+            metadata=metadata_to_save,
             file_format=selected_format,
             compression=selected_compression,
         )
         self.loaded_file_path = saved_path
         self._remember_recent_file(saved_path)
-        self._set_dirty(False)
         if selected_format == 'pcapng':
-            self.save_packet_comments_to_file()
+            self.capture_metadata = metadata_to_save
+            self._set_dirty(False)
+            self._update_status(f'Saved to {saved_path}')
+            return True
+        self._set_dirty(self._has_pcapng_only_metadata())
+        if self._has_pcapng_only_metadata():
+            self._update_status('Saved packet bytes to pcap, but pcapng metadata requires pcapng to persist')
+            return True
         self._update_status(f'Saved to {saved_path}')
         return True
 
@@ -4433,6 +4494,29 @@ class CaptureView(QWidget):
                 comments[packet_no] = comment
         return comments
 
+    def _has_comment_metadata(self) -> bool:
+        if str(self.capture_comments or '').strip():
+            return True
+        return bool(self._collect_packet_comments_for_persistence())
+
+    def _has_pcapng_only_metadata(self) -> bool:
+        if self._has_comment_metadata():
+            return True
+        metadata = self.capture_metadata
+        if metadata is None:
+            return False
+        if str(getattr(metadata, 'section_hardware', '') or '').strip():
+            return True
+        if str(getattr(metadata, 'section_os', '') or '').strip():
+            return True
+        if str(getattr(metadata, 'section_application', '') or '').strip():
+            return True
+        if bool(list(getattr(metadata, 'interfaces', []) or [])):
+            return True
+        if bool(dict(getattr(metadata, 'packet_interfaces', {}) or {})):
+            return True
+        return False
+
     def save_packet_comments_to_file(self) -> bool:
         if not self.loaded_file_path or not str(self.loaded_file_path).lower().endswith('.pcapng'):
             return False
@@ -4451,9 +4535,13 @@ class CaptureView(QWidget):
             return False
         try:
             filename = normalize_capture_extension(filename, 'pcapng')
-            saved_path = save_capture_file(
+            metadata_to_save = clone_capture_metadata(self.capture_metadata)
+            metadata_to_save.file_comment = str(self.capture_comments or '')
+            metadata_to_save.packet_comments = self._collect_packet_comments_for_persistence()
+            saved_path = save_capture_file_with_metadata(
                 filename,
                 [r.raw for r in self.records],
+                metadata=metadata_to_save,
                 file_format='pcapng',
                 compression='none',
             )

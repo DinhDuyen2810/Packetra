@@ -1,10 +1,11 @@
 import gzip
 import os
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
-from scapy.all import ARP, Ether, bind_layers, rdpcap, wrpcap
+from scapy.all import ARP, Ether, bind_layers, conf, rdpcap, wrpcap
 from scapy.utils import PcapNgWriter, PcapReader
 
 from utils.pcapng_parser import PcapngParser, PcapngMetadata, PcapngFileWriter
@@ -59,7 +60,77 @@ def _write_uncompressed_capture(filename: str, packets: List, file_format: str):
     wrpcap(filename, packets)
 
 
+def _packet_output_metadata(packet_number: int, metadata: CaptureMetadata | None) -> tuple[list[str], bytes | None]:
+    if metadata is None:
+        return [], None
+    packet_comments = dict(getattr(metadata, 'packet_comments', {}) or {})
+    comment = str(packet_comments.get(int(packet_number), '') or '').strip()
+    comments = [comment] if comment else []
+
+    packet_interfaces = dict(getattr(metadata, 'packet_interfaces', {}) or {})
+    interface_id = packet_interfaces.get(int(packet_number), None)
+    interface_name = ''
+    if interface_id is not None:
+        for interface in list(getattr(metadata, 'interfaces', []) or []):
+            try:
+                raw_interface_id = interface.get('interface_id', -1)
+                parsed_interface_id = -1 if raw_interface_id is None else int(raw_interface_id)
+                matches = parsed_interface_id == int(interface_id)
+            except Exception:
+                matches = False
+            if not matches:
+                continue
+            interface_name = str(interface.get('name', '') or '').strip()
+            if not interface_name:
+                interface_name = str(interface.get('description', '') or '').strip()
+            if not interface_name:
+                interface_name = f'interface-{int(interface_id)}'
+            break
+    return comments, (interface_name.encode('utf-8') if interface_name else None)
+
+
+def _write_uncompressed_capture_with_metadata(filename: str, packets: List, file_format: str, metadata: CaptureMetadata | None):
+    fmt = str(file_format or '').strip().lower()
+    if fmt == 'pcapng':
+        writer = PcapNgWriter(filename)
+        try:
+            for packet_number, pkt in enumerate(list(packets or []), start=1):
+                if not getattr(writer, 'header_present', False):
+                    writer.header_present = True
+                    writer._write_block_shb()
+                    writer.interfaces2id = {b'__packetra_placeholder__': -1}
+                raw_pkt = bytes(pkt)
+                comments, ifname = _packet_output_metadata(packet_number, metadata)
+                sec = float(getattr(pkt, 'time', 0.0) or 0.0)
+                wirelen = int(getattr(pkt, 'wirelen', len(raw_pkt)) or len(raw_pkt))
+                linktype = conf.l2types.layer2num[pkt.__class__]
+                writer._write_packet(
+                    raw_pkt,
+                    linktype=linktype,
+                    sec=sec,
+                    caplen=len(raw_pkt),
+                    wirelen=wirelen,
+                    ifname=ifname,
+                    comments=comments,
+                )
+        finally:
+            writer.close()
+        save_pcapng_capture_metadata(filename, metadata)
+        return
+    _write_uncompressed_capture(filename, packets, file_format)
+
+
 def save_capture_file(filename: str, packets: List, file_format: str = 'pcap', compression: str = 'none') -> str:
+    return save_capture_file_with_metadata(filename, packets, metadata=None, file_format=file_format, compression=compression)
+
+
+def save_capture_file_with_metadata(
+    filename: str,
+    packets: List,
+    metadata: CaptureMetadata | None = None,
+    file_format: str = 'pcap',
+    compression: str = 'none',
+) -> str:
     """Save packets with explicit format/compression and return actual output path."""
     fmt = (file_format or 'pcap').strip().lower()
     comp = (compression or 'none').strip().lower()
@@ -68,13 +139,13 @@ def save_capture_file(filename: str, packets: List, file_format: str = 'pcap', c
     output_filename = apply_compression_suffix(base_filename, comp)
 
     if comp == 'none':
-        _write_uncompressed_capture(output_filename, packets, fmt)
+        _write_uncompressed_capture_with_metadata(output_filename, packets, fmt, metadata)
         return output_filename
 
     fd, temp_path = tempfile.mkstemp(suffix='.pcapng' if fmt == 'pcapng' else '.pcap')
     os.close(fd)
     try:
-        _write_uncompressed_capture(temp_path, packets, fmt)
+        _write_uncompressed_capture_with_metadata(temp_path, packets, fmt, metadata)
 
         if comp == 'gzip':
             with open(temp_path, 'rb') as src, gzip.open(output_filename, 'wb') as dst:
@@ -127,6 +198,40 @@ def save_pcapng_packet_comments(filename: str, packet_comments: Dict[int, str]) 
     if not filename or not filename.lower().endswith('.pcapng'):
         return False
     return PcapngFileWriter(filename).update_packet_comments(packet_comments or {})
+
+
+def clone_capture_metadata(metadata: CaptureMetadata | None) -> CaptureMetadata:
+    if not isinstance(metadata, CaptureMetadata):
+        return CaptureMetadata()
+    cloned = CaptureMetadata()
+    cloned.file_comment = str(metadata.file_comment or '')
+    cloned.section_hardware = str(metadata.section_hardware or '')
+    cloned.section_os = str(metadata.section_os or '')
+    cloned.section_application = str(metadata.section_application or '')
+    cloned.interfaces = deepcopy(list(metadata.interfaces or []))
+    cloned.packet_interfaces = dict(metadata.packet_interfaces or {})
+    cloned.packet_comments = dict(metadata.packet_comments or {})
+    return cloned
+
+
+def save_pcapng_capture_metadata(filename: str, metadata: CaptureMetadata | None) -> bool:
+    """Persist supported PCAPNG metadata after packet bytes are written.
+
+    Currently supported:
+    - file comment (SHB comment)
+    - per-packet comments (EPB comments)
+
+    Interface metadata is not rewritten here because the current writer only
+    supports updating comments safely.
+    """
+    if not filename or not filename.lower().endswith('.pcapng'):
+        return False
+    if not isinstance(metadata, CaptureMetadata):
+        return True
+    ok = True
+    ok = bool(save_pcapng_file_comment(filename, str(metadata.file_comment or ''))) and ok
+    ok = bool(save_pcapng_packet_comments(filename, dict(metadata.packet_comments or {}))) and ok
+    return ok
 
 
 def load_capture_metadata(filename: str) -> CaptureMetadata:

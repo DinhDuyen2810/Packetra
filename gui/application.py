@@ -56,7 +56,15 @@ from core.flow_engine import (
     PacketraModelAdapter,
     FlowFeatureExtractor,
 )
-from utils.pcap_io import normalize_capture_extension, iter_pcap_packets, save_capture_file
+from utils.pcap_io import (
+    CaptureMetadata,
+    clone_capture_metadata,
+    iter_pcap_packets,
+    load_capture_metadata,
+    normalize_capture_extension,
+    save_capture_file,
+    save_capture_file_with_metadata,
+)
 
 log = logging.getLogger('application')
 
@@ -3894,6 +3902,7 @@ class ApplicationWindow(QMainWindow):
 
         try:
             incoming_packets = list(iter_pcap_packets(merge_path))
+            incoming_metadata = load_capture_metadata(merge_path)
         except Exception as exc:
             QMessageBox.critical(self, 'Merge', f'Khong the doc file merge:\n{exc}')
             return
@@ -3902,13 +3911,36 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.warning(self, 'Merge', 'File duoc chon khong co packet hop le de merge.')
             return
 
-        current_packets = [r.raw for r in cv.records if getattr(r, 'raw', None) is not None]
-        merged_packets = current_packets + incoming_packets
+        merged_entries = [self._packet_entry_from_record(r) for r in cv.records if getattr(r, 'raw', None) is not None]
+        packet_comments = dict(getattr(incoming_metadata, 'packet_comments', {}) or {})
+        packet_interfaces = dict(getattr(incoming_metadata, 'packet_interfaces', {}) or {})
+        incoming_interfaces = list(getattr(incoming_metadata, 'interfaces', []) or [])
+        for idx, pkt in enumerate(incoming_packets, start=1):
+            interface_info = None
+            if idx in packet_interfaces:
+                incoming_interface_id = int(packet_interfaces.get(idx, 0) or 0)
+                for interface in incoming_interfaces:
+                    try:
+                        raw_interface_id = interface.get('interface_id', -1)
+                        parsed_interface_id = -1 if raw_interface_id is None else int(raw_interface_id)
+                        if parsed_interface_id == incoming_interface_id:
+                            interface_info = dict(interface)
+                            break
+                    except Exception:
+                        continue
+            snapshot = {
+                'marked': False,
+                'ignored': False,
+                'comment': str(packet_comments.get(idx, '') or ''),
+                'interface_id': int(packet_interfaces.get(idx, 0) or 0) if idx in packet_interfaces else 0,
+                'has_interface_id': idx in packet_interfaces,
+            }
+            merged_entries.append({'raw': pkt, 'snapshot': snapshot, 'interface_info': interface_info})
         if chronological:
-            merged_packets.sort(key=lambda p: float(getattr(p, 'time', 0.0) or 0.0))
+            merged_entries.sort(key=lambda entry: float(getattr(entry.get('raw'), 'time', 0.0) or 0.0))
 
         self._replace_capture_packets(
-            merged_packets,
+            merged_entries,
             preserve_metadata=True,
             preserve_loaded_path=True,
             mark_dirty=True,
@@ -4270,16 +4302,19 @@ class ApplicationWindow(QMainWindow):
             saved_paths = []
             try:
                 for part_no, (frm, to_) in enumerate(ranges, start=1):
-                    chunk_packets = [
-                        rec.raw
+                    chunk_records = [
+                        rec
                         for rec in cv.records
                         if frm <= int(getattr(rec, 'number', 0) or 0) <= to_
                         and getattr(rec, 'raw', None) is not None
                     ]
+                    chunk_packets = [rec.raw for rec in chunk_records]
                     target = os.path.join(output_dir, f'{base_name}_part{part_no:03d}')
-                    saved_path = save_capture_file(
+                    chunk_metadata = self._derive_output_metadata_for_records(chunk_records) if file_format == 'pcapng' else None
+                    saved_path = save_capture_file_with_metadata(
                         target,
                         chunk_packets,
+                        metadata=chunk_metadata,
                         file_format=file_format,
                         compression=compression,
                     )
@@ -4330,13 +4365,13 @@ class ApplicationWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        remaining_packets = [
-            rec.raw
+        remaining_entries = [
+            self._packet_entry_from_record(rec)
             for i, rec in enumerate(cv.records)
             if i not in delete_indices and getattr(rec, 'raw', None) is not None
         ]
         self._replace_capture_packets(
-            remaining_packets,
+            remaining_entries,
             preserve_metadata=True,
             preserve_loaded_path=True,
             mark_dirty=True,
@@ -4435,22 +4470,25 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.warning(self, 'Export Specified Packets', 'Khong co packet phu hop de export.')
             return
 
-        packets = [cv.records[i].raw for i in sorted(export_indices) if getattr(cv.records[i], 'raw', None) is not None]
+        export_records = [cv.records[i] for i in sorted(export_indices) if getattr(cv.records[i], 'raw', None) is not None]
+        packets = [rec.raw for rec in export_records]
         if not packets:
             QMessageBox.warning(self, 'Export Specified Packets', 'Khong co packet hop le de export.')
             return
 
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            'Export Specified Packets',
-            str(Path.cwd() / f'export_packets_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pcap'),
-            'PCAP Files (*.pcap)',
-        )
+        filename, selected_format, selected_compression = cv._show_save_with_options_dialog()
         if not filename:
             return
 
         try:
-            out_path = save_capture_file(filename, packets, file_format='pcap', compression='none')
+            export_metadata = self._derive_output_metadata_for_records(export_records) if selected_format == 'pcapng' else None
+            out_path = save_capture_file_with_metadata(
+                filename,
+                packets,
+                metadata=export_metadata,
+                file_format=selected_format,
+                compression=selected_compression,
+            )
             QMessageBox.information(
                 self,
                 'Export Specified Packets',
@@ -4657,11 +4695,59 @@ class ApplicationWindow(QMainWindow):
         if not cv:
             return
 
-        packets = list(packets or [])
+        packet_entries = []
+        for item in list(packets or []):
+            if isinstance(item, dict) and item.get('raw') is not None:
+                packet_entries.append(dict(item))
+            elif not isinstance(item, dict):
+                packet_entries.append({'raw': item})
+        packet_entries = [entry for entry in packet_entries if entry.get('raw') is not None]
         old_loaded_path = cv.loaded_file_path
-        old_metadata = cv.capture_metadata
+        old_metadata = clone_capture_metadata(cv.capture_metadata) if preserve_metadata else CaptureMetadata()
         old_comments = cv.capture_comments
         old_filter = str(cv.display_filter_input.text() or '') if preserve_display_filter else ''
+
+        def _snapshot_from_record(record):
+            if record is None:
+                return {}
+            metadata = getattr(record, 'metadata', {}) or {}
+            has_interface_id = 'frame_interface_id' in metadata or hasattr(record, 'interface_id')
+            interface_id = metadata.get('frame_interface_id', getattr(record, 'interface_id', 0))
+            try:
+                interface_id = int(interface_id or 0)
+            except Exception:
+                interface_id = 0
+            return {
+                'marked': bool(getattr(record, 'marked', False)),
+                'ignored': bool(getattr(record, 'ignored', False)),
+                'comment': str(getattr(record, 'packet_comment', '') or ''),
+                'interface_id': interface_id,
+                'has_interface_id': bool(has_interface_id),
+            }
+
+        def _register_interface(catalog, catalog_by_signature, interface_info):
+            normalized = self._normalize_interface_info(interface_info)
+            if normalized is None:
+                return None
+            signature = self._interface_signature(normalized)
+            existing_id = catalog_by_signature.get(signature, None)
+            if existing_id is not None:
+                return int(existing_id)
+            assigned_id = len(catalog)
+            normalized['interface_id'] = int(assigned_id)
+            catalog.append(normalized)
+            catalog_by_signature[signature] = int(assigned_id)
+            return int(assigned_id)
+
+        derived_metadata = CaptureMetadata()
+        runtime_state = {}
+        interface_catalog = []
+        interface_catalog_by_signature = {}
+        if preserve_metadata:
+            derived_metadata.file_comment = str(old_comments or '')
+            derived_metadata.section_hardware = str(old_metadata.section_hardware or '')
+            derived_metadata.section_os = str(old_metadata.section_os or '')
+            derived_metadata.section_application = str(old_metadata.section_application or '')
 
         cv.stop_capture()
         cv._set_packet_panes_visible(False)
@@ -4672,16 +4758,47 @@ class ApplicationWindow(QMainWindow):
                 cv.loaded_file_path = old_loaded_path
 
             cv._configure_parser_capture_context(cv.parser, str(cv.loaded_file_path or ''))
-            for idx, packet in enumerate(packets, start=1):
+            for idx, entry in enumerate(packet_entries, start=1):
+                packet = entry.get('raw', None)
+                if packet is None:
+                    continue
                 record = cv.parser.parse(packet, idx, cv.iface)
+                source_record = entry.get('record')
+                snapshot = dict(entry.get('snapshot') or {})
+                if source_record is not None and not snapshot:
+                    snapshot = _snapshot_from_record(source_record)
+                interface_info = entry.get('interface_info', None)
+                if interface_info is None and source_record is not None:
+                    interface_info = self._interface_info_from_record(source_record, old_metadata)
+                if snapshot:
+                    record.marked = bool(snapshot.get('marked', False))
+                    record.ignored = bool(snapshot.get('ignored', False))
+                    if str(snapshot.get('comment', '') or '').strip():
+                        record.packet_comment = str(snapshot.get('comment', '') or '')
+                    runtime_state[int(idx)] = {
+                        'marked': bool(record.marked),
+                        'ignored': bool(record.ignored),
+                        'comment': str(getattr(record, 'packet_comment', '') or ''),
+                    }
+                    if preserve_metadata and str(getattr(record, 'packet_comment', '') or '').strip():
+                        derived_metadata.packet_comments[int(idx)] = str(getattr(record, 'packet_comment', '') or '')
+                if preserve_metadata:
+                    assigned_interface_id = _register_interface(interface_catalog, interface_catalog_by_signature, interface_info)
+                    if assigned_interface_id is not None:
+                        derived_metadata.packet_interfaces[int(idx)] = int(assigned_interface_id)
                 cv.records.append(record)
 
             if preserve_metadata:
-                cv.capture_metadata = old_metadata
+                derived_metadata.interfaces = list(interface_catalog)
+                cv.capture_metadata = derived_metadata
                 cv.capture_comments = old_comments
             else:
                 cv.capture_metadata = None
                 cv.capture_comments = ''
+
+            cv._packet_state_by_number = dict(runtime_state)
+            for idx, record in enumerate(cv.records, start=1):
+                cv._apply_capture_metadata_to_record(record, idx)
 
             cv.display_filter_input.setText(old_filter)
             cv.apply_display_filter()
@@ -4692,6 +4809,137 @@ class ApplicationWindow(QMainWindow):
         finally:
             cv._set_packet_panes_updates_enabled(True)
             cv._set_packet_panes_visible(True)
+
+    def _packet_entry_from_record(self, record) -> dict:
+        return {
+            'raw': getattr(record, 'raw', None),
+            'record': record,
+            'interface_info': self._interface_info_from_record(record),
+        }
+
+    def _derive_output_metadata_for_records(self, records, include_file_comment: bool = True) -> CaptureMetadata:
+        cv = self.capture_view
+        source_meta = clone_capture_metadata(cv.capture_metadata if cv else None)
+        derived = CaptureMetadata()
+        if include_file_comment and cv is not None:
+            derived.file_comment = str(getattr(cv, 'capture_comments', '') or '')
+        derived.section_hardware = str(source_meta.section_hardware or '')
+        derived.section_os = str(source_meta.section_os or '')
+        derived.section_application = str(source_meta.section_application or '')
+        interface_catalog = []
+        interface_catalog_by_signature = {}
+        for new_idx, record in enumerate(list(records or []), start=1):
+            comment = str(getattr(record, 'packet_comment', '') or '').strip()
+            if comment:
+                derived.packet_comments[int(new_idx)] = comment
+            interface_info = self._interface_info_from_record(record, source_meta)
+            normalized = self._normalize_interface_info(interface_info)
+            if normalized is None:
+                continue
+            signature = self._interface_signature(normalized)
+            assigned_interface_id = interface_catalog_by_signature.get(signature, None)
+            if assigned_interface_id is None:
+                assigned_interface_id = len(interface_catalog)
+                normalized['interface_id'] = int(assigned_interface_id)
+                interface_catalog.append(normalized)
+                interface_catalog_by_signature[signature] = int(assigned_interface_id)
+            derived.packet_interfaces[int(new_idx)] = int(assigned_interface_id)
+        derived.interfaces = list(interface_catalog)
+        return derived
+
+    def _normalize_interface_info(self, interface_info):
+        if not isinstance(interface_info, dict):
+            return None
+        normalized = {
+            'interface_id': 0,
+            'name': str(interface_info.get('name', '') or '').strip(),
+            'description': str(interface_info.get('description', '') or '').strip(),
+            'comment': str(interface_info.get('comment', '') or '').strip(),
+            'dropped_packets': str(interface_info.get('dropped_packets', '') or '').strip(),
+            'capture_filter': str(interface_info.get('capture_filter', '') or '').strip(),
+            'link_type': str(interface_info.get('link_type', '') or '').strip(),
+            'snaplen': str(interface_info.get('snaplen', '') or '').strip(),
+            'ipv4_addr': str(interface_info.get('ipv4_addr', '') or '').strip(),
+            'ipv6_addr': str(interface_info.get('ipv6_addr', '') or '').strip(),
+            'mac_addr': str(interface_info.get('mac_addr', '') or '').strip(),
+            'speed': str(interface_info.get('speed', '') or '').strip(),
+            'os': str(interface_info.get('os', '') or '').strip(),
+            'hardware': str(interface_info.get('hardware', '') or '').strip(),
+        }
+        try:
+            normalized['interface_id'] = int(interface_info.get('interface_id', 0) or 0)
+        except Exception:
+            normalized['interface_id'] = 0
+        if not any(str(normalized.get(key, '') or '').strip() for key in normalized if key != 'interface_id'):
+            return None
+        return normalized
+
+    def _interface_signature(self, interface_info) -> tuple:
+        normalized = self._normalize_interface_info(interface_info)
+        if normalized is None:
+            return tuple()
+        return (
+            str(normalized.get('name', '') or '').strip().lower(),
+            str(normalized.get('description', '') or '').strip().lower(),
+            str(normalized.get('comment', '') or '').strip(),
+            str(normalized.get('capture_filter', '') or '').strip(),
+            str(normalized.get('link_type', '') or '').strip(),
+            str(normalized.get('snaplen', '') or '').strip(),
+            str(normalized.get('ipv4_addr', '') or '').strip(),
+            str(normalized.get('ipv6_addr', '') or '').strip(),
+            str(normalized.get('mac_addr', '') or '').strip(),
+            str(normalized.get('speed', '') or '').strip(),
+            str(normalized.get('os', '') or '').strip(),
+            str(normalized.get('hardware', '') or '').strip(),
+        )
+
+    def _interface_info_from_record(self, record, metadata: CaptureMetadata | None = None):
+        if record is None:
+            return None
+        source_metadata = metadata
+        if source_metadata is None and self.capture_view is not None:
+            source_metadata = self.capture_view.capture_metadata
+        interfaces = list(getattr(source_metadata, 'interfaces', []) or [])
+        record_meta = getattr(record, 'metadata', {}) or {}
+        interface_name = str(record_meta.get('frame_interface_name', '') or getattr(record, 'iface', '') or '').strip()
+        interface_description = str(record_meta.get('frame_interface_description', '') or '').strip()
+        interface_id = record_meta.get('frame_interface_id', getattr(record, 'interface_id', None))
+        try:
+            interface_id = None if interface_id is None else int(interface_id)
+        except Exception:
+            interface_id = None
+
+        matched = None
+        if interface_id is not None:
+            for interface in interfaces:
+                try:
+                    raw_interface_id = interface.get('interface_id', -1)
+                    parsed_interface_id = -1 if raw_interface_id is None else int(raw_interface_id)
+                    if parsed_interface_id == int(interface_id):
+                        matched = interface
+                        break
+                except Exception:
+                    continue
+        if matched is None and interface_name:
+            name_lower = interface_name.lower()
+            desc_lower = interface_description.lower()
+            for interface in interfaces:
+                iface_name = str(interface.get('name', '') or '').strip().lower()
+                iface_desc = str(interface.get('description', '') or '').strip().lower()
+                if name_lower and name_lower in {iface_name, iface_desc}:
+                    matched = interface
+                    break
+                if desc_lower and desc_lower in {iface_name, iface_desc}:
+                    matched = interface
+                    break
+        if matched is not None:
+            return self._normalize_interface_info(dict(matched))
+        fallback = {
+            'interface_id': int(interface_id or 0) if interface_id is not None else 0,
+            'name': interface_name,
+            'description': interface_description,
+        }
+        return self._normalize_interface_info(fallback)
 
     def _render_flow_behavior_text(self, result: dict) -> str:
         flow_count = int(result.get("flow_count", 0) or 0)
