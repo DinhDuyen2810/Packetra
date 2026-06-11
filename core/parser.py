@@ -33,6 +33,8 @@ class PacketParser:
         b'GET', b'POST', b'PUT', b'DELETE', b'HEAD', b'OPTIONS', b'PATCH', b'TRACE', b'CONNECT', b'PRI',
         b'SUBSCRIBE', b'UNSUBSCRIBE', b'NOTIFY',
     }
+    _COMMON_PROTOCOLS_FAST = {'TCP', 'UDP', 'ICMP', 'ARP', 'DNS', 'TLS', 'HTTPS'}
+    _REGEX_CACHE = {}
 
     def __init__(self):
         self.first_epoch = None

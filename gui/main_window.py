@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 from core.capture import PacketSniffer
 from core.filtering import DisplayFilter
 from core.parser import PacketParser
+from gui.filter_drag import PacketFilterLineEdit
 from gui.hex_view import PacketHexView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
@@ -70,7 +71,7 @@ class MainWindow(QMainWindow):
 
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(8, 0, 8, 4)
-        self.display_filter_input = QLineEdit()
+        self.display_filter_input = PacketFilterLineEdit()
         self.display_filter_input.setPlaceholderText('Apply a display filter ... <Ctrl+/>')
         self.apply_filter_btn = QPushButton('➡')
         self.clear_filter_btn = QPushButton('✕')

@@ -183,6 +183,14 @@ class DisplayFilter:
             return [int(record.number)]
         if low == 'frame.len':
             return [int(record.length)]
+        if low in {'length', 'len'}:
+            return [int(record.length)]
+        if low in {'protocol', 'proto'}:
+            return [str(record.protocol or '')]
+        if low in {'src', 'source'}:
+            return [str(record.src or '')]
+        if low in {'dst', 'destination'}:
+            return [str(record.dst or '')]
         if low == 'frame.time_delta':
             return [float(metadata.get('frame_time_delta', 0.0) or 0.0)]
 

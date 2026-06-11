@@ -1,10 +1,13 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+
+from gui.filter_drag import build_filter_drag, packet_filter_expression
 
 
 class PacketTable(QTableWidget):
     INFO_COLUMN = 6
+    DRAGGABLE_COLUMNS = {2, 3, 4, 5}
     MARKED_ROLE = int(Qt.UserRole) + 100
     IGNORED_ROLE = int(Qt.UserRole) + 101
     ROW_RECORD_ROLE = int(Qt.UserRole) + 102
@@ -44,11 +47,15 @@ class PacketTable(QTableWidget):
         self._column_alignment_map = {}
         self._related_indicators = {}
         self._immediate_indicator_row = None
+        self._protocol_color_cache = {}
+        self._color_cache_max_size = 256
         self.setColumnCount(7)
         self.setHorizontalHeaderLabels(['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'])
         self.setEditTriggers(QTableWidget.NoEditTriggers)
         self.setSelectionBehavior(QTableWidget.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragOnly)
         self.setAlternatingRowColors(True)
         self.setSortingEnabled(False)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -78,7 +85,52 @@ class PacketTable(QTableWidget):
         self.setColumnWidth(6, 720)
         self._default_column_widths = [self.columnWidth(i) for i in range(self.columnCount())]
         self._resize_all_columns_enabled = False
+        self._drag_start_pos = None
+        self._drag_cell = None
         self.apply_content_resize_layout()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = self.indexAt(event.pos())
+            if index.isValid() and int(index.column()) in self.DRAGGABLE_COLUMNS:
+                self._drag_start_pos = event.pos()
+                self._drag_cell = (int(index.row()), int(index.column()))
+            else:
+                self._drag_start_pos = None
+                self._drag_cell = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start_pos is not None
+            and self._drag_cell is not None
+            and bool(event.buttons() & Qt.LeftButton)
+            and (event.pos() - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance()
+        ):
+            row, column = self._drag_cell
+            expression = self._filter_expression_for_cell(row, column)
+            drag = build_filter_drag(expression, self)
+            self._drag_start_pos = None
+            self._drag_cell = None
+            if drag is not None:
+                drag.exec(Qt.CopyAction)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_pos = None
+        self._drag_cell = None
+        super().mouseReleaseEvent(event)
+
+    def _row_record(self, row: int):
+        if row < 0 or row >= self.rowCount():
+            return None
+        marker = self.item(row, 0)
+        return marker.data(self.ROW_RECORD_ROLE) if marker is not None else None
+
+    def _filter_expression_for_cell(self, row: int, column: int) -> str:
+        record = self._row_record(row)
+        return packet_filter_expression(record, column)
 
     def set_column_text_alignment(self, column: int, alignment):
         try:
@@ -402,9 +454,15 @@ class PacketTable(QTableWidget):
             color = self._marked_color
             text_color = QColor(0, 0, 0)
         else:
-            color, text_color = self._match_wireshark_style(record_or_proto)
-            if text_color is None:
-                text_color = QColor(0, 0, 0)
+            cache_key = str(proto or '').upper()
+            if cache_key in self._protocol_color_cache:
+                color, text_color = self._protocol_color_cache[cache_key]
+            else:
+                color, text_color = self._match_wireshark_style(record_or_proto)
+                if text_color is None:
+                    text_color = QColor(0, 0, 0)
+                if len(self._protocol_color_cache) < self._color_cache_max_size:
+                    self._protocol_color_cache[cache_key] = (color, text_color)
 
         background_color = color if color else QColor(255, 255, 255)
         for col in range(self.columnCount()):

@@ -10885,6 +10885,10 @@ class ApplicationWindow(QMainWindow):
             self._status_activity_kind = 'load'
             self._selected_packet_number = None
             self._update_packet_status_label()
+        elif 'Display filter applied' in status_text:
+            self._status_mode = 'filtered'
+            self._selected_packet_number = None
+            self._update_packet_status_label()
         elif any(token in status_text for token in ('Live capture', 'Capture stopped', 'Capture stopping')):
             self._status_mode = 'activity'
             self._status_activity_kind = 'capture'
@@ -10953,6 +10957,18 @@ class ApplicationWindow(QMainWindow):
             self.packet_label.setText(f'Selected packet: {self._selected_packet_number}')
             return
 
+        if self._status_mode == 'filtered':
+            visible_count = 0
+            total_count = 0
+            if self.capture_view:
+                visible_count = len(getattr(self.capture_view, 'visible_indices', []) or [])
+                total_count = len(getattr(self.capture_view, 'records', []) or [])
+            percent = (visible_count * 100.0 / total_count) if total_count else 0.0
+            self.packet_label.setText(
+                f'Filtered: {visible_count} packet{"s" if visible_count != 1 else ""} ({percent:.1f}%)'
+            )
+            return
+
         if self._status_activity_kind == 'capture':
             capture_secs = self._current_capture_duration_seconds()
             capture_text = (
@@ -10972,7 +10988,14 @@ class ApplicationWindow(QMainWindow):
 
     def _on_detail_status_changed(self, field_name: str, byte_count: int):
         if field_name and byte_count > 0:
-            self.detail_field_label.setText(f'Field: {field_name} | Byte: {byte_count}')
+            unit = 'Byte'
+            if self.capture_view and getattr(self.capture_view, 'details_tree', None):
+                item = self.capture_view.details_tree.currentItem()
+                if item:
+                    title = str(item.text(0) or '').lower()
+                    if ' bit' in title or 'bits' in title or (title and title[0] in '.01' and '=' in title):
+                        unit = 'Bit'
+            self.detail_field_label.setText(f'Field: {field_name} | {unit}: {byte_count}')
             self._refresh_analyze_menu_state()
             return
         self.detail_field_label.setText('Field: - | Byte: 0')

@@ -1136,9 +1136,20 @@ def _build_grouped_items(
 def _preferred_treemap_group_field(data: List[Dict[str, Any]], config: Dict[str, Any]) -> Optional[str]:
     """Prefer protocol grouping for treemap-like charts when the field exists."""
     config = config or {}
+
+    def _find_matching_field(candidate: str) -> Optional[str]:
+        candidate_key = str(candidate or "").strip().lower()
+        for row in data:
+            for key in row.keys():
+                if str(key or "").strip().lower() == candidate_key:
+                    return str(key)
+        return None
+
     for candidate in ("protocol", "frame.protocol"):
-        if any(str(row.get(candidate, "") or "").strip() for row in data):
-            return candidate
+        match = _find_matching_field(candidate)
+        if match:
+            return match
+
     series_field = str(config.get("seriesField") or "").strip()
     return series_field or None
 

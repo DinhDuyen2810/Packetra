@@ -25,6 +25,7 @@ from core.filtering import DisplayFilter
 from core.formatters import packet_summary_tree
 from core.models import PacketRecord
 from core.parser import PacketParser
+from gui.filter_drag import PacketFilterLineEdit
 from gui.hex_view import PacketBytesView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
@@ -1115,7 +1116,7 @@ class CaptureView(QWidget):
         # Filter row
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(8, 4, 8, 4)
-        self.display_filter_input = QLineEdit()
+        self.display_filter_input = PacketFilterLineEdit()
         self.display_filter_input.setPlaceholderText('Apply a display filter ... <Ctrl+/>')
         self.apply_filter_btn = QToolButton()
         self.apply_filter_btn.setText('→')
@@ -1319,6 +1320,8 @@ class CaptureView(QWidget):
             self.filter_history_menu.addAction(action)
 
     def _filter_autocomplete_tokens(self) -> list[str]:
+        """Return standard filter syntax tokens only (no history).
+        Filter history is displayed separately via filter history menu."""
         protocol_tokens = sorted({str(token).lower() for token in getattr(DisplayFilter, 'PROTOCOL_ALIASES', set())})
         field_tokens = [
             'frame.number', 'frame.len', 'frame.time_delta',
@@ -1334,7 +1337,7 @@ class CaptureView(QWidget):
             'detail', 'detail.title', 'detail.key', 'detail.value', 'detail.pair', 'detail.path',
         ]
         keywords = ['and', 'or', 'not', 'contains', '==', '!=', '>=', '<=', '>', '<', '(', ')']
-        values = list(self._filter_history) + protocol_tokens + field_tokens + keywords
+        values = protocol_tokens + field_tokens + keywords
         seen = set()
         unique = []
         for value in values:
@@ -2323,11 +2326,11 @@ class CaptureView(QWidget):
                 self._finalize_background_file_load()
             return
         table = self.table
-        max_rows = 40
+        max_rows = 200
         if bool(self._startup_priority_mode):
-            max_rows = 10
+            max_rows = 100
         elif table.columnCount() > 7:
-            max_rows = 16
+            max_rows = 80
         try:
             scrollbar = table.verticalScrollBar()
             if scrollbar is not None and bool(scrollbar.isSliderDown()):
@@ -2725,11 +2728,16 @@ class CaptureView(QWidget):
         if expr != str(self.display_filter_input.text() or ''):
             self.display_filter_input.setText(expr)
         self._remember_filter(expr)
-        visible_records = []
-        for idx, record in enumerate(self.records):
-            if self.display_filter.matches(record, expr):
-                self.visible_indices.append(idx)
-                visible_records.append(record)
+        current_filter_unchanged = (expr == self._file_load_filter_expr)
+        if current_filter_unchanged and hasattr(self, '_visible_indices_from_load'):
+            self.visible_indices = list(self._visible_indices_from_load)
+            visible_records = [self.records[idx] for idx in self.visible_indices]
+        else:
+            visible_records = []
+            for idx, record in enumerate(self.records):
+                if self.display_filter.matches(record, expr):
+                    self.visible_indices.append(idx)
+                    visible_records.append(record)
         self._rebuild_visible_row_lookup()
         self.table.replace_records(visible_records)
         if getattr(self.table, '_color_rules_enabled', self.color_rules_enabled) != self.color_rules_enabled:
@@ -3181,6 +3189,7 @@ class CaptureView(QWidget):
             first_remaining_packet = None
             packet_iter = iter_pcap_packets(filename)
 
+            preload_process_events_interval = 10
             for idx, packet in enumerate(packet_iter, start=1):
                 if idx > full_preload_count:
                     first_remaining_packet = packet
@@ -3199,6 +3208,9 @@ class CaptureView(QWidget):
                 elif self.display_filter.matches(record, display_expr):
                     self.visible_indices.append(idx - 1)
                     batch_new_visible.append(record)
+
+                if idx % preload_process_events_interval == 0:
+                    QApplication.processEvents()
 
             if batch_new_visible:
                 self.table.setUpdatesEnabled(False)
