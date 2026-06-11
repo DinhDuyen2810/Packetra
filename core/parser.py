@@ -15,6 +15,10 @@ from scapy.layers.snmp import SNMP
 from scapy.layers.tls.all import TLS, TLSClientHello  # type: ignore
 from scapy.layers.quic import QUIC  # type: ignore
 from scapy.contrib.eigrp import EIGRP  # type: ignore
+from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
 from core.models import PacketRecord
 from core.formatters import get_mac_vendor
@@ -59,6 +63,9 @@ class PacketParser:
         self.smb2_pending_requests = {}
         self.smb2_preauth_hashes = {}
         self.smb2_tree_paths = {}
+        self.smb2_file_open_frames = {}
+        self.smb2_file_close_frames = {}
+        self.smb2_file_records = {}
         self.ipv4_fragment_state = {}
         self.ipv6_fragment_state = {}
         self.layer_stream_maps = {
@@ -87,6 +94,9 @@ class PacketParser:
         self.h264_ts_stream_state = {}
         self.rdpudp_tls_stream_versions = {}
         self.ws_col_info_cache = {}
+        self.stun_pending = {}
+        self.srtcp_setup_frames = {}
+        self.quic_connections = {}
 
     def set_capture_file_path(self, capture_file_path: str) -> None:
         self.capture_file_path = str(capture_file_path or '').strip()
@@ -212,6 +222,8 @@ class PacketParser:
                     ldap_payload = b''
                 if ldap_payload and self._ldap_payload_is_complete(ldap_payload) and (self._looks_like_ldap_payload(ldap_payload) or self._contains_ldap_message(ldap_payload)):
                     protocol = 'LDAP'
+        self._update_stun_request_response_metadata(protocol, metadata, src, dst, sport, dport, int(number), epoch_time)
+        self._update_srtcp_setup_metadata(protocol, metadata, src, dst, sport, dport)
         info = self._build_info(packet, protocol, metadata)
 
         if sport is not None or dport is not None:
@@ -236,6 +248,8 @@ class PacketParser:
         )
 
         self._update_h264_ts_reassembly(record, packet)
+        if str(getattr(record, 'protocol', '') or '') == 'H.264' and str(record.metadata.get('h264_ts_reassembled_pes_hex', '') or ''):
+            record.info = self._build_info(record.raw, 'H.264', record.metadata)
 
         self._track_transport_record(record)
         self._update_kerberos_record_metadata(record)
@@ -554,6 +568,10 @@ class PacketParser:
                     self.ldap_stream_protocols.add(int(stream_index))
                 return 'LDAP'
             if sport in ldap_ports or dport in ldap_ports:
+                if self._looks_like_ldap_sasl_payload(payload):
+                    if stream_index >= 0:
+                        self.ldap_stream_protocols.add(int(stream_index))
+                    return 'LDAP'
                 if stream_index >= 0 and stream_index in self.ldap_stream_protocols:
                     if not ldap_complete and not str(metadata.get('tcp_reassembled_data_hex', '') or ''):
                         return 'TCP'
@@ -686,6 +704,12 @@ class PacketParser:
                 rdpudp = self._rdpudp_payload_info(payload)
                 if isinstance(rdpudp, dict):
                     metadata['rdpudp'] = rdpudp
+                    unwrapped_payload = bytes(rdpudp.get('unwrapped_payload', b'') or b'')
+                    if unwrapped_payload:
+                        metadata['rdpudp_unwrapped_payload'] = unwrapped_payload
+                        data_offset = int(rdpudp.get('data_offset', -1) or -1)
+                        if data_offset >= 0 and len(unwrapped_payload) > data_offset + 4:
+                            metadata['rdpudp_tls_fragment_payload'] = bytes(unwrapped_payload[data_offset + 4:])
                     tls_info = self._rdpudp_embedded_tls_info(payload, rdpudp, int(metadata.get('udp_stream_index', -1) or -1))
                     if isinstance(tls_info, dict):
                         metadata['tls_embedded_payload'] = bytes(tls_info.get('payload', b'') or b'')
@@ -694,6 +718,7 @@ class PacketParser:
                         metadata['tls_embedded_sni'] = str(tls_info.get('sni', '') or '')
                         metadata['tls_embedded_unknown_record'] = bool(tls_info.get('unknown_record', False))
                         metadata['tls_embedded_transport'] = 'RDPUDP'
+                        metadata['rdpudp_tls_fragment_payload'] = bytes(tls_info.get('payload', b'') or b'')
                         return str(tls_info.get('protocol', 'TLSv1.2'))
                     return str(rdpudp.get('protocol', 'RDPUDP'))
             if sport == 4500 or dport == 4500:
@@ -701,6 +726,14 @@ class PacketParser:
                 if isinstance(udpencap, dict):
                     metadata['udpencap'] = udpencap
                     return 'UDPENCAP'
+            qsrc, qdst = self._extract_endpoints(packet)
+            quic_info = self._quic_payload_info(payload, str(qsrc), str(qdst), sport, dport)
+            if isinstance(quic_info, dict):
+                metadata['quic'] = quic_info
+                decrypted = bytes(quic_info.get('quic_decrypted_payload', b'') or b'')
+                if decrypted:
+                    metadata['quic_decrypted_payload'] = decrypted
+                return 'QUIC'
             stun_info = self._stun_payload_info(payload)
             if isinstance(stun_info, dict):
                 metadata['stun'] = stun_info
@@ -718,6 +751,15 @@ class PacketParser:
             dtls_info = self._dtls_payload_info(payload)
             if dtls_info is not None:
                 metadata['dtls'] = dtls_info
+                if b'\x00\x0e' in payload:
+                    src_addr, dst_addr = self._extract_endpoints(packet)
+                    setup_key = self._canonical_transport_key(str(src_addr), sport, str(dst_addr), dport, 'UDP')
+                    frame_no = int(metadata.get('frame_number', 0) or 0)
+                    existing = int(self.srtcp_setup_frames.get(setup_key, 0) or 0)
+                    info_text = str(dtls_info.get('info_text', '') or '')
+                    prefer = 'Server Hello' in info_text
+                    if prefer or existing <= 0 or (frame_no > 0 and frame_no < existing):
+                        self.srtcp_setup_frames[setup_key] = frame_no
                 return str(dtls_info.get('protocol', 'DTLS'))
             if (sport == 389 or dport == 389) and packet.haslayer('CLDAP'):
                 return 'CLDAP'
@@ -4543,6 +4585,7 @@ class PacketParser:
         return None
 
     def _update_ip_fragment_metadata(self, packet, metadata: dict, frame_number: int) -> None:
+        stream_state = None
         def _apply_udp_reassembled_metadata(
             target_metadata: dict,
             udp_payload: bytes,
@@ -6803,6 +6846,12 @@ class PacketParser:
                 rdpudp = self._rdpudp_payload_info(udp_payload)
                 if isinstance(rdpudp, dict):
                     metadata['rdpudp'] = rdpudp
+                    unwrapped_payload = bytes(rdpudp.get('unwrapped_payload', b'') or b'')
+                    if unwrapped_payload:
+                        metadata['rdpudp_unwrapped_payload'] = unwrapped_payload
+                        data_offset = int(rdpudp.get('data_offset', -1) or -1)
+                        if data_offset >= 0 and len(unwrapped_payload) > data_offset + 4:
+                            metadata['rdpudp_tls_fragment_payload'] = bytes(unwrapped_payload[data_offset + 4:])
                     tls_info = self._rdpudp_embedded_tls_info(udp_payload, rdpudp, int(metadata.get('udp_stream_index', -1) or -1))
                     if isinstance(tls_info, dict):
                         metadata['tls_embedded_payload'] = bytes(tls_info.get('payload', b'') or b'')
@@ -6811,6 +6860,7 @@ class PacketParser:
                         metadata['tls_embedded_sni'] = str(tls_info.get('sni', '') or '')
                         metadata['tls_embedded_unknown_record'] = bool(tls_info.get('unknown_record', False))
                         metadata['tls_embedded_transport'] = 'RDPUDP'
+                        metadata['rdpudp_tls_fragment_payload'] = bytes(tls_info.get('payload', b'') or b'')
                         return str(tls_info.get('protocol', 'TLSv1.2'))
                     return str(rdpudp.get('protocol', 'RDPUDP'))
             if sport == 4500 or dport == 4500:
@@ -6818,6 +6868,14 @@ class PacketParser:
                 if isinstance(udpencap, dict):
                     metadata['udpencap'] = udpencap
                     return 'UDPENCAP'
+            qsrc, qdst = self._extract_endpoints(packet)
+            quic_info = self._quic_payload_info(udp_payload, str(qsrc), str(qdst), sport, dport)
+            if isinstance(quic_info, dict):
+                metadata['quic'] = quic_info
+                decrypted = bytes(quic_info.get('quic_decrypted_payload', b'') or b'')
+                if decrypted:
+                    metadata['quic_decrypted_payload'] = decrypted
+                return 'QUIC'
             stun_info = self._stun_payload_info(udp_payload)
             if isinstance(stun_info, dict):
                 metadata['stun'] = stun_info
@@ -6835,6 +6893,15 @@ class PacketParser:
             dtls_info = self._dtls_payload_info(udp_payload)
             if dtls_info is not None:
                 metadata['dtls'] = dtls_info
+                if b'\x00\x0e' in udp_payload:
+                    src_addr, dst_addr = self._extract_endpoints(packet)
+                    setup_key = self._canonical_transport_key(str(src_addr), sport, str(dst_addr), dport, 'UDP')
+                    frame_no = int(metadata.get('frame_number', 0) or 0)
+                    existing = int(self.srtcp_setup_frames.get(setup_key, 0) or 0)
+                    info_text = str(dtls_info.get('info_text', '') or '')
+                    prefer = 'Server Hello' in info_text
+                    if prefer or existing <= 0 or (frame_no > 0 and frame_no < existing):
+                        self.srtcp_setup_frames[setup_key] = frame_no
                 return str(dtls_info.get('protocol', 'DTLS'))
             if (sport == 389 or dport == 389) and packet.haslayer('CLDAP'):
                 return 'CLDAP'
@@ -6996,6 +7063,10 @@ class PacketParser:
                     self.ldap_stream_protocols.add(int(stream_index))
                 return 'LDAP'
             if sport in ldap_ports or dport in ldap_ports:
+                if self._looks_like_ldap_sasl_payload(tcp_payload):
+                    if stream_index >= 0:
+                        self.ldap_stream_protocols.add(int(stream_index))
+                    return 'LDAP'
                 if stream_index >= 0 and stream_index in self.ldap_stream_protocols:
                     if not ldap_complete and not str(metadata.get('tcp_reassembled_data_hex', '') or ''):
                         return 'TCP'
@@ -7479,7 +7550,7 @@ class PacketParser:
         if 20 + msg_len > len(data):
             return None
         trans_id = data[8:20]
-        klass = ((msg_type >> 4) & 0x1) | (((msg_type >> 7) & 0x1) << 1)
+        klass = ((msg_type >> 4) & 0x1) | (((msg_type >> 8) & 0x1) << 1)
         method = (msg_type & 0x000F) | ((msg_type & 0x00E0) >> 1) | ((msg_type & 0x3E00) >> 2)
         return {
             'message_type': msg_type,
@@ -7490,6 +7561,393 @@ class PacketParser:
             'cookie': cookie,
             'raw': data[:20 + msg_len],
         }
+
+    def _update_stun_request_response_metadata(
+        self,
+        protocol: str,
+        metadata: dict,
+        src: str,
+        dst: str,
+        sport: int | None,
+        dport: int | None,
+        frame_number: int,
+        epoch_time: float,
+    ) -> None:
+        if protocol != 'STUN':
+            return
+        stun = metadata.get('stun')
+        if not isinstance(stun, dict):
+            return
+        tx_id = bytes(stun.get('transaction_id', b'') or b'')
+        if not tx_id:
+            return
+        klass = int(stun.get('message_class', -1) or -1)
+        method = int(stun.get('message_method', -1) or -1)
+        if method < 0:
+            return
+        key = (tx_id, int(method))
+        if klass == 0:
+            self.stun_pending[key] = {
+                'frame': int(frame_number),
+                'time': float(epoch_time),
+                'src': str(src),
+                'dst': str(dst),
+                'sport': int(sport or 0),
+                'dport': int(dport or 0),
+            }
+            return
+        if klass == 2:
+            pending = self.stun_pending.get(key)
+            if isinstance(pending, dict):
+                req_frame = int(pending.get('frame', 0) or 0)
+                if req_frame > 0:
+                    metadata['stun_request_frame'] = req_frame
+                    delta_us = max(0.0, (float(epoch_time) - float(pending.get('time', epoch_time))) * 1_000_000.0)
+                    metadata['stun_time_from_request_us'] = float(delta_us)
+
+    def _hkdf_extract_sha256(self, salt: bytes, ikm: bytes) -> bytes:
+        h = hmac.HMAC(bytes(salt), hashes.SHA256())
+        h.update(bytes(ikm))
+        return h.finalize()
+
+    def _hkdf_expand_label_sha256(self, secret: bytes, label: bytes, context: bytes, length: int) -> bytes:
+        full_label = b'tls13 ' + bytes(label)
+        hkdf_label = (
+            int(length).to_bytes(2, 'big')
+            + bytes([len(full_label)])
+            + full_label
+            + bytes([len(context)])
+            + bytes(context)
+        )
+        hkdf = HKDFExpand(algorithm=hashes.SHA256(), length=int(length), info=hkdf_label)
+        return hkdf.derive(bytes(secret))
+
+    def _decode_quic_varint(self, data: bytes, offset: int) -> tuple[int, int] | None:
+        if offset < 0 or offset >= len(data):
+            return None
+        first = int(data[offset])
+        ln = 1 << (first >> 6)
+        if offset + ln > len(data):
+            return None
+        value = first & 0x3F
+        for idx in range(1, ln):
+            value = (value << 8) | int(data[offset + idx])
+        return value, ln
+
+    def _parse_quic_tls_client_hello(self, data: bytes) -> dict | None:
+        buf = bytes(data or b'')
+        if len(buf) < 4 or int(buf[0]) != 1:
+            return None
+        body_len = int.from_bytes(buf[1:4], 'big')
+        if 4 + body_len > len(buf):
+            return None
+        body = buf[4:4 + body_len]
+        if len(body) < 38:
+            return None
+        cursor = 0
+        legacy_version = int.from_bytes(body[cursor:cursor + 2], 'big')
+        cursor += 2
+        random_hex = body[cursor:cursor + 32].hex()
+        cursor += 32
+        sid_len = int(body[cursor])
+        cursor += 1
+        session_id = body[cursor:cursor + sid_len]
+        cursor += sid_len
+        if cursor + 2 > len(body):
+            return None
+        suites_len = int.from_bytes(body[cursor:cursor + 2], 'big')
+        cursor += 2
+        cipher_suites = []
+        for off in range(cursor, min(len(body), cursor + suites_len), 2):
+            if off + 2 > len(body):
+                break
+            cipher_suites.append(int.from_bytes(body[off:off + 2], 'big'))
+        cursor += suites_len
+        if cursor >= len(body):
+            return None
+        comp_len = int(body[cursor])
+        cursor += 1
+        compression_methods = list(body[cursor:cursor + comp_len])
+        cursor += comp_len
+        extensions = []
+        if cursor + 2 <= len(body):
+            ext_total = int.from_bytes(body[cursor:cursor + 2], 'big')
+            cursor += 2
+            ext_end = min(len(body), cursor + ext_total)
+            while cursor + 4 <= ext_end:
+                etype = int.from_bytes(body[cursor:cursor + 2], 'big')
+                elen = int.from_bytes(body[cursor + 2:cursor + 4], 'big')
+                estart = cursor + 4
+                eend = min(ext_end, estart + elen)
+                extensions.append({
+                    'type': etype,
+                    'data': body[estart:eend],
+                })
+                cursor = eend
+        return {
+            'handshake_length': body_len,
+            'legacy_version': legacy_version,
+            'random_hex': random_hex,
+            'session_id': session_id.hex(),
+            'cipher_suites': cipher_suites,
+            'compression_methods': compression_methods,
+            'extensions': extensions,
+        }
+
+    def _quic_payload_info(self, payload: bytes, src: str = '', dst: str = '', sport: int | None = None, dport: int | None = None) -> dict | None:
+        data = bytes(payload or b'')
+        if len(data) < 7 or (int(data[0]) & 0x40) == 0:
+            return None
+
+        def _transport_key() -> tuple:
+            left = (str(src), int(sport or 0))
+            right = (str(dst), int(dport or 0))
+            return ('UDP', left, right) if left <= right else ('UDP', right, left)
+
+        def _parse_frames(plaintext: bytes) -> dict[str, Any]:
+            pos = 0
+            frames: list[dict[str, Any]] = []
+            crypto_frames: list[dict[str, Any]] = []
+            ack_frames: list[dict[str, Any]] = []
+            remaining = ''
+            while pos < len(plaintext):
+                info = self._decode_quic_varint(plaintext, pos)
+                if info is None:
+                    remaining = plaintext[pos:].hex()
+                    break
+                frame_type, ft_len = info
+                if frame_type == 0x00:
+                    pad_start = pos
+                    while pos < len(plaintext) and plaintext[pos] == 0x00:
+                        pos += 1
+                    frames.append({'type': 0x00, 'offset_in_plaintext': pad_start, 'length': pos - pad_start})
+                    continue
+                if frame_type == 0x06:
+                    off_info = self._decode_quic_varint(plaintext, pos + ft_len)
+                    if off_info is None:
+                        remaining = plaintext[pos:].hex()
+                        break
+                    crypto_offset, off_len = off_info
+                    len_info = self._decode_quic_varint(plaintext, pos + ft_len + off_len)
+                    if len_info is None:
+                        remaining = plaintext[pos:].hex()
+                        break
+                    crypto_len, crypto_len_len = len_info
+                    crypto_start = pos + ft_len + off_len + crypto_len_len
+                    crypto_end = min(len(plaintext), crypto_start + crypto_len)
+                    frame = {
+                        'type': 0x06,
+                        'offset_in_plaintext': pos,
+                        'crypto_offset': crypto_offset,
+                        'crypto_length': crypto_len,
+                        'crypto_data': bytes(plaintext[crypto_start:crypto_end]),
+                        'length': crypto_end - pos,
+                    }
+                    crypto_frames.append(frame)
+                    frames.append(frame)
+                    pos = crypto_end
+                    continue
+                if frame_type in {0x02, 0x03}:
+                    at = pos + ft_len
+                    largest = self._decode_quic_varint(plaintext, at)
+                    delay = self._decode_quic_varint(plaintext, at + (largest[1] if largest else 0)) if largest else None
+                    ranges = self._decode_quic_varint(plaintext, at + (largest[1] if largest else 0) + (delay[1] if delay else 0)) if delay else None
+                    first_range = self._decode_quic_varint(plaintext, at + (largest[1] if largest else 0) + (delay[1] if delay else 0) + (ranges[1] if ranges else 0)) if ranges else None
+                    ack_len = ft_len + sum(item[1] for item in (largest, delay, ranges, first_range) if item)
+                    ack = {
+                        'type': frame_type,
+                        'offset_in_plaintext': pos,
+                        'largest_acknowledged': int(largest[0]) if largest else 0,
+                        'ack_delay': int(delay[0]) if delay else 0,
+                        'ack_range_count': int(ranges[0]) if ranges else 0,
+                        'first_ack_range': int(first_range[0]) if first_range else 0,
+                        'length': ack_len,
+                    }
+                    ack_frames.append(ack)
+                    frames.append(ack)
+                    pos += ack_len
+                    continue
+                remaining = plaintext[pos:].hex()
+                break
+            return {
+                'frames': frames,
+                'crypto_frames': crypto_frames,
+                'ack_frames': ack_frames,
+                'remaining_payload_hex': remaining,
+            }
+
+        key = _transport_key()
+        blocks: list[dict[str, Any]] = []
+        cursor = 0
+        while cursor < len(data):
+            start = cursor
+            first = int(data[cursor])
+            if (first & 0x40) == 0:
+                if any(b != 0x00 for b in data[cursor:]):
+                    break
+                blocks.append({'header_form': 'Padding', 'offset': cursor, 'total_length': len(data) - cursor, 'padding_appended': True})
+                cursor = len(data)
+                break
+            if (first & 0x80) == 0:
+                if start == 0 and key not in self.quic_connections:
+                    return None
+                blocks.append({
+                    'header_form': 'Short Header',
+                    'fixed_bit': True,
+                    'packet_type': 'short',
+                    'offset': cursor,
+                    'total_length': len(data) - cursor,
+                    'raw': data[cursor:],
+                    'remaining_payload_hex': data[cursor + 1:].hex() if len(data) - cursor > 1 else '',
+                    'decryption_failed': True,
+                    'decryption_failure_reason': 'Secrets are not available',
+                })
+                cursor = len(data)
+                break
+            if cursor + 7 > len(data):
+                break
+            version = int.from_bytes(data[cursor + 1:cursor + 5], 'big')
+            if version == 0:
+                break
+            dcid_len = int(data[cursor + 5])
+            pos = cursor + 6
+            if pos + dcid_len >= len(data):
+                break
+            dcid = bytes(data[pos:pos + dcid_len])
+            pos += dcid_len
+            scid_len = int(data[pos])
+            pos += 1
+            if pos + scid_len > len(data):
+                break
+            scid = bytes(data[pos:pos + scid_len])
+            pos += scid_len
+            packet_type = (first >> 4) & 0x03
+            block: dict[str, Any] = {
+                'version': version,
+                'header_form': 'Long Header',
+                'fixed_bit': True,
+                'packet_type': packet_type,
+                'dcid': dcid.hex(),
+                'scid': scid.hex(),
+                'offset': start,
+            }
+            if packet_type == 3:
+                block['header_prefix_length'] = pos - start
+                block['retry_token_hex'] = data[pos:max(pos, len(data) - 16)].hex()
+                block['retry_integrity_tag_hex'] = data[max(pos, len(data) - 16):].hex()
+                block['token_length'] = max(0, len(data) - 16 - pos)
+                block['total_length'] = len(data) - start
+                block['raw'] = data[start:]
+                blocks.append(block)
+                cursor = len(data)
+                continue
+            token_len = 0
+            if packet_type == 0:
+                token_info = self._decode_quic_varint(data, pos)
+                if token_info is None:
+                    break
+                token_len, token_len_len = token_info
+                pos += token_len_len
+                block['token'] = data[pos:pos + token_len].hex()
+                block['token_length'] = token_len
+                pos += token_len
+            length_info = self._decode_quic_varint(data, pos)
+            if length_info is None:
+                break
+            packet_length, length_varint_len = length_info
+            pos += length_varint_len
+            block['packet_length'] = packet_length
+            block['length_varint_len'] = length_varint_len
+            block['header_prefix_length'] = pos - start
+            block['total_length'] = min(len(data) - start, (pos - start) + packet_length)
+            block['raw'] = data[start:start + int(block['total_length'])]
+            if packet_type == 0 and token_len == 0 and src and dst:
+                ctx = self.quic_connections.get(key, {})
+                if not ctx:
+                    self.quic_connections[key] = {
+                        'initial_dcid': dcid.hex(),
+                        'client_endpoint': (str(src), int(sport or 0)),
+                    }
+            secret_cid = dcid
+            role = 'client'
+            ctx = self.quic_connections.get(key, {})
+            if ctx and tuple(ctx.get('client_endpoint', ())) != (str(src), int(sport or 0)):
+                role = 'server'
+                initial_hex = str(ctx.get('initial_dcid', '') or '')
+                if initial_hex:
+                    try:
+                        secret_cid = bytes.fromhex(initial_hex)
+                    except Exception:
+                        secret_cid = dcid
+            if packet_type == 0 and version == 1 and secret_cid:
+                try:
+                    initial_salt = bytes.fromhex('38762cf7f55934b34d179ae6a4c80cadccbb7f0a')
+                    initial_secret = self._hkdf_extract_sha256(initial_salt, secret_cid)
+                    directional_secret = self._hkdf_expand_label_sha256(initial_secret, b'client in' if role == 'client' else b'server in', b'', 32)
+                    key_bytes = self._hkdf_expand_label_sha256(directional_secret, b'quic key', b'', 16)
+                    iv = self._hkdf_expand_label_sha256(directional_secret, b'quic iv', b'', 12)
+                    hp = self._hkdf_expand_label_sha256(directional_secret, b'quic hp', b'', 16)
+                    sample_offset = pos + 4
+                    if sample_offset + 16 <= start + int(block['total_length']):
+                        sample = data[sample_offset:sample_offset + 16]
+                        mask = Cipher(algorithms.AES(hp), modes.ECB()).encryptor().update(sample)
+                        unprotected_first = first ^ (int(mask[0]) & 0x0F)
+                        packet_number_len = (unprotected_first & 0x03) + 1
+                        if pos + packet_number_len <= start + int(block['total_length']):
+                            pn_bytes = bytearray(data[pos:pos + packet_number_len])
+                            for idx in range(packet_number_len):
+                                pn_bytes[idx] ^= int(mask[idx + 1])
+                            packet_number = int.from_bytes(bytes(pn_bytes), 'big')
+                            aad = bytearray(data[start:pos + packet_number_len])
+                            aad[0] = unprotected_first
+                            aad[pos - start:pos - start + packet_number_len] = pn_bytes
+                            ciphertext = data[pos + packet_number_len:start + int(block['total_length'])]
+                            nonce = bytearray(iv)
+                            pn_full = int(packet_number).to_bytes(len(nonce), 'big')
+                            for idx in range(len(nonce)):
+                                nonce[idx] ^= pn_full[idx]
+                            plaintext = AESGCM(key_bytes).decrypt(bytes(nonce), bytes(ciphertext), bytes(aad))
+                            block['packet_number'] = packet_number
+                            block['packet_number_length'] = packet_number_len
+                            block['payload_plaintext'] = plaintext.hex()
+                            block['quic_decrypted_payload'] = plaintext
+                            block['header_unprotected_first_byte'] = unprotected_first
+                            frame_info = _parse_frames(plaintext)
+                            block.update(frame_info)
+                            if block.get('crypto_frames'):
+                                first_crypto = block['crypto_frames'][0]
+                                crypto_data = bytes(first_crypto.get('crypto_data', b'') or b'')
+                                block['frame_type'] = 0x06
+                                block['crypto_frame_offset_in_plaintext'] = int(first_crypto.get('offset_in_plaintext', 0) or 0)
+                                block['crypto_offset'] = int(first_crypto.get('crypto_offset', 0) or 0)
+                                block['crypto_length'] = len(crypto_data)
+                                block['crypto_data'] = crypto_data.hex()
+                                client_hello = self._parse_quic_tls_client_hello(crypto_data)
+                                if isinstance(client_hello, dict):
+                                    block['client_hello'] = client_hello
+                except Exception:
+                    block['decryption_failed'] = True
+                    block['decryption_failure_reason'] = 'Secrets are not available'
+            elif packet_type in {1, 2}:
+                block['decryption_failed'] = True
+                block['decryption_failure_reason'] = 'Secrets are not available'
+                block['packet_number_length'] = (first & 0x03) + 1
+                pn_guess = int(block['packet_number_length'])
+                if pos + pn_guess <= start + int(block['total_length']):
+                    block['remaining_payload_hex'] = data[pos + pn_guess:start + int(block['total_length'])].hex()
+            blocks.append(block)
+            cursor = start + max(1, int(block['total_length']))
+        if not blocks:
+            return None
+        quic = dict(blocks[0])
+        quic['raw'] = data
+        quic['blocks'] = blocks
+        for block in blocks:
+            decrypted = bytes(block.get('quic_decrypted_payload', b'') or b'')
+            if decrypted:
+                quic['quic_decrypted_payload'] = decrypted
+                break
+        return quic
 
     def _srtcp_payload_info(self, payload: bytes) -> dict | None:
         data = bytes(payload or b'')
@@ -7508,13 +7966,49 @@ class PacketParser:
         # SRTCP adds index/auth after RTCP payload; plain RTCP generally ends at rtcp_len.
         if len(data) <= rtcp_len:
             return None
+        compound_types: list[int] = [pt]
+        malformed = False
+        cursor = rtcp_len
+        while cursor + 8 <= len(data):
+            next_first = int(data[cursor])
+            next_ver = (next_first >> 6) & 0x03
+            next_pt = int(data[cursor + 1])
+            if next_ver not in {1, 2} or next_pt < 200 or next_pt > 207:
+                break
+            next_words = int.from_bytes(data[cursor + 2:cursor + 4], 'big')
+            next_len = (next_words + 1) * 4
+            compound_types.append(next_pt)
+            if cursor + next_len > len(data):
+                malformed = True
+                break
+            cursor += next_len
+            if len(compound_types) >= 4:
+                break
         return {
             'version': 2,
             'packet_type': pt,
             'rtcp_length': rtcp_len,
             'total_length': len(data),
             'payload': data,
+            'compound_packet_types': compound_types,
+            'malformed': malformed,
         }
+
+    def _update_srtcp_setup_metadata(
+        self,
+        protocol: str,
+        metadata: dict,
+        src: str,
+        dst: str,
+        sport: int | None,
+        dport: int | None,
+    ) -> None:
+        if protocol != 'SRTCP':
+            return
+        key = self._canonical_transport_key(str(src), int(sport or 0), str(dst), int(dport or 0), 'UDP')
+        setup_frame = int(self.srtcp_setup_frames.get(key, 0) or 0)
+        if setup_frame > 0:
+            metadata['srtcp_setup_frame'] = setup_frame
 
     def _rdpudp_payload_info(self, payload: bytes) -> dict | None:
         data = bytes(payload or b'')
@@ -7531,10 +8025,12 @@ class PacketParser:
             'preview': data[:24],
         }
         if len(data) >= 8 and (int(data[7]) & 0xE0) == 0xE0:
-            flags = ((int(data[2]) & 0x0F) << 8) | int(data[1])
-            info['prefix_byte'] = int(data[7])
+            unwrapped = bytes([int(data[7])]) + bytes(data[1:7]) + bytes(data[0:1]) + bytes(data[8:])
+            flags = ((int(unwrapped[2]) & 0x0F) << 8) | int(unwrapped[1])
+            info['prefix_byte'] = int(unwrapped[0])
             info['flags'] = flags
-            info['log_window'] = (int(data[2]) >> 4) & 0x0F
+            info['log_window'] = (int(unwrapped[2]) >> 4) & 0x0F
+            info['unwrapped_payload'] = unwrapped
             labels = []
             if flags & 0x001:
                 labels.append('ACK')
@@ -7547,30 +8043,49 @@ class PacketParser:
             if flags & 0x004:
                 labels.append('DATA')
             info['flag_labels'] = labels
-            data_offset = 8
+            data_offset = 3
+            if len(unwrapped) >= 8:
+                tls_start = -1
+                for i in range(0, len(unwrapped) - 4):
+                    ct = int(unwrapped[i])
+                    ver = int.from_bytes(unwrapped[i + 1:i + 3], 'big')
+                    rec_len = int.from_bytes(unwrapped[i + 3:i + 5], 'big')
+                    if ct in {20, 21, 22, 23} and ver in {0x0301, 0x0302, 0x0303, 0x0304} and i + 5 + rec_len <= len(unwrapped):
+                        tls_start = i
+                        break
+                info['tls_start'] = tls_start
             if flags & 0x010:
-                info['aoa_sequence'] = int.from_bytes(data[5:7], 'little') if len(data) >= 7 else 0
+                info['aoa_sequence'] = int.from_bytes(unwrapped[data_offset:data_offset + 2], 'little') if len(unwrapped) >= data_offset + 2 else 0
                 data_offset += 2
             if flags & 0x100:
-                if len(data) >= 6:
-                    info['max_delayed_acks'] = int(data[3])
-                    info['delayed_ack_timeout_ms'] = int(data[4])
+                if len(unwrapped) >= data_offset + 2:
+                    info['max_delayed_acks'] = int(unwrapped[data_offset])
+                    info['delayed_ack_timeout_ms'] = int(unwrapped[data_offset + 1])
                 data_offset += 2
-            if flags & 0x001:
-                if len(data) >= 10:
-                    info['ack_base_seq'] = int.from_bytes(data[3:5], 'little')
-                    info['ack_received_ts'] = int.from_bytes(data[5:7], 'little')
-                    info['ack_send_gap'] = int.from_bytes(data[8:10], 'little')
-                    info['num_delayed_acks'] = int(data[1] >> 4)
-                    info['delayed_time_scale'] = int(data[0] & 0x0F)
+            if flags & 0x001 and len(unwrapped) >= 10:
+                info['ack_base_seq'] = int.from_bytes(unwrapped[3:5], 'little')
+                info['ack_received_ts'] = int.from_bytes(unwrapped[5:7], 'little')
+                info['ack_send_gap'] = int.from_bytes(unwrapped[7:9], 'little')
+                info['num_delayed_acks'] = int(unwrapped[9] & 0x0F)
+                info['delayed_time_scale'] = int((unwrapped[9] >> 4) & 0x0F)
                 data_offset = max(data_offset, 10)
-            if flags & 0x040 and len(data) >= 10:
-                info['overhead_size'] = int(data[9])
-                data_offset = max(data_offset, 11 + int(data[9]))
+            tls_start = int(info.get('tls_start', -1) or -1)
+            if flags & 0x040:
+                if tls_start >= 5:
+                    overhead_size_pos = tls_start - 5
+                    if overhead_size_pos >= data_offset and overhead_size_pos < len(unwrapped):
+                        info['overhead_size'] = int(unwrapped[overhead_size_pos])
+                        data_offset = max(data_offset, overhead_size_pos + 1)
+                elif len(unwrapped) > data_offset:
+                    info['overhead_size'] = int(unwrapped[data_offset])
+                    data_offset += 1
             info['data_offset'] = min(len(data), max(8, data_offset))
-            if len(data) >= info['data_offset'] + 4:
-                info['data_sequence'] = int.from_bytes(data[info['data_offset']:info['data_offset'] + 2], 'little')
-                info['channel_sequence'] = int.from_bytes(data[info['data_offset'] + 2:info['data_offset'] + 4], 'little')
+            if tls_start >= 4:
+                info['data_offset'] = max(data_offset, tls_start - 4)
+            if len(unwrapped) >= int(info['data_offset']) + 4:
+                data_offset = int(info['data_offset'])
+                info['data_sequence'] = int.from_bytes(unwrapped[data_offset:data_offset + 2], 'little')
+                info['channel_sequence'] = int.from_bytes(unwrapped[data_offset + 2:data_offset + 4], 'little')
             return info
         if proto == 'RDPUDP':
             flags = int.from_bytes(data[6:8], 'big')
@@ -7791,13 +8306,15 @@ class PacketParser:
     def _rdpudp_embedded_tls_info(self, payload: bytes, rdpudp: dict | None, udp_stream_index: int) -> dict | None:
         if not isinstance(rdpudp, dict):
             return None
-        data_offset = int(rdpudp.get('data_offset', -1) or -1)
-        if data_offset < 0 or data_offset >= len(payload):
-            return None
-        if str(rdpudp.get('protocol', '') or '') == 'RDPUDP' and int(rdpudp.get('prefix_byte', -1) or -1) == 0xE0 and len(payload) > data_offset:
-            tls_blob = bytes([int(payload[0])]) + bytes(payload[data_offset:] or b'')
+        unwrapped = bytes(rdpudp.get('unwrapped_payload', b'') or b'')
+        if unwrapped:
+            work = unwrapped
         else:
-            tls_blob = bytes(payload[data_offset:] or b'')
+            work = bytes(payload or b'')
+        data_offset = int(rdpudp.get('data_offset', -1) or -1)
+        if data_offset < 0 or data_offset >= len(work):
+            return None
+        tls_blob = bytes(work[data_offset + 4:] or b'') if len(work) >= data_offset + 4 else b''
         if not tls_blob:
             return None
         summaries = self._tls_record_summaries_bytes(tls_blob)
@@ -7812,7 +8329,8 @@ class PacketParser:
             return {
                 'protocol': str(protocol),
                 'payload': tls_blob,
-                'offset': data_offset,
+                'offset': data_offset + 4,
+                'unwrapped_payload': work,
                 'summaries': summaries,
                 'sni': self._tls_client_hello_sni_bytes(tls_blob),
                 'unknown_record': False,
@@ -7826,7 +8344,8 @@ class PacketParser:
             return {
                 'protocol': str(self.rdpudp_tls_stream_versions[udp_stream_index]),
                 'payload': tls_blob,
-                'offset': data_offset,
+                'offset': data_offset + 4,
+                'unwrapped_payload': work,
                 'summaries': [],
                 'sni': '',
                 'unknown_record': True,
@@ -7940,6 +8459,9 @@ class PacketParser:
             }
             if ptype == 1 and len(data) >= 8:
                 inner = data[8:]
+                out['register_flags'] = int.from_bytes(data[4:8], 'big')
+                out['inner_ip_version'] = (int(inner[0]) >> 4) & 0x0F if inner else 0
+                out['inner_payload_hex'] = inner.hex()
                 if len(inner) >= 20 and ((inner[0] >> 4) & 0x0F) == 4:
                     try:
                         out['inner_src'] = str(ipaddress.IPv4Address(inner[12:16]))
@@ -8008,6 +8530,23 @@ class PacketParser:
             return 0x60 <= op_tag <= 0x79
         except Exception:
             return False
+
+    def _looks_like_ldap_sasl_payload(self, payload: bytes) -> bool:
+        data = bytes(payload or b'')
+        if len(data) < 8:
+            return False
+        sasl_len = int.from_bytes(data[0:4], 'big')
+        if sasl_len <= 0 or sasl_len > (len(data) - 4):
+            return False
+        blob = data[4:4 + sasl_len]
+        if len(blob) < 2:
+            return False
+        tok_id = int.from_bytes(blob[0:2], 'little')
+        if tok_id == 0x0405:
+            return True
+        if blob[:1] == b'\x60':
+            return True
+        return False
 
     def _contains_ldap_message(self, payload: bytes) -> bool:
         data = bytes(payload or b'')
@@ -9931,6 +10470,9 @@ class PacketParser:
                         seg_record = self._find_stream_record(state, seg_frame)
                         if seg_record is not None:
                             seg_record.metadata['tls_reassembled_pdu_in_frame'] = frame_number
+                            seg_record.metadata['tls_reassembled_payload'] = combined
+                            seg_record.metadata['tls_reassembled_segments'] = segments
+                            seg_record.metadata['tls_reassembled_length'] = int(first_rec_total)
                             # Store how many bytes this frame contributes to the reassembled PDU
                             seg_record.metadata['tls_segment_data_length'] = int(seg.get('payload_length', 0))
                             # Store where the fragment starts within the TCP payload
@@ -11765,6 +12307,15 @@ class PacketParser:
                         payload = bytes.fromhex(reassembled_hex)
                     except Exception:
                         payload = self._payload_bytes(packet)
+                if self._looks_like_ldap_sasl_payload(payload):
+                    sasl_len = int.from_bytes(payload[0:4], 'big') if len(payload) >= 4 else 0
+                    if len(payload) >= 7:
+                        tok_id = int.from_bytes(payload[4:6], 'little')
+                        flags = int(payload[6])
+                        if tok_id == 0x0405 and (flags & 0x02):
+                            plen = max(0, sasl_len - 60) if sasl_len >= 60 else max(0, sasl_len - 16)
+                            return f'SASL GSS-API Privacy: payload ({plen} bytes)'
+                    return f'SASL Buffer ({sasl_len} bytes)'
                 message_id = 1
                 op_name = 'LDAPMessage'
                 try:
@@ -11798,6 +12349,29 @@ class PacketParser:
                 return f'{op_name}({message_id})'
             if protocol == 'H.264':
                 payload = bytes(getattr(self._effective_udp_layer(packet), 'payload', b'') or b'')
+                pes_hex = str(metadata.get('h264_ts_reassembled_pes_hex', '') or '')
+                if pes_hex:
+                    try:
+                        pes = bytes.fromhex(pes_hex)
+                    except Exception:
+                        pes = b''
+                    if pes:
+                        nal_map = {1: 'non-IDR', 5: 'IDR', 6: 'SEI', 7: 'SPS', 8: 'PPS', 9: 'AUD'}
+                        seen = []
+                        for i in range(0, len(pes) - 4):
+                            if pes[i:i + 4] == b'\x00\x00\x00\x01':
+                                if i + 5 <= len(pes):
+                                    ntype = int(pes[i + 4] & 0x1F)
+                                    if ntype in nal_map:
+                                        seen.append(ntype)
+                            elif pes[i:i + 3] == b'\x00\x00\x01':
+                                if i + 4 <= len(pes):
+                                    ntype = int(pes[i + 3] & 0x1F)
+                                    if ntype in nal_map:
+                                        seen.append(ntype)
+                        for preferred in (5, 1, 6, 7, 8, 9):
+                            if preferred in seen:
+                                return f'H.264 {nal_map[preferred]}'
                 if len(payload) >= 13:
                     csrc = int(payload[0] & 0x0F)
                     hlen = 12 + (4 * csrc)
@@ -11939,6 +12513,7 @@ class PacketParser:
                 if message_class == 2:
                     cookie = int(stun.get('cookie', 0) or 0)
                     trans_id = bytes(stun.get('transaction_id', b'') or b'')
+                    xor_mapped = ''
                     mapped = ''
                     cursor = 20
                     while cursor + 4 <= len(data):
@@ -11961,16 +12536,25 @@ class PacketParser:
                                     addr_bytes = bytes(addr_bytes[i] ^ mask[i] for i in range(16))
                             try:
                                 if fam == 0x01 and len(addr_bytes) >= 4:
-                                    mapped = f'{ipaddress.IPv4Address(addr_bytes[:4])}:{port}'
+                                    addr_text = f'{ipaddress.IPv4Address(addr_bytes[:4])}:{port}'
                                 elif fam == 0x02 and len(addr_bytes) >= 16:
-                                    mapped = f'{ipaddress.IPv6Address(addr_bytes[:16])}:{port}'
+                                    addr_text = f'{ipaddress.IPv6Address(addr_bytes[:16])}:{port}'
+                                else:
+                                    addr_text = ''
                             except Exception:
-                                mapped = ''
-                            if mapped:
-                                break
+                                addr_text = ''
+                            if addr_text:
+                                if at == 0x0020:
+                                    xor_mapped = addr_text
+                                else:
+                                    mapped = addr_text
                         cursor = v0 + ((al + 3) & ~0x03)
+                    if xor_mapped and mapped:
+                        return f'Binding Success Response XOR-MAPPED-ADDRESS: {xor_mapped} MAPPED-ADDRESS: {mapped}'
+                    if xor_mapped:
+                        return f'Binding Success Response XOR-MAPPED-ADDRESS: {xor_mapped}'
                     if mapped:
-                        return f'Binding Success Response XOR-MAPPED-ADDRESS: {mapped}'
+                        return f'Binding Success Response MAPPED-ADDRESS: {mapped}'
                     return 'Binding Success Response'
                 return f'Message 0x{message_type:04x}'
             if protocol == 'SRTCP':
@@ -11979,10 +12563,17 @@ class PacketParser:
                     return 'Secure RTCP'
                 pt = int(srtcp.get('packet_type', -1) or -1)
                 payload = bytes(srtcp.get('payload', b'') or b'')
+                compound = [int(v) for v in list(srtcp.get('compound_packet_types', []) or [])]
+                malformed = bool(srtcp.get('malformed', False))
                 if pt == 200:
                     return 'Sender Report'
                 if pt == 201:
-                    return 'Receiver Report'
+                    parts = ['Receiver Report']
+                    if 207 in compound[1:]:
+                        parts.append('Extended report (RFC 3611)')
+                    if malformed:
+                        parts.append('[Malformed Packet]')
+                    return '   '.join(parts)
                 if pt == 205:
                     return 'Generic RTP Feedback'
                 if pt == 206:
@@ -12066,7 +12657,7 @@ class PacketParser:
                     }
                     opname = op_map.get(opnum, f'RPC_NETLOGON opnum {opnum}')
                     if ptype == 0:
-                        return f'{opname} request'
+                        return f'{opname} request, '
                     if ptype == 2:
                         return f'{opname} response'
                 return 'Microsoft Network Logon'
@@ -13022,7 +13613,54 @@ class PacketParser:
                     return str(igmp_summary.get('info', 'Internet Group Management Protocol'))
                 return 'Internet Group Management Protocol'
             if protocol == 'QUIC':
-                return 'QUIC'
+                quic = metadata.get('quic') if isinstance(metadata.get('quic'), dict) else self._quic_payload_info(self._payload_bytes(packet))
+                if not isinstance(quic, dict):
+                    return 'QUIC'
+                blocks = list(quic.get('blocks', []) or [])
+                if blocks:
+                    first_block = blocks[0] if isinstance(blocks[0], dict) else quic
+                else:
+                    first_block = quic
+                packet_type_raw = first_block.get('packet_type', -1)
+                packet_type = int(packet_type_raw) if packet_type_raw is not None else -1
+                dcid = str(first_block.get('dcid', '') or '')
+                scid = str(first_block.get('scid', '') or '')
+                packet_number_raw = first_block.get('packet_number', 0)
+                packet_number = int(packet_number_raw) if packet_number_raw is not None else 0
+                frame_type_raw = first_block.get('frame_type', -1)
+                frame_type = int(frame_type_raw) if frame_type_raw is not None else -1
+                ptype_name = {
+                    0: 'Initial',
+                    1: '0-RTT',
+                    2: 'Handshake',
+                    3: 'Retry',
+                }.get(packet_type, f'Long Header Type {packet_type}')
+                parts = [ptype_name]
+                if dcid:
+                    parts.append(f'DCID={dcid}')
+                if scid:
+                    parts.append(f'SCID={scid}')
+                if packet_type != 3:
+                    parts.append(f'PKN: {packet_number}')
+                if frame_type == 0x06:
+                    parts.append('CRYPTO')
+                if blocks and len(blocks) > 1:
+                    extra_names = []
+                    for block in blocks[1:]:
+                        if not isinstance(block, dict):
+                            continue
+                        name = {
+                            0: 'Initial',
+                            1: '0-RTT',
+                            2: 'Handshake',
+                            3: 'Retry',
+                            'short': 'Protected Payload',
+                        }.get(block.get('packet_type'), '')
+                        if name:
+                            extra_names.append(name)
+                    if extra_names:
+                        parts.append('+ ' + ', '.join(extra_names))
+                return ', '.join(parts)
             if protocol == 'TCP':
                 tcp = self._effective_tcp_layer(packet)
                 if tcp is None:
@@ -13459,8 +14097,6 @@ class PacketParser:
             self.radius_request_pending.pop(req_key, None)
 
     def _update_smb2_metadata(self, record: PacketRecord) -> None:
-        if str(getattr(record, 'protocol', '') or '') != 'SMB2':
-            return
         metadata = getattr(record, 'metadata', None)
         packet = getattr(record, 'raw', None)
         if not isinstance(metadata, dict) or packet is None or not packet.haslayer(TCP):
@@ -13501,6 +14137,35 @@ class PacketParser:
             return
         key = (stream_index, cmd, msg_id)
         is_response = bool(flags & 0x1)
+        file_id_hex = ''
+        try:
+            body = smb2[64:]
+            if cmd == 5 and is_response and len(body) >= 80:
+                file_id_hex = bytes(body[64:80]).hex()
+                if file_id_hex and file_id_hex != '00000000000000000000000000000000':
+                    self.smb2_file_open_frames[file_id_hex] = int(record.number)
+            elif cmd == 6 and len(body) >= 24:
+                file_id_hex = bytes(body[8:24]).hex()
+                if file_id_hex and file_id_hex != '00000000000000000000000000000000':
+                    self.smb2_file_close_frames[file_id_hex] = int(record.number)
+            elif cmd == 11 and len(body) >= 24:
+                file_id_hex = bytes(body[8:24]).hex()
+        except Exception:
+            file_id_hex = ''
+        if file_id_hex:
+            file_records = self.smb2_file_records.setdefault(file_id_hex, [])
+            if record not in file_records:
+                file_records.append(record)
+            open_frame = int(self.smb2_file_open_frames.get(file_id_hex, 0) or 0)
+            close_frame = int(self.smb2_file_close_frames.get(file_id_hex, 0) or 0)
+            for file_record in list(file_records):
+                file_meta = getattr(file_record, 'metadata', None)
+                if not isinstance(file_meta, dict):
+                    continue
+                if open_frame > 0:
+                    file_meta['smb2_file_open_frame'] = open_frame
+                if close_frame > 0:
+                    file_meta['smb2_file_close_frame'] = close_frame
         if cmd == 3 and len(smb2) >= 72 and not is_response:
             try:
                 path_offset = int.from_bytes(smb2[68:70], 'little')

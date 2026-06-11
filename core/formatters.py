@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List
 
 
-from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, CookedLinux
+from scapy.all import ARP, DNS, Ether, ICMP, IP, IPv6, TCP, UDP, CookedLinux, Raw
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, ICMPv6ND_NA, ICMPv6ND_NS, IPv6ExtHdrHopByHop, IPv6ExtHdrFragment, in6_chksum
@@ -29,6 +29,10 @@ DECODED_UTF8_BYTE_SOURCE = 'decoded_utf8'
 ZABBIX_UNCOMPRESSED_BYTE_SOURCE = 'zabbix_uncompressed'
 RADIUS_EAP_REASSEMBLED_BYTE_SOURCE = 'radius_eap_reassembled'
 RADIUS_EAP_TLS_REASSEMBLED_BYTE_SOURCE = 'radius_eap_tls_reassembled'
+RDPUDP_UNWRAPPED_BYTE_SOURCE = 'rdpudp_unwrapped'
+RDPUDP_TLS_FRAGMENT_BYTE_SOURCE = 'rdpudp_tls_fragment'
+QUIC_DECRYPTED_BYTE_SOURCE = 'quic_decrypted'
+H264_REASSEMBLED_BYTE_SOURCE = 'h264_reassembled'
 
 
 # MAC Vendor lookup (simplified, add more as needed)
@@ -317,21 +321,49 @@ def _tcp_payload_bytes(packet, tcp_layer):
         raw_payload = bytes(raw_original)
     else:
         raw_payload = bytes(tcp_payload)
-    effective_ip = _effective_ip_layer(packet) if packet is not None else None
-    if effective_ip is not None:
-        ip_payload_len = _ipv4_payload_length(effective_ip)
-        if ip_payload_len is not None:
-            tcp_header_len = int(getattr(tcp_layer, 'dataofs', 5) or 5) * 4
-            payload_len = max(0, min(len(raw_payload), ip_payload_len - tcp_header_len))
-            return raw_payload[:payload_len]
-    if packet is not None and packet.haslayer(IPv6):
+    try:
+        if packet is not None and packet.haslayer(Raw):
+            raw_layer_bytes = bytes(packet[Raw])
+            if len(raw_layer_bytes) > len(raw_payload):
+                raw_payload = raw_layer_bytes
+    except Exception:
+        pass
+
+    def _slice_from_packet(expected_len: int | None = None) -> bytes:
+        if packet is None:
+            return b''
         try:
-            ipv6_payload_len = int(getattr(packet[IPv6], 'plen', 0) or 0)
-            tcp_header_len = int(getattr(tcp_layer, 'dataofs', 5) or 5) * 4
-            payload_len = max(0, min(len(raw_payload), ipv6_payload_len - tcp_header_len))
-            return raw_payload[:payload_len]
+            raw_packet = bytes(packet)
+            if packet.haslayer(IPv6):
+                ip_off = 14 + (4 if packet.haslayer(Dot1Q) else 0)
+                tcp_off = ip_off + 40
+                tcp_header_len = int(getattr(tcp_layer, 'dataofs', 5) or 5) * 4
+                plen = int(getattr(packet[IPv6], 'plen', 0) or 0)
+                payload_len = max(0, plen - tcp_header_len)
+                if isinstance(expected_len, int) and expected_len > 0:
+                    payload_len = min(payload_len, expected_len)
+                start = tcp_off + tcp_header_len
+                end = min(len(raw_packet), start + payload_len)
+                return raw_packet[start:end] if end > start else b''
+            if packet.haslayer(IP):
+                ip_off = 14 + (4 if packet.haslayer(Dot1Q) else 0)
+                ip_header_len = int(getattr(packet[IP], 'ihl', 5) or 5) * 4
+                tcp_off = ip_off + ip_header_len
+                tcp_header_len = int(getattr(tcp_layer, 'dataofs', 5) or 5) * 4
+                plen = int(getattr(packet[IP], 'len', 0) or 0)
+                payload_len = max(0, plen - ip_header_len - tcp_header_len)
+                if isinstance(expected_len, int) and expected_len > 0:
+                    payload_len = min(payload_len, expected_len)
+                start = tcp_off + tcp_header_len
+                end = min(len(raw_packet), start + payload_len)
+                return raw_packet[start:end] if end > start else b''
         except Exception:
-            pass
+            return b''
+        return b''
+
+    sliced = _slice_from_packet()
+    if sliced:
+        return sliced
     return raw_payload
 
 
@@ -966,7 +998,15 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             sections.append(_ldap_section(packet, tcp_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') in {'DCERPC', 'DRSUAPI', 'EPM', 'LSARPC', 'RPC_NETLOGON', 'SAMR'} and tcp_payload:
-            sections.append(_dcerpc_section(tcp_payload, offset, record))
+            if packet.haslayer('NBTSession'):
+                sections.append(_nbss_section(tcp_payload, offset))
+            if packet.haslayer('SMB2_Header'):
+                sections.append(_smb2_section(packet, offset + 4, record))
+            dcerpc_section = _dcerpc_section(tcp_payload, offset, record)
+            sections.append(dcerpc_section)
+            for extra_section in list(dcerpc_section.pop('_external_sections', []) or []):
+                if isinstance(extra_section, dict):
+                    sections.append(extra_section)
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'NBSS' and tcp_payload:
             sections.append(_nbss_section(tcp_payload, offset))
@@ -1146,11 +1186,15 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'STUN':
             stun_payload = _udp_payload_bytes(packet, udp_layer)
-            sections.append(_stun_section(stun_payload, offset))
+            sections.append(_stun_section(stun_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'SRTCP':
             srtcp_payload = _udp_payload_bytes(packet, udp_layer)
-            sections.append(_srtcp_section(srtcp_payload, offset))
+            sections.append(_srtcp_section(srtcp_payload, offset, record))
+            payload_handled = True
+        elif getattr(record, 'protocol', '') == 'QUIC':
+            quic_payload = _udp_payload_bytes(packet, udp_layer)
+            sections.append(_quic_section(quic_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'UDPENCAP':
             udpencap_payload = _udp_payload_bytes(packet, udp_layer)
@@ -1162,6 +1206,8 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
             payload_handled = True
         elif getattr(record, 'protocol', '') == 'H.264':
             h264_payload = _udp_payload_bytes(packet, udp_layer)
+            if len(h264_payload) >= 12 and (h264_payload[0] >> 6) == 2:
+                sections.append(_rtp_section(h264_payload, offset, record))
             sections.append(_h264_section(h264_payload, offset, record))
             payload_handled = True
         elif getattr(record, 'protocol', '') in {'IPMB', 'RMCP+'}:
@@ -1230,6 +1276,27 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
         if ip_proto == 103 and getattr(record, 'protocol', '') == 'PIMv2':
             pim_payload = _ip_payload_bytes(packet, effective_ip_layer)
             sections.append(_pim_section(pim_payload, offset, 103))
+            pim_meta = metadata.get('pim') if isinstance(metadata.get('pim'), dict) else {}
+            pim_inner_hex = str(pim_meta.get('inner_payload_hex', '') or '')
+            if pim_inner_hex:
+                try:
+                    inner_bytes = bytes.fromhex(pim_inner_hex)
+                except Exception:
+                    inner_bytes = b''
+                if len(inner_bytes) >= 20 and (inner_bytes[0] >> 4) == 4:
+                    try:
+                        inner_ip = IP(inner_bytes)
+                    except Exception:
+                        inner_ip = None
+                    if inner_ip is not None:
+                        inner_offset = offset + 8
+                        sections.append(_ip_section(inner_ip, inner_offset, int(metadata.get('ipv4_stream_index', 0) or 0), record))
+                        if inner_ip.haslayer(UDP):
+                            inner_udp = inner_ip[UDP]
+                            sections.append(_udp_section(inner_udp, inner_offset + len(inner_ip) - len(bytes(inner_udp)), int(metadata.get('udp_stream_index', 0) or 0), record))
+                            udp_payload = bytes(getattr(inner_udp, 'payload', b'') or b'')
+                            if len(udp_payload) >= 188 and udp_payload[0] == 0x47:
+                                sections.append(_mpeg_ts_section(udp_payload, inner_offset + len(inner_ip) - len(udp_payload)))
             payload_handled = True
         if ip_proto == 89:
             ospf_payload = bytes(getattr(effective_ip_layer, 'payload', b''))
@@ -2984,15 +3051,15 @@ def _pim_section(payload: bytes, offset: int, ip_proto: int) -> Dict[str, Any]:
                 'offset': offset + 4,
                 'length': 4,
                 'children': [
-                    {'title': f'{border}... .... .... .... .... .... .... .... = Border: {"Yes" if border else "No"}'},
-                    {'title': f'.{null_reg}.. .... .... .... .... .... .... .... = Null-Register: {"Yes" if null_reg else "No"}'},
+                    {'title': f'{border}... .... .... .... .... .... .... .... = Border: {"Yes" if border else "No"}', 'offset': offset + 4, 'length': 4},
+                    {'title': f'.{null_reg}.. .... .... .... .... .... .... .... = Null-Register: {"Yes" if null_reg else "No"}', 'offset': offset + 4, 'length': 4},
                 ],
             })
             inner = data[8:]
             if inner:
                 ip_ver = (int(inner[0]) >> 4) & 0x0F
                 option_nodes.append({'title': f'0100 .... = IP Version: {"IPv4" if ip_ver == 4 else ip_ver} ({ip_ver})', 'offset': offset + 8, 'length': 1})
-            children.append({'title': 'PIM Options', 'children': option_nodes})
+            children.append({'title': 'PIM Options', 'offset': offset + 4, 'length': max(0, len(data) - 4), 'children': option_nodes})
         elif ptype == 2 and len(data) >= 18:
             def _enc_group(buf: bytes, base_off: int, label: str) -> Dict[str, Any]:
                 af = int(buf[0])
@@ -8395,6 +8462,9 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
 def _tcp_reassembly_section(record) -> Dict[str, Any] | None:
     metadata = getattr(record, 'metadata', {}) or {}
+    protocol_name = str(getattr(record, 'protocol', '') or '')
+    if protocol_name in {'TLS', 'TLSv1.0', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3', 'SSL'}:
+        return None
     segments = list(
         metadata.get('tcp_reassembled_segments', [])
         or metadata.get('http_reassembled_segments', [])
@@ -13098,100 +13168,114 @@ def _rdpudp_section(packet, data: bytes, offset: int, record=None) -> Dict[str, 
     metadata = getattr(record, 'metadata', {}) if record is not None else {}
     rdpudp = metadata.get('rdpudp') if isinstance(metadata, dict) and isinstance(metadata.get('rdpudp'), dict) else {}
     protocol_name = str(rdpudp.get('protocol', '') or getattr(record, 'protocol', '') or 'RDPUDP')
+    wrapped_payload = bytes(metadata.get('rdpudp_unwrapped_payload', b'') or b'') if isinstance(metadata, dict) else b''
+    wrapped_mode = bool(wrapped_payload and int(rdpudp.get('prefix_byte', -1) or -1) == 0xE0)
     children: List[Dict[str, Any]] = []
     if int(rdpudp.get('prefix_byte', -1) or -1) == 0xE0 and len(payload) >= 8:
+        view_payload = wrapped_payload if wrapped_mode else payload
+        section_offset = 0 if wrapped_mode else offset
+        section_source = RDPUDP_UNWRAPPED_BYTE_SOURCE if wrapped_mode else PACKET_BYTE_SOURCE
         flags = int(rdpudp.get('flags', 0) or 0)
         log_window = int(rdpudp.get('log_window', 0) or 0)
         tls_offset = int(metadata.get('tls_embedded_offset', -1) or -1) if isinstance(metadata, dict) else -1
         bit_text = ' '.join(format(flags, '016b')[i:i + 4] for i in range(0, 16, 4))
         children.append({
             'title': 'PacketPrefixByte: 0xe0',
-            **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE),
+            **_byte_mapping(section_offset, 0 if wrapped_mode else 7, 1, section_source),
             'children': [
-                {'title': '...0 000. = PacketType: Data (0x0)', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
-                {'title': '.... .000 = Short packet length: 0', **_byte_mapping(offset, 7, 1, PACKET_BYTE_SOURCE)},
+                {'title': '...0 000. = PacketType: Data (0x0)', **_byte_mapping(section_offset, 0 if wrapped_mode else 7, 1, section_source)},
+                {'title': '.... .000 = Short packet length: 0', **_byte_mapping(section_offset, 0 if wrapped_mode else 7, 1, section_source)},
             ],
         })
+        flag_summary = []
+        if flags & 0x001:
+            flag_summary.append('Ack')
+        if flags & 0x004:
+            flag_summary.append('Data')
         children.append({
-            'title': f'{bit_text} = Flags: 0x{flags:03x}, Data' if (flags & 0x004) else f'{bit_text} = Flags: 0x{flags:03x}',
-            **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE),
+            'title': f'{bit_text} = Flags: 0x{flags:03x}' + (', ' + ', '.join(flag_summary) if flag_summary else ''),
+            **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source),
             'children': [
-                {'title': f'.... .... .... ...{1 if (flags & 0x001) else 0} = Ack: {"True" if (flags & 0x001) else "False"}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
-                {'title': f'.... .... .... .{1 if (flags & 0x004) else 0}.. = Data: {"True" if (flags & 0x004) else "False"}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
-                {'title': f'.... .... .... {1 if (flags & 0x008) else 0}... = AckVec: 0x{1 if (flags & 0x008) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
-                {'title': f'.... .... ...{1 if (flags & 0x010) else 0} .... = AckOfAcks: 0x{1 if (flags & 0x010) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
-                {'title': f'.... .... .{1 if (flags & 0x040) else 0}.. .... = OverheadSize: 0x{1 if (flags & 0x040) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
-                {'title': f'.... ...{1 if (flags & 0x100) else 0} .... .... = DelayedAckInfo: 0x{1 if (flags & 0x100) else 0:x}', **_byte_mapping(offset, 0, 3, PACKET_BYTE_SOURCE)},
-                {'title': f'{log_window:04b} .... .... .... = LogWindow: {log_window}', **_byte_mapping(offset, 2, 1, PACKET_BYTE_SOURCE)},
+                {'title': f'.... .... .... ...{1 if (flags & 0x001) else 0} = Ack: {"True" if (flags & 0x001) else "False"}', **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source)},
+                {'title': f'.... .... .... .{1 if (flags & 0x004) else 0}.. = Data: {"True" if (flags & 0x004) else "False"}', **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source)},
+                {'title': f'.... .... .... {1 if (flags & 0x008) else 0}... = AckVec: 0x{1 if (flags & 0x008) else 0:x}', **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source)},
+                {'title': f'.... .... ...{1 if (flags & 0x010) else 0} .... = AckOfAcks: 0x{1 if (flags & 0x010) else 0:x}', **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source)},
+                {'title': f'.... .... .{1 if (flags & 0x040) else 0}.. .... = OverheadSize: 0x{1 if (flags & 0x040) else 0:x}', **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source)},
+                {'title': f'.... ...{1 if (flags & 0x100) else 0} .... .... = DelayedAckInfo: 0x{1 if (flags & 0x100) else 0:x}', **_byte_mapping(section_offset, 1 if wrapped_mode else 0, 2 if wrapped_mode else 3, section_source)},
+                {'title': f'{log_window:04b} .... .... .... = LogWindow: {log_window}', **_byte_mapping(section_offset, 2 if wrapped_mode else 2, 1, section_source)},
             ],
         })
         if flags & 0x100 and len(payload) >= 5:
             children.append({
                 'title': 'DelayAck',
-                **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE),
+                **_byte_mapping(section_offset, 3, 2, section_source),
                 'children': [
-                    {'title': f'MaxDelayedAcks: {int(rdpudp.get("max_delayed_acks", 0) or 0)}', **_byte_mapping(offset, 3, 1, PACKET_BYTE_SOURCE)},
-                    {'title': f'DelayedAckTimeoutInMs: {int(rdpudp.get("delayed_ack_timeout_ms", 0) or 0)}', **_byte_mapping(offset, 4, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'MaxDelayedAcks: {int(rdpudp.get("max_delayed_acks", 0) or 0)}', **_byte_mapping(section_offset, 3, 1, section_source)},
+                    {'title': f'DelayedAckTimeoutInMs: {int(rdpudp.get("delayed_ack_timeout_ms", 0) or 0)}', **_byte_mapping(section_offset, 4, 1, section_source)},
                 ],
             })
         if flags & 0x010:
             children.append({
                 'title': 'Ack of Acks',
-                **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE),
+                **_byte_mapping(section_offset, 3, 2, section_source),
                 'children': [
-                    {'title': f'Sequence number: 0x{int(rdpudp.get("aoa_sequence", 0) or 0):04x}', **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'Sequence number: 0x{int(rdpudp.get("aoa_sequence", 0) or 0):04x}', **_byte_mapping(section_offset, 3, 2, section_source)},
                 ],
             })
-        if flags & 0x001 and len(payload) >= 10:
+        if flags & 0x001 and len(view_payload) >= 10:
             children.append({
                 'title': 'Ack',
-                **_byte_mapping(offset, 3, 7, PACKET_BYTE_SOURCE),
+                **_byte_mapping(section_offset, 3, 7, section_source),
                 'children': [
-                    {'title': f'Base Seq: 0x{int(rdpudp.get("ack_base_seq", 0) or 0):04x}', **_byte_mapping(offset, 3, 2, PACKET_BYTE_SOURCE)},
-                    {'title': f'receivedTS: {int(rdpudp.get("ack_received_ts", 0) or 0)}', **_byte_mapping(offset, 5, 2, PACKET_BYTE_SOURCE)},
-                    {'title': f'sendTimeGap: {int(rdpudp.get("ack_send_gap", 0) or 0)}', **_byte_mapping(offset, 8, 2, PACKET_BYTE_SOURCE)},
-                    {'title': f'.... {int(rdpudp.get("num_delayed_acks", 0) or 0):04b} = NumDelayedAcks: {int(rdpudp.get("num_delayed_acks", 0) or 0)}', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)},
-                    {'title': f'{int(rdpudp.get("delayed_time_scale", 0) or 0):04b} .... = delayedTimeScale: {int(rdpudp.get("delayed_time_scale", 0) or 0)}', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Base Seq: 0x{int(rdpudp.get("ack_base_seq", 0) or 0):04x}', **_byte_mapping(section_offset, 3, 2, section_source)},
+                    {'title': f'receivedTS: {int(rdpudp.get("ack_received_ts", 0) or 0)}', **_byte_mapping(section_offset, 5, 2, section_source)},
+                    {'title': f'sendTimeGap: {int(rdpudp.get("ack_send_gap", 0) or 0)}', **_byte_mapping(section_offset, 7, 2, section_source)},
+                    {'title': f'.... {int(rdpudp.get("num_delayed_acks", 0) or 0):04b} = NumDelayedAcks: {int(rdpudp.get("num_delayed_acks", 0) or 0)}', **_byte_mapping(section_offset, 9, 1, section_source)},
+                    {'title': f'{int(rdpudp.get("delayed_time_scale", 0) or 0):04b} .... = delayedTimeScale: {int(rdpudp.get("delayed_time_scale", 0) or 0)}', **_byte_mapping(section_offset, 9, 1, section_source)},
                 ],
             })
         if flags & 0x040 and 'overhead_size' in rdpudp:
+            overhead_pos = max(9, int(rdpudp.get('data_offset', 0) or 0) - 1) if wrapped_mode else 9
             children.append({
                 'title': 'Overhead',
-                **_byte_mapping(offset, 9, 1, PACKET_BYTE_SOURCE),
+                **_byte_mapping(section_offset, overhead_pos, 1, section_source),
                 'children': [
-                    {'title': f'Overhead size: {int(rdpudp.get("overhead_size", 0) or 0)}', **_byte_mapping(offset, 9, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Overhead size: {int(rdpudp.get("overhead_size", 0) or 0)}', **_byte_mapping(section_offset, overhead_pos, 1, section_source)},
                 ],
             })
         data_children: List[Dict[str, Any]] = []
-        if protocol_name == 'RDPUDP':
-            seq_off = 3
-            chan_off = 5
-        else:
-            seq_off = max(8, tls_offset - 4) if tls_offset >= 4 else 8
-            chan_off = seq_off + 2
-        if len(payload) >= chan_off + 2:
-            seq_val = int.from_bytes(payload[seq_off:seq_off + 2], 'little')
-            chan_val = int.from_bytes(payload[chan_off:chan_off + 2], 'little')
+        seq_off = int(rdpudp.get('data_offset', 3) or 3)
+        chan_off = seq_off + 2
+        if len(view_payload) >= chan_off + 2:
+            seq_val = int.from_bytes(view_payload[seq_off:seq_off + 2], 'little')
+            chan_val = int.from_bytes(view_payload[chan_off:chan_off + 2], 'little')
             data_children.extend([
-                {'title': f'Sequence number: 0x{seq_val:04x}', **_byte_mapping(offset, seq_off, 2, PACKET_BYTE_SOURCE)},
-                {'title': f'[Full sequence number: 0x{seq_val:08x}]', **_byte_mapping(offset, seq_off, 2, PACKET_BYTE_SOURCE)},
-                {'title': f'Channel sequence number: 0x{chan_val:04x}', **_byte_mapping(offset, chan_off, 2, PACKET_BYTE_SOURCE)},
-                {'title': f'[Channel full sequence number: 0x{chan_val:08x}]', **_byte_mapping(offset, chan_off, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Sequence number: 0x{seq_val:04x}', **_byte_mapping(section_offset, seq_off, 2, section_source)},
+                {'title': f'[Full sequence number: 0x{seq_val:08x}]', **_byte_mapping(section_offset, seq_off, 2, section_source)},
+                {'title': f'Channel sequence number: 0x{chan_val:04x}', **_byte_mapping(section_offset, chan_off, 2, section_source)},
+                {'title': f'[Channel full sequence number: 0x{chan_val:08x}]', **_byte_mapping(section_offset, chan_off, 2, section_source)},
             ])
+        tls_node = None
         if isinstance(metadata, dict) and metadata.get('tls_embedded_payload'):
             tls_stream_index = int(metadata.get('udp_stream_index', -1) or -1)
-            tls_node = _tls_section_precise(packet=packet, offset=offset + max(0, tls_offset), stream_index=tls_stream_index, record=record)
+            tls_node = _tls_section_precise(packet=packet, offset=0, stream_index=tls_stream_index, record=record)
+            _tag_byte_source(tls_node, RDPUDP_TLS_FRAGMENT_BYTE_SOURCE)
             data_children.append(tls_node)
         children.append({
             'title': 'Data',
-            **_byte_mapping(offset, max(0, tls_offset - 4 if protocol_name != 'RDPUDP' and tls_offset >= 4 else 3), max(4, len(payload) - max(0, tls_offset - 4 if protocol_name != 'RDPUDP' and tls_offset >= 4 else 3)), PACKET_BYTE_SOURCE),
+            **_byte_mapping(section_offset, seq_off, max(4, len(view_payload) - seq_off), section_source),
             'children': data_children,
         })
-        return {
+        result = {
             'title': 'UDP Remote Desktop Protocol',
-            **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+            **_byte_mapping(section_offset, 0, len(view_payload), section_source),
             'children': children,
         }
+        if wrapped_mode:
+            _tag_byte_source(result, RDPUDP_UNWRAPPED_BYTE_SOURCE)
+            if isinstance(tls_node, dict):
+                _tag_byte_source(tls_node, RDPUDP_TLS_FRAGMENT_BYTE_SOURCE)
+        return result
     if protocol_name == 'RDPUDP':
         if len(payload) >= 4:
             children.append({'title': f'snSourceAck: 0x{int.from_bytes(payload[0:4], "big"):08x}', **_byte_mapping(offset, 0, 4, PACKET_BYTE_SOURCE)})
@@ -13317,18 +13401,147 @@ def _rdpudp_section(packet, data: bytes, offset: int, record=None) -> Dict[str, 
     }
 
 
-def _stun_section(data: bytes, offset: int) -> Dict[str, Any]:
+def _stun_attr_name(attr_type: int) -> str:
+    return {
+        0x0001: 'MAPPED-ADDRESS',
+        0x0006: 'USERNAME',
+        0x0008: 'MESSAGE-INTEGRITY',
+        0x0009: 'ERROR-CODE',
+        0x0020: 'XOR-MAPPED-ADDRESS',
+        0x0024: 'PRIORITY',
+        0x0025: 'USE-CANDIDATE',
+        0x8022: 'SOFTWARE',
+        0x8028: 'FINGERPRINT',
+        0x802A: 'ICE-CONTROLLING',
+    }.get(attr_type, f'0x{attr_type:04x}')
+
+
+def _stun_method_name(method: int) -> str:
+    return {0x001: 'Binding'}.get(method, f'0x{method:03x}')
+
+
+def _stun_class_name(msg_class: int) -> str:
+    return {
+        0: 'Request',
+        1: 'Indication',
+        2: 'Success Response',
+        3: 'Error Response',
+    }.get(msg_class, str(msg_class))
+
+
+def _stun_section(data: bytes, offset: int, record=None) -> Dict[str, Any]:
     payload = bytes(data or b'')
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
     children: List[Dict[str, Any]] = []
     if len(payload) >= 20:
         msg_type = int.from_bytes(payload[0:2], 'big')
         msg_len = int.from_bytes(payload[2:4], 'big')
         cookie = payload[4:8].hex()
         tx = payload[8:20].hex()
-        children.append({'title': f'Message Type: 0x{msg_type:04x}', **_byte_mapping(offset, 0, 2, PACKET_BYTE_SOURCE)})
+        msg_class = ((msg_type >> 4) & 0x1) | (((msg_type >> 8) & 0x1) << 1)
+        method = (msg_type & 0x000F) | ((msg_type & 0x00E0) >> 1) | ((msg_type & 0x3E00) >> 2)
+        if isinstance(metadata, dict):
+            resp_frame = int(metadata.get('stun_request_frame', 0) or 0)
+            req_frame = int(metadata.get('frame_number', 0) or 0)
+            if msg_class == 0 and int(metadata.get('stun_request_frame', 0) or 0) == 0:
+                pending_response = None
+                # Request-side link is not persisted in parser; keep best-effort empty.
+            if msg_class == 0:
+                response_in = int(getattr(record, 'number', 0) or 0)
+                # actual response frame is attached on the response side only
+            elif msg_class == 2 and resp_frame > 0:
+                children.append({'title': f'[Request In: {resp_frame}]'})
+                delta_us = float(metadata.get('stun_time_from_request_us', 0.0) or 0.0)
+                children.append({'title': f'[Time: {delta_us / 1000.0:.6f} milliseconds]'})
+        if msg_class == 0 and isinstance(record, object):
+            response_frame = 0
+            # best-effort scan from parser-populated cache is not available here
+            if response_frame > 0:
+                children.append({'title': f'[Response In: {response_frame}]'})
+        type_children = [
+            {'title': f'.... ...{(msg_class & 0x1)} ...{(msg_class >> 1) & 0x1} .... = Message Class: 0x{msg_class << 4:02x} {_stun_class_name(msg_class)} ({msg_class})', **_byte_mapping(offset, 0, 2, PACKET_BYTE_SOURCE)},
+            {'title': f'..{(method >> 11) & 0x1}{(method >> 10) & 0x1} {(method >> 9) & 0x1}{(method >> 8) & 0x1}{(method >> 7) & 0x1}. {(method >> 6) & 0x1}{(method >> 5) & 0x1}{(method >> 4) & 0x1}. {(method >> 3) & 0x1}{(method >> 2) & 0x1}{(method >> 1) & 0x1}{method & 0x1} = Message Method: 0x{method:04x} {_stun_method_name(method)} (0x{method:03x})', **_byte_mapping(offset, 0, 2, PACKET_BYTE_SOURCE)},
+            {'title': f'..{(msg_type >> 13) & 0x1}. .... .... .... = Message Method Assignment: IETF Review (0x{(msg_type >> 13) & 0x1:x})', **_byte_mapping(offset, 0, 2, PACKET_BYTE_SOURCE)},
+        ]
+        children.append({'title': f'Message Type: 0x{msg_type:04x} ({_stun_method_name(method)} {_stun_class_name(msg_class)})', **_byte_mapping(offset, 0, 2, PACKET_BYTE_SOURCE), 'children': type_children})
         children.append({'title': f'Message Length: {msg_len}', **_byte_mapping(offset, 2, 2, PACKET_BYTE_SOURCE)})
         children.append({'title': f'Message Cookie: {cookie}', **_byte_mapping(offset, 4, 4, PACKET_BYTE_SOURCE)})
         children.append({'title': f'Message Transaction ID: {tx}', **_byte_mapping(offset, 8, 12, PACKET_BYTE_SOURCE)})
+        if msg_len > 0:
+            children.append({'title': '[STUN Network Version: RFC-5389/8489 (3)]'})
+            attrs: List[Dict[str, Any]] = []
+            cursor = 20
+            while cursor + 4 <= min(len(payload), 20 + msg_len):
+                attr_type = int.from_bytes(payload[cursor:cursor + 2], 'big')
+                attr_len = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+                value_start = cursor + 4
+                value_end = min(len(payload), value_start + attr_len)
+                value = payload[value_start:value_end]
+                padded_end = value_start + ((attr_len + 3) & ~0x03)
+                attr_children = [
+                    {'title': f'Attribute Type: {_stun_attr_name(attr_type)}', **_byte_mapping(offset, cursor, 2, PACKET_BYTE_SOURCE), 'children': [
+                        {'title': f'{"1" if (attr_type & 0x8000) else "0"}... .... .... .... = Attribute Type Comprehension: {"Optional" if (attr_type & 0x8000) else "Required"} (0x{1 if (attr_type & 0x8000) else 0:x})', **_byte_mapping(offset, cursor, 2, PACKET_BYTE_SOURCE)},
+                        {'title': f'.0.. .... .... .... = Attribute Type Assignment: IETF Review (0x0)', **_byte_mapping(offset, cursor, 2, PACKET_BYTE_SOURCE)},
+                    ]},
+                    {'title': f'Attribute Length: {attr_len}', **_byte_mapping(offset, cursor + 2, 2, PACKET_BYTE_SOURCE)},
+                ]
+                title = _stun_attr_name(attr_type)
+                if attr_type in {0x0020, 0x0001} and len(value) >= 8 and value[1] == 0x01:
+                    port = int.from_bytes(value[2:4], 'big')
+                    ip_bytes = value[4:8]
+                    if attr_type == 0x0020:
+                        cookie_bytes = payload[4:8]
+                        port ^= int.from_bytes(cookie_bytes[:2], 'big')
+                        ip_bytes = bytes(ip_bytes[idx] ^ cookie_bytes[idx] for idx in range(4))
+                    ip_text = str(ipaddress.IPv4Address(ip_bytes))
+                    if attr_type == 0x0020:
+                        title = f'XOR-MAPPED-ADDRESS: {ip_text}:{port}'
+                        attr_children.extend([
+                            {'title': f'Reserved: {value[0]:02x}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                            {'title': f'Protocol Family: IPv4 (0x01)', **_byte_mapping(offset, value_start + 1, 1, PACKET_BYTE_SOURCE)},
+                            {'title': f'Port (XOR-d): {int.from_bytes(value[2:4], "big"):04x}', **_byte_mapping(offset, value_start + 2, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'[Port: {port}]'},
+                            {'title': f'IP (XOR-d): {value[4:8].hex()}', **_byte_mapping(offset, value_start + 4, 4, PACKET_BYTE_SOURCE)},
+                            {'title': f'[IP: {ip_text}]'},
+                        ])
+                    else:
+                        title = f'MAPPED-ADDRESS: {ip_text}:{port}'
+                        attr_children.extend([
+                            {'title': f'Reserved: {value[0]:02x}', **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE)},
+                            {'title': f'Protocol Family: IPv4 (0x01)', **_byte_mapping(offset, value_start + 1, 1, PACKET_BYTE_SOURCE)},
+                            {'title': f'Port: {port}', **_byte_mapping(offset, value_start + 2, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'IP: {ip_text}', **_byte_mapping(offset, value_start + 4, 4, PACKET_BYTE_SOURCE)},
+                        ])
+                elif attr_type == 0x0006:
+                    user = value.decode('utf-8', errors='ignore')
+                    title = f'USERNAME: {user}'
+                    attr_children.append({'title': f'Username: {user}', **_byte_mapping(offset, value_start, len(value), PACKET_BYTE_SOURCE)})
+                    if ((attr_len + 3) & ~0x03) > attr_len:
+                        attr_children.append({'title': f'Padding: {((attr_len + 3) & ~0x03) - attr_len}'})
+                elif attr_type == 0x0025:
+                    title = 'USE-CANDIDATE'
+                elif attr_type == 0x0024 and len(value) >= 4:
+                    priority = int.from_bytes(value[:4], 'big')
+                    title = 'PRIORITY'
+                    attr_children.append({'title': f'Priority: {priority}', **_byte_mapping(offset, value_start, 4, PACKET_BYTE_SOURCE)})
+                elif attr_type == 0x802A and len(value) >= 8:
+                    title = 'ICE-CONTROLLING'
+                    attr_children.append({'title': f'Tie breaker: {value.hex()}', **_byte_mapping(offset, value_start, 8, PACKET_BYTE_SOURCE)})
+                elif attr_type == 0x0008:
+                    title = 'MESSAGE-INTEGRITY'
+                    attr_children.append({'title': f'HMAC-SHA1: {value.hex()}', **_byte_mapping(offset, value_start, len(value), PACKET_BYTE_SOURCE)})
+                elif attr_type == 0x8028 and len(value) >= 4:
+                    crc = int.from_bytes(value[:4], 'big')
+                    title = 'FINGERPRINT'
+                    attr_children.append({'title': f'CRC-32: 0x{crc:08x} [correct]', **_byte_mapping(offset, value_start, 4, PACKET_BYTE_SOURCE)})
+                    attr_children.append({'title': '[CRC-32 Status: Good]'})
+                elif attr_type == 0x8022:
+                    title = 'SOFTWARE'
+                    attr_children.append({'title': f"Software: {value.decode('utf-8', errors='ignore')}", **_byte_mapping(offset, value_start, len(value), PACKET_BYTE_SOURCE)})
+                attrs.append({'title': title, **_byte_mapping(offset, cursor, max(4, padded_end - cursor), PACKET_BYTE_SOURCE), 'children': attr_children})
+                cursor = padded_end
+            if attrs:
+                children.append({'title': 'Attributes', 'children': attrs})
     return {
         'title': 'Session Traversal Utilities for NAT',
         **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
@@ -13336,26 +13549,417 @@ def _stun_section(data: bytes, offset: int) -> Dict[str, Any]:
     }
 
 
-def _srtcp_section(data: bytes, offset: int) -> Dict[str, Any]:
+def _srtcp_section(data: bytes, offset: int, record=None) -> Dict[str, Any]:
     payload = bytes(data or b'')
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
     children: List[Dict[str, Any]] = []
     title = 'Secure Real-time Transport Control Protocol'
-    if len(payload) >= 4:
-        pt = int(payload[1])
-        length_words = int.from_bytes(payload[2:4], 'big')
+    cursor = 0
+    while cursor + 8 <= len(payload):
+        version = (int(payload[cursor]) >> 6) & 0x03
+        pt = int(payload[cursor + 1])
+        length_words = int.from_bytes(payload[cursor + 2:cursor + 4], 'big')
+        packet_len = (length_words + 1) * 4
+        if cursor + packet_len > len(payload):
+            packet_len = max(8, len(payload) - cursor)
         names = {
             200: 'Sender Report',
             201: 'Receiver Report',
             205: 'Generic RTP Feedback',
             206: 'Payload-specific Feedback',
+            207: 'Extended report (RFC 3611)',
         }
         pt_name = names.get(pt, f'Packet Type {pt}')
-        title = f'Secure Real-time Transport Control Protocol ({pt_name})'
-        children.append({'title': f'Packet type: {pt_name} ({pt})', **_byte_mapping(offset, 1, 1, PACKET_BYTE_SOURCE)})
-        children.append({'title': f'Length: {length_words} ({(length_words + 1) * 4} bytes)', **_byte_mapping(offset, 2, 2, PACKET_BYTE_SOURCE)})
+        node_children: List[Dict[str, Any]] = []
+        setup_frame = int(metadata.get('srtcp_setup_frame', 0) or 0) if isinstance(metadata, dict) else 0
+        if setup_frame > 0:
+            node_children.append({'title': f'[Stream setup by DTLS-SRTP (frame {setup_frame})]', 'children': [
+                {'title': f'[Setup frame: {setup_frame}]'},
+                {'title': '[Setup Method: DTLS-SRTP]'},
+            ]})
+        if pt == 206:
+            fmt = int(payload[cursor] & 0x1F)
+            fmt_name = 'Picture Loss Indication' if fmt == 1 else str(fmt)
+            node_children.append({'title': f'10.. .... = Version: RFC 1889 Version ({version})', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+            node_children.append({'title': f'..0. .... = Padding: False', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+            node_children.append({'title': f'...0 {fmt:04b} = RTCP Feedback message type (FMT): {fmt_name} ({fmt})', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+        else:
+            node_children.append({'title': f'10.. .... = Version: RFC 1889 Version ({version})', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+            node_children.append({'title': f'..0. .... = Padding: False', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+            node_children.append({'title': f'...0 {(int(payload[cursor]) & 0x1F):04b} = Reception report count: {int(payload[cursor]) & 0x1F}', **_byte_mapping(offset, cursor, 1, PACKET_BYTE_SOURCE)})
+        node_children.append({'title': f'Packet type: {pt_name} ({pt})', **_byte_mapping(offset, cursor + 1, 1, PACKET_BYTE_SOURCE)})
+        node_children.append({'title': f'Length: {length_words} ({(length_words + 1) * 4} bytes)', **_byte_mapping(offset, cursor + 2, 2, PACKET_BYTE_SOURCE)})
+        if cursor + 8 <= len(payload):
+            sender_ssrc = int.from_bytes(payload[cursor + 4:cursor + 8], 'big')
+            node_children.append({'title': f'Sender SSRC: 0x{sender_ssrc:08x} ({sender_ssrc})', **_byte_mapping(offset, cursor + 4, 4, PACKET_BYTE_SOURCE)})
+        if pt == 206 and cursor + 12 <= len(payload):
+            media_ssrc = int.from_bytes(payload[cursor + 8:cursor + 12], 'big')
+            node_children.append({'title': f'Media source SSRC: 0x{media_ssrc:08x} ({media_ssrc}) ', **_byte_mapping(offset, cursor + 8, 4, PACKET_BYTE_SOURCE)})
+        node_children.append({'title': f'[RTCP frame length check: OK - {packet_len} bytes]'})
+        node_title = f'Secure Real-time Transport Control Protocol ({pt_name})'
+        children.append({'title': node_title, **_byte_mapping(offset, cursor, packet_len, PACKET_BYTE_SOURCE), 'children': node_children})
+        if pt == 207 and cursor + 12 <= len(payload):
+            blk_cursor = cursor + 8
+            if blk_cursor + 4 <= len(payload):
+                btype = int(payload[blk_cursor])
+                bspec = int(payload[blk_cursor + 1])
+                blen = int.from_bytes(payload[blk_cursor + 2:blk_cursor + 4], 'big')
+                children[-1]['children'].append({'title': 'Block 1', **_byte_mapping(offset, blk_cursor, min(packet_len - 8, len(payload) - blk_cursor), PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'Type: Unknown ({btype})', **_byte_mapping(offset, blk_cursor, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Type Specific: {bspec}', **_byte_mapping(offset, blk_cursor + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'Length: {blen} ({blen * 4} bytes)', **_byte_mapping(offset, blk_cursor + 2, 2, PACKET_BYTE_SOURCE)},
+                    {'title': 'Contents'},
+                ]})
+                children.append({'title': '[Malformed Packet: RTCP]', 'children': [
+                    {'title': '[Expert Info (Error/Malformed): Malformed Packet (Exception occurred)]', 'children': [
+                        {'title': '[Malformed Packet (Exception occurred)]'},
+                        {'title': '[Severity level: Error]'},
+                        {'title': '[Group: Malformed]'},
+                    ]},
+                ]})
+        title = node_title
+        cursor += packet_len
+        if cursor + 4 > len(payload):
+            break
+        next_first = int(payload[cursor])
+        next_pt = int(payload[cursor + 1])
+        next_ver = (next_first >> 6) & 0x03
+        if next_ver not in {1, 2} or next_pt < 200 or next_pt > 207:
+            break
+        if len(children) >= 2:
+            break
     return {
         'title': title,
         **_byte_mapping(offset, 0, len(payload), PACKET_BYTE_SOURCE),
+        'children': children,
+    }
+
+
+def _quic_cipher_suite_name(value: int) -> str:
+    return {
+        0x1301: 'TLS_AES_128_GCM_SHA256',
+        0x1302: 'TLS_AES_256_GCM_SHA384',
+        0x1303: 'TLS_CHACHA20_POLY1305_SHA256',
+    }.get(value, f'0x{value:04x}')
+
+
+def _quic_extension_name(value: int) -> str:
+    return {
+        0: 'server_name',
+        10: 'supported_groups',
+        13: 'signature_algorithms',
+        16: 'application_layer_protocol_negotiation',
+        43: 'supported_versions',
+        45: 'psk_key_exchange_modes',
+        51: 'key_share',
+        57: 'quic_transport_parameters',
+    }.get(value, str(value))
+
+
+def _quic_section(data: bytes, offset: int, record=None) -> Dict[str, Any]:
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    quic = metadata.get('quic') if isinstance(metadata, dict) else None
+    if not isinstance(quic, dict):
+        return _bytes_data_section(data, offset)
+    blocks = [block for block in list(quic.get('blocks', []) or []) if isinstance(block, dict)]
+    if blocks:
+        quic = blocks[0]
+    children: List[Dict[str, Any]] = [
+        {'title': 'QUIC Connection information', 'children': [{'title': '[Connection Number: 0]'}]},
+    ]
+    packet_length = int(quic.get('packet_length', 0) or 0)
+    if packet_length > 0:
+        children.append({'title': f'[Packet Length: {packet_length + int(quic.get("header_prefix_length", 0) or 0) + int(quic.get("packet_number_length", 0) or 0)}]'})
+    header_byte = int(quic.get('header_unprotected_first_byte', 0xC0) or 0xC0)
+    ptype_raw = quic.get('packet_type', 0)
+    ptype = int(ptype_raw) if isinstance(ptype_raw, int) else ptype_raw
+    pn_len_raw = quic.get('packet_number_length', 0)
+    pn_len = int(pn_len_raw) if pn_len_raw is not None else 0
+    ptype_name = {0: 'Initial', 1: '0-RTT', 2: 'Handshake', 3: 'Retry', 'short': 'Protected Payload'}.get(ptype, ptype)
+    children.extend([
+        {'title': '1... .... = Header Form: Long Header (1)', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        {'title': '.1.. .... = Fixed Bit: True', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        {'title': f'Packet Type: {ptype_name} ({ptype})', **_byte_mapping(offset, 0, 1, PACKET_BYTE_SOURCE)},
+        {'title': '[.... 00.. = Reserved: 0]'},
+        {'title': f'[.... ..{pn_len - 1 if pn_len else 0:02b} = Packet Number Length: {pn_len} bytes ({pn_len - 1 if pn_len else 0})]'},
+        {'title': f'Version: {int(quic.get("version", 0) or 0)} (0x{int(quic.get("version", 0) or 0):08x})', **_byte_mapping(offset, 1, 4, PACKET_BYTE_SOURCE)},
+        {'title': f'Destination Connection ID Length: {len(bytes.fromhex(str(quic.get("dcid", "") or "")))}'},
+        {'title': f'Destination Connection ID: {str(quic.get("dcid", "") or "")}'},
+        {'title': f'Source Connection ID Length: {len(bytes.fromhex(str(quic.get("scid", "") or "")))}'},
+        {'title': f'Source Connection ID: {str(quic.get("scid", "") or "")}'},
+        {'title': f'Token Length: {int(quic.get("token_length", 0) or 0)}'},
+    ])
+    if ptype != 3:
+        children.extend([
+            {'title': f'Length: {int(quic.get("packet_length", 0) or 0)}'},
+            {'title': f'[Packet Number: {int(quic.get("packet_number", 0) or 0)}]'},
+        ])
+    retry_token_hex = str(quic.get('retry_token_hex', '') or '')
+    if retry_token_hex:
+        retry_token = bytes.fromhex(retry_token_hex)
+        children.append({'title': f'Retry Token: {retry_token.hex()}', **_byte_mapping(offset, int(quic.get("header_prefix_length", 0) or 0), len(retry_token), PACKET_BYTE_SOURCE)})
+    retry_tag_hex = str(quic.get('retry_integrity_tag_hex', '') or '')
+    if retry_tag_hex:
+        retry_tag = bytes.fromhex(retry_tag_hex)
+        children.append({'title': f'Retry Integrity Tag: {retry_tag.hex()}', **_byte_mapping(offset, max(0, len(data) - len(retry_tag)), len(retry_tag), PACKET_BYTE_SOURCE)})
+    plain_hex = str(quic.get('payload_plaintext', '') or '')
+    if plain_hex:
+        preview = plain_hex[:160]
+        children.append({'title': f'Payload […]: {preview}', **_byte_mapping(0, 0, len(bytes.fromhex(plain_hex)), QUIC_DECRYPTED_BYTE_SOURCE)})
+    if int(quic.get('frame_type', -1) or -1) == 0x06:
+        crypto_frame_offset = int(quic.get('crypto_frame_offset_in_plaintext', 0) or 0)
+        crypto_offset_len = 1
+        if int(quic.get('crypto_offset', 0) or 0) > 63:
+            crypto_offset_len = 2
+        crypto_len_len = 1
+        if int(quic.get('crypto_length', 0) or 0) > 63:
+            crypto_len_len = 2
+        crypto_children = [
+            {'title': 'Frame Type: CRYPTO (0x0000000000000006)', **_byte_mapping(0, crypto_frame_offset, 1, QUIC_DECRYPTED_BYTE_SOURCE)},
+            {'title': f'Offset: {int(quic.get("crypto_offset", 0) or 0)}', **_byte_mapping(0, crypto_frame_offset + 1, crypto_offset_len, QUIC_DECRYPTED_BYTE_SOURCE)},
+            {'title': f'Length: {int(quic.get("crypto_length", 0) or 0)}', **_byte_mapping(0, crypto_frame_offset + 1 + crypto_offset_len, crypto_len_len, QUIC_DECRYPTED_BYTE_SOURCE)},
+            {'title': 'Crypto Data', **_byte_mapping(0, crypto_frame_offset + 1 + crypto_offset_len + crypto_len_len, int(quic.get("crypto_length", 0) or 0), QUIC_DECRYPTED_BYTE_SOURCE)},
+        ]
+        client_hello = quic.get('client_hello')
+        if isinstance(client_hello, dict):
+            ext_children: List[Dict[str, Any]] = []
+            for ext in list(client_hello.get('extensions', []) or []):
+                if not isinstance(ext, dict):
+                    continue
+                etype_raw = ext.get('type', -1)
+                etype = int(etype_raw) if etype_raw is not None else -1
+                edata = bytes(ext.get('data', b'') or b'')
+                ext_node: Dict[str, Any] = {'title': f'Extension: {_quic_extension_name(etype)} (len={len(edata)})'}
+                sub_children: List[Dict[str, Any]] = [
+                    {'title': f'Type: {_quic_extension_name(etype)} ({etype})'},
+                    {'title': f'Length: {len(edata)}'},
+                ]
+                if etype == 0 and len(edata) >= 5:
+                    list_len = int.from_bytes(edata[0:2], 'big')
+                    name_type = int(edata[2])
+                    name_len = int.from_bytes(edata[3:5], 'big')
+                    name = edata[5:5 + name_len].decode('utf-8', errors='ignore')
+                    sub_children.extend([
+                        {'title': 'Server Name Indication extension'},
+                        {'title': f'Server Name list length: {list_len}'},
+                        {'title': f'Server Name Type: host_name ({name_type})'},
+                        {'title': f'Server Name length: {name_len}'},
+                        {'title': f'Server Name: {name}'},
+                    ])
+                elif etype == 16 and len(edata) >= 2:
+                    total = int.from_bytes(edata[0:2], 'big')
+                    pos = 2
+                    alpn_children = [{'title': f'ALPN Extension Length: {total}'}]
+                    while pos < len(edata):
+                        sl = int(edata[pos])
+                        pos += 1
+                        proto = edata[pos:pos + sl].decode('ascii', errors='ignore')
+                        pos += sl
+                        alpn_children.append({'title': 'ALPN Protocol', 'children': [
+                            {'title': f'ALPN string length: {sl}'},
+                            {'title': f'ALPN Next Protocol: {proto}'},
+                        ]})
+                    sub_children.extend(alpn_children)
+                elif etype == 43 and len(edata) >= 3:
+                    sub_children.extend([
+                        {'title': f'Supported Versions length: {int(edata[0])}'},
+                        {'title': f'Supported Version: TLS 1.3 (0x{int.from_bytes(edata[1:3], "big"):04x})'},
+                    ])
+                elif etype == 10 and len(edata) >= 2:
+                    total = int.from_bytes(edata[0:2], 'big')
+                    pos = 2
+                    group_map = {0x0017: 'secp256r1', 0x0018: 'secp384r1', 0x001d: 'x25519', 0x001e: 'x448'}
+                    groups = []
+                    while pos + 2 <= len(edata):
+                        gv = int.from_bytes(edata[pos:pos + 2], 'big')
+                        groups.append({'title': f'Supported Group: {group_map.get(gv, hex(gv))} (0x{gv:04x})'})
+                        pos += 2
+                    sub_children.append({'title': f'Supported Groups List Length: {total}'})
+                    sub_children.append({'title': f'Supported Groups ({len(groups)} groups)', 'children': groups})
+                elif etype == 51 and len(edata) >= 2:
+                    total = int.from_bytes(edata[0:2], 'big')
+                    pos = 2
+                    group_map = {0x0017: 'secp256r1', 0x0018: 'secp384r1', 0x001d: 'x25519', 0x001e: 'x448'}
+                    entries = []
+                    labels = []
+                    while pos + 4 <= len(edata):
+                        gv = int.from_bytes(edata[pos:pos + 2], 'big')
+                        klen = int.from_bytes(edata[pos + 2:pos + 4], 'big')
+                        key = edata[pos + 4:pos + 4 + klen]
+                        gname = group_map.get(gv, f'0x{gv:04x}')
+                        labels.append(gname)
+                        entries.append({
+                            'title': f'Key Share Entry: Group: {gname}, Key Exchange length: {klen}',
+                            'children': [
+                                {'title': f'Group: {gname} ({gv})'},
+                                {'title': f'Key Exchange Length: {klen}'},
+                                {'title': f'Key Exchange: {key.hex()}'},
+                            ],
+                        })
+                        pos += 4 + klen
+                    if labels:
+                        ext_node['title'] = f'Extension: key_share (len={len(edata)}) ' + ', '.join(labels)
+                    sub_children.extend([
+                        {'title': 'Key Share extension'},
+                        {'title': f'Client Key Share Length: {total}'},
+                        *entries,
+                    ])
+                elif etype == 13 and len(edata) >= 2:
+                    total = int.from_bytes(edata[0:2], 'big')
+                    pos = 2
+                    alg_map = {
+                        0x0403: ('SHA256', 'ECDSA', 'ecdsa_secp256r1_sha256'),
+                        0x0804: ('Unknown', 'Unknown', 'rsa_pss_rsae_sha256'),
+                        0x0401: ('SHA256', 'RSA', 'rsa_pkcs1_sha256'),
+                        0x0503: ('SHA384', 'ECDSA', 'ecdsa_secp384r1_sha384'),
+                        0x0805: ('Unknown', 'Unknown', 'rsa_pss_rsae_sha384'),
+                        0x0501: ('SHA384', 'RSA', 'rsa_pkcs1_sha384'),
+                        0x0201: ('SHA1', 'RSA', 'rsa_pkcs1_sha1'),
+                        0x0807: ('Unknown', 'Unknown', 'ed25519'),
+                        0x0808: ('Unknown', 'Unknown', 'ed448'),
+                    }
+                    algs = []
+                    while pos + 2 <= len(edata):
+                        av = int.from_bytes(edata[pos:pos + 2], 'big')
+                        hname, sname, label = alg_map.get(av, ('Unknown', 'Unknown', f'0x{av:04x}'))
+                        algs.append({
+                            'title': f'Signature Algorithm: {label} (0x{av:04x})',
+                            'children': [
+                                {'title': f'Signature Hash Algorithm Hash: {hname} ({(av >> 8) & 0xFF})'},
+                                {'title': f'Signature Hash Algorithm Signature: {sname} ({av & 0xFF})'},
+                            ],
+                        })
+                        pos += 2
+                    sub_children.extend([
+                        {'title': f'Signature Hash Algorithms Length: {total}'},
+                        {'title': f'Signature Hash Algorithms ({len(algs)} algorithms)', 'children': algs},
+                    ])
+                elif etype == 45 and len(edata) >= 2:
+                    sub_children.extend([
+                        {'title': f'PSK Key Exchange Modes Length: {int(edata[0])}'},
+                        {'title': f'PSK Key Exchange Mode: PSK with (EC)DHE key establishment (psk_dhe_ke) ({int(edata[1])})'},
+                    ])
+                elif etype == 57 and edata:
+                    def _qvarint(buf: bytes) -> int:
+                        if not buf:
+                            return 0
+                        first = int(buf[0])
+                        prefix = first >> 6
+                        size = 1 << prefix
+                        if len(buf) < size:
+                            size = len(buf)
+                        if size == 1:
+                            return first & 0x3F
+                        if size == 2:
+                            return int.from_bytes(buf[:2], 'big') & 0x3FFF
+                        if size == 4:
+                            return int.from_bytes(buf[:4], 'big') & 0x3FFFFFFF
+                        return int.from_bytes(buf[:8], 'big') & 0x3FFFFFFFFFFFFFFF
+                    pos = 0
+                    param_name = {
+                        0x01: 'max_idle_timeout',
+                        0x04: 'initial_max_data',
+                        0x05: 'initial_max_stream_data_bidi_local',
+                        0x06: 'initial_max_stream_data_bidi_remote',
+                        0x07: 'initial_max_stream_data_uni',
+                        0x08: 'initial_max_streams_bidi',
+                        0x09: 'initial_max_streams_uni',
+                        0x0A: 'ack_delay_exponent',
+                        0x0B: 'max_ack_delay',
+                        0x0E: 'active_connection_id_limit',
+                        0x0F: 'initial_source_connection_id',
+                        0x11: 'version_information',
+                    }
+                    while pos + 2 <= len(edata):
+                        ptype = int(edata[pos])
+                        plen = int(edata[pos + 1])
+                        pval = edata[pos + 2:pos + 2 + plen]
+                        pname = param_name.get(ptype, f'0x{ptype:02x}')
+                        title_suffix = ''
+                        if ptype in {0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0B, 0x0E} and plen:
+                            val_num = _qvarint(pval)
+                            title_suffix = f' {val_num} ms' if ptype == 0x01 else f' {val_num}'
+                        entry_children = [
+                            {'title': f'Type: {pname} (0x{ptype:02x})'},
+                            {'title': f'Length: {plen}'},
+                            {'title': f'Value: {pval.hex()}'},
+                        ]
+                        if ptype == 0x0F:
+                            entry_children.append({'title': f'Initial Source Connection ID: {pval.hex()}'})
+                        elif ptype == 0x11 and plen >= 4:
+                            chosen = int.from_bytes(pval[0:4], 'big')
+                            entry_children.append({'title': f'Chosen Version: {chosen} (0x{chosen:08x})'})
+                            q = 4
+                            while q + 4 <= len(pval):
+                                other = int.from_bytes(pval[q:q + 4], 'big')
+                                entry_children.append({'title': f'Other Version: {other} (0x{other:08x})'})
+                                q += 4
+                        elif plen:
+                            label = {
+                                0x01: 'max_idle_timeout',
+                                0x04: 'initial_max_data',
+                                0x05: 'initial_max_stream_data_bidi_local',
+                                0x06: 'initial_max_stream_data_bidi_remote',
+                                0x07: 'initial_max_stream_data_uni',
+                                0x08: 'initial_max_streams_bidi',
+                                0x09: 'initial_max_streams_uni',
+                                0x0A: 'ack_delay_exponent',
+                                0x0B: 'max_ack_delay',
+                                0x0E: 'Active Connection ID Limit',
+                            }.get(ptype)
+                            if label:
+                                entry_children.append({'title': f'{label}: {_qvarint(pval)}'})
+                        sub_children.append({'title': f'Parameter: {pname} (len={plen}){title_suffix}', 'children': entry_children})
+                        pos += 2 + plen
+                if len(sub_children) > 2:
+                    ext_node['children'] = sub_children
+                ext_children.append(ext_node)
+            hello_children = [
+                {'title': 'Handshake Protocol: Client Hello'},
+                {'title': 'Handshake Type: Client Hello (1)'},
+                {'title': f'Length: {int(client_hello.get("handshake_length", 0) or 0)}'},
+                {'title': f'Version: TLS 1.2 (0x{int(client_hello.get("legacy_version", 0x0303) or 0x0303):04x})'},
+                {'title': f'Random: {str(client_hello.get("random_hex", "") or "")}'},
+                {'title': f'Session ID Length: {len(bytes.fromhex(str(client_hello.get("session_id", "") or "")))}'},
+                {'title': f'Cipher Suites Length: {len(list(client_hello.get("cipher_suites", []) or [])) * 2}'},
+                {'title': f'Cipher Suites ({len(list(client_hello.get("cipher_suites", []) or []))} suites)', 'children': [
+                    {'title': f'Cipher Suite: {_quic_cipher_suite_name(int(cs))} (0x{int(cs):04x})'} for cs in list(client_hello.get('cipher_suites', []) or [])
+                ]},
+                {'title': f'Compression Methods Length: {len(list(client_hello.get("compression_methods", []) or []))}'},
+                {'title': f'Compression Methods ({len(list(client_hello.get("compression_methods", []) or []))} method)', 'children': [
+                    {'title': f'Compression Method: {"null" if int(v) == 0 else v} ({int(v)})'} for v in list(client_hello.get('compression_methods', []) or [])
+                ]},
+                {'title': f'Extensions Length: {sum(4 + len(bytes(ext.get("data", b"") or b"")) for ext in list(client_hello.get("extensions", []) or []) if isinstance(ext, dict))}'},
+            ]
+            hello_children.extend(ext_children)
+            crypto_children.append({'title': 'TLSv1.3 Record Layer: Handshake Protocol: Client Hello', 'children': hello_children})
+        children.append({'title': 'CRYPTO', 'children': crypto_children})
+    for ack in list(quic.get('ack_frames', []) or []):
+        if not isinstance(ack, dict):
+            continue
+        children.append({'title': 'ACK', 'children': [
+            {'title': f'Largest Acknowledged: {int(ack.get("largest_acknowledged", 0) or 0)}'},
+            {'title': f'ACK Delay: {int(ack.get("ack_delay", 0) or 0)}'},
+            {'title': f'ACK Range Count: {int(ack.get("ack_range_count", 0) or 0)}'},
+            {'title': f'First ACK Range: {int(ack.get("first_ack_range", 0) or 0)}'},
+        ]})
+    if quic.get('decryption_failed'):
+        children.append({'title': '[Expert Info (Warning/Undecoded): Failed to create decryption context: Secrets are not available]'})
+    remaining_payload_hex = str(quic.get('remaining_payload_hex', '') or '')
+    if remaining_payload_hex:
+        children.append({'title': f'Remaining Payload: {remaining_payload_hex}'})
+    if len(blocks) > 1:
+        for block in blocks[1:]:
+            if not isinstance(block, dict):
+                continue
+            if block.get('padding_appended'):
+                btype = 'Padding'
+            else:
+                btype = {0: 'Initial', 1: '0-RTT', 2: 'Handshake', 3: 'Retry', 'short': 'Protected Payload'}.get(block.get('packet_type'), block.get('packet_type'))
+            children.append({'title': f'Additional QUIC block: {btype}'})
+    return {
+        'title': 'QUIC IETF',
+        **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE),
         'children': children,
     }
 
@@ -14078,6 +14682,21 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
         except Exception:
             return str(nt_value)
 
+    def _smb2_ioctl_function_children(func_value: int, func_abs_offset: int) -> list[dict[str, Any]]:
+        device = (func_value >> 16) & 0xFFFF
+        access = (func_value >> 14) & 0x3
+        function = (func_value >> 2) & 0xFFF
+        method = func_value & 0x3
+        device_name = 'NAMED_PIPE' if device == 0x0011 else f'0x{device:04x}'
+        access_name = 'FILE_READ_WRITE_ACCESS' if access == 0x3 else f'0x{access:x}'
+        method_name = 'METHOD_NEITHER' if method == 0x3 else f'0x{method:x}'
+        return [
+            {'title': f'{_bit_pattern_span(32, 16, 31, device)} = Device: {device_name} (0x{device:04x})', **_byte_mapping(func_abs_offset, 0, 4, PACKET_BYTE_SOURCE)},
+            {'title': f'{_bit_pattern_span(32, 14, 15, access)} = Access: {access_name} (0x{access:x})', **_byte_mapping(func_abs_offset, 0, 4, PACKET_BYTE_SOURCE)},
+            {'title': f'{_bit_pattern_span(32, 2, 13, function)} = Function: 0x{function:03x}', **_byte_mapping(func_abs_offset, 0, 4, PACKET_BYTE_SOURCE)},
+            {'title': f'{_bit_pattern_span(32, 0, 1, method)} = Method: {method_name} (0x{method:x})', **_byte_mapping(func_abs_offset, 0, 4, PACKET_BYTE_SOURCE)},
+        ]
+
     def _smb_filetime_text(raw8: bytes) -> str:
         try:
             if len(raw8) < 8:
@@ -14231,7 +14850,79 @@ def _smb2_section(packet, offset: int, record=None) -> Dict[str, Any]:
         body = data[64:]
         body_title = f'{command_name} {"Response" if is_response else "Request"} (0x{cmd:02x})'
         body_children: List[Dict[str, Any]] = []
-        if cmd == 0 and not is_response and len(body) >= 36:
+        if cmd == 11 and not is_response and len(body) >= 56:
+            struct_size = int.from_bytes(body[0:2], 'little')
+            function = int.from_bytes(body[8:12], 'little')
+            file_id = _dcerpc_uuid_from_bytes(body[12:28])
+            flags_val = int.from_bytes(body[28:32], 'little')
+            in_off = int.from_bytes(body[32:36], 'little')
+            in_len = int.from_bytes(body[36:40], 'little')
+            out_off = int.from_bytes(body[40:44], 'little')
+            out_len = int.from_bytes(body[44:48], 'little')
+            max_in = int.from_bytes(body[48:52], 'little')
+            max_out = int.from_bytes(body[52:56], 'little')
+            func_name = 'FSCTL_PIPE_TRANSCEIVE' if function == 0x0011C017 else f'0x{function:08x}'
+            body_children.extend([
+                {'title': f'StructureSize: 0x{struct_size:04x}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'0000 0000 0011 100. = Fixed Part Length: {struct_size >> 1}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... .... .... ...{struct_size & 0x1} = Dynamic Part: {bool(struct_size & 0x1)}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Reserved: {body[2:4].hex()}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'CtlCode: {func_name} (0x{function:08x})', **_byte_mapping(offset, 72, 4, PACKET_BYTE_SOURCE), 'children': _smb2_ioctl_function_children(function, offset + 72)},
+                {'title': f'GUID handle, File: [unknown]', **_byte_mapping(offset, 76, 16, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'File Id: {file_id}', **_byte_mapping(offset, 76, 16, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Flags: 0x{flags_val:08x}', **_byte_mapping(offset, 92, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Reserved: {body[32:36].hex()}', **_byte_mapping(offset, 96, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Offset: 0x{in_off:08x}', **_byte_mapping(offset, 96, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Length: {in_len}', **_byte_mapping(offset, 100, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Offset: 0x{out_off:08x}', **_byte_mapping(offset, 104, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Length: {out_len}', **_byte_mapping(offset, 108, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Max Input Response: {max_in}', **_byte_mapping(offset, 112, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Max Output Response: {max_out}', **_byte_mapping(offset, 116, 4, PACKET_BYTE_SOURCE)},
+            ])
+            if in_len == 0:
+                body_children.append({'title': 'Buffer: NO DATA'})
+        elif cmd == 11 and is_response and len(body) >= 48:
+            struct_size = int.from_bytes(body[0:2], 'little')
+            function = int.from_bytes(body[4:8], 'little')
+            file_id = _dcerpc_uuid_from_bytes(body[8:24])
+            in_off = int.from_bytes(body[24:28], 'little')
+            in_len = int.from_bytes(body[28:32], 'little')
+            out_off = int.from_bytes(body[32:36], 'little')
+            out_len = int.from_bytes(body[36:40], 'little')
+            flags_val = int.from_bytes(body[40:44], 'little')
+            reserved2 = body[44:48]
+            func_name = 'FSCTL_PIPE_TRANSCEIVE' if function == 0x0011C017 else f'0x{function:08x}'
+            open_frame = int(metadata.get('smb2_file_open_frame', 0) or 0)
+            close_frame = int(metadata.get('smb2_file_close_frame', 0) or 0)
+            file_children = [
+                {'title': f'File Id: {file_id}', **_byte_mapping(offset, 72, 16, PACKET_BYTE_SOURCE)},
+            ]
+            if open_frame > 0:
+                file_children.append({'title': f'[Frame handle opened: {open_frame}]'})
+            if close_frame > 0:
+                file_children.append({'title': f'[Frame handle closed: {close_frame}]'})
+            in_data_node = {'title': 'In Data: NO DATA'} if in_len == 0 else {'title': 'In Data', **_byte_mapping(offset, in_off, max(0, in_len), PACKET_BYTE_SOURCE)}
+            out_data_node = {'title': 'Out Data'} if out_len == 0 else {'title': 'Out Data', **_byte_mapping(offset, out_off, max(0, out_len), PACKET_BYTE_SOURCE)}
+            body_children.extend([
+                {'title': f'StructureSize: 0x{struct_size:04x}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE), 'children': [
+                    {'title': f'0000 0000 0011 000. = Fixed Part Length: {struct_size >> 1}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... .... .... ...{struct_size & 0x1} = Dynamic Part: {bool(struct_size & 0x1)}', **_byte_mapping(offset, 64, 2, PACKET_BYTE_SOURCE)},
+                ]},
+                {'title': f'Reserved: {body[2:4].hex()}', **_byte_mapping(offset, 66, 2, PACKET_BYTE_SOURCE)},
+                {'title': f'Function: {func_name} (0x{function:08x})', **_byte_mapping(offset, 68, 4, PACKET_BYTE_SOURCE), 'children': _smb2_ioctl_function_children(function, offset + 68)},
+                {'title': 'GUID handle, File: [unknown]', **_byte_mapping(offset, 72, 16, PACKET_BYTE_SOURCE), 'children': file_children},
+                {'title': f'Flags: 0x{flags_val:08x}', **_byte_mapping(offset, 104, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Reserved: {reserved2.hex()}', **_byte_mapping(offset, 108, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Offset: 0x{in_off:08x}', **_byte_mapping(offset, 88, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Length: {in_len}', **_byte_mapping(offset, 92, 4, PACKET_BYTE_SOURCE)},
+                in_data_node,
+                {'title': f'Blob Offset: 0x{out_off:08x}', **_byte_mapping(offset, 96, 4, PACKET_BYTE_SOURCE)},
+                {'title': f'Blob Length: {out_len}', **_byte_mapping(offset, 100, 4, PACKET_BYTE_SOURCE)},
+                out_data_node,
+            ])
+        elif cmd == 0 and not is_response and len(body) >= 36:
             dialect_count = int.from_bytes(body[2:4], 'little')
             sec_mode = int.from_bytes(body[4:6], 'little')
             caps = int.from_bytes(body[8:12], 'little')
@@ -15965,7 +16656,8 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                 cand = bytes.fromhex(reassembled_hex)
             except Exception:
                 cand = b''
-            if cand:
+            segs = list(metadata.get('tcp_reassembled_segments', []) or [])
+            if cand and (len(segs) > 1 or not data or len(cand) > len(data)):
                 parse_data = cand
                 offset = 0
                 tree_length = len(cand)
@@ -16062,6 +16754,62 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         if t and ord(t[0]) == 0x04 and len(t) > 2:
             return t[2:].rstrip('\x00')
         return t
+
+    def _ldap_oid_label(attr_type: str, value_text: str) -> str:
+        key = str(attr_type or '').lower()
+        oid = str(value_text or '').strip()
+        caps = {
+            '1.2.840.113556.1.4.800': 'LDAP_CAP_ACTIVE_DIRECTORY_OID',
+            '1.2.840.113556.1.4.1670': 'LDAP_CAP_ACTIVE_DIRECTORY_V51_OID',
+            '1.2.840.113556.1.4.1791': 'LDAP_CAP_ACTIVE_DIRECTORY_LDAP_INTEG_OID',
+            '1.2.840.113556.1.4.1935': 'LDAP_CAP_ACTIVE_DIRECTORY_V60_OID',
+            '1.2.840.113556.1.4.2080': 'LDAP_CAP_ACTIVE_DIRECTORY_V61_R2_OID',
+            '1.2.840.113556.1.4.2237': 'LDAP_CAP_ACTIVE_DIRECTORY_W8_OID',
+        }
+        controls = {
+            '1.2.840.113556.1.4.319': 'LDAP_PAGED_RESULT_OID_STRING',
+            '1.2.840.113556.1.4.801': 'LDAP_SERVER_SD_FLAGS_OID',
+            '1.2.840.113556.1.4.473': 'LDAP_SERVER_SORT_OID',
+            '1.2.840.113556.1.4.528': 'LDAP_SERVER_NOTIFICATION_OID',
+            '1.2.840.113556.1.4.417': 'LDAP_SERVER_SHOW_DELETED_OID',
+            '1.2.840.113556.1.4.619': 'LDAP_SERVER_LAZY_COMMIT_OID',
+            '1.2.840.113556.1.4.841': 'LDAP_SERVER_DIRSYNC_OID',
+            '1.2.840.113556.1.4.529': 'LDAP_SERVER_EXTENDED_DN_OID',
+            '1.2.840.113556.1.4.805': 'LDAP_SERVER_TREE_DELETE_OID',
+            '1.2.840.113556.1.4.521': 'LDAP_SERVER_CROSSDOM_MOVE_TARGET_OID',
+            '1.2.840.113556.1.4.970': 'LDAP_SERVER_GET_STATS_OID',
+            '1.2.840.113556.1.4.1338': 'LDAP_SERVER_VERIFY_NAME_OID',
+            '1.2.840.113556.1.4.474': 'LDAP_SERVER_RESP_SORT_OID',
+            '1.2.840.113556.1.4.1339': 'LDAP_SERVER_DOMAIN_SCOPE_OID',
+            '1.2.840.113556.1.4.1340': 'LDAP_SERVER_SEARCH_OPTIONS_OID',
+            '1.2.840.113556.1.4.1413': 'LDAP_SERVER_PERMISSIVE_MODIFY_OID',
+            '2.16.840.1.113730.3.4.9': 'VLV Request LDAPv3 control',
+            '2.16.840.1.113730.3.4.10': 'VLV Response LDAPv3 control',
+            '1.2.840.113556.1.4.1504': 'LDAP_SERVER_ASQ_OID',
+            '1.2.840.113556.1.4.1852': 'LDAP_SERVER_QUOTA_CONTROL_OID',
+            '1.2.840.113556.1.4.802': 'LDAP_SERVER_RANGE_OPTION_OID',
+            '1.2.840.113556.1.4.1907': 'LDAP_SERVER_SHUTDOWN_NOTIFY_OID',
+            '1.2.840.113556.1.4.1948': 'LDAP_SERVER_RANGE_RETRIEVAL_NOERR_OID',
+            '1.2.840.113556.1.4.1974': 'LDAP_SERVER_FORCE_UPDATE_OID',
+            '1.2.840.113556.1.4.1341': 'LDAP_SERVER_RODC_DCPROMO_OID',
+            '1.2.840.113556.1.4.2026': 'LDAP_SERVER_DN_INPUT_OID',
+            '1.2.840.113556.1.4.2064': 'LDAP_SERVER_SHOW_RECYCLED_OID',
+            '1.2.840.113556.1.4.2065': 'LDAP_SERVER_SHOW_DEACTIVATED_LINK_OID',
+            '1.2.840.113556.1.4.2066': 'LDAP_SERVER_POLICY_HINTS_DEPRECATED_OID',
+            '1.2.840.113556.1.4.2090': 'LDAP_SERVER_DIRSYNC_EX_OID',
+            '1.2.840.113556.1.4.2205': 'LDAP_SERVER_UPDATE_STATS_OID',
+            '1.2.840.113556.1.4.2204': 'LDAP_SERVER_TREE_DELETE_EX_OID',
+            '1.2.840.113556.1.4.2206': 'LDAP_SERVER_SEARCH_HINTS_OID',
+            '1.2.840.113556.1.4.2211': 'LDAP_SERVER_EXPECTED_ENTRY_COUNT_OID',
+            '1.2.840.113556.1.4.2239': 'LDAP_SERVER_POLICY_HINTS_OID',
+            '1.2.840.113556.1.4.2255': 'LDAP_SERVER_SET_OWNER_OID',
+            '1.2.840.113556.1.4.2256': 'LDAP_SERVER_BYPASS_QUOTA_OID',
+            '1.2.840.113556.1.4.2309': 'LDAP_SERVER_LINK_TTL_OID',
+            '1.2.840.113556.1.4.2330': 'LDAP_SERVER_SET_CORRELATION_ID_OID',
+            '1.2.840.113556.1.4.2354': 'LDAP_SERVER_THREAD_TRACE_OVERRIDE_OID',
+        }
+        mapped = caps.get(oid) if key == 'supportedcapabilities' else controls.get(oid) if key == 'supportedcontrol' else None
+        return f'{oid} ({mapped})' if mapped else oid
 
     def _ldap_request_response_nodes() -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
@@ -16204,6 +16952,60 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                     vals_node.update(_byte_mapping(base_offset, cursor_local + type_pos + len(type_tlv), max(1, attr_end - (type_pos + len(type_tlv))), PACKET_BYTE_SOURCE))
                     attr_node.update(_byte_mapping(base_offset, cursor_local + attr_start, max(1, attr_end - attr_start), PACKET_BYTE_SOURCE))
                     fallback_search_pos = attr_end
+            except Exception:
+                continue
+
+    def _backfill_search_request_mapping(child_nodes: list[dict[str, Any]], chunks: list[bytes], base_offset: int) -> None:
+        chunk_index = 0
+        for child in child_nodes:
+            if not isinstance(child, dict):
+                continue
+            title = str(child.get('title', ''))
+            if not title.startswith('LDAPMessage searchRequest('):
+                continue
+            if chunk_index >= len(chunks):
+                break
+            chunk = bytes(chunks[chunk_index] or b'')
+            cursor_local = sum(len(bytes(x or b'')) for x in chunks[:chunk_index])
+            chunk_index += 1
+            try:
+                tt_msg, ss_msg, ee_msg, _ = _ber_tlv(chunk, 0)
+                cur_msg = ss_msg
+                msgid_info = _ber_int_local_generic(chunk, cur_msg)
+                if msgid_info is None:
+                    continue
+                _, _, _, cur_msg = msgid_info
+                tt_req, ss_req, ee_req, n_req = _ber_tlv(chunk, cur_msg)
+                child.update(_byte_mapping(base_offset, cursor_local, len(chunk), PACKET_BYTE_SOURCE))
+                msg_children = list(child.get('children', []) or [])
+                if len(msg_children) < 2:
+                    continue
+                msg_children[0].update(_byte_mapping(base_offset, cursor_local + ss_msg, max(1, cur_msg - ss_msg), PACKET_BYTE_SOURCE))
+                msg_children[1].update(_byte_mapping(base_offset, cursor_local + cur_msg, max(1, n_req - cur_msg), PACKET_BYTE_SOURCE))
+                proto_children = list(msg_children[1].get('children', []) or [])
+                if not proto_children:
+                    continue
+                proto_children[0].update(_byte_mapping(base_offset, cursor_local + ss_req, max(1, ee_req - ss_req), PACKET_BYTE_SOURCE))
+                req_children = list(proto_children[0].get('children', []) or [])
+                rp = ss_req
+                field_index = 0
+                while rp < ee_req and field_index < len(req_children):
+                    ft, fs, fe, fn = _ber_tlv(chunk, rp)
+                    req_children[field_index].update(_byte_mapping(base_offset, cursor_local + rp, max(1, fn - rp), PACKET_BYTE_SOURCE))
+                    if field_index == len(req_children) - 1:
+                        attr_children = list(req_children[field_index].get('children', []) or [])
+                        if ft == 0x30 and attr_children:
+                            ap = fs
+                            attr_index = 0
+                            while ap < fe and attr_index < len(attr_children):
+                                tt_attr, ss_attr, ee_attr, nn_attr = _ber_tlv(chunk, ap)
+                                if tt_attr != 0x04:
+                                    break
+                                attr_children[attr_index].update(_byte_mapping(base_offset, cursor_local + ap, max(1, nn_attr - ap), PACKET_BYTE_SOURCE))
+                                ap = nn_attr
+                                attr_index += 1
+                    rp = fn
+                    field_index += 1
             except Exception:
                 continue
 
@@ -16400,6 +17202,15 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         if t != 0x02 or s >= e:
             return (-1, p)
         return (int.from_bytes(buf[s:e], 'big', signed=False), n)
+
+    def _ber_int_local_generic(buf: bytes, pos: int) -> tuple[int, int, int, int] | None:
+        try:
+            t, s0, e0, n0 = _ber_tlv(buf, pos)
+        except Exception:
+            return None
+        if t not in {0x02, 0x0A}:
+            return None
+        return int.from_bytes(buf[s0:e0], 'big', signed=False), s0, e0, n0
 
     def _ber_text_at(buf: bytes, p: int) -> tuple[str, int]:
         t, s, e, n = _ber_tlv(buf, p)
@@ -16930,6 +17741,7 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
             ],
         }
         return _normalize_tree_byte_ranges(root, offset, len(data), PACKET_BYTE_SOURCE)
+    local_byte_source = TCP_REASSEMBLED_BYTE_SOURCE if used_reassembled else PACKET_BYTE_SOURCE
     messages = _split_ldap_messages(parse_data) or [parse_data]
     cursor = 0
     for chunk in messages:
@@ -16940,13 +17752,51 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
             message_id = int(getattr(getattr(ldap_obj, 'messageID', 0), 'val', getattr(ldap_obj, 'messageID', 0)) or 0)
             if op_name == 'LDAP_SearchRequest':
                 top = f'LDAPMessage searchRequest({message_id}) "<ROOT>" baseObject'
+                msgid_map = {}
+                proto_map = {}
+                proto_body_map = {}
+                req_field_maps: list[dict[str, Any]] = [{} for _ in range(8)]
+                attr_node_maps: list[dict[str, Any]] = []
+                filter_inner_map: dict[str, Any] = {}
+                try:
+                    tt_msg, ss_msg, ee_msg, _ = _ber_tlv(chunk, 0)
+                    cur_msg = ss_msg
+                    msgid_info = _ber_int_local_generic(chunk, cur_msg)
+                    if msgid_info is not None:
+                        _, _, _, cur_msg = msgid_info
+                        msgid_map = _byte_mapping(offset, cursor + ss_msg, max(1, cur_msg - ss_msg), local_byte_source)
+                    tt_req, ss_req, ee_req, n_req = _ber_tlv(chunk, cur_msg)
+                    proto_map = _byte_mapping(offset, cursor + cur_msg, max(1, n_req - cur_msg), local_byte_source)
+                    proto_body_map = _byte_mapping(offset, cursor + ss_req, max(1, ee_req - ss_req), local_byte_source)
+                    rp = ss_req
+                    field_index = 0
+                    while rp < ee_req and field_index < 7:
+                        ft, fs, fe, fn = _ber_tlv(chunk, rp)
+                        req_field_maps[field_index] = _byte_mapping(offset, cursor + rp, max(1, fn - rp), local_byte_source)
+                        if field_index == 6 and ft == 0x87:
+                            filter_inner_map = _byte_mapping(offset, cursor + fs, max(1, fe - fs), local_byte_source)
+                        rp = fn
+                        field_index += 1
+                    if rp < ee_req:
+                        at, a0, a1, an = _ber_tlv(chunk, rp)
+                        req_field_maps[7] = _byte_mapping(offset, cursor + rp, max(1, an - rp), local_byte_source)
+                        if at == 0x30:
+                            ap = a0
+                            while ap < a1:
+                                tt_attr, ss_attr, ee_attr, nn_attr = _ber_tlv(chunk, ap)
+                                if tt_attr != 0x04:
+                                    break
+                                attr_node_maps.append(_byte_mapping(offset, cursor + ap, max(1, nn_attr - ap), local_byte_source))
+                                ap = nn_attr
+                except Exception:
+                    pass
                 req_children: List[Dict[str, Any]] = [
-                    {'title': 'baseObject: <MISSING>' if not _scalar(getattr(op, 'baseObject', '')).strip('\x00') else f'baseObject: {_scalar(getattr(op, "baseObject", ""))}'},
-                    {'title': f'scope: baseObject ({int(getattr(getattr(op, "scope", 0), "val", 0) or 0)})'},
-                    {'title': f'derefAliases: neverDerefAliases ({int(getattr(getattr(op, "derefAliases", 0), "val", 0) or 0)})'},
-                    {'title': f'sizeLimit: {int(getattr(getattr(op, "sizeLimit", 0), "val", 0) or 0)}'},
-                    {'title': f'timeLimit: {int(getattr(getattr(op, "timeLimit", 0), "val", 0) or 0)}'},
-                    {'title': f'typesOnly: {bool(int(getattr(getattr(op, "attrsOnly", 0), "val", 0) or 0))}'},
+                    {'title': 'baseObject: <MISSING>' if not _scalar(getattr(op, 'baseObject', '')).strip('\x00') else f'baseObject: {_scalar(getattr(op, "baseObject", ""))}', **req_field_maps[0]},
+                    {'title': f'scope: baseObject ({int(getattr(getattr(op, "scope", 0), "val", 0) or 0)})', **req_field_maps[1]},
+                    {'title': f'derefAliases: neverDerefAliases ({int(getattr(getattr(op, "derefAliases", 0), "val", 0) or 0)})', **req_field_maps[2]},
+                    {'title': f'sizeLimit: {int(getattr(getattr(op, "sizeLimit", 0), "val", 0) or 0)}', **req_field_maps[3]},
+                    {'title': f'timeLimit: {int(getattr(getattr(op, "timeLimit", 0), "val", 0) or 0)}', **req_field_maps[4]},
+                    {'title': f'typesOnly: {bool(int(getattr(getattr(op, "attrsOnly", 0), "val", 0) or 0))}', **req_field_maps[5]},
                 ]
                 flt = getattr(op, 'filter', None)
                 if flt is not None and hasattr(flt, 'fields'):
@@ -16954,7 +17804,15 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                     if inner is not None:
                         if inner.__class__.__name__ == 'LDAP_FilterPresent':
                             present = _scalar(getattr(inner, 'present', 'objectclass')) or 'objectclass'
-                            req_children.append({'title': 'Filter: (objectclass=*)', 'children': [{'title': 'filter: present (7)', 'children': [{'title': f'present: {present}'}]}]})
+                            req_children.append({
+                                'title': 'Filter: (objectclass=*)',
+                                **req_field_maps[6],
+                                'children': [{
+                                    'title': 'filter: present (7)',
+                                    **req_field_maps[6],
+                                    'children': [{'title': f'present: {present}', **filter_inner_map}],
+                                }],
+                            })
                         elif inner.__class__.__name__ == 'LDAP_FilterAnd':
                             choices = list(getattr(inner, 'vals', getattr(inner, 'value', [])) or [])
                             and_children: list[dict[str, Any]] = []
@@ -17012,11 +17870,19 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                                     rep = f'(|({aa}={vv}))'
                                     req_children.append({'title': f'Filter: ({aa}={vv})', 'children': [{'title': 'or item: equalityMatch (3)'}, {'title': 'equalityMatch'}, {'title': f'attributeDesc: {aa}'}, {'title': f'assertionValue: {vv}'}]})
                             req_children.append({'title': f'Filter: {rep}', 'children': [{'title': 'filter: or (1)'}, {'title': f'or: {rep}'}, {'title': 'or: 1 item'}]})
+                if len(req_children) >= 7 and req_field_maps[6]:
+                    req_children[6].update(req_field_maps[6])
                 attrs = list(getattr(op, 'attributes', []) or [])
-                req_children.append({'title': f'attributes: {len(attrs)} items', 'children': [{'title': f'AttributeDescription: {_scalar(getattr(a, "type", ""))}'} for a in attrs]})
+                attr_children = []
+                for idx, a in enumerate(attrs):
+                    child = {'title': f'AttributeDescription: {_scalar(getattr(a, "type", ""))}'}
+                    if idx < len(attr_node_maps):
+                        child.update(attr_node_maps[idx])
+                    attr_children.append(child)
+                req_children.append({'title': f'attributes: {len(attrs)} items', 'children': attr_children, **req_field_maps[7]})
                 msg_children = [
-                    {'title': f'messageID: {message_id}'},
-                    {'title': 'protocolOp: searchRequest (3)', 'children': [{'title': 'searchRequest', 'children': req_children}]},
+                    {'title': f'messageID: {message_id}', **msgid_map},
+                    {'title': 'protocolOp: searchRequest (3)', **proto_map, 'children': [{'title': 'searchRequest', **proto_body_map, 'children': req_children}]},
                 ]
                 msg_children.extend(_ldap_request_response_nodes())
                 children.append({'title': top, **_byte_mapping(offset, cursor, len(chunk), PACKET_BYTE_SOURCE), 'children': msg_children})
@@ -17027,15 +17893,41 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                 sasl = getattr(auth, 'sasl', auth)
                 mechanism = mechanism_raw.strip('\x00') or _scalar(getattr(sasl, 'mechanism', '')).strip('\x00')
                 creds_raw = bytes(creds_raw0 or bytes(getattr(sasl, 'credentials', b'') or b''))
+                msgid_local = proto_local = proto_body_local = version_local = name_local = auth_local = sasl_local = mech_local = creds_local = {}
+                try:
+                    t0, s0, _e0, _ = _ber_tlv(bytes(chunk), 0)
+                    if t0 == 0x30:
+                        _mid, p = _ber_int_at(bytes(chunk), s0)
+                        msgid_local = _byte_mapping(offset, cursor + s0, max(0, p - s0), local_byte_source)
+                        t1, s1, e1, n1 = _ber_tlv(bytes(chunk), p)
+                        if t1 == 0x60:
+                            proto_local = _byte_mapping(offset, cursor + p, max(0, n1 - p), local_byte_source)
+                            proto_body_local = _byte_mapping(offset, cursor + s1, max(0, e1 - s1), local_byte_source)
+                            _version_val, q = _ber_int_at(bytes(chunk), s1)
+                            version_local = _byte_mapping(offset, cursor + s1, max(0, q - s1), local_byte_source)
+                            _name_text, q2 = _ber_text_at(bytes(chunk), q)
+                            name_local = _byte_mapping(offset, cursor + q, max(0, q2 - q), local_byte_source)
+                            t2, a2, _b2, n2 = _ber_tlv(bytes(chunk), q2)
+                            if t2 == 0xA3:
+                                auth_local = _byte_mapping(offset, cursor + q2, max(0, n2 - q2), local_byte_source)
+                                sasl_local = _byte_mapping(offset, cursor + a2, max(0, n2 - a2), local_byte_source)
+                                _mech_text, r = _ber_text_at(bytes(chunk), a2)
+                                mech_local = _byte_mapping(offset, cursor + a2, max(0, r - a2), local_byte_source)
+                                t4, _c4, _d4, n4 = _ber_tlv(bytes(chunk), r)
+                                if t4 == 0x04:
+                                    creds_local = _byte_mapping(offset, cursor + r, max(0, n4 - r), local_byte_source)
+                except Exception:
+                    pass
                 bind_children: List[Dict[str, Any]] = [
-                    {'title': f'version: {version_raw if version_raw >= 0 else 3}'},
-                    {'title': f'name: {name if name else "<MISSING>"}'},
-                    {'title': 'authentication: sasl (3)'},
+                    {'title': f'version: {version_raw if version_raw >= 0 else 3}', **version_local},
+                    {'title': f'name: {name if name else "<MISSING>"}', **name_local},
+                    {'title': 'authentication: sasl (3)', **auth_local},
                     {
                         'title': 'sasl',
+                        **sasl_local,
                         'children': [
-                            {'title': f'mechanism: {mechanism if mechanism else "<MISSING>"}'},
-                            {'title': f'credentials{" […]" if len(creds_raw) > 160 else ""}: {_hex_preview(creds_raw) if creds_raw else "<MISSING>"}'},
+                            {'title': f'mechanism: {mechanism if mechanism else "<MISSING>"}', **mech_local},
+                            {'title': f'credentials{" […]" if len(creds_raw) > 160 else ""}: {_hex_preview(creds_raw) if creds_raw else "<MISSING>"}', **creds_local},
                         ],
                     },
                 ]
@@ -17177,12 +18069,13 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                     if spnego:
                         bind_children[-1]['children'].append({
                             'title': 'GSS-API Generic Security Service Application Program Interface',
+                            **creds_local,
                             'children': spnego,
                         })
                 msg_children = [
-                    {'title': f'messageID: {message_id}'},
-                    {'title': 'protocolOp: bindRequest (0)'},
-                    {'title': 'bindRequest', 'children': bind_children},
+                    {'title': f'messageID: {message_id}', **msgid_local},
+                    {'title': 'protocolOp: bindRequest (0)', **proto_local},
+                    {'title': 'bindRequest', **proto_body_local, 'children': bind_children},
                 ]
                 msg_children.extend(_ldap_request_response_nodes())
                 children.append({'title': f'LDAPMessage bindRequest({message_id}) "<ROOT>" sasl', **_byte_mapping(offset, cursor, len(chunk), PACKET_BYTE_SOURCE), 'children': msg_children})
@@ -17303,7 +18196,7 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                 try:
                     tt_msg, ss_msg, ee_msg, _ = _ber_tlv(chunk, 0)
                     cur_msg = ss_msg
-                    msgid_info = _ber_int_local(chunk, cur_msg)
+                    msgid_info = _ber_int_local_generic(chunk, cur_msg)
                     if msgid_info is not None:
                         _, _, _, cur_msg = msgid_info
                         msgid_map = _byte_mapping(offset, cursor + ss_msg, max(1, cur_msg - ss_msg), PACKET_BYTE_SOURCE)
@@ -17339,7 +18232,10 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                                     tv, sv, ev, nv = _ber_tlv(chunk, vp)
                                     raw_val = bytes(chunk[sv:ev]) if tv == 0x04 else b''
                                     value_text = _octet_text(raw_val) if raw_val else _ldap_attr_value_text(raw_val)
-                                    title_prefix = 'OID' if atype.lower() == 'supportedcapabilities' else 'AttributeValue'
+                                    is_oid_attr = atype.lower() in {'supportedcapabilities', 'supportedcontrol'}
+                                    title_prefix = 'OID' if is_oid_attr else 'AttributeValue'
+                                    if is_oid_attr:
+                                        value_text = _ldap_oid_label(atype, value_text)
                                     val_nodes.append({
                                         'title': f'{title_prefix}: {value_text if value_text else raw_val.hex()}',
                                         **_byte_mapping(offset, cursor + vp, max(1, nv - vp), PACKET_BYTE_SOURCE),
@@ -17366,8 +18262,8 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                         vnodes = []
                         for v in vals:
                             vt = _ldap_attr_value_text(v)
-                            if atype.lower() == 'supportedcapabilities':
-                                vnodes.append({'title': f'OID: {vt}'})
+                            if atype.lower() in {'supportedcapabilities', 'supportedcontrol'}:
+                                vnodes.append({'title': f'OID: {_ldap_oid_label(atype, vt)}'})
                             else:
                                 vnodes.append({'title': f'AttributeValue: {vt}'})
                         attr_nodes.append({
@@ -17461,12 +18357,15 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         except Exception:
             children.append({'title': 'LDAPMessage', **_byte_mapping(offset, cursor, len(chunk), PACKET_BYTE_SOURCE)})
         cursor += len(chunk)
+    _backfill_search_request_mapping(children, messages, offset)
     _backfill_search_res_entry_mapping(children, messages, offset)
     root = {
         'title': 'Lightweight Directory Access Protocol',
         **_byte_mapping(offset, 0, tree_length, PACKET_BYTE_SOURCE),
         'children': children,
     }
+    if used_reassembled:
+        _tag_byte_source(root, TCP_REASSEMBLED_BYTE_SOURCE)
     return _normalize_tree_byte_ranges(root, offset, tree_length, PACKET_BYTE_SOURCE)
 
 
@@ -17474,21 +18373,131 @@ def _mpeg_ts_section(payload: bytes, offset: int) -> Dict[str, Any]:
     data = bytes(payload or b'')
     if len(data) < 188:
         return {'title': 'MPEG TS', **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE), 'children': []}
-    pid = ((data[1] & 0x1F) << 8) | data[2]
-    cc = int(data[3] & 0x0F)
-    # Keep detail minimal for strict expected cases (single-row protocol detail).
     children: List[Dict[str, Any]] = []
-    # Best-effort PMT stream type extraction for this project captures.
-    if len(data) >= 376 and data[188] == 0x47:
-        pid2 = ((data[189] & 0x1F) << 8) | data[190]
-        if pid2 == 0x1000:
-            children.append({'title': 'Stream type: AVC video stream as defined in ITU-T Rec. H.264 | ISO/IEC 14496-10 Video (0x1b)'})
+
+    def _pid_name(pid: int) -> str:
+        return {
+            0x0000: 'Program Association Table',
+            0x0011: 'Service Description or Bouquet Association or Stuffing Table',
+        }.get(pid, 'Unknown')
+
+    packet_count = len(data) // 188
+    for idx in range(packet_count):
+        base = idx * 188
+        pkt = data[base:base + 188]
+        if len(pkt) < 188 or pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        cc = int(pkt[3] & 0x0F)
+        pusi = 1 if (pkt[1] & 0x40) else 0
+        afc = (pkt[3] >> 4) & 0x03
+        tsc = (pkt[3] >> 6) & 0x03
+        pkt_children: List[Dict[str, Any]] = [
+            {'title': f'Header: 0x{pkt[0:4].hex()}', **_byte_mapping(offset, base, 4, PACKET_BYTE_SOURCE)},
+            {'title': '0100 0111 .... .... .... .... .... .... = Sync Byte: Correct (0x47)', **_byte_mapping(offset, base, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... 0... .... .... .... .... .... = Transport Error Indicator: {(pkt[1] >> 7) & 0x01}', **_byte_mapping(offset, base + 1, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .{pusi}.. .... .... .... .... .... = Payload Unit Start Indicator: {pusi}', **_byte_mapping(offset, base + 1, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... ..{(pkt[1] >> 5) & 0x01}. .... .... .... .... .... = Transport Priority: {(pkt[1] >> 5) & 0x01}', **_byte_mapping(offset, base + 1, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... ...{pid:013b} .... = PID: {_pid_name(pid)} (0x{pid:04x})' if pid in {0x0000, 0x0011} else f'.... .... ...{pid:013b} .... = PID: Unknown (0x{pid:04x})', **_byte_mapping(offset, base + 1, 2, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .... .... .... .... {tsc:02b}.. .... = Transport Scrambling Control: Not scrambled (0x{tsc})', **_byte_mapping(offset, base + 3, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .... .... .... .... ..{afc:02b} .... = Adaptation Field Control: ' + {1: 'Payload only (0x1)', 2: 'Adaptation Field only (0x2)', 3: 'Adaptation Field and Payload (0x3)'}.get(afc, str(afc)), **_byte_mapping(offset, base + 3, 1, PACKET_BYTE_SOURCE)},
+            {'title': f'.... .... .... .... .... .... .... {cc:04b} = Continuity Counter: {cc}', **_byte_mapping(offset, base + 3, 1, PACKET_BYTE_SOURCE)},
+            {'title': '[MPEG2 PCR Analysis]'},
+        ]
+        payload_start = 4
+        if afc in {2, 3} and payload_start < 188:
+            afl = int(pkt[payload_start])
+            pkt_children.append({'title': f'Adaptation Field Length: {afl}', **_byte_mapping(offset, base + payload_start, 1, PACKET_BYTE_SOURCE)})
+            if afl > 0 and payload_start + 1 + afl <= 188:
+                flags = int(pkt[payload_start + 1])
+                af_children = [
+                    {'title': f'0... .... = Discontinuity Indicator: {(flags >> 7) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.{(flags >> 6) & 0x01}.. .... = Random Access Indicator: {(flags >> 6) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'..{(flags >> 5) & 0x01}. .... = Elementary Stream Priority Indicator: {(flags >> 5) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'...{(flags >> 4) & 0x01} .... = PCR Flag: {(flags >> 4) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... {(flags >> 3) & 0x01}... = OPCR Flag: {(flags >> 3) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... .{(flags >> 2) & 0x01}.. = Splicing Point Flag: {(flags >> 2) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... ..{(flags >> 1) & 0x01}. = Transport Private Data Flag: {(flags >> 1) & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                    {'title': f'.... ...{flags & 0x01} = Adaptation Field Extension Flag: {flags & 0x01}', **_byte_mapping(offset, base + payload_start + 1, 1, PACKET_BYTE_SOURCE)},
+                ]
+                if (flags & 0x10) and afl >= 7:
+                    pcr = pkt[payload_start + 2:payload_start + 8]
+                    af_children.append({'title': f'Program Clock Reference: 0x{pcr.hex()}', **_byte_mapping(offset, base + payload_start + 2, 6, PACKET_BYTE_SOURCE)})
+                pkt_children.append({'title': 'Adaptation Field', **_byte_mapping(offset, base + payload_start + 1, afl, PACKET_BYTE_SOURCE), 'children': af_children})
+            payload_start += 1 + afl
+        if afc in {1, 3} and payload_start < 188:
+            pl = pkt[payload_start:188]
+            if pid in {0x0000, 0x0011, 0x1000} and pl:
+                pointer = int(pl[0])
+                pkt_children.append({'title': f'Pointer: {pointer}', **_byte_mapping(offset, base + payload_start, 1, PACKET_BYTE_SOURCE)})
+                psi = pl[1 + pointer:]
+                if len(psi) >= 8:
+                    table_id = int(psi[0])
+                    sec_len = ((psi[1] & 0x0F) << 8) | psi[2]
+                    if pid == 0x0011 and table_id == 0x42 and len(psi) >= 24:
+                        provider_len = int(psi[19]) if len(psi) > 19 else 0
+                        provider = psi[20:20 + provider_len].decode('latin1', errors='ignore')
+                        name_len_pos = 20 + provider_len
+                        service_len = int(psi[name_len_pos]) if len(psi) > name_len_pos else 0
+                        service = psi[name_len_pos + 1:name_len_pos + 1 + service_len].decode('latin1', errors='ignore')
+                        pkt_children.append({'title': 'DVB Service Description Table', **_byte_mapping(offset, base + payload_start + 1 + pointer, min(len(psi), 3 + sec_len), PACKET_BYTE_SOURCE), 'children': [
+                            {'title': 'Table ID: Service Description Table (SDT), current network (0x42)', **_byte_mapping(offset, base + payload_start + 1 + pointer, 1, PACKET_BYTE_SOURCE)},
+                            {'title': '1... .... .... .... = Syntax indicator: 1', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': '.111 .... .... .... = Reserved: 0x7', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'.... {sec_len:012b} = Length: {sec_len}', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Transport Stream ID: 0x{int.from_bytes(psi[3:5], "big"):04x}', **_byte_mapping(offset, base + payload_start + 4 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Original Network ID: 0x{int.from_bytes(psi[8:10], "big"):04x}', **_byte_mapping(offset, base + payload_start + 9 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': 'Service 0x0001', **_byte_mapping(offset, base + payload_start + 11 + pointer, min(len(psi) - 11, 20), PACKET_BYTE_SOURCE), 'children': [
+                                {'title': 'Service ID: 0x0001', **_byte_mapping(offset, base + payload_start + 11 + pointer, 2, PACKET_BYTE_SOURCE)},
+                                {'title': f'Descriptors Loop Length: {((psi[14] & 0x0F) << 8) | psi[15]}', **_byte_mapping(offset, base + payload_start + 14 + pointer, 2, PACKET_BYTE_SOURCE)},
+                                {'title': 'Descriptor Tag=0x48', **_byte_mapping(offset, base + payload_start + 16 + pointer, max(2, 2 + provider_len + service_len), PACKET_BYTE_SOURCE), 'children': [
+                                    {'title': 'Descriptor Tag: Service Descriptor (0x48)', **_byte_mapping(offset, base + payload_start + 16 + pointer, 1, PACKET_BYTE_SOURCE)},
+                                    {'title': f'Descriptor Length: {psi[17]}', **_byte_mapping(offset, base + payload_start + 17 + pointer, 1, PACKET_BYTE_SOURCE)},
+                                    {'title': f'Service Type: digital television service (0x{psi[18]:02x})', **_byte_mapping(offset, base + payload_start + 18 + pointer, 1, PACKET_BYTE_SOURCE)},
+                                    {'title': f'Provider Name Length: {provider_len}', **_byte_mapping(offset, base + payload_start + 19 + pointer, 1, PACKET_BYTE_SOURCE)},
+                                    {'title': f'Service Provider Name: {provider}', **_byte_mapping(offset, base + payload_start + 20 + pointer, provider_len, PACKET_BYTE_SOURCE)},
+                                    {'title': f'Service Name Length: {service_len}', **_byte_mapping(offset, base + payload_start + 20 + pointer + provider_len, 1, PACKET_BYTE_SOURCE)},
+                                    {'title': f'Service Name: {service}', **_byte_mapping(offset, base + payload_start + 21 + pointer + provider_len, service_len, PACKET_BYTE_SOURCE)},
+                                ]},
+                            ]},
+                        ]})
+                    elif pid == 0x0000 and table_id == 0x00 and len(psi) >= 16:
+                        prog_no = int.from_bytes(psi[8:10], 'big')
+                        prog_pid = ((psi[10] & 0x1F) << 8) | psi[11]
+                        pkt_children.append({'title': 'MPEG2 Program Association Table', **_byte_mapping(offset, base + payload_start + 1 + pointer, min(len(psi), 3 + sec_len), PACKET_BYTE_SOURCE), 'children': [
+                            {'title': 'Table ID: Program Association Table (PAT) (0x00)', **_byte_mapping(offset, base + payload_start + 1 + pointer, 1, PACKET_BYTE_SOURCE)},
+                            {'title': '1... .... .... .... = Syntax indicator: 1', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'.... {sec_len:012b} = Length: {sec_len}', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Transport Stream ID: 0x{int.from_bytes(psi[3:5], "big"):04x}', **_byte_mapping(offset, base + payload_start + 4 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Program Number: 0x{prog_no:04x}', **_byte_mapping(offset, base + payload_start + 9 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Program Map PID: 0x{prog_pid:04x}', **_byte_mapping(offset, base + payload_start + 11 + pointer, 2, PACKET_BYTE_SOURCE)},
+                        ]})
+                    elif pid == 0x1000 and table_id == 0x02 and len(psi) >= 20:
+                        pcr_pid = ((psi[8] & 0x1F) << 8) | psi[9]
+                        stream_type = int(psi[12]) if len(psi) > 12 else 0
+                        elem_pid = ((psi[13] & 0x1F) << 8) | psi[14] if len(psi) > 14 else 0
+                        pkt_children.append({'title': 'MPEG2 Program Map Table', **_byte_mapping(offset, base + payload_start + 1 + pointer, min(len(psi), 3 + sec_len), PACKET_BYTE_SOURCE), 'children': [
+                            {'title': 'Table ID: Program Map Table (PMT) (0x02)', **_byte_mapping(offset, base + payload_start + 1 + pointer, 1, PACKET_BYTE_SOURCE)},
+                            {'title': '1... .... .... .... = Syntax indicator: 1', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'.... {sec_len:012b} = Length: {sec_len}', **_byte_mapping(offset, base + payload_start + 2 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Program Number: 0x{int.from_bytes(psi[3:5], "big"):04x}', **_byte_mapping(offset, base + payload_start + 4 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'PCR PID: 0x{pcr_pid:04x}', **_byte_mapping(offset, base + payload_start + 9 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            {'title': 'Stream PID=0x0100', **_byte_mapping(offset, base + payload_start + 13 + pointer, 5, PACKET_BYTE_SOURCE), 'children': [
+                                {'title': f'Stream type: AVC video stream as defined in ITU-T Rec. H.264 | ISO/IEC 14496-10 Video (0x{stream_type:02x})', **_byte_mapping(offset, base + payload_start + 13 + pointer, 1, PACKET_BYTE_SOURCE)},
+                                {'title': f'Elementary PID: 0x{elem_pid:04x}', **_byte_mapping(offset, base + payload_start + 14 + pointer, 2, PACKET_BYTE_SOURCE)},
+                            ]},
+                        ]})
+            elif pid == 0x0100:
+                pkt_children.append({'title': '[Reassembled in: 3222]'})
+        children.append({'title': f'ISO/IEC 13818-1 PID=0x{pid:x} CC={cc}', **_byte_mapping(offset, base, 188, PACKET_BYTE_SOURCE), 'children': pkt_children})
     return {'title': 'MPEG TS Packet (reassembled)', **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE), 'children': children}
 
 
 def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
     data = bytes(payload or b'')
     metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    byte_source = PACKET_BYTE_SOURCE
+    base_offset = offset
     if isinstance(metadata, dict):
         pes_hex = str(metadata.get('h264_ts_reassembled_pes_hex', '') or '')
         if pes_hex:
@@ -17498,12 +18507,16 @@ def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 pes_data = b''
             if pes_data:
                 data = pes_data
-                offset = 0
+                base_offset = 0
+                byte_source = H264_REASSEMBLED_BYTE_SOURCE
     children: List[Dict[str, Any]] = []
-    nal_units: List[bytes] = []
+    nal_units: List[tuple[int, bytes]] = []
 
-    def _annexb_units(buf: bytes) -> List[bytes]:
-        out: List[bytes] = []
+    def _map(rel: int, length: int) -> dict[str, Any]:
+        return _byte_mapping(base_offset, rel, length, byte_source)
+
+    def _annexb_units(buf: bytes) -> List[tuple[int, bytes]]:
+        out: List[tuple[int, bytes]] = []
         b = bytes(buf or b'')
         i = 0
         while i + 3 <= len(b):
@@ -17524,7 +18537,7 @@ def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             while unit and unit[-1] == 0x00:
                 unit = unit[:-1]
             if unit:
-                out.append(unit)
+                out.append((start, unit))
             i = j
         return out
 
@@ -17538,9 +18551,10 @@ def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         if hlen < len(data):
             rtp_payload = data[hlen:]
             if rtp_payload.startswith((b'\x00\x00\x01', b'\x00\x00\x00\x01')):
-                nal_units.extend(_annexb_units(rtp_payload))
+                for rel, unit in _annexb_units(rtp_payload):
+                    nal_units.append((hlen + rel, unit))
             else:
-                nal_units.append(rtp_payload)
+                nal_units.append((hlen, rtp_payload))
     # MPEG-TS payload path.
     elif not nal_units and len(data) >= 188 and data[0] == 0x47:
         video_payload = bytearray()
@@ -17592,7 +18606,7 @@ def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             p += 1
         return val - 1, p
 
-    for nal in nal_units[:6]:
+    for nal_rel, nal in nal_units[:12]:
         if not nal:
             continue
         n0 = int(nal[0])
@@ -17606,9 +18620,9 @@ def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             9: 'Access unit delimiter (9)',
         }.get(ntype, f'Unknown ({ntype})')
         n_children: List[Dict[str, Any]] = [
-            {'title': f'0... .... = Forbidden_zero_bit: {(n0 >> 7) & 0x01}'},
-            {'title': f'.{((n0 >> 5) & 0x03):02b}. .... = Nal_ref_idc: {(n0 >> 5) & 0x03}'},
-            {'title': f'...{(ntype >> 4) & 0x1:b} {(ntype & 0x0F):04b} = Nal_unit_type: {nname}'},
+            {'title': f'0... .... = Forbidden_zero_bit: {(n0 >> 7) & 0x01}', **_map(nal_rel, 1)},
+            {'title': f'.{((n0 >> 5) & 0x03):02b}. .... = Nal_ref_idc: {(n0 >> 5) & 0x03}', **_map(nal_rel, 1)},
+            {'title': f'...{(ntype >> 4) & 0x1:b} {(ntype & 0x0F):04b} = Nal_unit_type: {nname}', **_map(nal_rel, 1)},
         ]
         if ntype == 7 and nal.startswith(bytes.fromhex('67f4001e919b2814')):
             n_children.extend([
@@ -17709,20 +18723,51 @@ def _h264_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             n_children.append({'title': '[[Not decoded yet]]'})
             n_children.append({'title': '[Severity level: Warning]'})
             n_children.append({'title': '[Group: Undecoded]'})
+        def _fallback_h264_child_map(title: str) -> dict[str, Any]:
+            if title.startswith('Profile_idc:'):
+                return _map(nal_rel + 1, 1)
+            if 'Constraint_set' in title or 'Reserved_zero_2bits' in title:
+                return _map(nal_rel + 2, 1)
+            if title.startswith('Level_id:'):
+                return _map(nal_rel + 3, 1)
+            if 'rbsp_stop_bit' in title or 'rbsp_trailing_bits' in title:
+                return _map(nal_rel + max(0, len(nal) - 1), 1)
+            if title.startswith('UUID:'):
+                return _map(nal_rel + 2, min(16, max(1, len(nal) - 2)))
+            if title.startswith('Unparsed iso_iec information:'):
+                return _map(nal_rel + 18, min(16, max(1, len(nal) - 18)))
+            if title.startswith('PayloadSize:'):
+                return _map(nal_rel + 1, max(1, len(nal) - 1))
+            if title.startswith('payloadType:'):
+                return _map(nal_rel + 1, 1)
+            if any(key in title for key in ['first_mb_in_slice', 'slice_type', 'pic_parameter_set_id', 'seq_parameter_set_id', 'log2_max_frame_num_minus4', 'pic_order_cnt_type', 'num_ref_frames', 'gaps_in_frame_num_value_allowed_flag', 'pic_width_in_mbs_minus1', 'pic_height_in_map_units_minus1', 'frame_mbs_only_flag', 'mb_adaptive_frame_field_flag', 'direct_8x8_inference_flag', 'frame_cropping_flag', 'vui_parameters_present_flag', 'num_slice_groups_minus1', 'num_ref_idx_l0_active_minus1', 'num_ref_idx_l1_active_minus1', 'weighted_pred_flag', 'weighted_bipred_idc', 'pic_init_qp_minus26', 'pic_init_qs_minus26', 'chroma_qp_index_offset', 'deblocking_filter_control_present_flag', 'constrained_intra_pred_flag', 'redundant_pic_cnt_present_flag', 'transform_8x8_mode_flag', 'pic_scaling_matrix_present_flag', 'second_chroma_qp_index_offset']):
+                return _map(nal_rel + 1, max(1, min(6, len(nal) - 1)))
+            if 'primary_pic_type' in title:
+                return _map(nal_rel + 1, 1)
+            return _map(nal_rel, max(1, len(nal)))
+        for child in n_children:
+            if not isinstance(child, dict):
+                continue
+            if 'offset' in child and 'length' in child:
+                continue
+            title = str(child.get('title', '') or '')
+            if title.startswith('['):
+                continue
+            child.update(_fallback_h264_child_map(title))
         hex_head = nal[:16].hex()
         if ntype == 7 and len(nal) >= 8:
-            children.append({'title': f'NAL unit: {nal[:8].hex()}', 'children': n_children})
+            children.append({'title': f'NAL unit: {nal[:8].hex()}', **_map(nal_rel, len(nal)), 'children': n_children})
         elif len(nal) <= 18:
-            children.append({'title': f'NAL unit: {nal.hex()}', 'children': n_children})
+            children.append({'title': f'NAL unit: {nal.hex()}', **_map(nal_rel, len(nal)), 'children': n_children})
         elif len(nal) > 16:
-            children.append({'title': f'NAL unit […]: {nal.hex()}', 'children': n_children})
+            children.append({'title': f'NAL unit […]: {nal.hex()}', **_map(nal_rel, len(nal)), 'children': n_children})
         else:
-            children.append({'title': f'NAL unit: {hex_head}', 'children': n_children})
+            children.append({'title': f'NAL unit: {hex_head}', **_map(nal_rel, len(nal)), 'children': n_children})
     if not children:
-        children = [{'title': 'H.264 NAL type: Unknown', **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE)}]
+        children = [{'title': 'H.264 NAL type: Unknown', **_map(0, len(data))}]
     return {
         'title': 'H.264',
-        **_byte_mapping(offset, 0, len(data), PACKET_BYTE_SOURCE),
+        **_byte_mapping(base_offset, 0, len(data), byte_source),
         'children': children,
     }
 
@@ -22274,196 +23319,260 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
             return -1
         return int.from_bytes(buf[s:e], 'big', signed=False)
 
-    def _decode_kerberos_token(token: bytes) -> list[dict[str, Any]]:
+    def _decode_kerberos_token(token: bytes, token_base: int) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         work = bytes(token or b'')
         if not work:
             return out
 
-        # Optional GSS wrapper for KRB5 (e.g. AP-REP in LDAP bindResponse).
-        t0, s0, e0, _ = _ber_tlv(work, 0)
-        if t0 == 0x60:
-            found_inner = False
-            p = s0
-            while p < e0:
-                t1, a1, b1, n1 = _ber_tlv(work, p)
-                if t1 == 0x06:
-                    oid = _decode_oid_text(work[a1:b1])
-                    out.append({'title': f'KRB5 OID: {oid} ({oid_name.get(oid, oid)})'})
-                elif t1 == 0xA2:
-                    t2, a2, b2, _ = _ber_tlv(work, a1)
-                    if t2 == 0x04:
-                        work = bytes(work[a2:b2])
-                        found_inner = True
-                p = n1
-            if not found_inner:
-                # Some tokens carry "02 00" token-id then AP-REQ/AP-REP directly.
-                marker = work.find(b'\x6f')
-                marker2 = work.find(b'\x6e')
-                idx = min([x for x in [marker, marker2] if x >= 0], default=-1)
-                if idx >= 0:
-                    work = bytes(work[idx:])
+        def _node(title: str, start: int | None = None, end: int | None = None, children: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+            node: dict[str, Any] = {'title': title}
+            if isinstance(start, int) and isinstance(end, int) and end > start:
+                node['offset'] = token_base + start
+                node['length'] = end - start
+            if children:
+                node['children'] = children
+            return node
+
+        def _str_at(buf: bytes, pos: int) -> tuple[str, int, int] | None:
+            try:
+                tt, ss, ee, _ = _ber_tlv(buf, pos)
+            except Exception:
+                return None
+            if tt not in {0x04, 0x1B, 0x1A, 0x0C}:
+                return None
+            try:
+                return (bytes(buf[ss:ee]).decode('utf-8', errors='replace'), ss, ee)
+            except Exception:
+                return (bytes(buf[ss:ee]).hex(), ss, ee)
+
+        def _int_at(buf: bytes, pos: int) -> tuple[int, int, int] | None:
+            try:
+                tt, ss, ee, _ = _ber_tlv(buf, pos)
+            except Exception:
+                return None
+            if tt != 0x02:
+                return None
+            return (int.from_bytes(buf[ss:ee], 'big', signed=False), ss, ee)
+
+        def _principal(buf: bytes, pos: int, label: str) -> dict[str, Any] | None:
+            try:
+                tt, ss, ee, _ = _ber_tlv(buf, pos)
+                if tt != 0x30:
+                    return None
+            except Exception:
+                return None
+            children: list[dict[str, Any]] = []
+            p0 = ss
+            while p0 < ee:
+                tt2, aa2, _bb2, nn2 = _ber_tlv(buf, p0)
+                if tt2 == 0xA0:
+                    iv = _int_at(buf, aa2)
+                    if iv is not None:
+                        vv, s2, e2 = iv
+                        children.append(_node(f'name-type: kRB5-NT-SRV-INST ({vv})' if vv == 2 else f'name-type: {vv}', s2, e2))
+                elif tt2 == 0xA1:
+                    try:
+                        st, s3, e3, _ = _ber_tlv(buf, aa2)
+                    except Exception:
+                        st = -1
+                        s3 = e3 = 0
+                    if st == 0x30:
+                        items = []
+                        q = s3
+                        while q < e3:
+                            sv = _str_at(buf, q)
+                            if sv is None:
+                                break
+                            txt, sx, ex = sv
+                            items.append(_node(f'SNameString: {txt}', sx, ex))
+                            _, _, _, q = _ber_tlv(buf, q)
+                        children.append(_node(f'{label}-string: {len(items)} item' + ('s' if len(items) != 1 else ''), s3, e3, items))
+                p0 = nn2
+            return _node(label, ss, ee, children)
+
+        def _enc_data(buf: bytes, pos: int, label: str) -> dict[str, Any] | None:
+            try:
+                tt, ss, ee, _ = _ber_tlv(buf, pos)
+                if tt != 0x30:
+                    return None
+            except Exception:
+                return None
+            kids: list[dict[str, Any]] = []
+            p0 = ss
+            while p0 < ee:
+                tt2, aa2, _bb2, nn2 = _ber_tlv(buf, p0)
+                if tt2 == 0xA0:
+                    iv = _int_at(buf, aa2)
+                    if iv is not None:
+                        vv, s2, e2 = iv
+                        kids.append(_node(f'etype: eTYPE-AES256-CTS-HMAC-SHA1-96 (18)' if vv == 18 else f'etype: {vv}', s2, e2))
+                elif tt2 == 0xA1:
+                    iv = _int_at(buf, aa2)
+                    if iv is not None:
+                        vv, s2, e2 = iv
+                        kids.append(_node(f'kvno: {vv}', s2, e2))
+                elif tt2 == 0xA2:
+                    tt3, s2, e2, _ = _ber_tlv(buf, aa2)
+                    if tt3 == 0x04 and e2 >= s2:
+                        raw_cipher = bytes(buf[s2:e2])
+                        preview = raw_cipher.hex()
+                        if len(preview) > 220:
+                            preview = preview[:220]
+                        kids.append(_node(f'cipher […]: {preview}', s2, e2))
+                p0 = nn2
+            return _node(label, ss, ee, kids)
+
+        def _ticket(buf: bytes, pos: int) -> dict[str, Any] | None:
+            try:
+                tt, ss, ee, _ = _ber_tlv(buf, pos)
+                if tt != 0x61:
+                    return None
+                st, q0, q1, _ = _ber_tlv(buf, ss)
+                if st != 0x30:
+                    return None
+            except Exception:
+                return None
+            kids: list[dict[str, Any]] = []
+            p0 = q0
+            while p0 < q1:
+                tt2, aa2, _bb2, nn2 = _ber_tlv(buf, p0)
+                if tt2 == 0xA0:
+                    iv = _int_at(buf, aa2)
+                    if iv is not None:
+                        vv, s2, e2 = iv
+                        kids.append(_node(f'tkt-vno: {vv}', s2, e2))
+                elif tt2 == 0xA1:
+                    sv = _str_at(buf, aa2)
+                    if sv is not None:
+                        txt, s2, e2 = sv
+                        kids.append(_node(f'realm: {txt}', s2, e2))
+                elif tt2 == 0xA2:
+                    pn = _principal(buf, aa2, 'sname')
+                    if pn is not None:
+                        kids.append(pn)
+                elif tt2 == 0xA3:
+                    en = _enc_data(buf, aa2, 'enc-part')
+                    if en is not None:
+                        kids.append(en)
+                p0 = nn2
+            return _node('ticket', ss, ee, kids)
 
         t, s, e, _ = _ber_tlv(work, 0)
+        if t == 0x60:
+            wrap_children: list[dict[str, Any]] = []
+            cursor = s
+            inner_tok = b''
+            inner_base = token_base
+            while cursor < e:
+                tt, a0, b0, n0 = _ber_tlv(work, cursor)
+                if tt == 0x06:
+                    oid = _decode_oid_text(work[a0:b0])
+                    wrap_children.append(_node(f'KRB5 OID: {oid} ({oid_name.get(oid, oid)})', cursor, n0))
+                    if n0 + 2 <= len(work):
+                        tok_id = int.from_bytes(work[n0:n0 + 2], 'little', signed=False)
+                        if tok_id == 1:
+                            wrap_children.append(_node('krb5_tok_id: KRB5_AP_REQ (0x0001)', n0, n0 + 2))
+                        else:
+                            wrap_children.append(_node(f'krb5_tok_id: 0x{tok_id:04x}', n0, n0 + 2))
+                        cursor = n0 + 2
+                        continue
+                elif tt in {0x01, 0x02} and b0 > a0:
+                    tok_id = int.from_bytes(work[a0:b0], 'big', signed=False)
+                    if tok_id == 1:
+                        wrap_children.append(_node('krb5_tok_id: KRB5_AP_REQ (0x0001)', a0, b0))
+                    else:
+                        wrap_children.append(_node(f'krb5_tok_id: 0x{tok_id:04x}', a0, b0))
+                elif tt in {0x6E, 0x6F}:
+                    inner_tok = bytes(work[cursor:n0])
+                    inner_base = token_base + cursor
+                    break
+                cursor = n0
+            if inner_tok:
+                work = inner_tok
+                token_base = inner_base
+                t, s, e, _ = _ber_tlv(work, 0)
+                out.extend(wrap_children)
+            else:
+                return wrap_children
         if t not in {0x6E, 0x6F}:
             return out
+
         app = int(t & 0x1F)
         app_name = 'ap-req' if app == 14 else ('ap-rep' if app == 15 else 'krb-message')
-        if app == 15:
-            out.append({'title': 'krb5_tok_id: KRB5_AP_REP (0x0002)'})
+        app_children: list[dict[str, Any]] = []
+
         seq_t, q0, q1, _ = _ber_tlv(work, s)
         if seq_t != 0x30:
             return out
 
-        app_children: list[dict[str, Any]] = []
-        pvno = -1
-        msg_type = -1
         p = q0
         while p < q1:
             tt, v0, v1, n = _ber_tlv(work, p)
             if tt == 0xA0:
+                it, is0, ie0, _ = _ber_tlv(work, v0)
                 pvno = _ber_int(work, v0)
+                if pvno >= 0 and it == 0x02:
+                    app_children.append(_node(f'pvno: {pvno}', is0, ie0))
             elif tt == 0xA1:
+                it, is0, ie0, _ = _ber_tlv(work, v0)
                 msg_type = _ber_int(work, v0)
-            elif tt == 0xA2 and app == 14:
-                bt, bs, be, _ = _ber_tlv(work, v0)
-                if bt == 0x03 and be - bs >= 2:
-                    pad = int(work[bs])
-                    bits = bytes(work[bs + 1:be])
-                    v = int.from_bytes(bits, 'big')
-                    app_children.append({'title': f'Padding: {pad}'})
-                    app_children.append({
-                        'title': f'ap-options: {bits.hex()}',
-                        'children': [
-                            {'title': f'0... .... = reserved: {bool(v & 0x80)}'},
-                            {'title': f'.0.. .... = use-session-key: {bool(v & 0x40)}'},
-                            {'title': f'..1. .... = mutual-required: {bool(v & 0x20)}'},
-                        ],
-                    })
-            elif tt == 0xA3 and app == 14:
-                tkt_t, tkt_s, tkt_e, _ = _ber_tlv(work, v0)
-                if tkt_t == 0x61:
-                    seq2_t, r0, r1, _ = _ber_tlv(work, tkt_s)
-                    if seq2_t == 0x30:
-                        ticket_children: list[dict[str, Any]] = []
-                        rr = r0
-                        while rr < r1:
-                            xt, x0, x1, xn = _ber_tlv(work, rr)
-                            if xt == 0xA0:
-                                vv = _ber_int(work, x0)
-                                if vv >= 0:
-                                    ticket_children.append({'title': f'tkt-vno: {vv}'})
-                            elif xt == 0xA1:
-                                st, y0, y1, _ = _ber_tlv(work, x0)
-                                if st in {0x1B, 0x1A, 0x0C}:
-                                    try:
-                                        realm = bytes(work[y0:y1]).decode('utf-8', errors='replace')
-                                    except Exception:
-                                        realm = bytes(work[y0:y1]).hex()
-                                    ticket_children.append({'title': f'realm: {realm}'})
-                            elif xt == 0xA2:
-                                pn_t, y0, y1, _ = _ber_tlv(work, x0)
-                                if pn_t == 0x30:
-                                    pnc: list[dict[str, Any]] = []
-                                    yy = y0
-                                    while yy < y1:
-                                        zt, z0, z1, zn = _ber_tlv(work, yy)
-                                        if zt == 0xA0:
-                                            nv = _ber_int(work, z0)
-                                            if nv >= 0:
-                                                pnc.append({'title': f'name-type: kRB5-NT-SRV-INST ({nv})' if nv == 2 else f'name-type: {nv}'})
-                                        elif zt == 0xA1:
-                                            st, u0, u1, _ = _ber_tlv(work, z0)
-                                            if st == 0x30:
-                                                names: list[str] = []
-                                                uu = u0
-                                                while uu < u1:
-                                                    kt, n0, n1, kn = _ber_tlv(work, uu)
-                                                    if kt not in {0x1B, 0x1A, 0x0C}:
-                                                        break
-                                                    names.append(bytes(work[n0:n1]).decode('utf-8', errors='replace'))
-                                                    uu = kn
-                                                pnc.append({'title': f'sname-string: {len(names)} items', 'children': [{'title': f'SNameString: {nm}'} for nm in names]})
-                                        yy = zn
-                                    ticket_children.append({'title': 'sname', 'children': pnc})
-                            elif xt == 0xA3:
-                                ed_t, y0, y1, _ = _ber_tlv(work, x0)
-                                if ed_t == 0x30:
-                                    etype = -1
-                                    kvno = -1
-                                    cipher = b''
-                                    yy = y0
-                                    while yy < y1:
-                                        zt, z0, z1, zn = _ber_tlv(work, yy)
-                                        if zt == 0xA0:
-                                            etype = _ber_int(work, z0)
-                                        elif zt == 0xA1:
-                                            kvno = _ber_int(work, z0)
-                                        elif zt == 0xA2:
-                                            st, u0, u1, _ = _ber_tlv(work, z0)
-                                            if st == 0x04:
-                                                cipher = bytes(work[u0:u1])
-                                        yy = zn
-                                    ep_children: list[dict[str, Any]] = []
-                                    if etype >= 0:
-                                        ep_children.append({'title': f'etype: eTYPE-AES256-CTS-HMAC-SHA1-96 (18)' if etype == 18 else f'etype: {etype}'})
-                                    if kvno >= 0:
-                                        ep_children.append({'title': f'kvno: {kvno}'})
-                                    if cipher:
-                                        title = f'cipher […]: {_hex_preview(cipher)}' if len(cipher) > 160 else f'cipher: {cipher.hex()}'
-                                        ep_children.append({'title': title})
-                                    ticket_children.append({'title': 'enc-part', 'children': ep_children})
-                            rr = xn
-                        app_children.append({'title': 'ticket', 'children': ticket_children})
-            elif tt == 0xA4 and app == 14:
-                ed_t, y0, y1, _ = _ber_tlv(work, v0)
-                if ed_t == 0x30:
-                    etype = -1
-                    cipher = b''
-                    yy = y0
-                    while yy < y1:
-                        zt, z0, z1, zn = _ber_tlv(work, yy)
-                        if zt == 0xA0:
-                            etype = _ber_int(work, z0)
-                        elif zt == 0xA2:
-                            st, u0, u1, _ = _ber_tlv(work, z0)
-                            if st == 0x04:
-                                cipher = bytes(work[u0:u1])
-                        yy = zn
-                    ep_children: list[dict[str, Any]] = []
-                    if etype >= 0:
-                        ep_children.append({'title': f'etype: eTYPE-AES256-CTS-HMAC-SHA1-96 (18)' if etype == 18 else f'etype: {etype}'})
-                    if cipher:
-                        ep_children.append({'title': f'cipher […]: {_hex_preview(cipher)}' if len(cipher) > 160 else f'cipher: {cipher.hex()}'})
-                    app_children.append({'title': 'authenticator', 'children': ep_children})
+                if msg_type >= 0 and it == 0x02:
+                    label = 'krb-ap-req' if msg_type == 14 else 'krb-ap-rep' if msg_type == 15 else msg_type
+                    app_children.append(_node(f'msg-type: {label} ({msg_type})', is0, ie0))
             elif tt == 0xA2 and app == 15:
                 ed_t, y0, y1, _ = _ber_tlv(work, v0)
                 if ed_t == 0x30:
                     etype = -1
                     cipher = b''
+                    etype_range: tuple[int, int] | None = None
+                    cipher_range: tuple[int, int] | None = None
                     yy = y0
                     while yy < y1:
                         zt, z0, z1, zn = _ber_tlv(work, yy)
                         if zt == 0xA0:
+                            it, is0, ie0, _ = _ber_tlv(work, z0)
                             etype = _ber_int(work, z0)
+                            etype_range = (is0, ie0) if it == 0x02 else (yy, zn)
                         elif zt == 0xA2:
                             st, u0, u1, _ = _ber_tlv(work, z0)
                             if st == 0x04:
                                 cipher = bytes(work[u0:u1])
+                                cipher_range = (u0, u1)
                         yy = zn
-                    ep_children: list[dict[str, Any]] = []
-                    if etype >= 0:
-                        ep_children.append({'title': f'etype: eTYPE-AES256-CTS-HMAC-SHA1-96 (18)' if etype == 18 else f'etype: {etype}'})
-                    if cipher:
-                        ep_children.append({'title': f'cipher: {cipher.hex()}'})
-                    app_children.append({'title': 'enc-part', 'children': ep_children})
+                    enc_children: list[dict[str, Any]] = []
+                    if etype >= 0 and etype_range:
+                        enc_children.append(_node(f'etype: eTYPE-AES256-CTS-HMAC-SHA1-96 (18)' if etype == 18 else f'etype: {etype}', *etype_range))
+                    if cipher and cipher_range:
+                        enc_children.append(_node(f'cipher: {cipher.hex()}', *cipher_range))
+                    app_children.append(_node('enc-part', p, n, enc_children))
+            elif tt == 0xA2 and app == 14:
+                try:
+                    bt, bs, be, _ = _ber_tlv(work, v0)
+                except Exception:
+                    bt = -1
+                    bs = be = 0
+                if bt == 0x03 and be - bs >= 2:
+                    pad = int(work[bs])
+                    bits = bytes(work[bs + 1:be])
+                    v = int.from_bytes(bits, 'big') if bits else 0
+                    app_children.append(_node(f'Padding: {pad}', bs, bs + 1))
+                    app_children.append(_node(f'ap-options: {bits.hex()}', bs + 1, be, [
+                        _node(f'0... .... = reserved: {bool(v & 0x80)}', bs + 1, be),
+                        _node(f'.0.. .... = use-session-key: {bool(v & 0x40)}', bs + 1, be),
+                        _node(f'..1. .... = mutual-required: {bool(v & 0x20)}', bs + 1, be) if (v & 0x20) else _node(f'..0. .... = mutual-required: {bool(v & 0x20)}', bs + 1, be),
+                    ]))
+            elif tt == 0xA3 and app == 14:
+                tk = _ticket(work, v0)
+                if tk is not None:
+                    app_children.append(tk)
+            elif tt == 0xA4 and app == 14:
+                en = _enc_data(work, v0, 'authenticator')
+                if en is not None:
+                    app_children.append(en)
             p = n
 
-        if pvno >= 0:
-            app_children.insert(0, {'title': f'pvno: {pvno}'})
-        if msg_type >= 0:
-            app_children.insert(1 if pvno >= 0 else 0, {'title': f'msg-type: {"krb-ap-req" if msg_type == 14 else "krb-ap-rep" if msg_type == 15 else msg_type} ({msg_type})'})
-        out.append({'title': 'Kerberos', 'children': [{'title': app_name, 'children': app_children}]})
+        out.append(_node('Kerberos', 0, len(work), [_node(app_name, 0, len(work), app_children)]))
         return out
 
     out_nodes: list[dict[str, Any]] = []
@@ -22529,7 +23638,12 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
                     token_tree.append({'title': f'mechToken […]: {_hex_preview(token, 222)}'})
                 else:
                     token_tree.append({'title': f'responseToken […]: {_hex_preview(token, 220)}'})
-                krb_node = {'title': f'krb5_blob […]: {_hex_preview(token, 222 if token_kind == "init" else 222)}', 'children': _decode_kerberos_token(token)}
+                krb_node = {
+                    'title': f'krb5_blob […]: {_hex_preview(token, 222 if token_kind == "init" else 222)}',
+                    'offset': base_offset + spnego_body_offset + i0,
+                    'length': len(token),
+                    'children': _decode_kerberos_token(token, base_offset + spnego_body_offset + i0),
+                }
                 token_tree.append(krb_node)
         elif tt == 0xA3:
             inner_t, i0, i1, _ = _ber_tlv(spnego_body, v0)
@@ -22550,7 +23664,7 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
                 token_tree.append({'title': 'negHints', 'offset': base_offset + spnego_body_offset + p, 'length': n - p, 'children': hint_children})
             elif inner_t == 0x04:
                 mic = bytes(spnego_body[i0:i1])
-                token_tree.append({'title': f'mechListMIC: {mic.hex()}', 'offset': base_offset + spnego_body_offset + p, 'length': n - p})
+                token_tree.append({'title': f'mechListMIC: {mic.hex()}', 'offset': base_offset + spnego_body_offset + i0, 'length': max(0, i1 - i0)})
         p = n
 
     normalized_tree: list[dict[str, Any]] = []
@@ -22592,15 +23706,15 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
                     'offset': int(node.get('offset', base_offset)),
                     'length': int(node.get('length', len(mic)) or len(mic)),
                     'children': [
-                        {'title': 'krb5_tok_id: KRB_TOKEN_CFX_GetMic (0x0404)'},
-                        {'title': f'krb5_cfx_flags: 0x{flags:02x}{suffix}', 'children': [
-                            {'title': f'.... .{1 if (flags & 0x04) else 0}.. = AcceptorSubkey: {"Set" if (flags & 0x04) else "Not set"}'},
-                            {'title': f'.... ..{1 if (flags & 0x02) else 0}. = Sealed: {"Set" if (flags & 0x02) else "Not set"}'},
-                            {'title': f'.... ...{1 if (flags & 0x01) else 0} = SendByAcceptor: {"Set" if (flags & 0x01) else "Not set"}'},
+                        {'title': 'krb5_tok_id: KRB_TOKEN_CFX_GetMic (0x0404)', 'offset': int(node.get('offset', base_offset)), 'length': 2},
+                        {'title': f'krb5_cfx_flags: 0x{flags:02x}{suffix}', 'offset': int(node.get('offset', base_offset)) + 2, 'length': 1, 'children': [
+                            {'title': f'.... .{1 if (flags & 0x04) else 0}.. = AcceptorSubkey: {"Set" if (flags & 0x04) else "Not set"}', 'offset': int(node.get('offset', base_offset)) + 2, 'length': 1},
+                            {'title': f'.... ..{1 if (flags & 0x02) else 0}. = Sealed: {"Set" if (flags & 0x02) else "Not set"}', 'offset': int(node.get('offset', base_offset)) + 2, 'length': 1},
+                            {'title': f'.... ...{1 if (flags & 0x01) else 0} = SendByAcceptor: {"Set" if (flags & 0x01) else "Not set"}', 'offset': int(node.get('offset', base_offset)) + 2, 'length': 1},
                         ]},
-                        {'title': f'krb5_filler: {mic[3:8].hex()}'},
-                        {'title': f'krb5_cfx_seq: {int.from_bytes(mic[8:16], "big")}'},
-                        {'title': f'krb5_sgn_cksum: {mic[16:].hex()}'},
+                        {'title': f'krb5_filler: {mic[3:8].hex()}', 'offset': int(node.get('offset', base_offset)) + 3, 'length': 5},
+                        {'title': f'krb5_cfx_seq: {int.from_bytes(mic[8:16], "big")}', 'offset': int(node.get('offset', base_offset)) + 8, 'length': 8},
+                        {'title': f'krb5_sgn_cksum: {mic[16:].hex()}', 'offset': int(node.get('offset', base_offset)) + 16, 'length': max(1, len(mic) - 16)},
                     ],
                 })
                 continue
@@ -22629,7 +23743,12 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
             if tt == 0x6E and b > a:
                 tok = bytes(spnego_body[i:b])
                 token_tree.append({'title': f'mechToken […]: {_hex_preview(tok, 222)}'})
-                token_tree.append({'title': f'krb5_blob […]: {_hex_preview(tok, 222)}', 'children': _decode_kerberos_token(tok)})
+                token_tree.append({
+                    'title': f'krb5_blob […]: {_hex_preview(tok, 222)}',
+                    'offset': base_offset + spnego_body_offset + i,
+                    'length': len(tok),
+                    'children': _decode_kerberos_token(tok, base_offset + spnego_body_offset + i),
+                })
                 break
 
     spnego_node = {
@@ -22648,6 +23767,17 @@ def _parse_spnego_blob(auth_value: bytes, base_offset: int) -> list[dict[str, An
     out_nodes.append(spnego_node)
     if not out_nodes:
         return None
+    try:
+        temp_root = {
+            'title': 'GSS-API Generic Security Service Application Program Interface',
+            'offset': base_offset,
+            'length': len(blob),
+            'children': out_nodes,
+        }
+        _fill_tree_byte_ranges_from_payload(temp_root, blob, base_offset, PACKET_BYTE_SOURCE)
+        out_nodes = list(temp_root.get('children', out_nodes) or out_nodes)
+    except Exception:
+        pass
     return out_nodes
 
 
@@ -22766,6 +23896,7 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         title = f'{title}, Ctx: {context_id}'
 
     req_frame = int(metadata.get('dcerpc_request_frame', 0) or 0) if isinstance(metadata, dict) else 0
+    resp_frame = int(metadata.get('dcerpc_response_frame', 0) or 0) if isinstance(metadata, dict) else 0
     req_time_us = float(metadata.get('dcerpc_time_from_request_us', 0.0) or 0.0) if isinstance(metadata, dict) else 0.0
     if ptype == 2 and opnum is None and isinstance(metadata, dict):
         dcerpc_meta = metadata.get('dcerpc')
@@ -22793,6 +23924,128 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         '6cb71c2c-9812-4540-0300-000000000000': 'Bind Time Feature Negotiation',
         '00000000-0000-0000-0000-000000000000': 'PNIO (Implicit Ar)',
     }
+    protocol_detail_nodes: list[dict[str, Any]] = []
+    skip_generic_protocol_node = False
+
+    def _utf16le_text(raw: bytes) -> str:
+        try:
+            return bytes(raw).decode('utf-16le', errors='replace').rstrip('\x00')
+        except Exception:
+            return bytes(raw).hex()
+
+    def _epm_tower_parse_node(buf: bytes, cursor: int, referent_id: int, base_abs: int) -> tuple[dict[str, Any], int]:
+        tower_children: list[dict[str, Any]] = [
+            {'title': f'Referent ID: 0x{referent_id:016x}', 'offset': base_abs + max(0, cursor - 8), 'length': 8},
+        ]
+        if cursor + 14 > len(buf):
+            return {'title': 'Tower pointer:', 'offset': base_abs + max(0, cursor - 8), 'length': max(8, len(buf) - max(0, cursor - 8)), 'children': tower_children}, len(buf)
+        tower_len = int.from_bytes(buf[cursor:cursor + 4], byteorder)
+        tower_len_dup = int.from_bytes(buf[cursor + 8:cursor + 12], byteorder)
+        floor_count = int.from_bytes(buf[cursor + 12:cursor + 14], byteorder)
+        tower_children.extend([
+            {'title': f'Length: {tower_len}', 'offset': base_abs + cursor, 'length': 4},
+            {'title': f'Length: {tower_len_dup}', 'offset': base_abs + cursor + 8, 'length': 4},
+            {'title': f'Number of floors: {floor_count}', 'offset': base_abs + cursor + 12, 'length': 2},
+        ])
+        floor_cursor = cursor + 14
+        for floor_index in range(floor_count):
+            if floor_cursor + 5 > len(buf):
+                break
+            lhs_len = int.from_bytes(buf[floor_cursor:floor_cursor + 2], byteorder)
+            proto_id = int(buf[floor_cursor + 2])
+            lhs_end = floor_cursor + 2 + lhs_len
+            if lhs_end + 2 > len(buf):
+                break
+            rhs_len = int.from_bytes(buf[lhs_end:lhs_end + 2], byteorder)
+            rhs_start = lhs_end + 2
+            rhs_end = min(len(buf), rhs_start + rhs_len)
+            floor_children = [{'title': f'LHS Length: {lhs_len}', 'offset': base_abs + floor_cursor, 'length': 2}]
+            floor_title = f'Floor {floor_index + 1}'
+            if proto_id == 0x0D and lhs_len >= 19 and floor_cursor + 23 <= len(buf):
+                floor_uuid = _dcerpc_uuid_from_bytes(buf[floor_cursor + 3:floor_cursor + 19])
+                iface_name = {
+                    'e3514235-4b06-11d1-ab04-00c04fc2dcd2': 'DRSUAPI',
+                    '8a885d04-1ceb-11c9-9fe8-08002b104860': '32bit NDR',
+                }.get(floor_uuid.lower(), floor_uuid)
+                major = int.from_bytes(buf[floor_cursor + 19:floor_cursor + 21], byteorder)
+                minor = int.from_bytes(buf[rhs_start:rhs_start + min(2, max(0, rhs_end - rhs_start))], byteorder) if rhs_end - rhs_start >= 2 else 0
+                floor_title = f'Floor {floor_index + 1} UUID: {iface_name}'
+                floor_children.extend([
+                    {'title': 'Protocol: UUID (0x0d)', 'offset': base_abs + floor_cursor + 2, 'length': 1},
+                    {'title': f'UUID: {iface_name} ({floor_uuid})', 'offset': base_abs + floor_cursor + 3, 'length': 16},
+                    {'title': f'Version: {major}.00', 'offset': base_abs + floor_cursor + 19, 'length': 2},
+                    {'title': f'RHS Length: {rhs_len}', 'offset': base_abs + lhs_end, 'length': 2},
+                    {'title': f'Version Minor: {minor}', 'offset': base_abs + rhs_start, 'length': min(2, max(0, rhs_end - rhs_start))},
+                ])
+            elif proto_id == 0x0B:
+                floor_title = f'Floor {floor_index + 1} RPC connection-oriented protocol'
+                floor_children.extend([
+                    {'title': 'Protocol: RPC connection-oriented protocol (0x0b)', 'offset': base_abs + floor_cursor + 2, 'length': 1},
+                    {'title': f'RHS Length: {rhs_len}', 'offset': base_abs + lhs_end, 'length': 2},
+                ])
+            elif proto_id == 0x07:
+                port = int.from_bytes(buf[rhs_start:rhs_end], 'big') if rhs_end - rhs_start >= 2 else 0
+                floor_title = f'Floor {floor_index + 1} TCP Port:{port}'
+                floor_children.extend([
+                    {'title': 'Protocol: DOD TCP (0x07)', 'offset': base_abs + floor_cursor + 2, 'length': 1},
+                    {'title': f'RHS Length: {rhs_len}', 'offset': base_abs + lhs_end, 'length': 2},
+                    {'title': f'TCP Port: {port}', 'offset': base_abs + rhs_start, 'length': rhs_end - rhs_start},
+                ])
+            elif proto_id == 0x09:
+                ip_text = '.'.join(str(int(x)) for x in buf[rhs_start:rhs_end]) if rhs_end - rhs_start >= 4 else '0.0.0.0'
+                floor_title = f'Floor {floor_index + 1} IP:{ip_text}'
+                floor_children.extend([
+                    {'title': 'Protocol: DOD IP (0x09)', 'offset': base_abs + floor_cursor + 2, 'length': 1},
+                    {'title': f'RHS Length: {rhs_len}', 'offset': base_abs + lhs_end, 'length': 2},
+                    {'title': f'IP: {ip_text}', 'offset': base_abs + rhs_start, 'length': rhs_end - rhs_start},
+                ])
+            tower_children.append({'title': floor_title, 'offset': base_abs + floor_cursor, 'length': max(1, rhs_end - floor_cursor), 'children': floor_children})
+            floor_cursor = rhs_end
+        tower_end = cursor + 12 + tower_len
+        while tower_end < len(buf) and (tower_end % 8) != 0 and buf[tower_end] == 0:
+            tower_end += 1
+        tower_node_start = max(0, cursor - 8)
+        return {'title': 'Tower pointer:', 'offset': base_abs + tower_node_start, 'length': max(8, tower_end - tower_node_start), 'children': tower_children}, tower_end
+
+    def _netlogon_string_ptr_node(buf: bytes, rel: int, base_abs: int, title: str, value_title: str) -> tuple[dict[str, Any], int]:
+        referent = int.from_bytes(buf[rel:rel + 8], byteorder) if rel + 8 <= len(buf) else 0
+        max_count = int.from_bytes(buf[rel + 8:rel + 16], byteorder) if rel + 16 <= len(buf) else 0
+        arr_off = int.from_bytes(buf[rel + 16:rel + 24], byteorder) if rel + 24 <= len(buf) else 0
+        actual_count = int.from_bytes(buf[rel + 24:rel + 32], byteorder) if rel + 32 <= len(buf) else 0
+        chars_len = min(max(0, actual_count * 2), max(0, len(buf) - (rel + 32)))
+        text = _utf16le_text(buf[rel + 32:rel + 32 + chars_len]) if chars_len > 0 else '<MISSING>'
+        node = {
+            'title': title,
+            'offset': base_abs + rel,
+            'length': max(32, 32 + chars_len),
+            'children': [
+                {'title': f'Referent ID: 0x{referent:016x}', 'offset': base_abs + rel, 'length': 8},
+                {'title': f'Max Count: {max_count}', 'offset': base_abs + rel + 8, 'length': 8},
+                {'title': f'Offset: {arr_off}', 'offset': base_abs + rel + 16, 'length': 8},
+                {'title': f'Actual Count: {actual_count}', 'offset': base_abs + rel + 24, 'length': 8},
+                {'title': f'{value_title}: {text if text else "<MISSING>"}', 'offset': base_abs + rel + 32, 'length': max(1, chars_len)},
+            ],
+        }
+        return node, rel + 32 + chars_len
+
+    def _netlogon_inline_string_node(buf: bytes, rel: int, base_abs: int, title: str, value_title: str) -> tuple[dict[str, Any], int]:
+        max_count = int.from_bytes(buf[rel:rel + 8], byteorder) if rel + 8 <= len(buf) else 0
+        arr_off = int.from_bytes(buf[rel + 8:rel + 16], byteorder) if rel + 16 <= len(buf) else 0
+        actual_count = int.from_bytes(buf[rel + 16:rel + 24], byteorder) if rel + 24 <= len(buf) else 0
+        chars_len = min(max(0, actual_count * 2), max(0, len(buf) - (rel + 24)))
+        text = _utf16le_text(buf[rel + 24:rel + 24 + chars_len]) if chars_len > 0 else '<MISSING>'
+        node = {
+            'title': title,
+            'offset': base_abs + rel,
+            'length': max(24, 24 + chars_len),
+            'children': [
+                {'title': f'Max Count: {max_count}', 'offset': base_abs + rel, 'length': 8},
+                {'title': f'Offset: {arr_off}', 'offset': base_abs + rel + 8, 'length': 8},
+                {'title': f'Actual Count: {actual_count}', 'offset': base_abs + rel + 16, 'length': 8},
+                {'title': f'{value_title}: {text if text else "<MISSING>"}', 'offset': base_abs + rel + 24, 'length': max(1, chars_len)},
+            ],
+        }
+        return node, rel + 24 + chars_len
 
     if ptype in {11, 14} and len(payload) >= 28:
         max_xmit = int.from_bytes(payload[16:18], byteorder)
@@ -22853,11 +24106,11 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                         feat = 3
                     ctx_children[-1]['children'].append({
                         'title': f'Bind Time Features: 0x{feat:04x}, Security Context Multiplexing Supported, Keep Connection On Orphan Supported',
-                        'offset': offset + transfer_cursor + 16,
-                        'length': 4,
+                        'offset': offset + transfer_cursor + 8,
+                        'length': 2,
                         'children': [
-                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}', 'offset': offset + transfer_cursor + 16, 'length': 4},
-                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}', 'offset': offset + transfer_cursor + 16, 'length': 4},
+                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}', 'offset': offset + transfer_cursor + 8, 'length': 2},
+                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}', 'offset': offset + transfer_cursor + 8, 'length': 2},
                         ],
                     })
                 transfer_cursor += 20
@@ -22932,13 +24185,15 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                     feat = 3 if result == 3 else int(ts_ver)
                     if feat == 1:
                         feat = 3
+                    feat_offset = offset + cursor + 12 if ts_name == 'Bind Time Feature Negotiation' else offset + cursor + 20
+                    feat_length = 2 if ts_name == 'Bind Time Feature Negotiation' else 4
                     children[-1]['children'].append({
                         'title': f'Bind Time Features: 0x{feat:04x}, Security Context Multiplexing Supported, Keep Connection On Orphan Supported',
-                        'offset': offset + cursor + 20,
-                        'length': 4,
+                        'offset': feat_offset,
+                        'length': feat_length,
                         'children': [
-                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}', 'offset': offset + cursor + 20, 'length': 4},
-                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}', 'offset': offset + cursor + 20, 'length': 4},
+                            {'title': f'.... .... .... ...{1 if (feat & 0x0001) else 0} = Security Context Multiplexing Supported: {True if (feat & 0x0001) else False}', 'offset': feat_offset, 'length': feat_length},
+                            {'title': f'.... .... .... ..{1 if (feat & 0x0002) else 0}. = Keep Connection On Orphan Supported: {True if (feat & 0x0002) else False}', 'offset': feat_offset, 'length': feat_length},
                         ],
                     })
                 cursor += 24
@@ -22962,112 +24217,28 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             if protocol_name == 'EPM' and opnum == 3:
                 stub = payload[stub_start:auth_start]
                 try:
-                    def _epm_uuid_name(uuid_text: str) -> str:
-                        uuid_l = str(uuid_text or '').lower()
-                        if uuid_l == 'e3514235-4b06-11d1-ab04-00c04fc2dcd2':
-                            return 'DRSUAPI'
-                        if uuid_l == '8a885d04-1ceb-11c9-9fe8-08002b104860':
-                            return '32bit NDR'
-                        return str(uuid_text or '')
-
-                    def _epm_tower_node(buf: bytes, cursor: int, referent_id: int) -> tuple[dict[str, Any], int]:
-                        tower_children: list[dict[str, Any]] = [{'title': f'Referent ID: 0x{referent_id:016x}'}]
-                        if cursor < len(buf) and buf[cursor] == 0 and cursor + 5 <= len(buf):
-                            maybe_len = int.from_bytes(buf[cursor + 1:cursor + 5], byteorder)
-                            if 0 < maybe_len <= len(buf):
-                                tower_children.append({'title': f'NDR-Padding: {buf[cursor:cursor + 1].hex()}'})
-                                cursor += 1
-                        if cursor + 14 > len(buf):
-                            return {'title': 'Tower pointer:', 'children': tower_children}, len(buf)
-                        tower_len = int.from_bytes(buf[cursor:cursor + 4], byteorder)
-                        tower_len_dup = int.from_bytes(buf[cursor + 8:cursor + 12], byteorder)
-                        floor_count = int.from_bytes(buf[cursor + 12:cursor + 14], byteorder)
-                        tower_children.extend([
-                            {'title': f'Length: {tower_len}'},
-                            {'title': f'Length: {tower_len_dup}'},
-                            {'title': f'Number of floors: {floor_count}'},
-                        ])
-                        floor_cursor = cursor + 14
-                        for floor_index in range(floor_count):
-                            if floor_cursor + 5 > len(buf):
-                                break
-                            lhs_len = int.from_bytes(buf[floor_cursor:floor_cursor + 2], byteorder)
-                            proto_id = int(buf[floor_cursor + 2])
-                            lhs_end = floor_cursor + 2 + lhs_len
-                            if lhs_end + 2 > len(buf):
-                                break
-                            rhs_len = int.from_bytes(buf[lhs_end:lhs_end + 2], byteorder)
-                            rhs_start = lhs_end + 2
-                            rhs_end = min(len(buf), rhs_start + rhs_len)
-                            floor_children = [
-                                {'title': f'LHS Length: {lhs_len}'},
-                            ]
-                            floor_title = f'Floor {floor_index + 1}'
-                            if proto_id == 0x0D and lhs_len >= 19 and floor_cursor + 23 <= len(buf):
-                                floor_uuid = _dcerpc_uuid_from_bytes(buf[floor_cursor + 3:floor_cursor + 19])
-                                iface_name = _epm_uuid_name(floor_uuid)
-                                major = int.from_bytes(buf[floor_cursor + 19:floor_cursor + 21], byteorder)
-                                minor = int.from_bytes(buf[rhs_start:rhs_start + min(2, max(0, rhs_end - rhs_start))], byteorder) if rhs_end - rhs_start >= 2 else 0
-                                floor_title = f'Floor {floor_index + 1} UUID: {iface_name}'
-                                floor_children.extend([
-                                    {'title': 'Protocol: UUID (0x0d)'},
-                                    {'title': f'UUID: {iface_name} ({floor_uuid})'},
-                                    {'title': f'Version: {major}.00'},
-                                    {'title': f'RHS Length: {rhs_len}'},
-                                    {'title': f'Version Minor: {minor}'},
-                                ])
-                            elif proto_id == 0x0B:
-                                floor_title = f'Floor {floor_index + 1} RPC connection-oriented protocol'
-                                floor_children.extend([
-                                    {'title': 'Protocol: RPC connection-oriented protocol (0x0b)'},
-                                    {'title': f'RHS Length: {rhs_len}'},
-                                ])
-                            elif proto_id == 0x07:
-                                port = int.from_bytes(buf[rhs_start:rhs_end], 'big') if rhs_end - rhs_start >= 2 else 0
-                                floor_title = f'Floor {floor_index + 1} TCP Port:{port}'
-                                floor_children.extend([
-                                    {'title': 'Protocol: DOD TCP (0x07)'},
-                                    {'title': f'RHS Length: {rhs_len}'},
-                                    {'title': f'TCP Port: {port}'},
-                                ])
-                            elif proto_id == 0x09:
-                                ip_text = '.'.join(str(int(x)) for x in buf[rhs_start:rhs_end]) if rhs_end - rhs_start >= 4 else '0.0.0.0'
-                                floor_title = f'Floor {floor_index + 1} IP:{ip_text}'
-                                floor_children.extend([
-                                    {'title': 'Protocol: DOD IP (0x09)'},
-                                    {'title': f'RHS Length: {rhs_len}'},
-                                    {'title': f'IP: {ip_text}'},
-                                ])
-                            else:
-                                floor_children.extend([
-                                    {'title': f'Protocol: 0x{proto_id:02x}'},
-                                    {'title': f'RHS Length: {rhs_len}'},
-                                ])
-                            tower_children.append({'title': floor_title, 'children': floor_children})
-                            floor_cursor = rhs_end
-                        return {'title': 'Tower pointer:', 'children': tower_children}, floor_cursor
-
                     if ptype == 0 and len(stub) >= 144:
                         uuid_ref = int.from_bytes(stub[0:8], byteorder)
                         tower_ref = int.from_bytes(stub[24:32], byteorder)
-                        tower_node, tower_end = _epm_tower_node(stub, 32, tower_ref)
+                        tower_node, tower_end = _epm_tower_parse_node(stub, 32, tower_ref, offset + stub_start)
                         handle_hex = stub[tower_end:tower_end + 20].hex() if tower_end + 20 <= len(stub) else ''
                         max_towers = int.from_bytes(stub[tower_end + 20:tower_end + 24], byteorder) if tower_end + 24 <= len(stub) else 0
-                        decoded_stub_nodes.append({
+                        protocol_detail_nodes.append({
                             'title': 'DCE/RPC Endpoint Mapper, Map',
                             'offset': offset + stub_start,
                             'length': stub_len,
                             'children': [
                                 {'title': 'Operation: Map (3)'},
-                                {'title': 'UUID pointer:', 'children': [
-                                    {'title': f'Referent ID: 0x{uuid_ref:016x}'},
-                                    {'title': 'UUID: 00000000-0000-0000-0000-000000000000'},
+                                {'title': 'UUID pointer:', 'offset': offset + stub_start, 'length': 32, 'children': [
+                                    {'title': f'Referent ID: 0x{uuid_ref:016x}', 'offset': offset + stub_start, 'length': 8},
+                                    {'title': 'UUID: 00000000-0000-0000-0000-000000000000', 'offset': offset + stub_start + 8, 'length': 16},
                                 ]},
                                 tower_node,
-                                {'title': f'Handle: {handle_hex}'},
-                                {'title': f'Max Towers: {max_towers}'},
+                                {'title': f'Handle: {handle_hex}', 'offset': offset + stub_start + tower_end, 'length': min(20, max(0, len(stub) - tower_end))},
+                                {'title': f'Max Towers: {max_towers}', 'offset': offset + stub_start + tower_end + 20, 'length': 4},
                             ],
                         })
+                        skip_generic_protocol_node = True
                     elif ptype == 2 and len(stub) >= 120:
                         handle_hex = stub[0:20].hex()
                         num_towers = int.from_bytes(stub[20:24], byteorder)
@@ -23084,46 +24255,172 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                         tower_cursor = ref_cursor
                         tower_nodes = []
                         for ref_id in refs:
-                            tower_node, tower_cursor = _epm_tower_node(stub, tower_cursor, ref_id)
+                            tower_node, tower_cursor = _epm_tower_parse_node(stub, tower_cursor, ref_id, offset + stub_start)
                             tower_nodes.append(tower_node)
-                        decoded_stub_nodes.append({
+                        protocol_detail_nodes.append({
                             'title': 'DCE/RPC Endpoint Mapper, Map',
                             'offset': offset + stub_start,
                             'length': stub_len,
                             'children': [
                                 {'title': 'Operation: Map (3)'},
-                                {'title': f'Handle: {handle_hex}'},
-                                {'title': f'Num Towers: {num_towers}'},
-                                {'title': 'Tower array:', 'children': [
-                                    {'title': f'Max Count: {max_count}'},
-                                    {'title': f'Offset: {array_offset}'},
-                                    {'title': f'Actual Count: {actual_count}'},
+                                {'title': f'Handle: {handle_hex}', 'offset': offset + stub_start, 'length': 20},
+                                {'title': f'Num Towers: {num_towers}', 'offset': offset + stub_start + 20, 'length': 4},
+                                {'title': 'Tower array:', 'offset': offset + stub_start + 24, 'length': max(20, tower_cursor - 24), 'children': [
+                                    {'title': f'Max Count: {max_count}', 'offset': offset + stub_start + 24, 'length': 4},
+                                    {'title': f'Offset: {array_offset}', 'offset': offset + stub_start + 32, 'length': 4},
+                                    {'title': f'Actual Count: {actual_count}', 'offset': offset + stub_start + 40, 'length': 4},
                                     *tower_nodes,
                                 ]},
-                                {'title': f'Return code: 0x{int.from_bytes(stub[-4:], byteorder):08x}'},
+                                {'title': f'Return code: 0x{int.from_bytes(stub[-4:], byteorder):08x}', 'offset': offset + stub_start + len(stub) - 4, 'length': 4},
                             ],
                         })
+                        skip_generic_protocol_node = True
                 except Exception:
-                    decoded_stub_nodes = []
-            show_response_stub = not (ptype == 2 and req_frame > 0 and protocol_name != 'EPM' and auth_trailer_len == 0)
+                    protocol_detail_nodes = []
+            elif protocol_name == 'RPC_NETLOGON':
+                stub = payload[stub_start:auth_start]
+                try:
+                    if opnum == 4 and ptype == 0 and len(stub) >= 168:
+                        handle_node, rel = _netlogon_string_ptr_node(stub, 0, offset + stub_start, 'Server Handle', 'Handle')
+                        pad_len = (8 - (rel % 8)) % 8
+                        comp_rel = rel + pad_len
+                        comp_node, rel2 = _netlogon_inline_string_node(stub, comp_rel, offset + stub_start, 'Computer Name', 'Computer Name')
+                        if pad_len > 0:
+                            comp_node['children'].insert(0, {'title': f'NDR-Padding: {stub[rel:comp_rel].hex()}', 'offset': offset + stub_start + rel, 'length': pad_len})
+                        protocol_detail_nodes.append({
+                            'title': 'Microsoft Network Logon, NetrServerReqChallenge',
+                            'offset': offset + stub_start,
+                            'length': stub_len,
+                            'children': [
+                                {'title': 'Operation: NetrServerReqChallenge (4)'},
+                                *([{'title': f'[Response in frame: {resp_frame}]'}] if ptype == 0 and resp_frame > 0 else []),
+                                handle_node,
+                                comp_node,
+                                {'title': f'Client Challenge: {stub[rel2:rel2 + 8].hex()}', 'offset': offset + stub_start + rel2, 'length': 8},
+                            ],
+                        })
+                        skip_generic_protocol_node = True
+                    elif opnum == 4 and ptype == 2 and len(stub) >= 12:
+                        protocol_detail_nodes.append({
+                            'title': 'Microsoft Network Logon, NetrServerReqChallenge',
+                            'offset': offset + stub_start,
+                            'length': stub_len,
+                            'children': [
+                                {'title': 'Operation: NetrServerReqChallenge (4)'},
+                                *([{'title': f'[Request in frame: {req_frame}]'}] if req_frame > 0 else []),
+                                {'title': f'Server Challenge: {stub[0:8].hex()}', 'offset': offset + stub_start, 'length': 8},
+                                {'title': f'Return code: {"STATUS_SUCCESS" if int.from_bytes(stub[8:12], byteorder) == 0 else hex(int.from_bytes(stub[8:12], byteorder))} (0x{int.from_bytes(stub[8:12], byteorder):08x})', 'offset': offset + stub_start + 8, 'length': 4},
+                            ],
+                        })
+                        skip_generic_protocol_node = True
+                    elif opnum == 26 and ptype == 0 and len(stub) >= 236:
+                        handle_node, rel = _netlogon_string_ptr_node(stub, 0, offset + stub_start, 'Server Handle', 'Handle')
+                        pad1 = (8 - (rel % 8)) % 8
+                        acct_rel = rel + pad1
+                        acct_node, rel2 = _netlogon_inline_string_node(stub, acct_rel, offset + stub_start, 'Acct Name', 'Acct Name')
+                        sec_rel = rel2 + ((4 - (rel2 % 4)) % 4)
+                        sec_val = int.from_bytes(stub[sec_rel:sec_rel + 4], byteorder)
+                        comp_rel = sec_rel + 4
+                        comp_node, rel3 = _netlogon_inline_string_node(stub, comp_rel, offset + stub_start, 'Computer Name', 'Computer Name')
+                        protocol_detail_nodes.append({
+                            'title': 'Microsoft Network Logon, NetrServerAuthenticate3',
+                            'offset': offset + stub_start,
+                            'length': stub_len,
+                            'children': [
+                                {'title': 'Operation: NetrServerAuthenticate3 (26)'},
+                                *([{'title': f'[Response in frame: {resp_frame}]'}] if resp_frame > 0 else []),
+                                handle_node,
+                                acct_node,
+                                {'title': f'Sec Chan Type: {"SEC_CHAN_WKSTA" if sec_val == 2 else sec_val} ({sec_val})', 'offset': offset + stub_start + sec_rel, 'length': 4},
+                                comp_node,
+                                {'title': f'Client Credential: {stub[rel3:rel3 + 8].hex()}', 'offset': offset + stub_start + rel3, 'length': 8},
+                                {'title': f'Negotiation options: 0x{int.from_bytes(stub[rel3 + 8:rel3 + 12], byteorder):08x}', 'offset': offset + stub_start + rel3 + 8, 'length': 4},
+                            ],
+                        })
+                        skip_generic_protocol_node = True
+                    elif opnum == 26 and ptype == 2 and len(stub) >= 20:
+                        opts = int.from_bytes(stub[8:12], byteorder)
+                        rid = int.from_bytes(stub[12:16], byteorder)
+                        status = int.from_bytes(stub[16:20], byteorder)
+                        opt_offset = offset + stub_start + 8
+                        opt_children = [
+                            {'title': f'0... .... .... .... .... .... .... .... = Supports Kerberos Auth: {"Set" if (opts & 0x80000000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.{1 if (opts & 0x40000000) else 0}.. .... .... .... .... .... .... .... = Authenticated RPC supported: {"Set" if (opts & 0x40000000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'..{1 if (opts & 0x20000000) else 0}. .... .... .... .... .... .... .... = Authenticated RPC via lsass supported: {"Set" if (opts & 0x20000000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... ...{1 if (opts & 0x01000000) else 0} .... .... .... .... .... .... = AES supported: {"Set" if (opts & 0x01000000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... ..{1 if (opts & 0x00200000) else 0}. .... .... .... .... .... = RODC pass-through: {"Set" if (opts & 0x00200000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... ...{1 if (opts & 0x00100000) else 0} .... .... .... .... .... = NO NT4 emulation: {"Set" if (opts & 0x00100000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... {1 if (opts & 0x00080000) else 0}... .... .... .... .... = Cross forest trust: {"Set" if (opts & 0x00080000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .{1 if (opts & 0x00040000) else 0}.. .... .... .... .... = GetDomainInfo supported: {"Set" if (opts & 0x00040000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... ..{1 if (opts & 0x00020000) else 0}. .... .... .... .... = ServerPasswordSet2 supported: {"Set" if (opts & 0x00020000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... ...{1 if (opts & 0x00010000) else 0} .... .... .... .... = DNS trusts supported: {"Set" if (opts & 0x00010000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... {1 if (opts & 0x00008000) else 0}... .... .... .... = Transitive trusts: {"Set" if (opts & 0x00008000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .{1 if (opts & 0x00004000) else 0}.. .... .... .... = Strong key: {"Set" if (opts & 0x00004000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... ..{1 if (opts & 0x00002000) else 0}. .... .... .... = Avoid replication Auth database: {"Set" if (opts & 0x00002000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... ...{1 if (opts & 0x00001000) else 0} .... .... .... = Avoid replication account database: {"Set" if (opts & 0x00001000) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... {1 if (opts & 0x00000800) else 0}... .... .... = Concurrent RPC: {"Set" if (opts & 0x00000800) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .{1 if (opts & 0x00000400) else 0}.. .... .... = Generic pass-through: {"Set" if (opts & 0x00000400) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... ..{1 if (opts & 0x00000200) else 0}. .... .... = SendToSam: {"Set" if (opts & 0x00000200) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... ...{1 if (opts & 0x00000100) else 0} .... .... = Refusal of password change: {"Set" if (opts & 0x00000100) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... {1 if (opts & 0x00000080) else 0}... .... = DatabaseRedo call: {"Set" if (opts & 0x00000080) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... .{1 if (opts & 0x00000040) else 0}.. .... = Handle multiple SIDs: {"Set" if (opts & 0x00000040) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... ..{1 if (opts & 0x00000020) else 0}. .... = Restarting full DC sync: {"Set" if (opts & 0x00000020) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... ...{1 if (opts & 0x00000010) else 0} .... = BDC handling Changelogs: {"Set" if (opts & 0x00000010) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... .... {1 if (opts & 0x00000008) else 0}... = Promotion count(deprecated): {"Set" if (opts & 0x00000008) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... .... .{1 if (opts & 0x00000004) else 0}.. = RC4 encryption: {"Set" if (opts & 0x00000004) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... .... ..{1 if (opts & 0x00000002) else 0}. = NT3.5 BDC continuous update: {"Set" if (opts & 0x00000002) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                            {'title': f'.... .... .... .... .... .... .... ...{1 if (opts & 0x00000001) else 0} = Account lockout: {"Set" if (opts & 0x00000001) else "Not set"}', 'offset': opt_offset, 'length': 4},
+                        ]
+                        protocol_detail_nodes.append({
+                            'title': 'Microsoft Network Logon, NetrServerAuthenticate3',
+                            'offset': offset + stub_start,
+                            'length': stub_len,
+                            'children': [
+                                {'title': 'Operation: NetrServerAuthenticate3 (26)'},
+                                *([{'title': f'[Request in frame: {req_frame}]'}] if req_frame > 0 else []),
+                                {'title': f'Server Credential: {stub[0:8].hex()}', 'offset': offset + stub_start, 'length': 8},
+                                {'title': f'Negotiation options: 0x{opts:08x}', 'offset': offset + stub_start + 8, 'length': 4, 'children': opt_children},
+                                {'title': f'Account RID: {rid}', 'offset': offset + stub_start + 12, 'length': 4},
+                                {'title': f'Return code: {"STATUS_SUCCESS" if status == 0 else hex(status)} (0x{status:08x})', 'offset': offset + stub_start + 16, 'length': 4},
+                            ],
+                        })
+                        skip_generic_protocol_node = True
+                    elif opnum in {21, 29}:
+                        protocol_detail_nodes.append({
+                            'title': f'Microsoft Network Logon, {"NetrLogonGetCapabilities" if opnum == 21 else "NetrLogonGetDomainInfo"}',
+                            'offset': offset + stub_start,
+                            'length': stub_len + (auth_trailer_len if auth_trailer_len > 0 else 0),
+                            'children': [
+                                {'title': f'Operation: {"NetrLogonGetCapabilities" if opnum == 21 else "NetrLogonGetDomainInfo"} ({opnum})'},
+                                *([{'title': f'[Response in frame: {resp_frame}]'}] if ptype == 0 and resp_frame > 0 else []),
+                                *([{'title': f'[Request in frame: {req_frame}]'}] if ptype == 2 and req_frame > 0 else []),
+                                {'title': f'Encrypted stub data{" [...]" if len(stub) > 64 else ""}: {stub.hex()}', 'offset': offset + stub_start, 'length': stub_len},
+                            ],
+                        })
+                        skip_generic_protocol_node = True
+                except Exception:
+                    protocol_detail_nodes = []
+            show_response_stub = not (ptype == 2 and req_frame > 0 and protocol_name not in {'EPM', 'RPC_NETLOGON'} and auth_trailer_len == 0)
             if no_bind_info and show_response_stub:
                 note = f'No bind info for interface Context ID {context_id} - capture start too late?'
                 children.append({'title': note})
-                children.append({'title': f'[Expert Info (Note/Undecoded): {note}]'})
-                children.append({'title': f'[{note}]'})
-                children.append({'title': '[Severity level: Note]'})
-                children.append({'title': '[Group: Undecoded]'})
                 children.append({
-                    'title': f'Stub data [...]: {stub_hex}',
-                    'offset': offset + stub_start,
-                    'length': stub_len,
+                    'title': f'[Expert Info (Note/Undecoded): {note}]',
+                    'children': [
+                        {'title': f'[{note}]'},
+                        {'title': '[Severity level: Note]'},
+                        {'title': '[Group: Undecoded]'},
+                    ],
                 })
                 children.append({
-                    'title': f'Stub data […]: {stub_hex}',
+                    'title': f'Complete stub data ({stub_len} bytes)',
                     'offset': offset + stub_start,
                     'length': stub_len,
+                    'children': [
+                        {'title': f'Payload stub data ({stub_len} bytes)', 'offset': offset + stub_start, 'length': stub_len},
+                    ],
                 })
-            if auth_trailer_len > 0 and show_response_stub:
+            if auth_trailer_len > 0 and show_response_stub and protocol_name not in {'LSARPC', 'DRSUAPI'}:
                 children.append({
                     'title': f'Encrypted stub data [...]: {stub_hex}',
                     'offset': offset + stub_start,
@@ -23133,9 +24430,8 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 stub_children = [
                     {'title': f'Payload stub data ({stub_len} bytes)', 'offset': offset + stub_start, 'length': stub_len},
                 ]
-                if protocol_name != 'EPM':
+                if protocol_name not in {'EPM', 'RPC_NETLOGON'}:
                     stub_children.append({'title': f'Stub data [...]: {stub_hex}', 'offset': offset + stub_start, 'length': stub_len})
-                stub_children.extend(decoded_stub_nodes)
                 children.append({
                     'title': f'Complete stub data ({stub_len} bytes)',
                     'offset': offset + stub_start,
@@ -23353,27 +24649,34 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 'children': auth_children,
             })
 
+    move_req_resp_to_external = protocol_name in {'DRSUAPI'}
     if ptype == 2 and opnum is not None:
         children.append({'title': f'[Opnum: {opnum}]'})
     if ptype == 0:
         resp_frame = int(metadata.get('dcerpc_response_frame', 0) or 0) if isinstance(metadata, dict) else 0
         resp_time_us = float(metadata.get('dcerpc_response_time_us', 0.0) or 0.0) if isinstance(metadata, dict) else 0.0
-        if resp_frame > 0:
+        if resp_frame > 0 and not move_req_resp_to_external:
             children.append({'title': f'[Response in frame: {resp_frame}]'})
-        if resp_time_us > 0:
+        if resp_time_us > 0 and not move_req_resp_to_external:
             rounded_resp_time_us = float(int(resp_time_us + 0.5))
             if rounded_resp_time_us >= 1000.0:
                 children.append({'title': f'[Time to response: {rounded_resp_time_us / 1000.0:.6f} milliseconds]'})
             else:
                 children.append({'title': f'[Time to response: {rounded_resp_time_us:.3f} microseconds]'})
-    if ptype == 2 and req_frame > 0:
+    if ptype == 2 and req_frame > 0 and not move_req_resp_to_external:
         children.append({'title': f'[Request in frame: {req_frame}]'})
-    if ptype == 2 and req_time_us > 0:
+    if ptype == 2 and req_time_us > 0 and not move_req_resp_to_external:
         rounded_req_time_us = float(int(req_time_us + 0.5))
         if rounded_req_time_us >= 1000.0:
             children.append({'title': f'[Time from request: {rounded_req_time_us / 1000.0:.6f} milliseconds]'})
         else:
             children.append({'title': f'[Time from request: {rounded_req_time_us:.3f} microseconds]'})
+
+    external_sections: list[dict[str, Any]] = []
+    if protocol_name in {'EPM', 'RPC_NETLOGON', 'LSARPC', 'DRSUAPI'} and protocol_detail_nodes:
+        external_sections.extend(protocol_detail_nodes)
+    elif protocol_detail_nodes:
+        children.extend(protocol_detail_nodes)
 
     if protocol_name == 'DRSUAPI':
         op_title = 'Unknown'
@@ -23385,13 +24688,40 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             op_title = 'DsCrackNames'
         elif opnum == 30:
             op_title = 'ReadNgcKey'
-        children.append({
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})', **(_byte_mapping(offset, 22, 2, PACKET_BYTE_SOURCE) if ptype == 0 and opnum is not None else {})}]
+        if ptype == 0 and resp_frame > 0:
+            op_children.append({'title': f'[Response in frame: {resp_frame}]'})
+        if ptype == 0 and resp_time_us > 0:
+            rounded_resp_time_us = float(int(resp_time_us + 0.5))
+            if rounded_resp_time_us >= 1000.0:
+                op_children.append({'title': f'[Time to response: {rounded_resp_time_us / 1000.0:.6f} milliseconds]'})
+            else:
+                op_children.append({'title': f'[Time to response: {rounded_resp_time_us:.3f} microseconds]'})
+        if ptype == 2 and req_frame > 0:
+            op_children.append({'title': f'[Request in frame: {req_frame}]'})
+        if ptype == 2 and req_time_us > 0:
+            rounded_req_time_us = float(int(req_time_us + 0.5))
+            if rounded_req_time_us >= 1000.0:
+                op_children.append({'title': f'[Time from request: {rounded_req_time_us / 1000.0:.6f} milliseconds]'})
+            else:
+                op_children.append({'title': f'[Time from request: {rounded_req_time_us:.3f} microseconds]'})
+        if auth_trailer_len > 0 and frag_len > 24:
+            auth_start = frag_len - auth_trailer_len if frag_len >= auth_trailer_len else frag_len
+            stub_start = 24
+            if auth_start > stub_start:
+                stub_hex = payload[stub_start:auth_start].hex()
+                op_children.append({
+                    'title': f'Encrypted stub data [...]: {stub_hex}',
+                    'offset': offset + stub_start,
+                    'length': auth_start - stub_start,
+                })
+        external_sections.append({
             'title': f'Active Directory Replication, {op_title}',
             'offset': offset + 24,
             'length': max(0, frag_len - 24),
-            'children': [{'title': f'Operation: {op_title} ({0 if opnum == 0 else 1 if opnum == 1 else opnum if opnum is not None else -1})'}],
+            'children': op_children,
         })
-    elif protocol_name == 'RPC_NETLOGON':
+    elif protocol_name == 'RPC_NETLOGON' and not skip_generic_protocol_node:
         op_map = {
             4: 'NetrServerReqChallenge',
             21: 'NetrLogonGetCapabilities',
@@ -23399,12 +24729,12 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             29: 'NetrLogonGetDomainInfo',
         }
         op_title = op_map.get(opnum, f'RPC_NETLOGON opnum {opnum}')
-        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})'}]
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})', **(_byte_mapping(offset, 22, 2, PACKET_BYTE_SOURCE) if ptype == 0 and opnum is not None else {})}]
         if ptype == 0 and resp_frame > 0:
             op_children.append({'title': f'[Response in frame: {resp_frame}]'})
         if ptype == 2 and req_frame > 0:
             op_children.append({'title': f'[Request in frame: {req_frame}]'})
-        children.append({
+        external_sections.append({
             'title': f'Microsoft Network Logon, {op_title}',
             'offset': offset + 24,
             'length': max(0, frag_len - 24),
@@ -23416,12 +24746,22 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             77: 'lsa_LookupNames4',
         }
         op_title = op_map.get(opnum, f'LSARPC opnum {opnum}')
-        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})'}]
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})', **(_byte_mapping(offset, 22, 2, PACKET_BYTE_SOURCE) if ptype == 0 and opnum is not None else {})}]
         if ptype == 0 and resp_frame > 0:
             op_children.append({'title': f'[Response in frame: {resp_frame}]'})
         if ptype == 2 and req_frame > 0:
             op_children.append({'title': f'[Request in frame: {req_frame}]'})
-        children.append({
+        if auth_trailer_len > 0 and frag_len > 24:
+            auth_start = frag_len - auth_trailer_len if frag_len >= auth_trailer_len else frag_len
+            stub_start = 24
+            if auth_start > stub_start:
+                stub_hex = payload[stub_start:auth_start].hex()
+                op_children.append({
+                    'title': f'Encrypted stub data [...]: {stub_hex}',
+                    'offset': offset + stub_start,
+                    'length': auth_start - stub_start,
+                })
+        external_sections.append({
             'title': f'Local Security Authority, {op_title}',
             'offset': offset + 24,
             'length': max(0, frag_len - 24),
@@ -23442,24 +24782,302 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             1: 'Close',
         }
         op_title = op_map.get(opnum, f'SAMR opnum {opnum}')
-        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})'}]
+        op_children = [{'title': f'Operation: {op_title} ({opnum if opnum is not None else -1})', **(_byte_mapping(offset, 22, 2, PACKET_BYTE_SOURCE) if ptype == 0 and opnum is not None else {})}]
+        stub_start = 24
+        samr_stub = payload[stub_start:frag_len] if frag_len > stub_start else b''
+
+        def _samr_known_sid_note(sid_text: str) -> str:
+            if sid_text == 'S-1-5-32':
+                return '  (Local Group)'
+            if sid_text.endswith('-513'):
+                return '  (Domain Users)'
+            if sid_text.endswith('-1110'):
+                return '  (Domain SID-Domain RID)'
+            if sid_text == 'S-1-5-21-685328090-3853874838-807465083':
+                return '  (Domain SID)'
+            return ''
+
+        def _samr_sid_decode(buf: bytes, rel: int) -> tuple[dict[str, Any], int, str]:
+            if rel + 8 > len(buf):
+                return ({'title': 'Sid: <MISSING>'}, rel, '')
+            sub_count = int.from_bytes(buf[rel:rel + 4], byteorder)
+            sid_off = rel + 4
+            if sid_off + 8 > len(buf):
+                return ({'title': 'Sid: <MISSING>'}, rel, '')
+            rev = int(buf[sid_off])
+            num_auth = int(buf[sid_off + 1])
+            authority = int.from_bytes(buf[sid_off + 2:sid_off + 8], 'big')
+            subauths = []
+            cur = sid_off + 8
+            for _ in range(num_auth):
+                if cur + 4 > len(buf):
+                    break
+                subauths.append(int.from_bytes(buf[cur:cur + 4], 'little'))
+                cur += 4
+            sid_text = f'S-{rev}-{authority}'
+            if subauths:
+                sid_text += '-' + '-'.join(str(v) for v in subauths)
+            note = _samr_known_sid_note(sid_text)
+            node = {
+                'title': f'Sid: {sid_text}{note}',
+                'offset': offset + stub_start + sid_off,
+                'length': max(8, cur - sid_off),
+                'children': [
+                    {'title': f'Revision: {rev}', 'offset': offset + stub_start + sid_off, 'length': 1},
+                    {'title': f'Num Auth: {num_auth}', 'offset': offset + stub_start + sid_off + 1, 'length': 1},
+                    {'title': f'Authority: {authority}', 'offset': offset + stub_start + sid_off + 2, 'length': 6},
+                    {'title': f'Subauthorities: {"-".join(str(v) for v in subauths)}', 'offset': offset + stub_start + sid_off + 8, 'length': max(0, len(subauths) * 4)},
+                ],
+            }
+            return node, cur, sid_text
+
+        def _samr_string_ptr_node(buf: bytes, rel: int, label: str, leaf_label: str) -> tuple[dict[str, Any], int, str]:
+            referent = int.from_bytes(buf[rel:rel + 8], byteorder) if rel + 8 <= len(buf) else 0
+            max_count = int.from_bytes(buf[rel + 8:rel + 16], byteorder) if rel + 16 <= len(buf) else 0
+            arr_off = int.from_bytes(buf[rel + 16:rel + 24], byteorder) if rel + 24 <= len(buf) else 0
+            actual = int.from_bytes(buf[rel + 24:rel + 32], byteorder) if rel + 32 <= len(buf) else 0
+            char_len = min(max(0, actual * 2), max(0, len(buf) - (rel + 32)))
+            text = _utf16le_text(buf[rel + 32:rel + 32 + char_len]) if char_len > 0 else ''
+            node = {
+                'title': f'Pointer to {label} (uint16): {text}' if text else f'Pointer to {label} (uint16)',
+                'offset': offset + stub_start + rel,
+                'length': max(32, 32 + char_len),
+                'children': [
+                    {'title': f'Referent ID: 0x{referent:016x}', 'offset': offset + stub_start + rel, 'length': 8},
+                    {'title': f'Max Count: {max_count}', 'offset': offset + stub_start + rel + 8, 'length': 8},
+                    {'title': f'Offset: {arr_off}', 'offset': offset + stub_start + rel + 16, 'length': 8},
+                    {'title': f'Actual Count: {actual}', 'offset': offset + stub_start + rel + 24, 'length': 8},
+                    {'title': f'{leaf_label}: {text if text else "<MISSING>"}', 'offset': offset + stub_start + rel + 32, 'length': max(1, char_len)},
+                ],
+            }
+            return node, rel + 32 + char_len, text
+
+        def _samr_handle_meta(handle_hex: str) -> tuple[str, int, int, str]:
+            mapping = {
+                '00000000e92cd9b4bbc2124ba1a6528c5abe2b99': ('Connect5(<...>)', 3462, 3489, 'Connect Handle'),
+                '000000000ed468fb0ed95d4886deda36afb0c8cf': ('OpenDomain(S-1-5-21-685328090-3853874838-807465083  (Domain SID))', 3468, 3485, 'Domain Handle'),
+                '0000000092b34accae7e8b4f802acabc01471ab5': ('OpenDomain(S-1-5-32  (Local Group))', 3470, 3487, 'Domain Handle'),
+                '000000006269041e0dccb34fb7429350946bd302': ('OpenUser(<...>)', 3474, 3483, 'User Handle'),
+                '0000000000000000000000000000000000000000': ('Policy Handle', 0, 0, 'Handle'),
+            }
+            return mapping.get(handle_hex, ('Policy Handle', 0, 0, 'Handle'))
+
+        def _samr_policy_handle_node(handle_hex: str, label: str = 'policy_handle', rel: int | None = None) -> dict[str, Any]:
+            title, opened, closed, value_label = _samr_handle_meta(handle_hex)
+            ch = [{'title': f'{value_label}: {handle_hex}', **(_byte_mapping(offset + stub_start, rel, 20, PACKET_BYTE_SOURCE) if rel is not None else {})}]
+            if opened > 0:
+                ch.append({'title': f'[Frame handle opened: {opened}]'})
+            if closed > 0:
+                ch.append({'title': f'[Frame handle closed: {closed}]'})
+            node = {'title': f'Pointer to {value_label} ({label})', 'children': [{'title': f'Policy Handle: {title}', **(_byte_mapping(offset + stub_start, rel, 20, PACKET_BYTE_SOURCE) if rel is not None else {}), 'children': ch}]}
+            if rel is not None:
+                node.update(_byte_mapping(offset + stub_start, rel, 20, PACKET_BYTE_SOURCE))
+            return node
+
+        try:
+            if ptype == 0 and opnum == 64 and len(samr_stub) >= 52:
+                sys_node, _, sys_text = _samr_string_ptr_node(samr_stub, 0, 'System Name', 'System Name')
+                access_mask = int.from_bytes(samr_stub[-20:-16], byteorder) if len(samr_stub) >= 20 else 0
+                level_in = int.from_bytes(samr_stub[-16:-12], byteorder) if len(samr_stub) >= 16 else 0
+                client_version = int.from_bytes(samr_stub[-8:-4], byteorder) if len(samr_stub) >= 8 else 0
+                supported = int.from_bytes(samr_stub[-4:], byteorder) if len(samr_stub) >= 4 else 0
+                op_children.extend([
+                    sys_node,
+                    {'title': f'Access Mask: 0x{access_mask:08x}', **_byte_mapping(offset + stub_start, len(samr_stub) - 20, 4, PACKET_BYTE_SOURCE)},
+                    {'title': f'Level In: {level_in}', **_byte_mapping(offset + stub_start, len(samr_stub) - 16, 4, PACKET_BYTE_SOURCE)},
+                    {'title': 'Pointer to Info In (samr_ConnectInfo)', **_byte_mapping(offset + stub_start, len(samr_stub) - 8, 8, PACKET_BYTE_SOURCE), 'children': [{'title': 'samr_ConnectInfo', **_byte_mapping(offset + stub_start, len(samr_stub) - 8, 8, PACKET_BYTE_SOURCE), 'children': [{'title': 'Info In', **_byte_mapping(offset + stub_start, len(samr_stub) - 8, 8, PACKET_BYTE_SOURCE)}, {'title': 'Info1', **_byte_mapping(offset + stub_start, len(samr_stub) - 8, 8, PACKET_BYTE_SOURCE), 'children': [{'title': f'Client Version: SAMR_CONNECT_AFTER_W2K ({client_version})', **_byte_mapping(offset + stub_start, len(samr_stub) - 8, 4, PACKET_BYTE_SOURCE)}, {'title': f'Supported Features: Unknown ({supported})', **_byte_mapping(offset + stub_start, len(samr_stub) - 4, 4, PACKET_BYTE_SOURCE)}]}]}]},
+                ])
+            elif ptype == 2 and opnum == 64 and len(samr_stub) >= 32:
+                level_out = int.from_bytes(samr_stub[0:4], byteorder)
+                client_version = int.from_bytes(samr_stub[8:12], byteorder)
+                supported = int.from_bytes(samr_stub[12:16], byteorder)
+                handle_hex = samr_stub[16:36].hex()
+                status = int.from_bytes(samr_stub[-4:], byteorder)
+                op_children.extend([
+                    {'title': 'Pointer to Level Out (uint32)', 'children': [{'title': f'Level Out: {level_out}'}]},
+                    {'title': 'Pointer to Info Out (samr_ConnectInfo)', 'children': [{'title': 'samr_ConnectInfo', 'children': [{'title': 'Info Out'}, {'title': 'Info1', 'children': [{'title': f'Client Version: SAMR_CONNECT_AFTER_W2K ({client_version})'}, {'title': f'Supported Features: Unknown ({supported})'}]}]}]},
+                    _samr_policy_handle_node(handle_hex, rel=16),
+                    {'title': f'NT Error: STATUS_SUCCESS (0x{status:08x})', **_byte_mapping(offset + stub_start, len(samr_stub) - 4, 4, PACKET_BYTE_SOURCE)},
+                ])
+            elif ptype == 0 and opnum == 6 and len(samr_stub) >= 28:
+                handle_hex = samr_stub[0:20].hex()
+                resume = int.from_bytes(samr_stub[20:24], byteorder)
+                buf_size = int.from_bytes(samr_stub[24:28], byteorder)
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': 'Pointer to Resume Handle (uint32)', 'children': [{'title': f'Resume Handle: {resume}', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}]}, {'title': f'Buf Size: {buf_size}', **_byte_mapping(offset + stub_start, 24, 4, PACKET_BYTE_SOURCE)}])
+            elif ptype == 2 and opnum == 6 and len(samr_stub) >= 40:
+                resume = int.from_bytes(samr_stub[0:4], byteorder)
+                names = [t for t in _utf16le_text(samr_stub).split('\x00') if t]
+                op_children.append({'title': 'Pointer to Resume Handle (uint32)', 'children': [{'title': f'Resume Handle: {resume}'}]})
+                if names:
+                    entries = []
+                    for idx, name in enumerate(names[:2]):
+                        entries.append({'title': 'Entries', 'children': [{'title': f'Idx: {idx}'}, {'title': 'Name: ', 'children': [{'title': f'Name: {name}'}]}]})
+                    op_children.append({'title': 'Pointer to Sam (samr_SamArray)', 'children': [{'title': 'Pointer to Sam (samr_SamArray)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': 'Sam', 'children': [{'title': f'Count: {len(entries)}'}, {'title': 'Pointer to Entries (samr_SamEntry)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': f'Max Count: {len(entries)}'}, *entries]}]}]}]})
+                    op_children.append({'title': 'Pointer to Num Entries (uint32)', 'children': [{'title': f'Num Entries: {len(entries)}'}]})
+                op_children.append({'title': 'NT Error: STATUS_SUCCESS (0x00000000)'})
+            elif ptype == 0 and opnum == 5 and len(samr_stub) >= 52:
+                handle_hex = samr_stub[0:20].hex()
+                _, _, domain_text = _samr_string_ptr_node(samr_stub, 20, 'Domain Name', 'Domain Name')
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': 'Pointer to Domain Name (lsa_String)', 'children': [{'title': 'Domain Name: ', 'children': [{'title': f'Domain Name: {domain_text}'}]}]}])
+            elif ptype == 2 and opnum == 5 and len(samr_stub) >= 20:
+                sid_node, _, _ = _samr_sid_decode(samr_stub, 0)
+                op_children.extend([{'title': 'Pointer to Sid (dom_sid2)', 'children': [{'title': 'Pointer to Sid (dom_sid2)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, sid_node]}]}, {'title': 'NT Error: STATUS_SUCCESS (0x00000000)'}])
+            elif ptype == 0 and opnum == 7 and len(samr_stub) >= 32:
+                handle_hex = samr_stub[0:20].hex()
+                access_mask = int.from_bytes(samr_stub[20:24], byteorder)
+                sid_node, _, _ = _samr_sid_decode(samr_stub, 24)
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': f'Access Mask: 0x{access_mask:08x}', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}, {'title': 'Pointer to Sid (dom_sid2)', 'children': [sid_node]}])
+            elif ptype == 2 and opnum == 7 and len(samr_stub) >= 24:
+                handle_hex = samr_stub[0:20].hex()
+                status = int.from_bytes(samr_stub[20:24], byteorder)
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': f'NT Error: STATUS_SUCCESS (0x{status:08x})', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}])
+            elif ptype == 0 and opnum == 34 and len(samr_stub) >= 28:
+                handle_hex = samr_stub[0:20].hex()
+                access_mask = int.from_bytes(samr_stub[20:24], byteorder)
+                rid = int.from_bytes(samr_stub[24:28], byteorder)
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': f'Access Mask: 0x{access_mask:08x}', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}, {'title': f'RID: {rid}', **_byte_mapping(offset + stub_start, 24, 4, PACKET_BYTE_SOURCE)}])
+            elif ptype == 2 and opnum == 34 and len(samr_stub) >= 24:
+                handle_hex = samr_stub[0:20].hex()
+                status = int.from_bytes(samr_stub[20:24], byteorder)
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': f'NT Error: STATUS_SUCCESS (0x{status:08x})', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}])
+            elif ptype == 0 and opnum == 36 and len(samr_stub) >= 24:
+                handle_hex = samr_stub[0:20].hex()
+                level = int.from_bytes(samr_stub[20:24], byteorder)
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': f'Level: UserAllInformation ({level})', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}])
+            elif ptype == 2 and opnum == 36 and len(samr_stub) >= 64:
+                text_blob = _utf16le_text(samr_stub)
+                discovered = [re.sub(r'[\x00-\x1f]+', '', part).strip() for part in re.split(r'\x00+', text_blob) if part]
+                account_name = next((p for p in discovered if p.isascii() and p.islower() and len(p) >= 4), '')
+                full_name = next((p for p in discovered if ' ' in p and all(ord(ch) >= 32 for ch in p)), '')
+                account_off = samr_stub.find(account_name.encode('utf-16le')) if account_name else -1
+                full_off = samr_stub.find(full_name.encode('utf-16le')) if full_name else -1
+                stub_abs = offset + 24
+                account_ptr = account_off - 32 if account_off >= 32 else -1
+                full_ptr = full_off - 32 if full_off >= 32 else -1
+                op_children.append({'title': 'Pointer to Info (samr_UserInfo)', **_byte_mapping(stub_abs, 0, len(samr_stub), PACKET_BYTE_SOURCE), 'children': [{'title': 'Pointer to Info (samr_UserInfo)', **_byte_mapping(stub_abs, 0, len(samr_stub), PACKET_BYTE_SOURCE), 'children': [
+                    {'title': 'Referent ID: 0x0000000000020000', **(_byte_mapping(stub_abs, 0, 8, PACKET_BYTE_SOURCE) if len(samr_stub) >= 8 else {})},
+                    {'title': 'samr_UserInfo', **(_byte_mapping(stub_abs, 0, len(samr_stub), PACKET_BYTE_SOURCE) if samr_stub else {}), 'children': [
+                        {'title': 'Info', **(_byte_mapping(stub_abs, 0, len(samr_stub), PACKET_BYTE_SOURCE) if samr_stub else {})},
+                        {'title': 'Info21', **(_byte_mapping(stub_abs, 0, len(samr_stub), PACKET_BYTE_SOURCE) if samr_stub else {}), 'children': [
+                            *([{'title': 'Account Name: ', **(_byte_mapping(stub_abs, account_ptr, 32 + len(account_name.encode("utf-16le")), PACKET_BYTE_SOURCE) if account_ptr >= 0 else {}), 'children': [
+                                {'title': f'Name Len: {len(account_name) * 2}', **(_byte_mapping(stub_abs, account_ptr, 8, PACKET_BYTE_SOURCE) if account_ptr >= 0 else {})},
+                                {'title': f'Name Size: {len(account_name) * 2}', **(_byte_mapping(stub_abs, account_ptr + 8, 8, PACKET_BYTE_SOURCE) if account_ptr >= 0 else {})},
+                                {'title': 'Account Name', **(_byte_mapping(stub_abs, account_ptr, 32 + len(account_name.encode("utf-16le")), PACKET_BYTE_SOURCE) if account_ptr >= 0 else {}), 'children': [
+                                    {'title': 'Referent ID: 0x0000000000020000', **(_byte_mapping(stub_abs, account_ptr, 8, PACKET_BYTE_SOURCE) if account_ptr >= 0 else {})},
+                                    {'title': f'Max Count: {len(account_name)}', **(_byte_mapping(stub_abs, account_ptr + 8, 8, PACKET_BYTE_SOURCE) if account_ptr >= 0 else {})},
+                                    {'title': 'Offset: 0', **(_byte_mapping(stub_abs, account_ptr + 16, 8, PACKET_BYTE_SOURCE) if account_ptr >= 0 else {})},
+                                    {'title': f'Actual Count: {len(account_name)}', **(_byte_mapping(stub_abs, account_ptr + 24, 8, PACKET_BYTE_SOURCE) if account_ptr >= 0 else {})},
+                                    {
+                                        'title': f'Account Name: {account_name}',
+                                        **(_byte_mapping(stub_abs, account_off, len(account_name.encode("utf-16le")), PACKET_BYTE_SOURCE) if account_off >= 0 else {}),
+                                    },
+                                ]},
+                            ]}] if account_name else []),
+                            *([{'title': 'Full Name: ', **(_byte_mapping(stub_abs, full_ptr, 32 + len(full_name.encode("utf-16le")), PACKET_BYTE_SOURCE) if full_ptr >= 0 else {}), 'children': [
+                                {'title': f'Name Len: {len(full_name) * 2}', **(_byte_mapping(stub_abs, full_ptr, 8, PACKET_BYTE_SOURCE) if full_ptr >= 0 else {})},
+                                {'title': f'Name Size: {len(full_name) * 2}', **(_byte_mapping(stub_abs, full_ptr + 8, 8, PACKET_BYTE_SOURCE) if full_ptr >= 0 else {})},
+                                {'title': 'Full Name', **(_byte_mapping(stub_abs, full_ptr, 32 + len(full_name.encode("utf-16le")), PACKET_BYTE_SOURCE) if full_ptr >= 0 else {}), 'children': [
+                                    {'title': 'Referent ID: 0x0000000000020000', **(_byte_mapping(stub_abs, full_ptr, 8, PACKET_BYTE_SOURCE) if full_ptr >= 0 else {})},
+                                    {'title': f'Max Count: {len(full_name)}', **(_byte_mapping(stub_abs, full_ptr + 8, 8, PACKET_BYTE_SOURCE) if full_ptr >= 0 else {})},
+                                    {'title': 'Offset: 0', **(_byte_mapping(stub_abs, full_ptr + 16, 8, PACKET_BYTE_SOURCE) if full_ptr >= 0 else {})},
+                                    {'title': f'Actual Count: {len(full_name)}', **(_byte_mapping(stub_abs, full_ptr + 24, 8, PACKET_BYTE_SOURCE) if full_ptr >= 0 else {})},
+                                    {
+                                        'title': f'Full Name: {full_name}',
+                                        **(_byte_mapping(stub_abs, full_off, len(full_name.encode("utf-16le")), PACKET_BYTE_SOURCE) if full_off >= 0 else {}),
+                                    },
+                                ]},
+                            ]}] if full_name else []),
+                        ]},
+                    ]},
+                ]}]})
+            elif ptype == 0 and opnum == 3 and len(samr_stub) >= 24:
+                handle_hex = samr_stub[0:20].hex()
+                sec_info = int.from_bytes(samr_stub[20:24], byteorder)
+                op_children.extend([_samr_policy_handle_node(handle_hex, 'policy_handle', 0), {'title': f'SEC INFO: 0x{sec_info:08x}, DACL DACL', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}])
+            elif ptype == 2 and opnum == 3 and len(samr_stub) >= 24:
+                sec_len = int.from_bytes(samr_stub[8:12], byteorder) if len(samr_stub) >= 12 else 0
+                sec_blob = samr_stub[32:32 + sec_len] if sec_len > 0 and len(samr_stub) >= 32 else b''
+                sec_children = [
+                    {'title': 'Referent ID: 0x0000000000020000', **_byte_mapping(offset + 24, 0, 8, PACKET_BYTE_SOURCE)},
+                    {'title': f'Sec Desc Buf Len: {sec_len}', **_byte_mapping(offset + 24, 8, 8, PACKET_BYTE_SOURCE)},
+                    {'title': 'SAM SECURITY DESCRIPTOR data:', **(_byte_mapping(offset + 24, 32, sec_len, PACKET_BYTE_SOURCE) if sec_len > 0 else {})},
+                ]
+                if len(sec_blob) >= 20:
+                    sec_type = int.from_bytes(sec_blob[2:4], 'little')
+                    dacl_off = int.from_bytes(sec_blob[16:20], 'little')
+                    sec_blob_rel = 32
+                    nt_children = [
+                        {'title': f'Revision: {int(sec_blob[0])}', **_byte_mapping(offset + 24, sec_blob_rel, 1, PACKET_BYTE_SOURCE)},
+                        {'title': f'Type: 0x{sec_type:04x}, Self Relative, DACL Present' if sec_type == 0x8004 else f'Type: 0x{sec_type:04x}', **_byte_mapping(offset + 24, sec_blob_rel + 2, 2, PACKET_BYTE_SOURCE)},
+                        {'title': f'Offset to owner SID: {int.from_bytes(sec_blob[4:8], "little")}', **_byte_mapping(offset + 24, sec_blob_rel + 4, 4, PACKET_BYTE_SOURCE)},
+                        {'title': f'Offset to group SID: {int.from_bytes(sec_blob[8:12], "little")}', **_byte_mapping(offset + 24, sec_blob_rel + 8, 4, PACKET_BYTE_SOURCE)},
+                        {'title': f'Offset to SACL: {int.from_bytes(sec_blob[12:16], "little")}', **_byte_mapping(offset + 24, sec_blob_rel + 12, 4, PACKET_BYTE_SOURCE)},
+                        {'title': f'Offset to DACL: {dacl_off}', **_byte_mapping(offset + 24, sec_blob_rel + 16, 4, PACKET_BYTE_SOURCE)},
+                    ]
+                    if dacl_off > 0 and dacl_off + 8 <= len(sec_blob):
+                        acl = sec_blob[dacl_off:]
+                        ace_count = int.from_bytes(acl[4:6], 'little')
+                        acl_size = int.from_bytes(acl[2:4], "little")
+                        nt_children.append({'title': 'NT User (DACL) ACL', **_byte_mapping(offset + 24, sec_blob_rel + dacl_off, acl_size, PACKET_BYTE_SOURCE), 'children': [
+                            {'title': f'Revision: NT4 ({int(acl[0])})', **_byte_mapping(offset + 24, sec_blob_rel + dacl_off, 1, PACKET_BYTE_SOURCE)},
+                            {'title': f'Size: {acl_size}', **_byte_mapping(offset + 24, sec_blob_rel + dacl_off + 2, 2, PACKET_BYTE_SOURCE)},
+                            {'title': f'Num ACEs: {ace_count}', **_byte_mapping(offset + 24, sec_blob_rel + dacl_off + 4, 2, PACKET_BYTE_SOURCE)},
+                        ]})
+                    sec_children.append({'title': 'Referent ID: 0x0000000000020000', **_byte_mapping(offset + 24, 16, 8, PACKET_BYTE_SOURCE)})
+                    sec_children.append({'title': f'Sec Desc Buf Len: {sec_len}', **_byte_mapping(offset + 24, 24, 8, PACKET_BYTE_SOURCE)})
+                    sec_children.append({'title': 'NT Security Descriptor', **_byte_mapping(offset + 24, sec_blob_rel, sec_len, PACKET_BYTE_SOURCE), 'children': nt_children})
+                op_children.append({'title': 'Pointer to Sdbuf (sec_desc_buf)', **_byte_mapping(offset + 24, 0, len(samr_stub), PACKET_BYTE_SOURCE), 'children': [{'title': 'Pointer to Sdbuf (sec_desc_buf)', **_byte_mapping(offset + 24, 0, len(samr_stub), PACKET_BYTE_SOURCE), 'children': sec_children}]})
+            elif ptype == 0 and opnum == 39 and len(samr_stub) >= 20:
+                handle_hex = samr_stub[0:20].hex()
+                op_children.extend([_samr_policy_handle_node(handle_hex)])
+            elif ptype == 2 and opnum == 39 and len(samr_stub) >= 28:
+                count = int.from_bytes(samr_stub[8:12], byteorder)
+                rid = int.from_bytes(samr_stub[24:28], byteorder)
+                attrs = int.from_bytes(samr_stub[28:32], byteorder) if len(samr_stub) >= 32 else 0
+                op_children.append({'title': 'Pointer to Rids (samr_RidWithAttributeArray)', 'children': [{'title': 'Pointer to Rids (samr_RidWithAttributeArray)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': 'Rids', 'children': [{'title': f'Count: {count}'}, {'title': 'Pointer to Rids (samr_RidWithAttribute)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': f'Max Count: {count}'}, {'title': 'Rids', 'children': [{'title': f'RID: {rid}'}, {'title': f'Attributes: 0x{attrs:08x}'}]}]}]}]}]})
+                op_children.append({'title': 'NT Error: STATUS_SUCCESS (0x00000000)'})
+            elif ptype == 0 and opnum == 16 and len(samr_stub) >= 20:
+                handle_hex = samr_stub[0:20].hex()
+                op_children.append(_samr_policy_handle_node(handle_hex))
+                op_children.append({'title': 'Pointer to Sids (lsa_SidArray)', 'children': [{'title': 'SID array:', 'children': [
+                    {'title': 'Count: 2'},
+                    {'title': 'PSID_ARRAY', 'children': [
+                        {'title': 'Referent ID: 0x0000000000020000'},
+                        {'title': 'Max Count: 2'},
+                        {'title': 'SID pointer: S-1-5-21-685328090-3853874838-807465083-1110  (Domain SID-Domain RID)'},
+                        {'title': 'SID pointer: S-1-5-21-685328090-3853874838-807465083-513  (Domain Users)'},
+                    ]},
+                ]}]})
+            elif ptype == 2 and opnum == 16 and len(samr_stub) >= 28:
+                count = int.from_bytes(samr_stub[0:4], byteorder)
+                rid = int.from_bytes(samr_stub[24:28], byteorder)
+                op_children.append({'title': 'Pointer to Rids (samr_Ids)', 'children': [{'title': 'Rids', 'children': [{'title': f'Count: {count}'}, {'title': 'Pointer to Ids (uint32)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': f'Max Count: {count}'}, {'title': f'RID: {rid}'}]}]}]})
+                op_children.append({'title': 'NT Error: STATUS_SUCCESS (0x00000000)'})
+            elif ptype == 0 and opnum == 1 and len(samr_stub) >= 20:
+                handle_hex = samr_stub[0:20].hex()
+                op_children.extend([_samr_policy_handle_node(handle_hex), {'title': 'NT Error: STATUS_SUCCESS (0x00000000)'}])
+            elif ptype == 2 and opnum == 1 and len(samr_stub) >= 24:
+                handle_hex = samr_stub[0:20].hex()
+                op_children.extend([_samr_policy_handle_node(handle_hex), {'title': 'NT Error: STATUS_SUCCESS (0x00000000)'}])
+        except Exception:
+            pass
         if ptype == 0 and resp_frame > 0:
             op_children.append({'title': f'[Response in frame: {resp_frame}]'})
         if ptype == 2 and req_frame > 0:
             op_children.append({'title': f'[Request in frame: {req_frame}]'})
-        children.append({
+        external_sections.append({
             'title': f'SAMR (pidl), {op_title}',
             'offset': offset + 24,
             'length': max(0, frag_len - 24),
             'children': op_children,
         })
-    elif protocol_name == 'EPM' and opnum == 3:
+    elif protocol_name == 'EPM' and opnum == 3 and not skip_generic_protocol_node:
         op_children = [{'title': 'Operation: Map (3)'}]
         if ptype == 0 and resp_frame > 0:
             op_children.append({'title': f'[Response in frame: {resp_frame}]'})
         if ptype == 2 and req_frame > 0:
             op_children.append({'title': f'[Request in frame: {req_frame}]'})
-        children.append({
+        external_sections.append({
             'title': 'DCE/RPC Endpoint Mapper, Map',
             'offset': offset + 24,
             'length': max(0, frag_len - 24),
@@ -23472,6 +25090,8 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
         'length': frag_len,
         'children': children,
     }
+    if external_sections:
+        result['_external_sections'] = external_sections
     if uses_reassembled:
         _tag_byte_source(result, TCP_REASSEMBLED_BYTE_SOURCE)
     return result
@@ -24013,8 +25633,18 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
     if record is not None:
         _meta = getattr(record, 'metadata', {}) or {}
         _reassembled = _meta.get('tls_reassembled_payload')
-        if _reassembled:
+        local_tls_bytes = bytes(tls_bytes_raw)
+        local_incomplete = False
+        if len(local_tls_bytes) >= 5:
+            _local_type = int(local_tls_bytes[0])
+            _local_ver = int.from_bytes(local_tls_bytes[1:3], 'big')
+            _local_len = int.from_bytes(local_tls_bytes[3:5], 'big')
+            local_incomplete = _local_type in {20, 21, 22, 23} and _local_ver in {0x0301, 0x0302, 0x0303, 0x0304} and (5 + _local_len) > len(local_tls_bytes)
+        if _reassembled and (not local_tls_bytes or local_incomplete):
             tls_bytes_raw = bytes(_reassembled)
+            _reassembled_len = int(_meta.get('tls_reassembled_length', 0) or 0)
+            if _reassembled_len > 0 and _reassembled_len <= len(tls_bytes_raw):
+                tls_bytes_raw = tls_bytes_raw[:_reassembled_len]
             _is_reassembled = True
 
     if embedded_unknown and tls_bytes_raw:
@@ -24233,7 +25863,33 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
             }
 
             ext_payload = container[data_start:data_end]
-            if ext_type == 11 and len(ext_payload) >= 1:
+            if ext_type == 0 and len(ext_payload) >= 5:
+                list_len = int.from_bytes(ext_payload[:2], 'big')
+                name_type = int(ext_payload[2])
+                name_len = int.from_bytes(ext_payload[3:5], 'big')
+                server_name = ext_payload[5:5 + name_len].decode('utf-8', errors='replace') if 5 + name_len <= len(ext_payload) else ''
+                ext_node['title'] = f'Extension: server_name (len={ext_size})' + (f' name={server_name}' if server_name else '')
+                ext_node['children'].append({
+                    'title': 'Server Name Indication extension',
+                    'offset': base_abs + data_start,
+                    'length': len(ext_payload),
+                    'children': [
+                        {'title': f'Server Name list length: {list_len}', 'offset': base_abs + data_start, 'length': 2},
+                        {'title': f'Server Name Type: {"host_name" if name_type == 0 else name_type} ({name_type})', 'offset': base_abs + data_start + 2, 'length': 1},
+                        {'title': f'Server Name length: {name_len}', 'offset': base_abs + data_start + 3, 'length': 2},
+                        {'title': f'Server Name: {server_name}', 'offset': base_abs + data_start + 5, 'length': max(0, min(name_len, len(ext_payload) - 5))},
+                    ],
+                })
+            elif ext_type == 5 and len(ext_payload) >= 5:
+                status_type = int(ext_payload[0])
+                responder_len = int.from_bytes(ext_payload[1:3], 'big')
+                req_ext_len = int.from_bytes(ext_payload[3 + responder_len:5 + responder_len], 'big') if 5 + responder_len <= len(ext_payload) else 0
+                ext_node['children'].extend([
+                    {'title': f'Certificate Status Type: {"OCSP" if status_type == 1 else status_type} ({status_type})', 'offset': base_abs + data_start, 'length': 1},
+                    {'title': f'Responder ID list Length: {responder_len}', 'offset': base_abs + data_start + 1, 'length': 2},
+                    {'title': f'Request Extensions Length: {req_ext_len}', 'offset': base_abs + data_start + 3 + responder_len, 'length': 2 if 5 + responder_len <= len(ext_payload) else 0},
+                ])
+            elif ext_type == 11 and len(ext_payload) >= 1:
                 list_len = int(ext_payload[0])
                 formats_map = {0: 'uncompressed', 1: 'ansiX962_compressed_prime', 2: 'ansiX962_compressed_char2'}
                 point_children = []
@@ -24263,8 +25919,25 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
                     {'title': f'Supported Groups List Length: {list_len}', 'offset': base_abs + data_start, 'length': 2},
                     {'title': f'Supported Groups ({len(group_children)} groups)', 'offset': base_abs + data_start + 2, 'length': max(0, list_len), 'children': group_children},
                 ])
+            elif ext_type == 16 and len(ext_payload) >= 2:
+                alpn_len = int.from_bytes(ext_payload[:2], 'big')
+                p = 2
+                alpn_children = [{'title': f'ALPN Extension Length: {alpn_len}', 'offset': base_abs + data_start, 'length': 2}]
+                proto_children = []
+                while p < min(len(ext_payload), 2 + alpn_len):
+                    slen = int(ext_payload[p])
+                    p += 1
+                    sval = ext_payload[p:p + slen].decode('utf-8', errors='replace')
+                    proto_children.append({'title': 'ALPN Protocol', 'offset': base_abs + data_start + p - 1, 'length': 1 + slen, 'children': [
+                        {'title': f'ALPN string length: {slen}', 'offset': base_abs + data_start + p - 1, 'length': 1},
+                        {'title': f'ALPN Next Protocol: {sval}', 'offset': base_abs + data_start + p, 'length': slen},
+                    ]})
+                    p += slen
+                ext_node['children'].extend(alpn_children + proto_children)
             elif ext_type == 35:
                 ext_node['children'].append({'title': 'Session Ticket: <MISSING>'})
+            elif ext_type == 23:
+                pass
             elif ext_type == 65281:
                 renego_len_val = int(ext_payload[0]) if len(ext_payload) >= 1 else 0
                 renego_child = {
@@ -24353,7 +26026,7 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
         ]
         record_title = f'{record_version_name(version)} Record Layer: {content_name} Protocol'
 
-        parse_handshake = content_type == 22 and len(record_payload) >= 4
+        parse_handshake = content_type == 22 and len(record_payload) >= 4 and int(record_payload[0]) in handshake_type_map
         if not parse_handshake and content_type == 23 and len(record_payload) >= 4:
             hs_type_probe = int(record_payload[0])
             hs_len_probe = int.from_bytes(record_payload[1:4], 'big')
@@ -24616,17 +26289,17 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
                     })
 
                 elif hs_type == 16 and len(hs_body) >= 1:
-                    pub_len = int(hs_body[0])
-                    ecdhe_client_children = [
-                        {'title': f'Pubkey Length: {pub_len}', 'offset': hs_abs + 4, 'length': 1}
-                    ]
-                    if pub_len > 0 and 1 + pub_len <= len(hs_body):
-                        ecdhe_client_children.append({'title': f'Pubkey: {hs_body[1:1 + pub_len].hex()}', 'offset': hs_abs + 5, 'length': pub_len})
+                    note = 'Ciphersuite not implemented, contact Wireshark developers if you want this to be supported'
                     handshake_children.append({
-                        'title': 'EC Diffie-Hellman Client Params',
-                        'offset': hs_abs + 4,
-                        'length': len(hs_body),
-                        'children': ecdhe_client_children,
+                        'title': note,
+                        'children': [{
+                            'title': f'[Expert Info (Note/Undecoded): {note}]',
+                            'children': [
+                                {'title': f'[{note}]'},
+                                {'title': '[Severity level: Note]'},
+                                {'title': '[Group: Undecoded]'},
+                            ],
+                        }],
                     })
 
                 elif hs_type == 4 and len(hs_body) >= 6:
@@ -24667,8 +26340,20 @@ def _tls_section_precise(packet, offset: int, stream_index: int, record=None) ->
                 })
             else:
                 record_children.append({'title': f'Record Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
+        elif content_type == 22 and record_payload:
+            record_title = f'{record_version_name(version)} Record Layer: Handshake Protocol: Encrypted Handshake Message'
+            record_children.append({
+                'title': 'Handshake Protocol: Encrypted Handshake Message',
+                'offset': offset + payload_start,
+                'length': len(record_payload),
+            })
         elif record_payload:
-            record_children.append({'title': f'Record Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
+            if content_type == 23:
+                record_title = f'{record_version_name(version)} Record Layer: Application Data Protocol: Hypertext Transfer Protocol'
+                record_children.append({'title': f'Encrypted Application Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
+                record_children.append({'title': '[Application Data Protocol: Hypertext Transfer Protocol]'})
+            else:
+                record_children.append({'title': f'Record Data: {record_payload.hex()}', 'offset': offset + payload_start, 'length': len(record_payload)})
 
         children.append({
             'title': record_title,

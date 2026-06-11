@@ -308,6 +308,10 @@ class PacketBytesView(QWidget):
         self._views = {
             'packet': PacketHexView(),
             'tcp_reassembled': PacketHexView(),
+            'quic_decrypted': PacketHexView(),
+            'h264_reassembled': PacketHexView(),
+            'rdpudp_unwrapped': PacketHexView(),
+            'rdpudp_tls_fragment': PacketHexView(),
             'radius_eap_reassembled': PacketHexView(),
             'radius_eap_tls_reassembled': PacketHexView(),
             'http_dechunked': PacketHexView(),
@@ -363,6 +367,7 @@ class PacketBytesView(QWidget):
         sources = [
             ('packet', f'Packet ({len(packet_data)} bytes)', packet_data),
         ]
+        tls_family = {'SSL', 'TLS', 'TLSv1.0', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3'}
 
         reassembled_data = b''
         reassembled_hex = str(metadata.get('tcp_reassembled_data_hex', '') or '')
@@ -379,9 +384,38 @@ class PacketBytesView(QWidget):
                 reassembled_data = _tls_payload[:_tls_pdu_len]
             else:
                 reassembled_data = _tls_payload
-        if reassembled_data:
+        if reassembled_data and protocol_name not in tls_family:
             sources.append(
                 ('tcp_reassembled', f'Reassembled ({len(reassembled_data)} bytes)', reassembled_data)
+            )
+
+        quic_decrypted = bytes(metadata.get('quic_decrypted_payload', b'') or b'')
+        if quic_decrypted:
+            sources.append(
+                ('quic_decrypted', f'Decrypted QUIC ({len(quic_decrypted)} bytes)', quic_decrypted)
+            )
+
+        h264_reassembled_hex = str(metadata.get('h264_ts_reassembled_pes_hex', '') or '')
+        if h264_reassembled_hex:
+            try:
+                h264_reassembled = bytes.fromhex(h264_reassembled_hex)
+            except ValueError:
+                h264_reassembled = b''
+            if h264_reassembled:
+                sources.append(
+                    ('h264_reassembled', f'Reassembled H.264 PES ({len(h264_reassembled)} bytes)', h264_reassembled)
+                )
+
+        rdpudp_unwrapped = bytes(metadata.get('rdpudp_unwrapped_payload', b'') or b'')
+        if rdpudp_unwrapped:
+            sources.append(
+                ('rdpudp_unwrapped', f'Unwrapped RDPUDP2 packet ({len(rdpudp_unwrapped)} bytes)', rdpudp_unwrapped)
+            )
+
+        rdpudp_tls_fragment = bytes(metadata.get('rdpudp_tls_fragment_payload', b'') or b'')
+        if rdpudp_tls_fragment:
+            sources.append(
+                ('rdpudp_tls_fragment', f'SSL fragment ({len(rdpudp_tls_fragment)} bytes)', rdpudp_tls_fragment)
             )
 
         eap_reassembled_hex = str(metadata.get('radius_eap_reassembled_hex', '') or '')
