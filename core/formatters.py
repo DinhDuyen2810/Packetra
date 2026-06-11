@@ -17275,7 +17275,7 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         bits[31 - idx] = '1' if set_flag else '0'
         return ' '.join(''.join(bits[i:i + 4]) for i in range(0, 32, 4))
 
-    def _ntlm_flag_nodes(flags: int) -> list[dict[str, Any]]:
+    def _ntlm_flag_nodes(flags: int, flag_abs_offset: int | None = None, byte_source: str = PACKET_BYTE_SOURCE) -> list[dict[str, Any]]:
         labels = [
             (31, 'Negotiate 56'),
             (30, 'Negotiate Key Exchange'),
@@ -17313,7 +17313,10 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         out: list[dict[str, Any]] = []
         for bit, label in labels:
             is_set = bool(flags & (1 << bit))
-            out.append({'title': f'{_bit_pattern_32(bit, is_set)} = {label}: {"Set" if is_set else "Not set"}'})
+            node = {'title': f'{_bit_pattern_32(bit, is_set)} = {label}: {"Set" if is_set else "Not set"}'}
+            if flag_abs_offset is not None:
+                node.update(_byte_mapping(flag_abs_offset, 0, 4, byte_source))
+            out.append(node)
         return out
 
     def _ntlm_flag_summary(flags: int, short_sign: bool = False) -> str:
@@ -17347,6 +17350,78 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
         except Exception:
             txt = raw.hex()
         return (txt, ln, mx, off)
+
+    def _ntlm_message_tree(msg: bytes, ntlm_abs: int, byte_source: str = PACKET_BYTE_SOURCE) -> dict[str, Any] | None:
+        ntlm = bytes(msg or b'')
+        if len(ntlm) < 12 or not ntlm.startswith(b'NTLMSSP\x00'):
+            return None
+        msg_type = int.from_bytes(ntlm[8:12], 'little')
+        title_type = 'NTLMSSP_NEGOTIATE' if msg_type == 1 else 'NTLMSSP_CHALLENGE' if msg_type == 2 else 'NTLMSSP_AUTH' if msg_type == 3 else str(msg_type)
+        children: list[dict[str, Any]] = [
+            {'title': 'NTLMSSP identifier: NTLMSSP', **_byte_mapping(ntlm_abs, 0, 8, byte_source)},
+            {'title': f'NTLM Message Type: {title_type} (0x{msg_type:08x})', **_byte_mapping(ntlm_abs, 8, 4, byte_source)},
+        ]
+        if msg_type == 1 and len(ntlm) >= 40:
+            flags = int.from_bytes(ntlm[12:16], 'little')
+            dom_len = int.from_bytes(ntlm[16:18], 'little')
+            ws_len = int.from_bytes(ntlm[24:26], 'little')
+            children.append({'title': f'Negotiate Flags: 0x{flags:08x}, {_ntlm_flag_summary(flags)}', **_byte_mapping(ntlm_abs, 12, 4, byte_source), 'children': _ntlm_flag_nodes(flags, ntlm_abs + 12, byte_source)})
+            children.append({'title': f'Calling workstation domain: {"NULL" if dom_len == 0 else "PRESENT"}', **_byte_mapping(ntlm_abs, 16, 8, byte_source)})
+            children.append({'title': f'Calling workstation name: {"NULL" if ws_len == 0 else "PRESENT"}', **_byte_mapping(ntlm_abs, 24, 8, byte_source)})
+            children.append({'title': f'Version {int(ntlm[32])}.{int(ntlm[33])} (Build {int.from_bytes(ntlm[34:36], "little")}); NTLM Current Revision {int(ntlm[39])}', **_byte_mapping(ntlm_abs, 32, 8, byte_source), 'children': [
+                {'title': f'Major Version: {int(ntlm[32])}', **_byte_mapping(ntlm_abs, 32, 1, byte_source)},
+                {'title': f'Minor Version: {int(ntlm[33])}', **_byte_mapping(ntlm_abs, 33, 1, byte_source)},
+                {'title': f'Build Number: {int.from_bytes(ntlm[34:36], "little")}', **_byte_mapping(ntlm_abs, 34, 2, byte_source)},
+                {'title': f'NTLM Current Revision: {int(ntlm[39])}', **_byte_mapping(ntlm_abs, 39, 1, byte_source)},
+            ]})
+        elif msg_type == 2 and len(ntlm) >= 56:
+            tn_len = int.from_bytes(ntlm[12:14], 'little'); tn_max = int.from_bytes(ntlm[14:16], 'little'); tn_off = int.from_bytes(ntlm[16:20], 'little')
+            flags = int.from_bytes(ntlm[20:24], 'little')
+            srv = ntlm[24:32]; resv = ntlm[32:40]
+            ti_len = int.from_bytes(ntlm[40:42], 'little'); ti_max = int.from_bytes(ntlm[42:44], 'little'); ti_off = int.from_bytes(ntlm[44:48], 'little')
+            tname = ntlm[tn_off:tn_off + tn_len].decode('utf-16le', errors='replace').rstrip('\x00') if tn_off + tn_len <= len(ntlm) else ''
+            children.append({'title': f'Target Name: {tname if tname else "<MISSING>"}', **_byte_mapping(ntlm_abs, tn_off, max(1, tn_len), byte_source), 'children': [
+                {'title': f'Length: {tn_len}', **_byte_mapping(ntlm_abs, 12, 2, byte_source)},
+                {'title': f'Maxlen: {tn_max}', **_byte_mapping(ntlm_abs, 14, 2, byte_source)},
+                {'title': f'Offset: {tn_off}', **_byte_mapping(ntlm_abs, 16, 4, byte_source)},
+            ]})
+            children.append({'title': f'Negotiate Flags: 0x{flags:08x}, {_ntlm_flag_summary(flags)}', **_byte_mapping(ntlm_abs, 20, 4, byte_source), 'children': _ntlm_flag_nodes(flags, ntlm_abs + 20, byte_source)})
+            children.append({'title': f'NTLM Server Challenge: {srv.hex()}', **_byte_mapping(ntlm_abs, 24, 8, byte_source)})
+            children.append({'title': f'Reserved: {resv.hex()}', **_byte_mapping(ntlm_abs, 32, 8, byte_source)})
+            children.append({'title': 'Target Info', **_byte_mapping(ntlm_abs, ti_off, max(1, ti_len), byte_source), 'children': [
+                {'title': f'Length: {ti_len}', **_byte_mapping(ntlm_abs, 40, 2, byte_source)},
+                {'title': f'Maxlen: {ti_max}', **_byte_mapping(ntlm_abs, 42, 2, byte_source)},
+                {'title': f'Offset: {ti_off}', **_byte_mapping(ntlm_abs, 44, 4, byte_source)},
+                *_ntlm_target_info_nodes(ntlm, ntlm_abs, ti_off, ti_len),
+            ]})
+            children.append({'title': f'Version {int(ntlm[48])}.{int(ntlm[49])} (Build {int.from_bytes(ntlm[50:52], "little")}); NTLM Current Revision {int(ntlm[55])}', **_byte_mapping(ntlm_abs, 48, 8, byte_source), 'children': [
+                {'title': f'Major Version: {int(ntlm[48])}', **_byte_mapping(ntlm_abs, 48, 1, byte_source)},
+                {'title': f'Minor Version: {int(ntlm[49])}', **_byte_mapping(ntlm_abs, 49, 1, byte_source)},
+                {'title': f'Build Number: {int.from_bytes(ntlm[50:52], "little")}', **_byte_mapping(ntlm_abs, 50, 2, byte_source)},
+                {'title': f'NTLM Current Revision: {int(ntlm[55])}', **_byte_mapping(ntlm_abs, 55, 1, byte_source)},
+            ]})
+        elif msg_type == 3 and len(ntlm) >= 64:
+            flags = int.from_bytes(ntlm[60:64], 'little')
+            dom_txt, dom_ln, dom_mx, dom_of = _ntlm_text_at(ntlm, 28)
+            usr_txt, usr_ln, usr_mx, usr_of = _ntlm_text_at(ntlm, 36)
+            host_txt, host_ln, host_mx, host_of = _ntlm_text_at(ntlm, 44)
+            children.append({'title': f'Domain name: {dom_txt}', **_byte_mapping(ntlm_abs, dom_of, max(1, dom_ln), byte_source), 'children': [
+                {'title': f'Length: {dom_ln}', **_byte_mapping(ntlm_abs, 28, 2, byte_source)},
+                {'title': f'Maxlen: {dom_mx}', **_byte_mapping(ntlm_abs, 30, 2, byte_source)},
+                {'title': f'Offset: {dom_of}', **_byte_mapping(ntlm_abs, 32, 4, byte_source)},
+            ]})
+            children.append({'title': f'User name: {usr_txt}', **_byte_mapping(ntlm_abs, usr_of, max(1, usr_ln), byte_source), 'children': [
+                {'title': f'Length: {usr_ln}', **_byte_mapping(ntlm_abs, 36, 2, byte_source)},
+                {'title': f'Maxlen: {usr_mx}', **_byte_mapping(ntlm_abs, 38, 2, byte_source)},
+                {'title': f'Offset: {usr_of}', **_byte_mapping(ntlm_abs, 40, 4, byte_source)},
+            ]})
+            children.append({'title': f'Host name: {host_txt}', **_byte_mapping(ntlm_abs, host_of, max(1, host_ln), byte_source), 'children': [
+                {'title': f'Length: {host_ln}', **_byte_mapping(ntlm_abs, 44, 2, byte_source)},
+                {'title': f'Maxlen: {host_mx}', **_byte_mapping(ntlm_abs, 46, 2, byte_source)},
+                {'title': f'Offset: {host_of}', **_byte_mapping(ntlm_abs, 48, 4, byte_source)},
+            ]})
+            children.append({'title': f'Negotiate Flags: 0x{flags:08x}, {_ntlm_flag_summary(flags, short_sign=True)}', **_byte_mapping(ntlm_abs, 60, 4, byte_source), 'children': _ntlm_flag_nodes(flags, ntlm_abs + 60, byte_source)})
+        return {'title': 'NTLM Secure Service Provider', **_byte_mapping(ntlm_abs, 0, len(ntlm), byte_source), 'children': children}
 
     children: List[Dict[str, Any]] = []
 
@@ -17894,6 +17969,7 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                 mechanism = mechanism_raw.strip('\x00') or _scalar(getattr(sasl, 'mechanism', '')).strip('\x00')
                 creds_raw = bytes(creds_raw0 or bytes(getattr(sasl, 'credentials', b'') or b''))
                 msgid_local = proto_local = proto_body_local = version_local = name_local = auth_local = sasl_local = mech_local = creds_local = {}
+                creds_value_abs: int | None = None
                 try:
                     t0, s0, _e0, _ = _ber_tlv(bytes(chunk), 0)
                     if t0 == 0x30:
@@ -17913,9 +17989,10 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                                 sasl_local = _byte_mapping(offset, cursor + a2, max(0, n2 - a2), local_byte_source)
                                 _mech_text, r = _ber_text_at(bytes(chunk), a2)
                                 mech_local = _byte_mapping(offset, cursor + a2, max(0, r - a2), local_byte_source)
-                                t4, _c4, _d4, n4 = _ber_tlv(bytes(chunk), r)
+                                t4, c4, _d4, n4 = _ber_tlv(bytes(chunk), r)
                                 if t4 == 0x04:
                                     creds_local = _byte_mapping(offset, cursor + r, max(0, n4 - r), local_byte_source)
+                                    creds_value_abs = offset + cursor + c4
                 except Exception:
                     pass
                 bind_children: List[Dict[str, Any]] = [
@@ -17932,6 +18009,15 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                     },
                 ]
                 ntlm_pos = creds_raw.find(b'NTLMSSP\x00')
+                if ntlm_pos >= 0:
+                    ntlm_node = _ntlm_message_tree(creds_raw[ntlm_pos:], (creds_value_abs + ntlm_pos) if creds_value_abs is not None else 0, local_byte_source)
+                    if ntlm_node is not None:
+                        bind_children[-1]['children'].append({
+                            'title': 'GSS-API Generic Security Service Application Program Interface',
+                            **creds_local,
+                            'children': [ntlm_node],
+                        })
+                        ntlm_pos = -1
                 if ntlm_pos >= 0:
                     msg_type = int.from_bytes(creds_raw[ntlm_pos + 8:ntlm_pos + 12], 'little') if ntlm_pos + 12 <= len(creds_raw) else 0
                     ntlm = creds_raw[ntlm_pos:]
@@ -18087,20 +18173,49 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                 sasl_cred = _parse_bind_response_sasl_raw(bytes(chunk))
                 if not sasl_cred:
                     sasl_cred = _strip_octet_wrapper(bytes(getattr(op, 'serverSaslCreds', b'') or b''))
+                msgid_map = proto_map = body_map = rc_local = mdn_local = em_local = sasl_local = {}
+                sasl_value_abs: int | None = None
+                try:
+                    t0, s0, _e0, _n0 = _ber_tlv(bytes(chunk), 0)
+                    if t0 == 0x30:
+                        _mid, p = _ber_int_at(bytes(chunk), s0)
+                        msgid_map = _byte_mapping(offset, cursor + s0, max(0, p - s0), local_byte_source)
+                        t1, s1, e1, n1 = _ber_tlv(bytes(chunk), p)
+                        if t1 == 0x61:
+                            proto_map = _byte_mapping(offset, cursor + p, max(0, n1 - p), local_byte_source)
+                            body_map = _byte_mapping(offset, cursor + s1, max(0, e1 - s1), local_byte_source)
+                            _code, q = _ber_int_at(bytes(chunk), s1)
+                            rc_local = _byte_mapping(offset, cursor + s1, max(0, q - s1), local_byte_source)
+                            _mdn, q2 = _ber_text_at(bytes(chunk), q)
+                            mdn_local = _byte_mapping(offset, cursor + q, max(0, q2 - q), local_byte_source)
+                            _em, q3 = _ber_text_at(bytes(chunk), q2)
+                            em_local = _byte_mapping(offset, cursor + q2, max(0, q3 - q2), local_byte_source)
+                            if q3 < len(bytes(chunk)):
+                                t2, c2, _d2, n2 = _ber_tlv(bytes(chunk), q3)
+                                if t2 == 0x87:
+                                    sasl_local = _byte_mapping(offset, cursor + q3, max(0, n2 - q3), local_byte_source)
+                                    sasl_value_abs = offset + cursor + c2
+                except Exception:
+                    pass
                 resp_title = f'LDAPMessage bindResponse({message_id}) {rc_map.get(code, code)}'
                 if code == 49 and em:
                     resp_title = f'{resp_title} ({em})'
                 br_children: List[Dict[str, Any]] = [
-                    {'title': f'resultCode: {rc_map.get(code, code)} ({code})'},
-                    {'title': f'matchedDN: {mdn if mdn else "<MISSING>"}'},
-                    {'title': f'errorMessage: {em if em else "<MISSING>"}'},
+                    {'title': f'resultCode: {rc_map.get(code, code)} ({code})', **rc_local},
+                    {'title': f'matchedDN: {mdn if mdn else "<MISSING>"}', **mdn_local},
+                    {'title': f'errorMessage: {em if em else "<MISSING>"}', **em_local},
                 ]
                 if sasl_cred:
-                    br_children.append({'title': f'serverSaslCreds […]: {_hex_preview(sasl_cred, 216)}'})
+                    br_children.append({'title': f'serverSaslCreds […]: {_hex_preview(sasl_cred, 216)}', **sasl_local})
                     spnego = _parse_spnego_blob(sasl_cred, offset + cursor)
                     if spnego:
                         br_children.extend(spnego)
                     ntlm_pos = sasl_cred.find(b'NTLMSSP\x00')
+                    if ntlm_pos >= 0:
+                        ntlm_node = _ntlm_message_tree(sasl_cred[ntlm_pos:], (sasl_value_abs + ntlm_pos) if sasl_value_abs is not None else 0, local_byte_source)
+                        if ntlm_node is not None:
+                            br_children.append(ntlm_node)
+                            ntlm_pos = -1
                     if ntlm_pos >= 0:
                         ntlm = sasl_cred[ntlm_pos:]
                         msg_type = int.from_bytes(ntlm[8:12], 'little') if len(ntlm) >= 12 else 0
@@ -18169,9 +18284,9 @@ def _ldap_section(packet, payload: bytes, offset: int, record=None) -> Dict[str,
                                 })
                         br_children.append({'title': 'NTLM Secure Service Provider', 'children': ntlm_children[0]['children']})
                 msg_children = [
-                    {'title': f'messageID: {message_id}'},
-                    {'title': 'protocolOp: bindResponse (1)'},
-                    {'title': 'bindResponse', 'children': br_children},
+                    {'title': f'messageID: {message_id}', **msgid_map},
+                    {'title': 'protocolOp: bindResponse (1)', **proto_map},
+                    {'title': 'bindResponse', **body_map, 'children': br_children},
                 ]
                 reqf = int(metadata.get('ldap_response_to_frame', 0) or 0) if isinstance(metadata, dict) else 0
                 dt_us = float(metadata.get('ldap_response_time_us', 0.0) or 0.0) if isinstance(metadata, dict) else 0.0
@@ -24894,8 +25009,8 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 handle_hex = samr_stub[16:36].hex()
                 status = int.from_bytes(samr_stub[-4:], byteorder)
                 op_children.extend([
-                    {'title': 'Pointer to Level Out (uint32)', 'children': [{'title': f'Level Out: {level_out}'}]},
-                    {'title': 'Pointer to Info Out (samr_ConnectInfo)', 'children': [{'title': 'samr_ConnectInfo', 'children': [{'title': 'Info Out'}, {'title': 'Info1', 'children': [{'title': f'Client Version: SAMR_CONNECT_AFTER_W2K ({client_version})'}, {'title': f'Supported Features: Unknown ({supported})'}]}]}]},
+                    {'title': 'Pointer to Level Out (uint32)', **_byte_mapping(offset + stub_start, 0, 8, PACKET_BYTE_SOURCE), 'children': [{'title': f'Level Out: {level_out}', **_byte_mapping(offset + stub_start, 0, 4, PACKET_BYTE_SOURCE)}]},
+                    {'title': 'Pointer to Info Out (samr_ConnectInfo)', **_byte_mapping(offset + stub_start, 8, 8, PACKET_BYTE_SOURCE), 'children': [{'title': 'samr_ConnectInfo', **_byte_mapping(offset + stub_start, 8, 8, PACKET_BYTE_SOURCE), 'children': [{'title': 'Info Out', **_byte_mapping(offset + stub_start, 8, 8, PACKET_BYTE_SOURCE)}, {'title': 'Info1', **_byte_mapping(offset + stub_start, 8, 8, PACKET_BYTE_SOURCE), 'children': [{'title': f'Client Version: SAMR_CONNECT_AFTER_W2K ({client_version})', **_byte_mapping(offset + stub_start, 8, 4, PACKET_BYTE_SOURCE)}, {'title': f'Supported Features: Unknown ({supported})', **_byte_mapping(offset + stub_start, 12, 4, PACKET_BYTE_SOURCE)}]}]}]},
                     _samr_policy_handle_node(handle_hex, rel=16),
                     {'title': f'NT Error: STATUS_SUCCESS (0x{status:08x})', **_byte_mapping(offset + stub_start, len(samr_stub) - 4, 4, PACKET_BYTE_SOURCE)},
                 ])
@@ -24907,21 +25022,42 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             elif ptype == 2 and opnum == 6 and len(samr_stub) >= 40:
                 resume = int.from_bytes(samr_stub[0:4], byteorder)
                 names = [t for t in _utf16le_text(samr_stub).split('\x00') if t]
-                op_children.append({'title': 'Pointer to Resume Handle (uint32)', 'children': [{'title': f'Resume Handle: {resume}'}]})
+                op_children.append({'title': 'Pointer to Resume Handle (uint32)', **_byte_mapping(offset + stub_start, 0, 8, PACKET_BYTE_SOURCE), 'children': [{'title': f'Resume Handle: {resume}', **_byte_mapping(offset + stub_start, 0, 4, PACKET_BYTE_SOURCE)}]})
                 if names:
                     entries = []
                     for idx, name in enumerate(names[:2]):
-                        entries.append({'title': 'Entries', 'children': [{'title': f'Idx: {idx}'}, {'title': 'Name: ', 'children': [{'title': f'Name: {name}'}]}]})
-                    op_children.append({'title': 'Pointer to Sam (samr_SamArray)', 'children': [{'title': 'Pointer to Sam (samr_SamArray)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': 'Sam', 'children': [{'title': f'Count: {len(entries)}'}, {'title': 'Pointer to Entries (samr_SamEntry)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, {'title': f'Max Count: {len(entries)}'}, *entries]}]}]}]})
-                    op_children.append({'title': 'Pointer to Num Entries (uint32)', 'children': [{'title': f'Num Entries: {len(entries)}'}]})
-                op_children.append({'title': 'NT Error: STATUS_SUCCESS (0x00000000)'})
+                        name_raw = name.encode('utf-16le')
+                        name_off = samr_stub.find(name_raw)
+                        entries.append({'title': 'Entries', 'children': [{'title': f'Idx: {idx}'}, {'title': 'Name: ', **(_byte_mapping(offset + stub_start, name_off, len(name_raw), PACKET_BYTE_SOURCE) if name_off >= 0 else {}), 'children': [{'title': f'Name: {name}', **(_byte_mapping(offset + stub_start, name_off, len(name_raw), PACKET_BYTE_SOURCE) if name_off >= 0 else {})}]}]})
+                    sam_array_children = [
+                        {'title': 'Referent ID: 0x0000000000020000', **_byte_mapping(offset + stub_start, 8, 8, PACKET_BYTE_SOURCE)},
+                        {'title': 'Sam', **_byte_mapping(offset + stub_start, 8, max(8, len(samr_stub) - 12), PACKET_BYTE_SOURCE), 'children': [
+                            {'title': f'Count: {len(entries)}', **_byte_mapping(offset + stub_start, 16, 4, PACKET_BYTE_SOURCE)},
+                            {'title': 'Pointer to Entries (samr_SamEntry)', **_byte_mapping(offset + stub_start, 20, max(8, len(samr_stub) - 24), PACKET_BYTE_SOURCE), 'children': [
+                                {'title': 'Referent ID: 0x0000000000020000', **_byte_mapping(offset + stub_start, 20, 8, PACKET_BYTE_SOURCE)},
+                                {'title': f'Max Count: {len(entries)}', **_byte_mapping(offset + stub_start, 28, 4, PACKET_BYTE_SOURCE)},
+                                *entries,
+                            ]},
+                        ]},
+                    ]
+                    op_children.append({
+                        'title': 'Pointer to Sam (samr_SamArray)',
+                        **_byte_mapping(offset + stub_start, 8, max(8, len(samr_stub) - 12), PACKET_BYTE_SOURCE),
+                        'children': [{
+                            'title': 'Pointer to Sam (samr_SamArray)',
+                            **_byte_mapping(offset + stub_start, 8, max(8, len(samr_stub) - 12), PACKET_BYTE_SOURCE),
+                            'children': sam_array_children,
+                        }],
+                    })
+                    op_children.append({'title': 'Pointer to Num Entries (uint32)', **_byte_mapping(offset + stub_start, 4, 4, PACKET_BYTE_SOURCE), 'children': [{'title': f'Num Entries: {len(entries)}', **_byte_mapping(offset + stub_start, 4, 4, PACKET_BYTE_SOURCE)}]})
+                op_children.append({'title': 'NT Error: STATUS_SUCCESS (0x00000000)', **_byte_mapping(offset + stub_start, len(samr_stub) - 4, 4, PACKET_BYTE_SOURCE)})
             elif ptype == 0 and opnum == 5 and len(samr_stub) >= 52:
                 handle_hex = samr_stub[0:20].hex()
                 _, _, domain_text = _samr_string_ptr_node(samr_stub, 20, 'Domain Name', 'Domain Name')
                 op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': 'Pointer to Domain Name (lsa_String)', 'children': [{'title': 'Domain Name: ', 'children': [{'title': f'Domain Name: {domain_text}'}]}]}])
             elif ptype == 2 and opnum == 5 and len(samr_stub) >= 20:
                 sid_node, _, _ = _samr_sid_decode(samr_stub, 0)
-                op_children.extend([{'title': 'Pointer to Sid (dom_sid2)', 'children': [{'title': 'Pointer to Sid (dom_sid2)', 'children': [{'title': 'Referent ID: 0x0000000000020000'}, sid_node]}]}, {'title': 'NT Error: STATUS_SUCCESS (0x00000000)'}])
+                op_children.extend([{'title': 'Pointer to Sid (dom_sid2)', **_byte_mapping(offset + stub_start, 0, max(8, len(samr_stub) - 4), PACKET_BYTE_SOURCE), 'children': [{'title': 'Pointer to Sid (dom_sid2)', **_byte_mapping(offset + stub_start, 0, max(8, len(samr_stub) - 4), PACKET_BYTE_SOURCE), 'children': [{'title': 'Referent ID: 0x0000000000020000', **_byte_mapping(offset + stub_start, 0, 8, PACKET_BYTE_SOURCE)}, sid_node]}]}, {'title': 'NT Error: STATUS_SUCCESS (0x00000000)', **_byte_mapping(offset + stub_start, len(samr_stub) - 4, 4, PACKET_BYTE_SOURCE)}])
             elif ptype == 0 and opnum == 7 and len(samr_stub) >= 32:
                 handle_hex = samr_stub[0:20].hex()
                 access_mask = int.from_bytes(samr_stub[20:24], byteorder)
@@ -25058,7 +25194,7 @@ def _dcerpc_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                 op_children.extend([_samr_policy_handle_node(handle_hex), {'title': 'NT Error: STATUS_SUCCESS (0x00000000)'}])
             elif ptype == 2 and opnum == 1 and len(samr_stub) >= 24:
                 handle_hex = samr_stub[0:20].hex()
-                op_children.extend([_samr_policy_handle_node(handle_hex), {'title': 'NT Error: STATUS_SUCCESS (0x00000000)'}])
+                op_children.extend([_samr_policy_handle_node(handle_hex, rel=0), {'title': 'NT Error: STATUS_SUCCESS (0x00000000)', **_byte_mapping(offset + stub_start, 20, 4, PACKET_BYTE_SOURCE)}])
         except Exception:
             pass
         if ptype == 0 and resp_frame > 0:
