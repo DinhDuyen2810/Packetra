@@ -3249,6 +3249,9 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.go_state_changed.connect(lambda _state: self._refresh_go_menu_state())
             self.capture_view.table.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
             self.capture_view.details_tree.itemSelectionChanged.connect(self._refresh_analyze_menu_state)
+            self.capture_view.table.context_menu_requested.connect(self._on_packet_list_context_menu)
+            self.capture_view.details_tree.context_menu_requested.connect(self._on_packet_detail_context_menu)
+            self.capture_view.hex_view.context_menu_requested.connect(self._on_packet_bytes_context_menu)
             self.capture_view.table.verticalScrollBar().valueChanged.connect(
                 lambda _value: self._schedule_visible_custom_column_refresh()
             )
@@ -4841,6 +4844,8 @@ class ApplicationWindow(QMainWindow):
             if widget is cv.hex_view or cv.hex_view.isAncestorOf(widget):
                 if cv.hex_view.copy_selected_bytes_to_clipboard():
                     return
+                if cv.hex_view.copy_visible_bytes_to_clipboard():
+                    return
 
         if widget is not None and hasattr(widget, 'copy'):
             try:
@@ -6333,6 +6338,113 @@ class ApplicationWindow(QMainWindow):
             return None
         items = cv.details_tree.selectedItems()
         return items[0] if items else None
+
+    def _packet_list_filter_expression_for_context(self, row: int, column: int) -> str:
+        cv = self.capture_view
+        if not cv:
+            return ''
+        try:
+            return str(cv.packet_list_filter_expression(int(row), int(column)) or '').strip()
+        except Exception:
+            return ''
+
+    def _apply_filter_expression_with_mode(self, base_expr: str, mode: str) -> bool:
+        expr = str(base_expr or '').strip()
+        if not expr:
+            return False
+        merged = self._build_combined_filter(expr, str(mode or 'selected'))
+        self._set_display_filter_text(merged, apply_now=True)
+        return True
+
+    def _add_apply_filter_submenu(self, parent_menu, base_expr: str):
+        expr = str(base_expr or '').strip()
+        submenu = parent_menu.addMenu('Apply as a Filter')
+        action_specs = [
+            ('Selected', 'selected'),
+            ('Not Selected', 'not_selected'),
+            ('... and Selected', 'and_selected'),
+            ('... or Selected', 'or_selected'),
+            ('... and not Selected', 'and_not_selected'),
+            ('... or not Selected', 'or_not_selected'),
+        ]
+        for label, mode in action_specs:
+            action = submenu.addAction(label)
+            if expr:
+                action.triggered.connect(lambda _checked=False, m=mode, e=expr: self._apply_filter_expression_with_mode(e, m))
+            else:
+                action.setEnabled(False)
+        submenu.setEnabled(bool(expr))
+        return submenu
+
+    def _on_packet_list_context_menu(self, row: int, column: int, global_pos):
+        if not self._has_capture_document() or not self.capture_view:
+            return
+        cv = self.capture_view
+        if not cv.ensure_packet_list_context(int(row), int(column)):
+            return
+        record = cv.get_record_for_visible_row(int(row))
+        if record is None:
+            return
+
+        menu = QMenu(self)
+        menu.addAction(self.action_mark_unmark_selected)
+        menu.addAction(self.action_ignore_unignore_selected)
+        menu.addAction(self.action_packet_comment)
+
+        base_expr = self._packet_list_filter_expression_for_context(int(row), int(column))
+        if base_expr:
+            self._add_apply_filter_submenu(menu, base_expr)
+
+        follow_choices = self._follow_mode_choices_for_record(record)
+        if follow_choices:
+            follow_menu = menu.addMenu('Follow')
+            for label, mode in follow_choices:
+                follow_action = follow_menu.addAction(label)
+                follow_action.triggered.connect(
+                    lambda _checked=False, rec=record, m=mode, text=label: self._open_follow_stream_dialog(rec, m, title_label=text)
+                )
+
+        menu.addAction(self.action_copy)
+        menu.exec(global_pos)
+
+    def _on_packet_detail_context_menu(self, item, global_pos):
+        if not self._has_capture_document() or not self.capture_view or item is None:
+            return
+        tree = self.capture_view.details_tree
+        tree.clearSelection()
+        item.setSelected(True)
+        tree.setCurrentItem(item)
+        tree.setFocus()
+        self._refresh_analyze_menu_state()
+
+        menu = QMenu(self)
+        menu.addAction(self.action_expand_subtrees)
+        menu.addAction(self.action_collapse_subtrees)
+        menu.addAction(self.action_expand_all)
+        menu.addAction(self.action_collapse_all)
+
+        base_expr, _field_name = self._selected_field_filter_expression()
+        self._add_apply_filter_submenu(menu, base_expr)
+
+        copy_menu = menu.addMenu('Copy')
+        copy_visible_action = copy_menu.addAction('All visible items')
+        copy_visible_action.triggered.connect(lambda _checked=False, t=tree: t.copy_visible_items())
+        copy_selected_action = copy_menu.addAction('All visible selected tree items')
+        copy_selected_action.triggered.connect(lambda _checked=False, t=tree, it=item: t.copy_visible_selected_subtree(it))
+        copy_all_action = copy_menu.addAction('All')
+        copy_all_action.triggered.connect(lambda _checked=False, t=tree: t.copy_all_items())
+
+        menu.exec(global_pos)
+
+    def _on_packet_bytes_context_menu(self, byte_source: str, global_pos):
+        if not self._has_capture_document() or not self.capture_view:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction('Copy')
+        copy_action.triggered.connect(
+            lambda _checked=False, source=str(byte_source or 'packet'): self.capture_view.hex_view.copy_visible_bytes_to_clipboard(source)
+        )
+        menu.exec(global_pos)
 
     def _refresh_analyze_menu_state(self):
         has_capture = self._has_capture_document()
@@ -8714,9 +8826,9 @@ class ApplicationWindow(QMainWindow):
             return
         self._set_display_filter_text(expr, apply_now=True)
 
-    def _follow_stream_records(self, mode: str):
+    def _follow_stream_records(self, mode: str, record_override=None):
         cv = self.capture_view
-        record = cv.get_current_record() if cv else None
+        record = record_override if record_override is not None else (cv.get_current_record() if cv else None)
         if record is None:
             return [], ''
         metadata = getattr(record, 'metadata', {}) or {}
@@ -8740,6 +8852,29 @@ class ApplicationWindow(QMainWindow):
         fallback_mode = 'ipv6' if getattr(record, 'raw', None) is not None and record.raw.haslayer(IPv6) else 'ipv4'
         return rows, self._conversation_filter_expression_for_mode(fallback_mode)
 
+    def _follow_mode_choices_for_record(self, record) -> list[tuple[str, str]]:
+        if record is None:
+            return []
+        metadata = getattr(record, 'metadata', {}) or {}
+        protocol = str(getattr(record, 'protocol', '') or '').upper()
+        raw = getattr(record, 'raw', None)
+        has_tcp = bool(raw is not None and raw.haslayer(TCP))
+        has_udp = bool(raw is not None and raw.haslayer(UDP))
+        choices = []
+        if has_tcp or protocol in {'TCP', 'TLS', 'SSL'} or protocol.startswith('TLS'):
+            choices.append(('TCP Stream', 'tcp'))
+        if has_udp or protocol == 'UDP':
+            choices.append(('UDP Stream', 'udp'))
+        choices.append(('Conversation', 'conversation'))
+        deduped = []
+        seen = set()
+        for label, mode in choices:
+            if mode in seen:
+                continue
+            seen.add(mode)
+            deduped.append((label, mode))
+        return deduped
+
     def _packet_payload_bytes(self, record, mode: str) -> bytes:
         raw = getattr(record, 'raw', None)
         if raw is None:
@@ -8749,6 +8884,11 @@ class ApplicationWindow(QMainWindow):
                 return bytes(raw[TCP].payload)
             if mode == 'udp' and raw.haslayer(UDP):
                 return bytes(raw[UDP].payload)
+            if mode == 'conversation':
+                if raw.haslayer(TCP):
+                    return bytes(raw[TCP].payload)
+                if raw.haslayer(UDP):
+                    return bytes(raw[UDP].payload)
         except Exception:
             return b''
         return b''
@@ -8779,28 +8919,10 @@ class ApplicationWindow(QMainWindow):
             lines.append(f'{i:08x}  {ascii_part}')
         return '\n'.join(lines)
 
-    def _on_follow_stream(self):
-        if not self._has_capture_document():
-            QMessageBox.information(self, 'Follow', 'No capture is loaded.')
-            return
-        record = self.capture_view.get_current_record() if self.capture_view else None
+    def _open_follow_stream_dialog(self, record, mode: str, title_label: str | None = None):
         if record is None:
-            QMessageBox.information(self, 'Follow', 'Select a packet first.')
             return
-
-        metadata = getattr(record, 'metadata', {}) or {}
-        choices = []
-        if metadata.get('tcp_stream_index') is not None or str(record.protocol).upper() == 'TCP':
-            choices.append('TCP')
-        if metadata.get('udp_stream_index') is not None or str(record.protocol).upper() == 'UDP':
-            choices.append('UDP')
-        choices.append('Conversation')
-        stream_choice, ok = QInputDialog.getItem(self, 'Follow', 'Follow type:', choices, 0, False)
-        if not ok:
-            return
-
-        mode = str(stream_choice or 'Conversation').strip().lower()
-        records, stream_filter = self._follow_stream_records(mode)
+        records, stream_filter = self._follow_stream_records(mode, record_override=record)
         if not records:
             QMessageBox.information(self, 'Follow', 'No stream data found for selected packet.')
             return
@@ -8809,7 +8931,8 @@ class ApplicationWindow(QMainWindow):
         client_key = (str(getattr(first, 'src', '') or ''), str(getattr(first, 'sport', '') or ''))
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f'Follow {str(stream_choice).upper()} Stream')
+        title_text = str(title_label or mode or 'Conversation').strip()
+        dialog.setWindowTitle(f'Follow {title_text}')
         layout = QVBoxLayout(dialog)
 
         top = QHBoxLayout()
@@ -8852,7 +8975,7 @@ class ApplicationWindow(QMainWindow):
             server_bytes = 0
             packet_count = 0
             for rec in records:
-                payload = self._packet_payload_bytes(rec, mode)
+                payload = self._packet_payload_bytes(rec, str(mode or '').strip().lower())
                 if not payload:
                     continue
                 packet_count += 1
@@ -8903,6 +9026,26 @@ class ApplicationWindow(QMainWindow):
         dialog.resize(960, 620)
         self._fit_widget_90(dialog)
         dialog.exec()
+
+    def _on_follow_stream(self):
+        if not self._has_capture_document():
+            QMessageBox.information(self, 'Follow', 'No capture is loaded.')
+            return
+        record = self.capture_view.get_current_record() if self.capture_view else None
+        if record is None:
+            QMessageBox.information(self, 'Follow', 'Select a packet first.')
+            return
+
+        choices = self._follow_mode_choices_for_record(record)
+        if not choices:
+            QMessageBox.information(self, 'Follow', 'No stream data found for selected packet.')
+            return
+        labels = [label for label, _mode in choices]
+        stream_choice, ok = QInputDialog.getItem(self, 'Follow', 'Follow type:', labels, 0, False)
+        if not ok:
+            return
+        mode = next((mode for label, mode in choices if label == str(stream_choice)), 'conversation')
+        self._open_follow_stream_dialog(record, mode, title_label=str(stream_choice))
 
     def _on_menu_feature_placeholder(self, feature_name: str):
         QMessageBox.information(

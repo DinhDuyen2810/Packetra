@@ -26,6 +26,7 @@ from core.formatters import packet_summary_tree
 from core.models import PacketRecord
 from core.parser import PacketParser
 from gui.filter_drag import PacketFilterLineEdit
+from gui.filter_drag import packet_filter_expression
 from gui.hex_view import PacketBytesView
 from gui.packet_details import PacketDetailsTree
 from gui.packet_table import PacketTable
@@ -1285,14 +1286,12 @@ class CaptureView(QWidget):
         self.table.cellClicked.connect(self.show_details)
         self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
         self.table.itemSelectionChanged.connect(self._on_packet_table_selection_changed)
-        self.table.verticalScrollBar().valueChanged.connect(
-            lambda _value: getattr(self, 'packet_minimap', None).update() if getattr(self, 'packet_minimap', None) is not None else None
-        )
+        self.table.verticalScrollBar().valueChanged.connect(self._on_packet_table_scrolled)
         model = self.table.model()
         if model is not None:
-            model.rowsInserted.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True))
-            model.rowsRemoved.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True))
-            model.modelReset.connect(lambda *_args: self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True))
+            model.rowsInserted.connect(self._on_packet_table_model_changed)
+            model.rowsRemoved.connect(self._on_packet_table_model_changed)
+            model.modelReset.connect(self._on_packet_table_model_changed)
         self.details_tree.detail_field_selected.connect(self._on_detail_field_selected)
         self.details_tree.item_bytes_selected.connect(self.hex_view.highlight_bytes)
         self.hex_view.bytes_range_selected.connect(self._on_bytes_range_selected)
@@ -1318,6 +1317,21 @@ class CaptureView(QWidget):
             action = QAction(expr, self.filter_history_menu)
             action.triggered.connect(lambda checked=False, value=expr: self._apply_filter_from_history(value))
             self.filter_history_menu.addAction(action)
+
+    def _on_packet_table_scrolled(self, _value=0):
+        minimap = getattr(self, 'packet_minimap', None)
+        if minimap is None:
+            return
+        try:
+            minimap.update()
+        except RuntimeError:
+            pass
+
+    def _on_packet_table_model_changed(self, *_args):
+        try:
+            self._schedule_packet_list_aux_refresh(minimap=True, minimap_data_changed=True)
+        except RuntimeError:
+            pass
 
     def _filter_autocomplete_tokens(self) -> list[str]:
         """Return standard filter syntax tokens only (no history).
@@ -3012,6 +3026,34 @@ class CaptureView(QWidget):
                     records.append(self.records[rec_idx])
         return records
 
+    def get_record_for_visible_row(self, row: int):
+        if row < 0 or row >= len(self.visible_indices):
+            return None
+        rec_idx = self.visible_indices[row]
+        if rec_idx < 0 or rec_idx >= len(self.records):
+            return None
+        return self.records[rec_idx]
+
+    def ensure_packet_list_context(self, row: int, column: int) -> bool:
+        if row < 0 or row >= len(self.visible_indices):
+            return False
+        item = self.table.item(row, column if 0 <= column < self.table.columnCount() else 0)
+        if item is None:
+            item = self.table.item(row, 0)
+        if item is None:
+            return False
+        if not item.isSelected():
+            self.table.clearSelection()
+            self.table.selectRow(row)
+        self.table.setCurrentCell(row, max(0, min(column, self.table.columnCount() - 1)))
+        self.table.setFocus()
+        self.show_details(row, 0, add_to_history=False)
+        return True
+
+    def packet_list_filter_expression(self, row: int, column: int) -> str:
+        record = self.get_record_for_visible_row(row)
+        return packet_filter_expression(record, column)
+
     def get_selected_raw_packets(self):
         packets = []
         for record in self.get_selected_records():
@@ -3511,33 +3553,51 @@ class CaptureView(QWidget):
             return None
         metadata = getattr(record, 'metadata', {}) or {}
         current_number = int(getattr(record, 'number', 0) or 0)
-        candidate_keys = [
-            'http_response_frame', 'http_request_frame',
-            'dns_response_frame', 'dns_request_frame',
-            'icmp_response_frame', 'icmp_request_frame',
-            'icmpv6_response_frame', 'icmpv6_request_frame',
-            'smtp_response_frame', 'smtp_request_frame',
-            'imap_response_frame', 'imap_request_frame',
-            'sip_response_frame', 'sip_request_frame',
-            'snmp_response_frame', 'snmp_request_frame',
-            'whois_answer_frame', 'whois_query_frame',
-            'radius_response_frame', 'radius_request_frame',
-            'ntp_response_frame', 'ntp_request_frame',
-            'zabbix_response_frame', 'zabbix_request_frame',
-            'ldap_response_to_frame', 'dcerpc_request_frame',
-            'tftp_request_frame',
+        
+        def _frame_from_key(key: str) -> int | None:
+            value = metadata.get(key)
+            try:
+                frame = int(value)
+            except Exception:
+                return None
+            return frame if frame > 0 and frame != current_number else None
+
+        request_response_pairs = [
+            ('http_response_frame', 'http_request_frame'),
+            ('dns_response_frame', 'dns_request_frame'),
+            ('icmp_response_frame', 'icmp_request_frame'),
+            ('icmpv6_response_frame', 'icmpv6_request_frame'),
+            ('smtp_response_frame', 'smtp_request_frame'),
+            ('imap_response_frame', 'imap_request_frame'),
+            ('sip_response_frame', 'sip_request_frame'),
+            ('snmp_response_frame', 'snmp_request_frame'),
+            ('whois_answer_frame', 'whois_query_frame'),
+            ('radius_response_frame', 'radius_request_frame'),
+            ('ntp_response_frame', 'ntp_request_frame'),
+            ('zabbix_response_frame', 'zabbix_request_frame'),
+            ('ldap_response_frame', 'ldap_response_to_frame'),
+            ('dcerpc_response_frame', 'dcerpc_request_frame'),
+            ('kerberos_response_frame', 'kerberos_request_frame'),
+            ('smb2_response_frame', 'smb2_request_frame'),
+            ('tftp_response_frame', 'tftp_request_frame'),
+        ]
+        for response_key, request_key in request_response_pairs:
+            frame = _frame_from_key(response_key)
+            if frame is not None:
+                return frame
+            frame = _frame_from_key(request_key)
+            if frame is not None:
+                return frame
+
+        fallback_keys = [
             'tcp_ack_frame_number', 'tcp_duplicate_ack_frame_number',
             'ip_reassembled_in_frame',
             'tcp_reassembled_pdu_in_frame', 'tls_reassembled_pdu_in_frame',
             'smtp_reassembled_data_in_frame', 'rtp_setup_frame',
         ]
-        for key in candidate_keys:
-            value = metadata.get(key)
-            try:
-                frame = int(value)
-            except Exception:
-                continue
-            if frame > 0 and frame != current_number:
+        for key in fallback_keys:
+            frame = _frame_from_key(key)
+            if frame is not None:
                 return frame
         return None
 
@@ -3775,6 +3835,12 @@ class CaptureView(QWidget):
         return matches
 
     def _flatten_detail_titles(self, record):
+        metadata = getattr(record, 'metadata', {}) or {}
+        if isinstance(metadata, dict):
+            cached = metadata.get('_detail_find_titles_cache')
+            if isinstance(cached, list):
+                return [str(title or '') for title in cached]
+
         titles = []
 
         def walk(nodes):
@@ -3790,6 +3856,8 @@ class CaptureView(QWidget):
             walk(packet_summary_tree(record.raw, record))
         except Exception:
             pass
+        if isinstance(metadata, dict):
+            metadata['_detail_find_titles_cache'] = list(titles)
         return titles
 
     def _match_packet_list_text(self, record):
@@ -4129,6 +4197,11 @@ class CaptureView(QWidget):
 
         if details_mode:
             for row in self._iter_search_rows(backwards, include_current=False):
+                rec_idx = self.visible_indices[row]
+                record = self.records[rec_idx]
+                result = self._run_find_on_record(record, query, search_type, scope, case_sensitive, encoding_mode)
+                if not result.get('matched'):
+                    continue
                 self.goto_row(row)
                 selected, _ = self._select_detail_match_in_current_tree(
                     query,

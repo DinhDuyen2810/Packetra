@@ -35,10 +35,13 @@ class PacketHexView(QPlainTextEdit):
     bytes_range_selected = Signal(int, int)  # (offset, length)
     bytes_hovered = Signal(int)  # byte offset under mouse
     hover_left = Signal()
+    context_menu_requested = Signal(object)
 
     def __init__(self):
         super().__init__()
         self.setReadOnly(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_custom_context_menu)
         font = QFont('Consolas')
         font.setStyleHint(QFont.Monospace)
         self.setFont(font)
@@ -48,7 +51,9 @@ class PacketHexView(QPlainTextEdit):
         self._hover_highlight_ranges = []
         self._last_hovered_byte = None
         self._raw_data = b''
-        
+
+    def _on_custom_context_menu(self, pos):
+        self.context_menu_requested.emit(self.viewport().mapToGlobal(pos))
 
     def show_packet(self, record):
         self.show_bytes(_record_packet_bytes(record))
@@ -302,6 +307,7 @@ class PacketBytesView(QWidget):
     bytes_range_selected = Signal(int, int, str)
     bytes_hovered = Signal(int, str)
     hover_left = Signal(str)
+    context_menu_requested = Signal(str, object)
 
     def __init__(self):
         super().__init__()
@@ -336,6 +342,9 @@ class PacketBytesView(QWidget):
             )
             view.hover_left.connect(
                 lambda key=source: self.hover_left.emit(key)
+            )
+            view.context_menu_requested.connect(
+                lambda global_pos, key=source: self.context_menu_requested.emit(key, global_pos)
             )
 
         self.show_packet(None)
@@ -514,3 +523,16 @@ class PacketBytesView(QWidget):
             QApplication.clipboard().setText(cursor_text)
             return True
         return False
+
+    def copy_visible_bytes_to_clipboard(self, byte_source: str | None = None) -> bool:
+        if not self._tab_sources:
+            return False
+        source = self._active_source(byte_source)
+        view = self._views.get(source)
+        if view is None:
+            return False
+        text = str(view.toPlainText() or '').strip()
+        if not text:
+            return False
+        QApplication.clipboard().setText(text)
+        return True

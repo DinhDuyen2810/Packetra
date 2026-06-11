@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
@@ -6,6 +6,7 @@ from gui.filter_drag import build_filter_drag, packet_filter_expression
 
 
 class PacketTable(QTableWidget):
+    context_menu_requested = Signal(int, int, object)
     INFO_COLUMN = 6
     DRAGGABLE_COLUMNS = {2, 3, 4, 5}
     MARKED_ROLE = int(Qt.UserRole) + 100
@@ -56,6 +57,8 @@ class PacketTable(QTableWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragOnly)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_custom_context_menu)
         self.setAlternatingRowColors(True)
         self.setSortingEnabled(False)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -121,6 +124,14 @@ class PacketTable(QTableWidget):
         self._drag_start_pos = None
         self._drag_cell = None
         super().mouseReleaseEvent(event)
+
+    def _on_custom_context_menu(self, pos):
+        item = self.itemAt(pos)
+        if item is None:
+            return
+        row = int(item.row())
+        column = int(item.column())
+        self.context_menu_requested.emit(row, column, self.viewport().mapToGlobal(pos))
 
     def _row_record(self, row: int):
         if row < 0 or row >= self.rowCount():

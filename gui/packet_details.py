@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt, Signal, QSignalBlocker
-from PySide6.QtGui import QFont, QAction
-from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QMenu
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
 
 from core.formatters import packet_summary_tree
 
@@ -9,6 +9,7 @@ class PacketDetailsTree(QTreeWidget):
     item_selected = Signal(int, int)  # offset, length
     item_bytes_selected = Signal(int, int, str)  # offset, length, byte_source
     detail_field_selected = Signal(str, int)  # field name, byte count
+    context_menu_requested = Signal(object, object)
     BYTE_SOURCE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
     BYTE_SELECTABLE_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
@@ -19,7 +20,7 @@ class PacketDetailsTree(QTreeWidget):
         self.setUniformRowHeights(True)
         self.setIndentation(18)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._show_context_menu)
+        self.customContextMenuRequested.connect(self._on_custom_context_menu)
         self.itemSelectionChanged.connect(self._on_selection_changed)
         # Persistent expand state by normalized tree path.
         self._expand_state = {}
@@ -69,27 +70,56 @@ class PacketDetailsTree(QTreeWidget):
             text = text[:137].rstrip() + '...'
         return text
 
-    def _show_context_menu(self, position):
-        menu = QMenu(self)
-        copy_action = QAction('Copy', self)
-        copy_action.triggered.connect(self._copy_details)
-        menu.addAction(copy_action)
-        menu.exec(self.mapToGlobal(position))
+    def _on_custom_context_menu(self, position):
+        item = self.itemAt(position)
+        if item is None:
+            return
+        self.context_menu_requested.emit(item, self.viewport().mapToGlobal(position))
 
-    def _copy_details(self):
-        # Copy all details to clipboard
-        details = []
-        def collect_items(item, level=0):
-            indent = '  ' * level
-            details.append(f'{indent}{item.text(0)}')
-            for i in range(item.childCount()):
-                collect_items(item.child(i), level + 1)
+    def _collect_text_lines(self, root_item, visible_only: bool, include_root: bool = True, level: int = 0):
+        lines = []
+        if include_root:
+            lines.append(('  ' * level) + root_item.text(0))
+        if visible_only and not root_item.isExpanded():
+            return lines
+        next_level = level + (1 if include_root else 0)
+        for i in range(root_item.childCount()):
+            child = root_item.child(i)
+            lines.extend(self._collect_text_lines(child, visible_only, True, next_level))
+        return lines
+
+    def copy_all_items(self) -> bool:
+        lines = []
         root = self.invisibleRootItem()
         for i in range(root.childCount()):
-            collect_items(root.child(i))
-        from PySide6.QtWidgets import QApplication
-        clipboard = QApplication.clipboard()
-        clipboard.setText('\n'.join(details))
+            lines.extend(self._collect_text_lines(root.child(i), visible_only=False, include_root=True, level=0))
+        if not lines:
+            return False
+        QApplication.clipboard().setText('\n'.join(lines))
+        return True
+
+    def copy_visible_items(self) -> bool:
+        lines = []
+        root = self.invisibleRootItem()
+        for i in range(root.childCount()):
+            lines.extend(self._collect_text_lines(root.child(i), visible_only=True, include_root=True, level=0))
+        if not lines:
+            return False
+        QApplication.clipboard().setText('\n'.join(lines))
+        return True
+
+    def copy_visible_selected_subtree(self, item: QTreeWidgetItem | None = None) -> bool:
+        target = item
+        if target is None:
+            selected = self.selectedItems()
+            target = selected[0] if selected else None
+        if target is None:
+            return False
+        lines = self._collect_text_lines(target, visible_only=True, include_root=True, level=0)
+        if not lines:
+            return False
+        QApplication.clipboard().setText('\n'.join(lines))
+        return True
 
     def select_offset(self, offset: int, byte_source: str = 'packet'):
         best_item = None
