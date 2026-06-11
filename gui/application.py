@@ -2541,7 +2541,7 @@ class ApplicationWindow(QMainWindow):
         self.action_advanced_dashboard.triggered.connect(lambda: self._on_advanced_analysis_action('Dashboard'))
         self.action_advanced_demo_packet.triggered.connect(lambda: self._on_advanced_analysis_action('Demo Packet'))
         self.action_advanced_draw_topo.triggered.connect(lambda: self._on_advanced_analysis_action('Network Topology Graph'))
-        self.action_advanced_ai_analyst.triggered.connect(lambda: self._on_advanced_analysis_action('AI Analyst'))
+        self.action_advanced_ai_analyst.triggered.connect(self._open_ai_analyst_dialog_en)
         self.action_advanced_fwrule.triggered.connect(lambda: self._on_advanced_analysis_action('Firewall ACL Rules'))
 
         # Help
@@ -2985,15 +2985,15 @@ class ApplicationWindow(QMainWindow):
         adapter = self._build_flow_model_adapter()
         if not adapter.loaded:
             raise RuntimeError(
-                'AI model package is not ready. Hay cai torch, joblib va scikit-learn '
-                'bang cach chay: pip install -r requirements.txt'
+                'The AI model package is not ready. Install torch, joblib, and scikit-learn '
+                'with: pip install -r requirements.txt'
             )
         predictions = adapter.predict(ml_rows)
         if not isinstance(predictions, list):
             if isinstance(predictions, str) and predictions == 'torch_not_available':
                 raise RuntimeError(
-                    'AI model package is missing torch/joblib/scikit-learn. '
-                    'Hay chay: pip install -r requirements.txt'
+                    'The AI model package is missing torch, joblib, or scikit-learn. '
+                    'Run: pip install -r requirements.txt'
                 )
             raise RuntimeError(f'AI model predict failed: {predictions}')
         return predictions
@@ -3551,6 +3551,284 @@ class ApplicationWindow(QMainWindow):
         result_tree.itemDoubleClicked.connect(_handle_result_click)
         conversation_list.itemDoubleClicked.connect(lambda _item: _filter_selected_conversation())
         _update_mode_ui()
+
+        dialog.resize(1120, 760)
+        selector_panel.setMaximumHeight(max(140, int(dialog.height() * 0.2)))
+        self._fit_widget_90(dialog)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._ai_analyst_dialog = dialog
+        dialog.destroyed.connect(lambda *_args: setattr(self, '_ai_analyst_dialog', None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _parse_ai_selector_en(self, selector: str, available_numbers: list[int], subject_label: str) -> list[int]:
+        text = str(selector or '').strip().lower()
+        available = sorted(set(int(v) for v in available_numbers))
+        available_set = set(available)
+        if not available:
+            return []
+        if text in {'all', '*'}:
+            return available
+
+        result = set()
+        tokens = [t.strip() for t in text.split(',') if t.strip()]
+        if not tokens:
+            raise ValueError(f'Enter {subject_label} values like 5,8,10-20 or all.')
+
+        for token in tokens:
+            if '-' in token:
+                parts = [p.strip() for p in token.split('-', 1)]
+                if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                    raise ValueError(f'Invalid range: {token}')
+                start = int(parts[0])
+                end = int(parts[1])
+                if start > end:
+                    start, end = end, start
+                for value in range(start, end + 1):
+                    if value in available_set:
+                        result.add(value)
+                continue
+            if not token.isdigit():
+                raise ValueError(f'Invalid value: {token}')
+            value = int(token)
+            if value in available_set:
+                result.add(value)
+
+        selected = sorted(result)
+        if not selected:
+            raise ValueError(f'No {subject_label} entries matched the current selection.')
+        return selected
+
+    def _open_ai_analyst_dialog_en(self):
+        existing_dialog = getattr(self, '_ai_analyst_dialog', None)
+        if existing_dialog is not None:
+            try:
+                existing_dialog.show()
+                existing_dialog.raise_()
+                existing_dialog.activateWindow()
+                return
+            except Exception:
+                self._ai_analyst_dialog = None
+
+        if not self.capture_view or not getattr(self.capture_view, 'records', None):
+            QMessageBox.information(self, 'AI Analyst', 'No capture is available for analysis.')
+            return
+
+        records = list(self.capture_view.get_effective_records(include_ignored=False))
+        if not records:
+            QMessageBox.information(self, 'AI Analyst', 'All current packets are ignored.')
+            return
+
+        packet_numbers = sorted(int(r.number) for r in records)
+        record_by_number = {int(rec.number): rec for rec in records}
+        conversation_catalog = self._build_ai_conversation_catalog(records)
+        conversation_numbers = [int(item.get('index', 0) or 0) for item in conversation_catalog]
+        conversation_by_number = {int(item.get('index', 0) or 0): item for item in conversation_catalog}
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('AI Analyst')
+        root = QVBoxLayout(dialog)
+
+        selector_panel = QFrame(dialog)
+        selector_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        selector_layout = QHBoxLayout(selector_panel)
+
+        left_panel = QWidget(selector_panel)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('Analysis mode:'))
+        mode_combo = QComboBox(left_panel)
+        mode_combo.addItems(['By packets', 'By conversations'])
+        mode_row.addWidget(mode_combo, 1)
+        left_layout.addLayout(mode_row)
+
+        input_title = QLabel('Packet selection', left_panel)
+        left_layout.addWidget(input_title)
+        input_hint = QLabel('Supported: single value, comma-separated values, ranges like a-b, or all', left_panel)
+        input_hint.setWordWrap(True)
+        left_layout.addWidget(input_hint)
+
+        packet_input = QLineEdit(left_panel)
+        packet_input.setPlaceholderText('Example: 5,8,10-20 or all')
+        packet_input.setText('all')
+        left_layout.addWidget(packet_input)
+
+        conversation_input = QLineEdit(left_panel)
+        conversation_input.setPlaceholderText('Example: 1,3,5-8 or all')
+        conversation_input.setText('all')
+        left_layout.addWidget(conversation_input)
+
+        button_row = QHBoxLayout()
+        analyze_btn = QPushButton('Analyze', left_panel)
+        close_btn = QPushButton('Close', left_panel)
+        button_row.addWidget(analyze_btn)
+        button_row.addStretch()
+        button_row.addWidget(close_btn)
+        left_layout.addLayout(button_row)
+
+        right_panel = QWidget(selector_panel)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        conversation_list = QListWidget(right_panel)
+        for entry in conversation_catalog:
+            conversation_list.addItem(str(entry.get('label', '') or ''))
+        right_layout.addWidget(conversation_list, 1)
+
+        selector_layout.addWidget(left_panel, 3)
+        selector_layout.addWidget(right_panel, 2)
+        root.addWidget(selector_panel)
+
+        result_summary = QLabel(
+            f'Ready to analyze. {len(packet_numbers)} packets and {len(conversation_catalog)} conversations are available.',
+            dialog,
+        )
+        root.addWidget(result_summary)
+
+        result_tree = QTreeWidget(dialog)
+        result_tree.setColumnCount(2)
+        result_tree.setHeaderLabels(['Action', 'Count'])
+        result_tree.setRootIsDecorated(True)
+        result_tree.setAlternatingRowColors(True)
+        result_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        result_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        root.addWidget(result_tree, 1)
+
+        def apply_conversation_entry(entry):
+            if not isinstance(entry, dict):
+                return
+            filter_expression = str(entry.get('filter_expression', '') or '').strip()
+            first_packet = int(entry.get('first_packet', 0) or 0)
+            if not filter_expression:
+                return
+            self._set_display_filter_text(filter_expression, apply_now=True)
+            if first_packet > 0 and self.capture_view is not None:
+                self.capture_view.goto_packet_number(first_packet)
+            if self.capture_view is not None:
+                self.stacked_widget.setCurrentWidget(self.capture_view)
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+        def update_mode_ui():
+            is_conversation_mode = (mode_combo.currentIndex() == 1)
+            input_title.setText('Conversation selection' if is_conversation_mode else 'Packet selection')
+            packet_input.setVisible(not is_conversation_mode)
+            conversation_input.setVisible(is_conversation_mode)
+            right_panel.setVisible(is_conversation_mode)
+
+        def collect_selected_records():
+            if mode_combo.currentIndex() == 1:
+                selected_conversations = self._parse_ai_selector_en(conversation_input.text(), conversation_numbers, 'conversation')
+                seen_numbers = set()
+                selected_records = []
+                for conv_no in selected_conversations:
+                    entry = conversation_by_number.get(int(conv_no))
+                    if not entry:
+                        continue
+                    for rec in list(entry.get('records', []) or []):
+                        packet_no = int(getattr(rec, 'number', 0) or 0)
+                        if packet_no in seen_numbers:
+                            continue
+                        seen_numbers.add(packet_no)
+                        selected_records.append(rec)
+                return selected_records, f'{len(selected_conversations)} conversations'
+            selected_numbers = self._parse_ai_selector_en(packet_input.text(), packet_numbers, 'packet')
+            selected_records = [record_by_number[n] for n in selected_numbers if n in record_by_number]
+            return selected_records, f'{len(selected_numbers)} packets'
+
+        def render_result_groups(groups):
+            result_tree.clear()
+            for group in list(groups or []):
+                description = str(group.get('description', '') or '').strip()
+                parent_text = str(group.get('action', '') or '')
+                if description:
+                    parent_text = f'{parent_text} - {description}'
+                parent = QTreeWidgetItem(result_tree)
+                parent.setText(0, parent_text)
+                parent.setText(1, str(int(group.get('count', 0) or 0)))
+                for child_info in list(group.get('children', []) or []):
+                    child = QTreeWidgetItem(parent)
+                    child.setText(0, str(child_info.get('text', '') or ''))
+                    child.setText(1, '')
+                    child.setData(0, Qt.UserRole, str(child_info.get('filter_expression', '') or ''))
+                    child.setData(0, Qt.UserRole + 1, int(child_info.get('first_packet', 0) or 0))
+            result_tree.collapseAll()
+
+        def build():
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            analyze_btn.setEnabled(False)
+            result_summary.setText('Loading... AI Analyst is processing the selected data.')
+            QApplication.processEvents()
+            try:
+                selected_records, selection_text = collect_selected_records()
+                if not selected_records:
+                    raise ValueError('No valid data was selected for analysis.')
+
+                flows = self._build_ai_flows(selected_records)
+                traffic_header = list(self.AI_TRAFFIC_COLUMNS)
+                traffic_rows = self._build_ai_traffic_rows_from_flows(flows)
+                if any(len(row) != len(traffic_header) for row in traffic_rows):
+                    raise ValueError('TrafficLabelling schema mismatch: row length does not match the header.')
+
+                ml_header, ml_rows = self._traffic_to_ml(traffic_header, traffic_rows)
+                if any(len(row) != len(ml_header) for row in ml_rows):
+                    raise ValueError('Inference schema mismatch: feature rows do not match the header.')
+                if any(str(col).strip().lower() == 'label' for col in ml_header):
+                    raise ValueError('Inference schema mismatch: Label is still present in the feature set.')
+
+                predictions = self._predict_ai_labels(ml_header, ml_rows)
+                action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
+                render_result_groups(action_groups)
+                result_summary.setText(
+                    f'Analysis complete. {selection_text} produced {len(flows)} flows and {len(action_groups)} actions.'
+                )
+            except Exception as exc:
+                result_tree.clear()
+                result_summary.setText(f'AI Analyst error: {exc}')
+            finally:
+                analyze_btn.setEnabled(True)
+                QApplication.restoreOverrideCursor()
+                QApplication.processEvents()
+
+        def handle_result_item(item, _column):
+            if item is None:
+                return
+            filter_expression = str(item.data(0, Qt.UserRole) or '').strip()
+            first_packet = int(item.data(0, Qt.UserRole + 1) or 0)
+            if not filter_expression:
+                item.setExpanded(not item.isExpanded())
+                return
+            self._set_display_filter_text(filter_expression, apply_now=True)
+            if first_packet > 0 and self.capture_view is not None:
+                self.capture_view.goto_packet_number(first_packet)
+            if self.capture_view is not None:
+                self.stacked_widget.setCurrentWidget(self.capture_view)
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+        def filter_selected_conversation():
+            row = int(conversation_list.currentRow())
+            if row < 0 or row >= len(conversation_catalog):
+                return
+            entry = conversation_catalog[row]
+            conversation_input.setText(str(int(entry.get('index', 0) or 0)))
+            apply_conversation_entry(entry)
+
+        mode_combo.currentIndexChanged.connect(update_mode_ui)
+        analyze_btn.clicked.connect(build)
+        close_btn.clicked.connect(dialog.close)
+        packet_input.returnPressed.connect(build)
+        conversation_input.returnPressed.connect(build)
+        result_tree.itemClicked.connect(handle_result_item)
+        result_tree.itemDoubleClicked.connect(handle_result_item)
+        conversation_list.itemDoubleClicked.connect(lambda _item: filter_selected_conversation())
+        update_mode_ui()
 
         dialog.resize(1120, 760)
         selector_panel.setMaximumHeight(max(140, int(dialog.height() * 0.2)))
