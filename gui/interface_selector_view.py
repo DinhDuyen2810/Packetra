@@ -235,7 +235,7 @@ class InterfaceSelectorView(QWidget):
         self.tooltip_item = None
 
     def _on_header_section_resized(self, logicalIndex, oldSize, newSize):
-        # Nếu là cột Traffic Trend (index 1), vẽ lại sparkline với width mới
+        # If this is the Traffic Trend column (index 1), redraw the sparkline with the new width
         if logicalIndex == 1:
             for idx in range(self.list_widget.topLevelItemCount()):
                 item = self.list_widget.topLevelItem(idx)
@@ -422,7 +422,7 @@ class InterfaceSelectorView(QWidget):
         display_name = self.get_selected_display_name()
         capture_filter = self.get_capture_filter()
         if not iface:
-            QMessageBox.warning(None, 'Error', 'Vui lòng chọn interface.')
+            QMessageBox.warning(None, 'Error', 'Please select an interface.')
             return
         self.capture_started.emit(iface, display_name or iface, capture_filter)
 

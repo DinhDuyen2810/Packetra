@@ -40,10 +40,10 @@ def ensure_npcap():
     msg.setIcon(QMessageBox.Warning)
     msg.setWindowTitle('Npcap Required')
     msg.setText(
-        'Npcap chưa được cài đặt hoặc không hoạt động.\n'
-        'Ứng dụng cần Npcap để bắt gói tin trên Windows.'
+        'Npcap is not installed or is not working.\n'
+        'Packetra requires Npcap to capture packets on Windows.'
     )
-    msg.setInformativeText('Tải Npcap tại: https://npcap.com/')
+    msg.setInformativeText('Get Npcap at: https://npcap.com/')
     open_button = msg.addButton('Open Npcap Website', QMessageBox.AcceptRole)
     msg.addButton('Exit', QMessageBox.RejectRole)
     msg.exec()

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QHeaderView,
     QAbstractItemView,
+    QFrame,
 )
 
 
@@ -75,6 +76,16 @@ class ConversationsDialog(QDialog):
         layout.addLayout(button_row)
 
         self._analyze_packets()
+
+    def _style_table(self, table: QTableWidget):
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setShowGrid(False)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        table.setStyleSheet('QTableWidget { border: none; gridline-color: transparent; }')
+        return table
 
     def _analyze_packets(self):
         tabs_order = ["Ethernet", "IPv4", "IPv6", "TCP", "UDP"]
@@ -308,9 +319,7 @@ class ConversationsDialog(QDialog):
 
         table = QTableWidget()
         table.setSortingEnabled(False)
-        table.setAlternatingRowColors(True)
-        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._style_table(table)
 
         if tab_name in ("TCP", "UDP"):
             columns = [

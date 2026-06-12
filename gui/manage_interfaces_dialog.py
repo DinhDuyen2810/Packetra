@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QCheckBox, QLineEdit, QTextEdit, QFileDialog,
     QSpinBox, QMessageBox, QComboBox, QTreeWidget,
-    QTreeWidgetItem, QHeaderView, QAbstractItemView
+    QTreeWidgetItem, QHeaderView, QAbstractItemView, QFrame
 )
 from PySide6.QtGui import QIcon
 
@@ -411,6 +411,28 @@ Notes
     
     def _settings(self):
         return QSettings('Packetra', 'Packetra')
+
+    def _style_flat_table(self, table):
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        table.setShowGrid(False)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        table.setStyleSheet('QTableWidget { border: none; gridline-color: transparent; }')
+        return table
+
+    def _style_flat_tree(self, tree):
+        tree.setAlternatingRowColors(True)
+        tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tree.setFrameShape(QFrame.Shape.NoFrame)
+        tree.setStyleSheet('QTreeWidget { border: none; gridline-color: transparent; }')
+        return tree
     
     # ===== LOCAL INTERFACES TAB (QTreeWidget) =====
     
@@ -422,6 +444,7 @@ Notes
         
         # Tree widget - no gridlines, no headers like Capture Options Input tab
         self.local_tree = QTreeWidget()
+        self._style_flat_tree(self.local_tree)
         self.local_tree.setColumnCount(5)
         self.local_tree.setHeaderLabels(['Show', 'Friendly Name', 'Interface Name', 'Comment', 'Show with cmt'])
         self.local_tree.setColumnWidth(0, 60)
@@ -431,8 +454,6 @@ Notes
         self.local_tree.setColumnWidth(4, 120)
         
         # Hide gridlines like Input tab
-        self.local_tree.setStyleSheet("QTreeWidget { gridline-color: transparent; }")
-        
         # Populate with interfaces
         self._populate_local_interfaces()
 
@@ -543,6 +564,7 @@ Notes
         layout.addWidget(label)
 
         self.pipes_table = QTableWidget()
+        self._style_flat_table(self.pipes_table)
         self.pipes_table.setColumnCount(1)
         self.pipes_table.setHorizontalHeaderLabels(['Pipe Path'])
         self.pipes_table.horizontalHeader().setStretchLastSection(True)
@@ -598,7 +620,7 @@ Notes
         dialog.resize(760, 600)
 
         layout = QVBoxLayout(dialog)
-        label = QLabel('Tham khảo: script publisher cho Windows named pipe (PCAP stream).')
+        label = QLabel('Reference: Windows named pipe publisher script for Packetra.')
         layout.addWidget(label)
 
         text = QTextEdit()
@@ -646,6 +668,7 @@ Notes
         
         # Table for remote interfaces
         self.remote_table = QTableWidget()
+        self._style_flat_table(self.remote_table)
         self.remote_table.setColumnCount(7)
         self.remote_table.setHorizontalHeaderLabels(['Show', 'Host / Device URL', 'Port', 'OS', 'Username', 'Auth Type', 'Password'])
         self.remote_table.horizontalHeader().setStretchLastSection(True)
@@ -687,6 +710,7 @@ Notes
         layout.addLayout(btn_layout)
 
         self.remote_iface_tree = QTreeWidget()
+        self._style_flat_tree(self.remote_iface_tree)
         self.remote_iface_tree.setColumnCount(2)
         self.remote_iface_tree.setHeaderLabels(['Remote Host / Interface', 'Show'])
         self.remote_iface_tree.setColumnWidth(0, 430)

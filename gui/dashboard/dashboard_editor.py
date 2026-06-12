@@ -959,7 +959,7 @@ class WidgetEditorDialog(QDialog):
 
         primary_color_row = QHBoxLayout()
         self.primary_color_input = QLineEdit()
-        self.primary_color_input.setPlaceholderText("#4e79a7 hoặc red")
+        self.primary_color_input.setPlaceholderText("#4e79a7 or red")
         primary_color_row.addWidget(self.primary_color_input, 1)
         self.pick_primary_color_button = QPushButton("Pick Color")
         self.pick_primary_color_button.clicked.connect(self._pick_primary_color)

@@ -392,7 +392,7 @@ class CaptureFiltersDialog(QDialog):
 
 
 class CaptureOptionsDialog(QDialog):
-    """Capture Options dialog với 3 tabs: Input, Output, Options"""
+    """Capture Options dialog with 3 tabs: Input, Output, Options"""
     
     def __init__(self, parent, capture_view, read_only: bool = False):
         super().__init__(parent)
@@ -945,7 +945,7 @@ class CaptureOptionsDialog(QDialog):
             iface_item = QTreeWidgetItem()
             is_pipe = str(iface_name).startswith('\\\\.\\pipe\\')
             ips = [] if is_pipe else self._get_interface_ips(iface_name)
-            # Column 0: Interface display name (friendly hoáº·c comment:friendly)
+            # Column 0: Interface display name (friendly or comment-friendly)
             friendly_name = iface_pref.get('friendly_name', interfaces.get(iface_name, iface_name))
             comment = iface_pref.get('comment', '')
             show_with_comment = iface_pref.get('show_with_comment', False)
@@ -1190,7 +1190,7 @@ class CaptureOptionsDialog(QDialog):
         """Start capture using selected interface and current Output/Options settings"""
         if not self._validate_output_settings() or not self._validate_options_settings():
             return
-        # Validate capture filter syntax (nếu có)
+        # Validate capture filter syntax (if provided)
         capture_filter = str(item.data(6, Qt.UserRole) or '').strip()
         parent_window = self.parent()
         if hasattr(parent_window, '_resolve_capture_filter_alias'):
@@ -1223,7 +1223,7 @@ class CaptureOptionsDialog(QDialog):
             'buffer_mb': buffer_mb,
             'capture_filter': capture_filter,
         }
-        # Thêm thông tin pipes và remote interfaces từ settings nếu có
+        # Add pipe and remote interface information from settings if available
         from PySide6.QtCore import QSettings
         import json
         settings = QSettings('Packetra', 'Packetra')
@@ -1274,14 +1274,14 @@ class CaptureOptionsDialog(QDialog):
             self._update_start_button_state()
             self._start_capture_with_item(item)
 
-        # Column 2 (Link-layer Header) - Inline combo edit, chỉ cho phép các giá trị hợp lệ tùy loại interface
+        # Column 2 (Link-layer Header) - Inline combo edit, only allow valid values for the interface type
         elif column == 2:
             iface_name = item.data(0, Qt.UserRole) or item.text(0)
-            # Lấy loại interface từ network_utils (nếu có)
+            # Get interface type from network_utils if available
             from utils.network_utils import get_interface_details
             details = get_interface_details().get(iface_name, {})
             iface_type = details.get('type', '').lower()
-            # Mapping loại interface sang các header hợp lệ
+            # Map interface type to the valid link-layer headers
             if 'ethernet' in iface_type:
                 options = ['Ethernet', 'DOCSIS']
             elif 'wifi' in iface_type or '802.11' in iface_type:
@@ -1297,7 +1297,7 @@ class CaptureOptionsDialog(QDialog):
             elif 'raw' in iface_type:
                 options = ['Raw IP']
             else:
-                # Nếu không xác định, cho phép tất cả
+                # If unknown, allow all values
                 options = ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC',
                            'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback']
             self._edit_inline_combobox(item, column, options)
@@ -1914,7 +1914,7 @@ class ApplicationWindow(QMainWindow):
         self._fw_acl_dialog = None
         self._demo_packet_entries = None
 
-        # Trạng thái ứng dụng
+        # Application state
         self.current_view = None
         self.capture_view = None
         self.iface_selector_view = None
@@ -1988,7 +1988,7 @@ class ApplicationWindow(QMainWindow):
             pass
 
     def _build_ui(self):
-        """Xây dựng giao diện chính"""
+        """Build the main window UI"""
         # Central widget
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -2328,7 +2328,7 @@ class ApplicationWindow(QMainWindow):
         self.action_about_qt = QAction('About &Qt', self)
 
     def _build_toolbar(self):
-        """Xây dựng toolbar"""
+        """Build the toolbar"""
         icon_dir = Path(__file__).resolve().parent.parent / 'image' / 'main_toolbar_items'
 
         def toolbar_icon(name: str) -> QIcon:
@@ -2631,7 +2631,7 @@ class ApplicationWindow(QMainWindow):
             if '-' in token:
                 parts = [p.strip() for p in token.split('-', 1)]
                 if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                    raise ValueError(f'Khoảng không hợp lệ: {token}')
+                    raise ValueError(f'Invalid range: {token}')
                 start = int(parts[0])
                 end = int(parts[1])
                 if start > end:
@@ -2642,7 +2642,7 @@ class ApplicationWindow(QMainWindow):
                 continue
 
             if not token.isdigit():
-                raise ValueError(f'Giá trị không hợp lệ: {token}')
+                raise ValueError(f'Invalid value: {token}')
             value = int(token)
             if value in available_set:
                 result.add(value)
@@ -2656,7 +2656,7 @@ class ApplicationWindow(QMainWindow):
         return self._parse_ai_numeric_selector(selector, available_numbers, 'conversation')
 
     def _parse_ai_packet_selector(self, selector: str, available_numbers: list[int]) -> list[int]:
-        return self._parse_ai_numeric_selector(selector, available_numbers, 'gói tin')
+        return self._parse_ai_numeric_selector(selector, available_numbers, 'packet')
         text = str(selector or '').strip().lower()
         available = sorted(set(int(v) for v in available_numbers))
         available_set = set(available)
@@ -2675,7 +2675,7 @@ class ApplicationWindow(QMainWindow):
             if '-' in token:
                 parts = [p.strip() for p in token.split('-', 1)]
                 if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                    raise ValueError(f'Khoảng không hợp lệ: {token}')
+                    raise ValueError(f'Invalid range: {token}')
                 start = int(parts[0])
                 end = int(parts[1])
                 if start > end:
@@ -2686,7 +2686,7 @@ class ApplicationWindow(QMainWindow):
                 continue
 
             if not token.isdigit():
-                raise ValueError(f'Giá trị không hợp lệ: {token}')
+                raise ValueError(f'Invalid value: {token}')
             value = int(token)
             if value in available_set:
                 result.add(value)
@@ -3233,7 +3233,7 @@ class ApplicationWindow(QMainWindow):
         root.addWidget(info)
 
         button_row = QHBoxLayout()
-        open_btn = QPushButton('Mo demo', dialog)
+        open_btn = QPushButton('Open Demo', dialog)
         close_btn = QPushButton('Close', dialog)
         button_row.addWidget(open_btn)
         button_row.addStretch(1)
@@ -3255,10 +3255,10 @@ class ApplicationWindow(QMainWindow):
             open_btn.setEnabled(exists)
             lines = [
                 f"ID: {int(entry.get('id', 0) or 0):03d}",
-                f"Loai: {str(entry.get('category', '') or '-').strip() or '-'}",
+                f"Category: {str(entry.get('category', '') or '-').strip() or '-'}",
                 f"Protocol: {str(entry.get('protocol', '') or '-').strip() or '-'}",
                 '',
-                f"Mo ta: {str(entry.get('description', '') or '').strip()}",
+                f"Description: {str(entry.get('description', '') or '').strip()}",
             ]
             info.setPlainText("\n".join(lines))
 
@@ -3395,7 +3395,7 @@ class ApplicationWindow(QMainWindow):
         left_layout.addWidget(conversation_input)
 
         button_row = QHBoxLayout()
-        analyze_btn = QPushButton('Phân tích', left_panel)
+        analyze_btn = QPushButton('Analyze', left_panel)
         close_btn = QPushButton('Close', left_panel)
         button_row.addWidget(analyze_btn)
         button_row.addStretch()
@@ -3434,7 +3434,7 @@ class ApplicationWindow(QMainWindow):
             is_conversation_mode = (mode_combo.currentIndex() == 1)
             input_title.setText('Conversation selection' if is_conversation_mode else 'Packet selection')
             input_hint.setText(
-                'Hỗ trợ: 1 mục, nhiều mục cách nhau dấu phẩy, khoảng a-b, hoặc all'
+                'Usage: 1 item, multiple items separated by commas, range a-b, or all'
                 if is_conversation_mode
                 else 'Supported: single value, comma-separated values, ranges like a-b, or all'
             )
@@ -3508,13 +3508,13 @@ class ApplicationWindow(QMainWindow):
                 traffic_header = list(self.AI_TRAFFIC_COLUMNS)
                 traffic_rows = self._build_ai_traffic_rows_from_flows(flows)
                 if any(len(row) != len(traffic_header) for row in traffic_rows):
-                    raise ValueError('Lỗi schema: số cột TrafficLabelling không khớp header.')
+                    raise ValueError('Schema error: TrafficLabelling column count does not match the header.')
 
                 ml_header, ml_rows = self._traffic_to_ml(traffic_header, traffic_rows)
                 if any(len(row) != len(ml_header) for row in ml_rows):
-                    raise ValueError('Lỗi schema: số cột inference feature không khớp header.')
+                    raise ValueError('Schema error: inference feature column count does not match the header.')
                 if any(str(col).strip().lower() == 'label' for col in ml_header):
-                    raise ValueError('Lỗi schema: cột Label vẫn còn trong feature inference.')
+                    raise ValueError('Schema error: Label column still exists in feature inference.')
 
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
                 action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
@@ -4041,7 +4041,7 @@ class ApplicationWindow(QMainWindow):
         QTimer.singleShot(0, lambda: setattr(self, '_auxiliary_analysis_opening', False))
 
     def show_interface_selector(self):
-        """Hiển thị màn hình chọn interface"""
+        """Show the interface selection screen"""
         self._close_firewall_acl_dialog()
         if not self.iface_selector_view:
             self.iface_selector_view = InterfaceSelectorView()
@@ -4065,7 +4065,7 @@ class ApplicationWindow(QMainWindow):
             self.iface_selector_view.refresh_interface_preferences()
 
     def show_capture_view(self, iface: str, iface_display_name: str, capture_filter: str = ''):
-        """Hiển thị màn hình capture"""
+        """Show the capture screen"""
         if not self.capture_view:
             self.capture_view = CaptureView(iface, iface_display_name, capture_filter)
             self.capture_view.status_changed.connect(self._on_capture_status_changed)
@@ -4224,7 +4224,7 @@ class ApplicationWindow(QMainWindow):
             self.action_go_auto_scroll_live_capture.blockSignals(False)
 
     def _update_toolbar_state(self, mode: str):
-        """Cáº­p nháº­t tráº¡ng thĂ¡i toolbar theo mode"""
+        """Update toolbar state based on mode"""
         has_capture = bool(self.capture_view)
 
         if mode == 'selector':
@@ -4516,7 +4516,7 @@ class ApplicationWindow(QMainWindow):
         self._save_capture_filter_presets(dialog.presets())
 
     def _on_capture_started(self, iface, iface_display_name, capture_filter):
-        """Xử lý khi bắt đầu capture"""
+        """Handle capture start"""
         self.show_capture_view(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self._on_start_capture()
@@ -4530,7 +4530,7 @@ class ApplicationWindow(QMainWindow):
         if not os.path.exists(normalized_path):
             QMessageBox.warning(self, 'Open', f'The file does not exist:\n{normalized_path}')
             return
-        proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('Opening a new file will replace the current data. Do you want to save first?')
         if not proceed:
             return
         self.show_capture_view('', 'Offline', '')
@@ -4556,10 +4556,9 @@ class ApplicationWindow(QMainWindow):
         self._sync_capture_buttons()
         self._update_capture_window_title()
         self._refresh_status_metrics()
-        self._refresh_file_menu_state()
 
     def _on_start_capture(self):
-        """Bắt đầu capture"""
+        """Start capture."""
         if not self.capture_view:
             self._on_capture_options()
             return
@@ -4573,7 +4572,7 @@ class ApplicationWindow(QMainWindow):
 
         self.capture_view.capture_filter = self._resolve_capture_filter_alias(getattr(self.capture_view, 'capture_filter', ''))
 
-        proceed = self._prompt_save_before_destructive_action('Start capture mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('Starting a new capture will replace the current data. Do you want to save first?')
         if not proceed:
             return
 
@@ -4591,7 +4590,7 @@ class ApplicationWindow(QMainWindow):
         self._update_capture_window_title()
 
     def _on_stop_capture(self):
-        """Dừng capture"""
+        """Stop capture."""
         if not self.capture_view:
             return
         self.capture_view.stop_capture()
@@ -4606,14 +4605,14 @@ class ApplicationWindow(QMainWindow):
         self._refresh_capture_menu_state()
 
     def _on_restart_capture(self):
-        """Khởi động lại capture"""
+        """Restart capture."""
         if not self.capture_view:
             return
 
         if not self.capture_view.is_capturing():
             return
 
-        proceed = self._prompt_save_before_destructive_action('Restart capture sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('Restarting capture will replace the current data. Do you want to save first?')
         if not proceed:
             return
 
@@ -4630,7 +4629,7 @@ class ApplicationWindow(QMainWindow):
         self._update_capture_window_title()
 
     def _on_open_file(self):
-        """Mở file PCAP"""
+        """Open a PCAP file"""
         settings = QSettings('Packetra', 'Packetra')
         mode = str(settings.value('preferences/open_files_mode', 'recent_folder', str) or 'recent_folder')
         fixed_dir = str(settings.value('preferences/open_files_fixed_directory', '', str) or '').strip()
@@ -4662,7 +4661,7 @@ class ApplicationWindow(QMainWindow):
         self._on_open_recent_file(selected_path)
 
     def _on_save_file(self):
-        """Lưu file PCAP"""
+        """Save the PCAP file"""
         if self.capture_view:
             if self.capture_view.is_capturing():
                 QMessageBox.information(self, 'Save', 'Stop the live capture before saving.')
@@ -4676,7 +4675,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Info', 'There is no data to save.')
 
     def _on_save_as_file(self):
-        """Lưu file PCAP với tên mới"""
+        """Save the PCAP file as a new name"""
         if self.capture_view:
             if self.capture_view.is_capturing():
                 QMessageBox.information(self, 'Save As', 'Stop the live capture before using Save As.')
@@ -5885,7 +5884,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.critical(self, "Export Selected Flow CSV", f"Export that bai: {exc}")
 
     def _on_search(self):
-        """TĂ¬m kiáº¿m"""
+        """Find"""
         if self.capture_view:
             self.capture_view.toggle_find_panel()
 
@@ -10283,7 +10282,7 @@ class ApplicationWindow(QMainWindow):
         return True
 
     def _on_summary(self):
-        """Xem tóm tắt"""
+        """View summary"""
         if self.capture_view:
             self.capture_view.show_summary()
 
@@ -10319,6 +10318,8 @@ class ApplicationWindow(QMainWindow):
         tree.setAlternatingRowColors(True)
         tree.setAllColumnsShowFocus(True)
         tree.setUniformRowHeights(False)
+        tree.setFrameShape(QFrame.Shape.NoFrame)
+        tree.setStyleSheet('QTreeWidget { border: none; gridline-color: transparent; }')
         tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         header = tree.header()
@@ -10339,6 +10340,9 @@ class ApplicationWindow(QMainWindow):
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
+        table.setShowGrid(False)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        table.setStyleSheet('QTableWidget { border: none; gridline-color: transparent; }')
         header = table.horizontalHeader()
         for column in range(int(table.columnCount() or 0)):
             mode = QHeaderView.ResizeMode.Stretch if stretch_column == column else resize_mode
@@ -12027,7 +12031,7 @@ class ApplicationWindow(QMainWindow):
             self.capture_view.show_conversations()
 
     def _on_about(self):
-        """Hiển thị về Packetra"""
+        """Show About Packetra"""
         dialog = QMessageBox(self)
         dialog.setWindowTitle('About Packetra')
         dialog.setIcon(QMessageBox.Information)
@@ -12044,7 +12048,7 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _on_about_qt(self):
-        """Hiển thị về Qt"""
+        """Show About Qt"""
         dialog = QMessageBox(self)
         dialog.setWindowTitle('About Qt')
         dialog.setIcon(QMessageBox.Information)
@@ -12511,7 +12515,7 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _on_capture_options(self):
-        """Mở Capture Options dialog"""
+        """Open Capture Options dialog"""
         read_only = bool(self.capture_view and self.capture_view.is_capturing())
         dialog = CaptureOptionsDialog(self, self.capture_view, read_only=read_only)
         result = dialog.exec()
@@ -12574,13 +12578,13 @@ class ApplicationWindow(QMainWindow):
                 dialog.close()
             except Exception:
                 pass
-        """Xử lý khi đóng ứng dụng"""
+        """Handle application close."""
         # 1. If capturing, prompt to stop capture first
         if self.capture_view and self.capture_view.is_capturing():
             reply = QMessageBox.question(
                 self,
                 'Confirm',
-                'Đang capture. Bạn có muốn dừng?',
+                'A capture is running. Do you want to stop it?',
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.No:
@@ -12593,7 +12597,7 @@ class ApplicationWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 'Unsaved Changes',
-                'Có thay đổi chưa lưu. Bạn có muốn lưu lại trước khi thoát?',
+                'There are unsaved changes. Do you want to save before exiting?',
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save
             )

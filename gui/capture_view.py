@@ -45,7 +45,7 @@ log = logging.getLogger('capture_view')
 
 
 class _ProtocolSparkline(QLabel):
-    """Sparkline label for one protocol â€” identical style to interface traffic chart."""
+    """Sparkline label for one protocol - same style as the interface traffic chart."""
     HISTORY_LEN = 30
 
     def __init__(self, parent=None):
@@ -94,7 +94,7 @@ class _ProtocolSparkline(QLabel):
 
 
 def _sparkline_pixmap(values, width=280, height=24):
-    """Standalone sparkline pixmap â€” same style as interface traffic chart."""
+    """Standalone sparkline pixmap - same style as the interface traffic chart."""
     pix = QPixmap(width, height)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
@@ -325,7 +325,7 @@ class _PacketListMinimap(QWidget):
 
 
 class CaptureInformationDialog(QDialog):
-    """Live capture statistics â€” sparkline per protocol, same style as Interface traffic chart."""
+    """Live capture statistics - sparkline per protocol, same style as the interface traffic chart."""
 
     stop_requested = Signal()
 
@@ -356,7 +356,7 @@ class CaptureInformationDialog(QDialog):
         stop_btn.clicked.connect(self.stop_requested.emit)
         layout.addWidget(stop_btn)
 
-        # Tick every 1 s â€” push delta counts into each sparkline
+        # Tick every 1 s - push delta counts into each sparkline
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -675,7 +675,7 @@ class CaptureView(QWidget):
         self._save_recent_files(recent)
 
     def set_interface(self, iface: str, iface_display_name: str, capture_filter: str = ''):
-        """Đặt interface và khởi động lại"""
+        """Set the interface and restart."""
         self.iface = iface
         self.iface_display_name = iface_display_name
         self.capture_filter = capture_filter
@@ -4556,7 +4556,7 @@ class CaptureView(QWidget):
     def _on_go_to_packet_row_submit(self):
         text = self.goto_packet_input.text().strip()
         if not text.isdigit():
-            QMessageBox.warning(self, 'Invalid packet', 'Vui lòng nhập số packet hợp lệ.')
+            QMessageBox.warning(self, 'Invalid packet', 'Please enter a valid packet number.')
             return
         target = int(text)
         if not self.goto_packet_number(target):
@@ -5113,7 +5113,7 @@ class CaptureView(QWidget):
         return entries
 
     def focus_filter(self):
-        """Focus vĂ o display filter input"""
+        """Focus the display filter input."""
         self.display_filter_input.setFocus()
         self.display_filter_input.selectAll()
 
