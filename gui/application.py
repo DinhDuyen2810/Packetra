@@ -12,7 +12,7 @@ import time
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings, QRectF
+from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings, QRectF, QEvent
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QMenuBar, QToolBar, QLabel, QMenu, QMessageBox, QFileDialog,
@@ -1890,7 +1890,7 @@ class ApplicationWindow(QMainWindow):
         'Bot': 'Co dau hieu bot/botnet: may nguon co the dang bi dieu khien tu xa hoac tu dong tao ket noi bat thuong.',
         'DDoS': 'Co dau hieu tan cong DDoS: nhieu goi/flow tao tai lon ve dich trong thoi gian ngan.',
         'DoS GoldenEye': 'Co mau DoS GoldenEye: tan cong HTTP lam can kiet tai nguyen dich vu web.',
-        'DoS Hulk': 'Co mau DoS Hulk: luu luong HTTP tan cong voi cuong do cao vao may chu web.',
+        'DoS Hulk': 'DoS Hulk pattern: high-rate HTTP attack traffic targeting a web server.',
         'DoS Slowhttptest': 'Co mau DoS SlowHTTPTest: giu ket noi HTTP cham de lam can kiet tai nguyen server.',
         'DoS slowloris': 'Co mau Slowloris: mo/giu nhieu ket noi HTTP chua hoan tat de lam treo web server.',
         'FTP-Patator': 'Co dau hieu brute force FTP: nhieu thu nghiem dang nhap hoac flow FTP bat thuong.',
@@ -1945,6 +1945,20 @@ class ApplicationWindow(QMainWindow):
         # Build UI
         self._build_ui()
         self._connect_signals()
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.focusWindowChanged.connect(self._on_application_focus_window_changed)
+            except Exception:
+                pass
+            try:
+                app.focusChanged.connect(self._on_application_focus_changed)
+            except Exception:
+                pass
+            try:
+                app.installEventFilter(self)
+            except Exception:
+                pass
         self._restore_main_window_placement_if_needed()
 
         # Show interface selector by default
@@ -2611,7 +2625,7 @@ class ApplicationWindow(QMainWindow):
         result = set()
         tokens = [t.strip() for t in text.split(',') if t.strip()]
         if not tokens:
-            raise ValueError(f'Hãy nhập {subject_label} (vd: 5,8,10-20) hoặc all.')
+            raise ValueError(f'Enter {subject_label} values such as 5,8,10-20 or all.')
 
         for token in tokens:
             if '-' in token:
@@ -2635,7 +2649,7 @@ class ApplicationWindow(QMainWindow):
 
         selected = sorted(result)
         if not selected:
-            raise ValueError(f'Không có {subject_label} nào khớp với lựa chọn hiện tại.')
+            raise ValueError(f'No {subject_label} values matched the current selection.')
         return selected
 
     def _parse_ai_conversation_selector(self, selector: str, available_numbers: list[int]) -> list[int]:
@@ -2655,7 +2669,7 @@ class ApplicationWindow(QMainWindow):
         result = set()
         tokens = [t.strip() for t in text.split(',') if t.strip()]
         if not tokens:
-            raise ValueError('Hãy nhập gói tin (vd: 5,8,10-20) hoặc all.')
+            raise ValueError('Enter packet numbers such as 5,8,10-20 or all.')
 
         for token in tokens:
             if '-' in token:
@@ -2679,7 +2693,7 @@ class ApplicationWindow(QMainWindow):
 
         selected = sorted(result)
         if not selected:
-            raise ValueError('Không có gói nào khớp với lựa chọn hiện tại.')
+            raise ValueError('No packets matched the current selection.')
         return selected
 
     def _protocol_number_from_record(self, record) -> int:
@@ -3197,14 +3211,14 @@ class ApplicationWindow(QMainWindow):
     def _on_open_demo_packet(self):
         entries = self._load_demo_packet_entries()
         if not entries:
-            QMessageBox.warning(self, 'Demo Packet', 'Khong the tai danh sach demo packet.')
+            QMessageBox.warning(self, 'Demo Packet', 'Could not load the demo packet list.')
             return
 
         dialog = QDialog(self)
         dialog.setWindowTitle('Demo Packet')
         root = QVBoxLayout(dialog)
 
-        root.addWidget(QLabel('Chon hanh vi demo:'))
+        root.addWidget(QLabel('Choose a demo action:'))
         combo = QComboBox(dialog)
         entry_by_id = {}
         for entry in entries:
@@ -3220,7 +3234,7 @@ class ApplicationWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         open_btn = QPushButton('Mo demo', dialog)
-        close_btn = QPushButton('Dong', dialog)
+        close_btn = QPushButton('Close', dialog)
         button_row.addWidget(open_btn)
         button_row.addStretch(1)
         button_row.addWidget(close_btn)
@@ -3233,7 +3247,7 @@ class ApplicationWindow(QMainWindow):
         def _refresh_info():
             entry = _selected_entry()
             if not entry:
-                info.setPlainText('Khong co du lieu demo duoc chon.')
+                info.setPlainText('No demo data is currently selected.')
                 open_btn.setEnabled(False)
                 return
             demo_path = str(entry.get('path') or '')
@@ -3251,36 +3265,36 @@ class ApplicationWindow(QMainWindow):
         def _open_selected_demo():
             entry = _selected_entry()
             if not entry:
-                QMessageBox.warning(dialog, 'Demo Packet', 'Khong tim thay demo duoc chon.')
+                QMessageBox.warning(dialog, 'Demo Packet', 'The selected demo entry could not be found.')
                 return
 
             demo_id = int(entry.get('id', 0) or 0)
             demo_name = str(entry.get('name', '') or '').strip() or f'Demo {demo_id:03d}'
             demo_path = str(entry.get('path') or '')
             if not os.path.exists(demo_path):
-                QMessageBox.critical(dialog, 'Demo Packet', f'Khong tim thay file demo cho muc {demo_id:03d}.')
+                QMessageBox.critical(dialog, 'Demo Packet', f'Could not find the demo file for item {demo_id:03d}.')
                 return
 
             proceed = self._prompt_save_before_destructive_action(
-                'Project hien tai co thay doi chua luu. Ban co muon luu truoc khi mo demo packet moi khong?'
+                'The current project has unsaved changes. Do you want to save before opening a new demo packet?'
             )
             if not proceed:
                 return
 
             self.show_capture_view('', 'Offline', '')
             if not self.capture_view:
-                QMessageBox.critical(dialog, 'Demo Packet', 'Khong tao duoc Capture View de mo demo packet.')
+                QMessageBox.critical(dialog, 'Demo Packet', 'Could not create a capture view for the demo packet.')
                 return
 
             started = time.perf_counter()
             try:
                 packets = list(iter_pcap_packets(demo_path))
             except Exception as exc:
-                QMessageBox.critical(dialog, 'Demo Packet', f'Khong doc duoc file demo cho muc {demo_id:03d}.\n\n{exc}')
+                QMessageBox.critical(dialog, 'Demo Packet', f'Could not read the demo file for item {demo_id:03d}.\n\n{exc}')
                 return
 
             if not packets:
-                QMessageBox.warning(dialog, 'Demo Packet', f'Demo {demo_id:03d} khong co packet hop le.')
+                QMessageBox.warning(dialog, 'Demo Packet', f'Demo {demo_id:03d} does not contain valid packets.')
                 return
 
             self._replace_capture_packets(
@@ -3288,7 +3302,7 @@ class ApplicationWindow(QMainWindow):
                 preserve_metadata=False,
                 preserve_loaded_path=False,
                 mark_dirty=True,
-                status_message=f'Loaded demo {demo_id:03d} - {demo_name}. Capture dang o trang thai chua luu.',
+                status_message=f'Loaded demo {demo_id:03d} - {demo_name}. The capture now has unsaved changes.',
                 preserve_display_filter=False,
             )
 
@@ -3320,22 +3334,23 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _open_ai_analyst_dialog(self):
+        return self._open_ai_analyst_dialog_en()
         existing_dialog = getattr(self, '_ai_analyst_dialog', None)
         if existing_dialog is not None:
             try:
-                existing_dialog.show()
+                existing_dialog.showNormal()
                 existing_dialog.raise_()
                 existing_dialog.activateWindow()
                 return
             except Exception:
                 self._ai_analyst_dialog = None
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.information(self, 'AI Analyst', 'Khong co capture de phan tich.')
+            QMessageBox.information(self, 'AI Analyst', 'No capture is available for analysis.')
             return
 
         records = list(self.capture_view.get_effective_records(include_ignored=False))
         if not records:
-            QMessageBox.information(self, 'AI Analyst', 'Tat ca packet hien tai dang o trang thai ignored.')
+            QMessageBox.information(self, 'AI Analyst', 'All current packets are ignored.')
             return
         packet_numbers = sorted(int(r.number) for r in records)
         record_by_number = {}
@@ -3345,8 +3360,8 @@ class ApplicationWindow(QMainWindow):
         conversation_numbers = [int(item.get('index', 0) or 0) for item in conversation_catalog]
         conversation_by_number = {int(item.get('index', 0) or 0): item for item in conversation_catalog}
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('AI Analyst')
+        dialog = QDialog()
+        self._configure_auxiliary_analysis_dialog(dialog, 'AI Analyst')
         root = QVBoxLayout(dialog)
 
         selector_panel = QFrame(dialog)
@@ -3358,30 +3373,30 @@ class ApplicationWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel('Mode phân tích:'))
+        mode_row.addWidget(QLabel('Analysis mode:'))
         mode_combo = QComboBox(left_panel)
-        mode_combo.addItems(['Theo gói tin', 'Theo conversation'])
+        mode_combo.addItems(['By packets', 'By conversations'])
         mode_row.addWidget(mode_combo, 1)
         left_layout.addLayout(mode_row)
 
-        input_title = QLabel('Nhập gói tin', left_panel)
+        input_title = QLabel('Packet selection', left_panel)
         left_layout.addWidget(input_title)
-        input_hint = QLabel('Hỗ trợ: 1 gói, nhiều gói cách nhau dấu phẩy, khoảng a-b, hoặc all', left_panel)
+        input_hint = QLabel('Supported: single value, comma-separated values, ranges like a-b, or all', left_panel)
         left_layout.addWidget(input_hint)
 
         packet_input = QLineEdit(left_panel)
-        packet_input.setPlaceholderText('Ví dụ: 5,8,10-20 hoặc all')
+        packet_input.setPlaceholderText('Example: 5,8,10-20 or all')
         packet_input.setText('all')
         left_layout.addWidget(packet_input)
 
         conversation_input = QLineEdit(left_panel)
-        conversation_input.setPlaceholderText('Ví dụ: 1,3,5-8 hoặc all')
+        conversation_input.setPlaceholderText('Example: 1,3,5-8 or all')
         conversation_input.setText('all')
         left_layout.addWidget(conversation_input)
 
         button_row = QHBoxLayout()
         analyze_btn = QPushButton('Phân tích', left_panel)
-        close_btn = QPushButton('Đóng', left_panel)
+        close_btn = QPushButton('Close', left_panel)
         button_row.addWidget(analyze_btn)
         button_row.addStretch()
         button_row.addWidget(close_btn)
@@ -3400,7 +3415,7 @@ class ApplicationWindow(QMainWindow):
         root.addWidget(selector_panel)
 
         result_summary = QLabel(
-            f'Sẵn sàng phân tích. Có {len(packet_numbers)} gói tin và {len(conversation_catalog)} conversation khả dụng.',
+            f'Ready to analyze. {len(packet_numbers)} packets and {len(conversation_catalog)} conversations are available.',
             dialog,
         )
         root.addWidget(result_summary)
@@ -3408,19 +3423,20 @@ class ApplicationWindow(QMainWindow):
         result_tree = QTreeWidget(dialog)
         result_tree.setColumnCount(2)
         result_tree.setHeaderLabels(['Action', 'Count'])
-        result_tree.setRootIsDecorated(True)
-        result_tree.setAlternatingRowColors(True)
-        result_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        result_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._style_standard_tree(
+            result_tree,
+            stretch_column=0,
+            resize_mode=QHeaderView.ResizeMode.ResizeToContents,
+        )
         root.addWidget(result_tree, 1)
 
         def _update_mode_ui():
             is_conversation_mode = (mode_combo.currentIndex() == 1)
-            input_title.setText('Nhập số thứ tự conversation' if is_conversation_mode else 'Nhập gói tin')
+            input_title.setText('Conversation selection' if is_conversation_mode else 'Packet selection')
             input_hint.setText(
                 'Hỗ trợ: 1 mục, nhiều mục cách nhau dấu phẩy, khoảng a-b, hoặc all'
                 if is_conversation_mode
-                else 'Hỗ trợ: 1 gói, nhiều gói cách nhau dấu phẩy, khoảng a-b, hoặc all'
+                else 'Supported: single value, comma-separated values, ranges like a-b, or all'
             )
             packet_input.setVisible(not is_conversation_mode)
             conversation_input.setVisible(is_conversation_mode)
@@ -3428,7 +3444,7 @@ class ApplicationWindow(QMainWindow):
 
         def _collect_selected_records():
             mode = str(mode_combo.currentText() or '')
-            if mode == 'Theo conversation':
+            if mode == 'By conversations':
                 selected_conversations = self._parse_ai_conversation_selector(conversation_input.text(), conversation_numbers)
                 seen_numbers = set()
                 selected_records = []
@@ -3442,10 +3458,10 @@ class ApplicationWindow(QMainWindow):
                             continue
                         seen_numbers.add(packet_no)
                         selected_records.append(rec)
-                return selected_records, f'{len(selected_conversations)} conversation'
+                return selected_records, f'{len(selected_conversations)} conversations'
             selected_numbers = self._parse_ai_packet_selector(packet_input.text(), packet_numbers)
             selected_records = [record_by_number[n] for n in selected_numbers if n in record_by_number]
-            return selected_records, f'{len(selected_numbers)} gói tin'
+            return selected_records, f'{len(selected_numbers)} packets'
 
         def _render_result_groups(groups):
             result_tree.clear()
@@ -3481,12 +3497,12 @@ class ApplicationWindow(QMainWindow):
         def _build():
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             analyze_btn.setEnabled(False)
-            result_summary.setText('Loading... đang phân tích dữ liệu AI Analyst.')
+            result_summary.setText('Loading... AI Analyst is processing the selected data.')
             QApplication.processEvents()
             try:
                 selected_records, selection_text = _collect_selected_records()
                 if not selected_records:
-                    raise ValueError('Không chọn được dữ liệu hợp lệ để phân tích.')
+                    raise ValueError('No valid data was selected for analysis.')
 
                 flows = self._build_ai_flows(selected_records)
                 traffic_header = list(self.AI_TRAFFIC_COLUMNS)
@@ -3504,11 +3520,11 @@ class ApplicationWindow(QMainWindow):
                 action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
                 _render_result_groups(action_groups)
                 result_summary.setText(
-                    f'Đã phân tích {selection_text} -> {len(flows)} flow, {len(action_groups)} action.'
+                    f'Analysis complete. {selection_text} produced {len(flows)} flows and {len(action_groups)} actions.'
                 )
             except Exception as exc:
                 result_tree.clear()
-                result_summary.setText(f'Lỗi AI Analyst: {exc}')
+                result_summary.setText(f'AI Analyst error: {exc}')
             finally:
                 analyze_btn.setEnabled(True)
                 QApplication.restoreOverrideCursor()
@@ -3555,9 +3571,6 @@ class ApplicationWindow(QMainWindow):
         dialog.resize(1120, 760)
         selector_panel.setMaximumHeight(max(140, int(dialog.height() * 0.2)))
         self._fit_widget_90(dialog)
-        dialog.setModal(False)
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._ai_analyst_dialog = dialog
         dialog.destroyed.connect(lambda *_args: setattr(self, '_ai_analyst_dialog', None))
         dialog.show()
@@ -3602,13 +3615,132 @@ class ApplicationWindow(QMainWindow):
             raise ValueError(f'No {subject_label} entries matched the current selection.')
         return selected
 
+    def _iter_auxiliary_analysis_dialogs(self):
+        for attr_name in ('_ai_analyst_dialog', '_expert_info_dialog'):
+            dialog = getattr(self, attr_name, None)
+            if dialog is not None:
+                yield attr_name, dialog
+
+    def _collapse_auxiliary_analysis_windows(self, exclude=None):
+        for _attr_name, dialog in self._iter_auxiliary_analysis_dialogs():
+            if dialog is None or dialog is exclude:
+                continue
+            try:
+                self._collapse_auxiliary_analysis_dialog(dialog)
+            except Exception:
+                pass
+
+    def _collapse_auxiliary_analysis_dialog(self, dialog):
+        if dialog is None:
+            return
+        try:
+            if dialog.isVisible() and not dialog.isMinimized():
+                try:
+                    dialog.clearFocus()
+                    dialog.lower()
+                except Exception:
+                    pass
+                try:
+                    dialog.setWindowState(dialog.windowState() | Qt.WindowState.WindowMinimized)
+                except Exception:
+                    pass
+                dialog.showMinimized()
+                QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _request_window_activation(self, widget):
+        if widget is None:
+            return
+        try:
+            handle = widget.windowHandle()
+        except Exception:
+            handle = None
+        try:
+            widget.raise_()
+        except Exception:
+            pass
+        try:
+            widget.activateWindow()
+        except Exception:
+            pass
+        if handle is not None:
+            try:
+                handle.requestActivate()
+            except Exception:
+                pass
+
+    def _activate_main_capture_view(self):
+        self._collapse_auxiliary_analysis_windows()
+        if self.capture_view is not None:
+            self.stacked_widget.setCurrentWidget(self.capture_view)
+        if self.isMinimized():
+            try:
+                self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+            except Exception:
+                pass
+            self.show()
+        self._request_window_activation(self)
+        QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
+
+    def _schedule_main_capture_navigation(self, *, filter_expression: str = '', first_packet: int = 0):
+        was_maximized = self.isMaximized()
+        was_fullscreen = self.isFullScreen()
+        self._activate_main_capture_view()
+
+        def _apply():
+            try:
+                if filter_expression:
+                    self._set_display_filter_text(filter_expression, apply_now=True)
+                if first_packet > 0 and self.capture_view is not None:
+                    self.capture_view.goto_packet_number(int(first_packet))
+                if was_fullscreen and not self.isFullScreen():
+                    self.showFullScreen()
+                elif was_maximized and not self.isMaximized():
+                    self.showMaximized()
+                self._request_window_activation(self)
+                self._collapse_auxiliary_analysis_windows()
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _apply)
+
+    def _configure_auxiliary_analysis_dialog(self, dialog, title: str):
+        dialog.setParent(None)
+        dialog.setWindowTitle(str(title))
+        dialog.setWindowFlag(Qt.WindowType.Window, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        try:
+            dialog.setWindowIcon(self.windowIcon())
+        except Exception:
+            pass
+
+    def _restore_auxiliary_analysis_dialog(self, dialog):
+        if dialog is None:
+            return
+        try:
+            if dialog.isMinimized():
+                try:
+                    dialog.setWindowState(dialog.windowState() & ~Qt.WindowState.WindowMinimized)
+                except Exception:
+                    pass
+                dialog.show()
+            else:
+                dialog.show()
+            QApplication.processEvents()
+            self._request_window_activation(dialog)
+        except Exception:
+            pass
+
     def _open_ai_analyst_dialog_en(self):
         existing_dialog = getattr(self, '_ai_analyst_dialog', None)
         if existing_dialog is not None:
             try:
-                existing_dialog.show()
-                existing_dialog.raise_()
-                existing_dialog.activateWindow()
+                self._restore_auxiliary_analysis_dialog(existing_dialog)
                 return
             except Exception:
                 self._ai_analyst_dialog = None
@@ -3628,8 +3760,8 @@ class ApplicationWindow(QMainWindow):
         conversation_numbers = [int(item.get('index', 0) or 0) for item in conversation_catalog]
         conversation_by_number = {int(item.get('index', 0) or 0): item for item in conversation_catalog}
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('AI Analyst')
+        dialog = QDialog()
+        self._configure_auxiliary_analysis_dialog(dialog, 'AI Analyst')
         root = QVBoxLayout(dialog)
 
         selector_panel = QFrame(dialog)
@@ -3705,14 +3837,11 @@ class ApplicationWindow(QMainWindow):
             first_packet = int(entry.get('first_packet', 0) or 0)
             if not filter_expression:
                 return
-            self._set_display_filter_text(filter_expression, apply_now=True)
-            if first_packet > 0 and self.capture_view is not None:
-                self.capture_view.goto_packet_number(first_packet)
-            if self.capture_view is not None:
-                self.stacked_widget.setCurrentWidget(self.capture_view)
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+            self._collapse_auxiliary_analysis_dialog(dialog)
+            self._schedule_main_capture_navigation(
+                filter_expression=filter_expression,
+                first_packet=first_packet,
+            )
 
         def update_mode_ui():
             is_conversation_mode = (mode_combo.currentIndex() == 1)
@@ -3803,14 +3932,11 @@ class ApplicationWindow(QMainWindow):
             if not filter_expression:
                 item.setExpanded(not item.isExpanded())
                 return
-            self._set_display_filter_text(filter_expression, apply_now=True)
-            if first_packet > 0 and self.capture_view is not None:
-                self.capture_view.goto_packet_number(first_packet)
-            if self.capture_view is not None:
-                self.stacked_widget.setCurrentWidget(self.capture_view)
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+            self._collapse_auxiliary_analysis_dialog(dialog)
+            self._schedule_main_capture_navigation(
+                filter_expression=filter_expression,
+                first_packet=first_packet,
+            )
 
         def filter_selected_conversation():
             row = int(conversation_list.currentRow())
@@ -3827,6 +3953,7 @@ class ApplicationWindow(QMainWindow):
         conversation_input.returnPressed.connect(build)
         result_tree.itemClicked.connect(handle_result_item)
         result_tree.itemDoubleClicked.connect(handle_result_item)
+        conversation_list.itemClicked.connect(lambda _item: filter_selected_conversation())
         conversation_list.itemDoubleClicked.connect(lambda _item: filter_selected_conversation())
         update_mode_ui()
 
@@ -4330,20 +4457,20 @@ class ApplicationWindow(QMainWindow):
             return
         normalized_path = os.path.abspath(os.path.normpath(candidate))
         if not os.path.exists(normalized_path):
-            QMessageBox.warning(self, 'Open', f'File khong ton tai:\n{normalized_path}')
+            QMessageBox.warning(self, 'Open', f'The file does not exist:\n{normalized_path}')
             return
         proceed = self._prompt_save_before_destructive_action('Mở file mới sẽ thay thế dữ liệu hiện tại. Bạn có muốn lưu trước không?')
         if not proceed:
             return
         self.show_capture_view('', 'Offline', '')
         if not self.capture_view:
-            QMessageBox.critical(self, 'Open', 'Khong tao duoc Capture View de mo file.')
+            QMessageBox.critical(self, 'Open', 'Could not create a capture view for the selected file.')
             return
         started = time.perf_counter()
         try:
             self.capture_view.load_file(normalized_path)
         except Exception as exc:
-            QMessageBox.critical(self, 'Open', f'Khong mo duoc file:\n{normalized_path}\n\n{exc}')
+            QMessageBox.critical(self, 'Open', f'Could not open the file:\n{normalized_path}\n\n{exc}')
             return
         self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
         self._status_mode = 'activity'
@@ -4353,7 +4480,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         if not getattr(self.capture_view, 'records', None):
-            QMessageBox.warning(self, 'Open', f'Mo file xong nhung khong co packet:\n{normalized_path}')
+            QMessageBox.warning(self, 'Open', f'The file opened successfully but contains no packets:\n{normalized_path}')
             return
         self._sync_capture_buttons()
         self._update_capture_window_title()
@@ -4467,7 +4594,7 @@ class ApplicationWindow(QMainWindow):
         """Lưu file PCAP"""
         if self.capture_view:
             if self.capture_view.is_capturing():
-                QMessageBox.information(self, 'Save', 'Khong the Save khi dang capture. Vui long dung capture truoc.')
+                QMessageBox.information(self, 'Save', 'Stop the live capture before saving.')
                 return
             self.capture_view.save_file()
             self._update_capture_window_title()
@@ -4475,13 +4602,13 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
             self._refresh_file_menu_state()
         else:
-            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
+            QMessageBox.information(self, 'Info', 'There is no data to save.')
 
     def _on_save_as_file(self):
         """Lưu file PCAP với tên mới"""
         if self.capture_view:
             if self.capture_view.is_capturing():
-                QMessageBox.information(self, 'Save As', 'Khong the Save As khi dang capture. Vui long dung capture truoc.')
+                QMessageBox.information(self, 'Save As', 'Stop the live capture before using Save As.')
                 return
             self.capture_view.save_file(force_dialog=True)
             self._update_capture_window_title()
@@ -4489,15 +4616,15 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
             self._refresh_file_menu_state()
         else:
-            QMessageBox.information(self, 'Info', 'Không có dữ liệu để lưu.')
+            QMessageBox.information(self, 'Info', 'There is no data to save.')
 
     def _on_merge_file(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Merge', 'Khong co capture hien tai de merge. Vui long mo hoac bat capture truoc.')
+            QMessageBox.information(self, 'Merge', 'No active capture is available to merge. Open or start a capture first.')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'Merge', 'Vui long dung capture truoc khi merge.')
+            QMessageBox.warning(self, 'Merge', 'Stop the live capture before merging files.')
             return
 
         dialog = QFileDialog(self, 'Merge Capture File')
@@ -4512,9 +4639,9 @@ class ApplicationWindow(QMainWindow):
 
         mode_dialog = QMessageBox(self)
         mode_dialog.setWindowTitle('Merge Mode')
-        mode_dialog.setText('Chon cach merge packet:')
-        append_btn = mode_dialog.addButton('Them vao cuoi danh sach', QMessageBox.AcceptRole)
-        chrono_btn = mode_dialog.addButton('Sap xep lai theo thoi gian', QMessageBox.ActionRole)
+        mode_dialog.setText('Choose how to merge packets:')
+        append_btn = mode_dialog.addButton('Append to the end of the list', QMessageBox.AcceptRole)
+        chrono_btn = mode_dialog.addButton('Reorder by timestamp', QMessageBox.ActionRole)
         cancel_btn = mode_dialog.addButton(QMessageBox.Cancel)
         mode_dialog.setDefaultButton(append_btn)
         mode_dialog.exec()
@@ -4527,11 +4654,11 @@ class ApplicationWindow(QMainWindow):
             incoming_packets = list(iter_pcap_packets(merge_path))
             incoming_metadata = load_capture_metadata(merge_path)
         except Exception as exc:
-            QMessageBox.critical(self, 'Merge', f'Khong the doc file merge:\n{exc}')
+            QMessageBox.critical(self, 'Merge', f'Cannot read the capture file to merge:\n{exc}')
             return
 
         if not incoming_packets:
-            QMessageBox.warning(self, 'Merge', 'File duoc chon khong co packet hop le de merge.')
+            QMessageBox.warning(self, 'Merge', 'The selected file does not contain valid packets to merge.')
             return
 
         merged_entries = [self._packet_entry_from_record(r) for r in cv.records if getattr(r, 'raw', None) is not None]
@@ -4576,23 +4703,23 @@ class ApplicationWindow(QMainWindow):
     def _on_separate_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Separate', 'Khong co packet de tach.')
+            QMessageBox.information(self, 'Separate', 'No packets are available to separate.')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'Separate', 'Vui long dung capture truoc khi tach packet.')
+            QMessageBox.warning(self, 'Separate', 'Stop the live capture before separating packets.')
             return
 
         dialog = QDialog(self)
         dialog.setWindowTitle('Separate Packets')
         layout = QVBoxLayout(dialog)
         total_packets = len(cv.records)
-        layout.addWidget(QLabel(f'Tong so packet hien tai: {total_packets}'))
+        layout.addWidget(QLabel(f'Current packet count: {total_packets}'))
 
         layout.addWidget(QLabel('Mode:'))
         mode_combo = QComboBox(dialog)
         mode_combo.addItems([
-            'Mode 1: Tach 1 file ra thanh nhieu file',
-            'Mode 2: Xoa goi tin trong file',
+            'Mode 1: Split one file into multiple files',
+            'Mode 2: Delete packets from the file',
         ])
         layout.addWidget(mode_combo)
 
@@ -4603,7 +4730,7 @@ class ApplicationWindow(QMainWindow):
         split_page = QWidget(dialog)
         split_layout = QVBoxLayout(split_page)
         split_toolbar = QHBoxLayout()
-        split_toolbar.addWidget(QLabel('Danh sach file tach:'))
+        split_toolbar.addWidget(QLabel('Split file list:'))
         split_remove_btn = QPushButton('-', split_page)
         split_add_btn = QPushButton('+', split_page)
         split_count_label = QLabel('', split_page)
@@ -4620,7 +4747,7 @@ class ApplicationWindow(QMainWindow):
         split_layout.addWidget(split_table)
 
         split_note = QLabel(
-            'Co the sua cot "To". From cua file sau se tu dong = To truoc + 1.',
+            'You can edit the "To" column. The next "From" value is updated automatically to previous "To" + 1.',
             split_page,
         )
         split_note.setWordWrap(True)
@@ -4632,19 +4759,19 @@ class ApplicationWindow(QMainWindow):
         delete_page = QWidget(dialog)
         delete_layout = QVBoxLayout(delete_page)
 
-        delete_selected_cb = QCheckBox('Xoa goi tin dang chon (Selected packets)', delete_page)
+        delete_selected_cb = QCheckBox('Delete currently selected packets', delete_page)
         delete_layout.addWidget(delete_selected_cb)
 
-        delete_protocol_cb = QCheckBox('Xoa theo protocol', delete_page)
+        delete_protocol_cb = QCheckBox('Delete by protocol', delete_page)
         delete_layout.addWidget(delete_protocol_cb)
         delete_protocol_input = QLineEdit(delete_page)
-        delete_protocol_input.setPlaceholderText('VD: TCP,UDP,DNS')
+        delete_protocol_input.setPlaceholderText('Example: TCP, UDP, DNS')
         delete_layout.addWidget(delete_protocol_input)
 
-        delete_ranges_cb = QCheckBox('Xoa theo khoang packet (nhieu khoang)', delete_page)
+        delete_ranges_cb = QCheckBox('Delete by packet ranges', delete_page)
         delete_layout.addWidget(delete_ranges_cb)
         delete_ranges_input = QTextEdit(delete_page)
-        delete_ranges_input.setPlaceholderText('VD: 1-100, 150, 200-260')
+        delete_ranges_input.setPlaceholderText('Example: 1-100, 150, 200-260')
         delete_ranges_input.setMinimumHeight(90)
         delete_layout.addWidget(delete_ranges_input)
 
@@ -4795,7 +4922,7 @@ class ApplicationWindow(QMainWindow):
             last_to = int((split_table.item(last_row, 2).text() or str(total_packets)).strip())
             last_len = last_to - last_from + 1
             if last_len < 2:
-                QMessageBox.warning(dialog, 'Separate', 'Khong the tach them: file cuoi qua nho de chia doi.')
+                QMessageBox.warning(dialog, 'Separate', 'Cannot split again because the last file is too small to divide.')
                 return
 
             left_len = last_len // 2
@@ -4826,7 +4953,7 @@ class ApplicationWindow(QMainWindow):
         def _on_split_add():
             current_rows = split_table.rowCount()
             if current_rows >= total_packets:
-                QMessageBox.warning(dialog, 'Separate', 'So file khong the lon hon tong so packet.')
+                QMessageBox.warning(dialog, 'Separate', 'The number of output files cannot exceed the total number of packets.')
                 return
             if split_state['manual_edit']:
                 _split_last_file_in_half()
@@ -4891,7 +5018,7 @@ class ApplicationWindow(QMainWindow):
                 return
 
             default_dir = os.path.dirname(str(cv.loaded_file_path)) if cv.loaded_file_path else str(Path.cwd())
-            output_dir = QFileDialog.getExistingDirectory(self, 'Chon thu muc luu cac file tach', default_dir)
+            output_dir = QFileDialog.getExistingDirectory(self, 'Choose the output folder for split files', default_dir)
             if not output_dir:
                 return
 
@@ -4906,7 +5033,7 @@ class ApplicationWindow(QMainWindow):
                 return
             base_name = str(base_name or '').strip()
             if not base_name:
-                QMessageBox.warning(self, 'Separate', 'Ten file khong duoc de trong.')
+                QMessageBox.warning(self, 'Separate', 'The file name cannot be empty.')
                 return
 
             file_format = 'pcapng'
@@ -4943,7 +5070,7 @@ class ApplicationWindow(QMainWindow):
                     )
                     saved_paths.append(saved_path)
             except Exception as exc:
-                QMessageBox.critical(self, 'Separate', f'Tach thanh nhieu file that bai:\n{exc}')
+                QMessageBox.critical(self, 'Separate', f'Failed to split the file into multiple files:\n{exc}')
                 return
 
             QMessageBox.information(
@@ -4972,16 +5099,16 @@ class ApplicationWindow(QMainWindow):
             delete_indices.update(range_indices)
 
         if not criteria_used:
-            QMessageBox.warning(self, 'Separate', 'Hay chon it nhat 1 tieu chi xoa packet.')
+            QMessageBox.warning(self, 'Separate', 'Choose at least one packet deletion criterion.')
             return
         if not delete_indices:
-            QMessageBox.warning(self, 'Separate', 'Khong co packet nao phu hop de xoa.')
+            QMessageBox.warning(self, 'Separate', 'No packets matched the delete criteria.')
             return
 
         confirm = QMessageBox.question(
             self,
             'Separate',
-            f'Ban chac chan muon xoa {len(delete_indices)} packet khoi file hien tai?',
+            f'Are you sure you want to delete {len(delete_indices)} packets from the current file?',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -5007,30 +5134,30 @@ class ApplicationWindow(QMainWindow):
     def _on_export_specified_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Export Specified Packets', 'Khong co packet de export.')
+            QMessageBox.information(self, 'Export Specified Packets', 'No packets are available to export.')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'Export Specified Packets', 'Vui long dung capture truoc khi export.')
+            QMessageBox.warning(self, 'Export Specified Packets', 'Stop the live capture before exporting packets.')
             return
 
         dialog = QDialog(self)
         dialog.setWindowTitle('Export Specified Packets')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('Tao file PCAP moi tu cac packet theo tieu chi:'))
+        layout.addWidget(QLabel('Create a new capture file from packets that match one criterion:'))
 
         export_selected_cb = QCheckBox('Packet dang chon (Selected packets)', dialog)
         layout.addWidget(export_selected_cb)
 
-        export_protocol_cb = QCheckBox('Theo protocol', dialog)
+        export_protocol_cb = QCheckBox('By protocol', dialog)
         layout.addWidget(export_protocol_cb)
         export_protocol_input = QLineEdit(dialog)
-        export_protocol_input.setPlaceholderText('VD: TCP,UDP,DNS')
+        export_protocol_input.setPlaceholderText('Example: TCP, UDP, DNS')
         layout.addWidget(export_protocol_input)
 
-        export_ranges_cb = QCheckBox('Theo khoang packet (nhieu khoang)', dialog)
+        export_ranges_cb = QCheckBox('By packet ranges', dialog)
         layout.addWidget(export_ranges_cb)
         export_ranges_input = QTextEdit(dialog)
-        export_ranges_input.setPlaceholderText('VD: 1-100, 150, 200-260')
+        export_ranges_input.setPlaceholderText('Example: 1-100, 150, 200-260')
         export_ranges_input.setMinimumHeight(90)
         layout.addWidget(export_ranges_input)
 
@@ -5090,13 +5217,13 @@ class ApplicationWindow(QMainWindow):
             return
 
         if not export_indices:
-            QMessageBox.warning(self, 'Export Specified Packets', 'Khong co packet phu hop de export.')
+            QMessageBox.warning(self, 'Export Specified Packets', 'No packets matched the export criteria.')
             return
 
         export_records = [cv.records[i] for i in sorted(export_indices) if getattr(cv.records[i], 'raw', None) is not None]
         packets = [rec.raw for rec in export_records]
         if not packets:
-            QMessageBox.warning(self, 'Export Specified Packets', 'Khong co packet hop le de export.')
+            QMessageBox.warning(self, 'Export Specified Packets', 'No valid packets are available to export.')
             return
 
         filename, selected_format, selected_compression = cv._show_save_with_options_dialog()
@@ -5132,7 +5259,7 @@ class ApplicationWindow(QMainWindow):
             if '-' in tok:
                 parts = [p.strip() for p in tok.split('-', 1)]
                 if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                    raise ValueError(f'Khoang khong hop le: {tok}')
+                    raise ValueError(f'Invalid range: {tok}')
                 lo = int(parts[0])
                 hi = int(parts[1])
                 if lo > hi:
@@ -5141,7 +5268,7 @@ class ApplicationWindow(QMainWindow):
                     numbers.add(n)
             else:
                 if not tok.isdigit():
-                    raise ValueError(f'Gia tri khong hop le: {tok}')
+                    raise ValueError(f'Invalid value: {tok}')
                 numbers.add(int(tok))
         return numbers
 
@@ -5167,11 +5294,11 @@ class ApplicationWindow(QMainWindow):
             return set()
         text = str(protocol_text or '').strip()
         if not text:
-            QMessageBox.warning(self, 'Protocol', 'Vui long nhap protocol can loc/xoa.')
+            QMessageBox.warning(self, 'Protocol', 'Enter at least one protocol to filter or delete.')
             return set()
         tokens = [t.strip().lower() for t in re.split(r'[,\s;]+', text) if t.strip()]
         if not tokens:
-            QMessageBox.warning(self, 'Protocol', 'Protocol khong hop le.')
+            QMessageBox.warning(self, 'Protocol', 'The protocol filter is not valid.')
             return set()
         token_set = set(tokens)
         return {
@@ -5182,7 +5309,7 @@ class ApplicationWindow(QMainWindow):
     def _on_print_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Print', 'Khong co packet de in.')
+            QMessageBox.information(self, 'Print', 'No packets are available to print.')
             return
 
         dialog = QDialog(self)
@@ -5224,7 +5351,7 @@ class ApplicationWindow(QMainWindow):
         scope = scope_combo.currentText()
         indexes = self._resolve_record_indices(scope, from_no=None, to_no=None, filter_expr='')
         if not indexes:
-            QMessageBox.warning(self, 'Print', 'Khong co packet phu hop de in.')
+            QMessageBox.warning(self, 'Print', 'No packets matched the print criteria.')
             return
 
         lines = []
@@ -5301,7 +5428,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 return [i for i, rec in enumerate(cv.records) if cv.display_filter.matches(rec, expr)]
             except Exception as exc:
-                QMessageBox.warning(self, 'Filter', f'Filter khong hop le:\n{exc}')
+                QMessageBox.warning(self, 'Filter', f'The filter is not valid:\n{exc}')
                 return []
         return []
 
@@ -5570,7 +5697,7 @@ class ApplicationWindow(QMainWindow):
         lines.append(f"Model status: {str(result.get('model_status', 'ok') or 'ok')}")
         summaries = list(result.get("summaries", []) or [])
         if not summaries:
-            lines.append("Khong co flow de phan tich hanh vi.")
+            lines.append("No flows are available for behavioral analysis.")
             return "\n".join(lines)
         lines.append("")
         lines.append("Tom tat hanh vi:")
@@ -5615,7 +5742,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_export_flow_csv_current(self):
         if not self.capture_view or not getattr(self.capture_view, "records", None):
-            QMessageBox.information(self, "Export Flow CSV", "Khong co du lieu capture de export.")
+            QMessageBox.information(self, "Export Flow CSV", "No capture data is available to export.")
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -5634,7 +5761,7 @@ class ApplicationWindow(QMainWindow):
                 if getattr(r, "raw", None) is not None
             ]
             if not packets:
-                QMessageBox.information(self, "Export Flow CSV", "Khong co packet hop le (cac packet co the da ignored).")
+                QMessageBox.information(self, "Export Flow CSV", "No valid packets are available to export. Some packets may be ignored.")
                 return
             csv_path, flows = export_packets_to_csv(packets, file_path)
             model_adapter = self._build_flow_model_adapter()
@@ -5649,7 +5776,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_export_flow_csv_selected(self):
         if not self.capture_view:
-            QMessageBox.information(self, "Export Selected Flow CSV", "Khong co du lieu capture.")
+            QMessageBox.information(self, "Export Selected Flow CSV", "No capture data is available.")
             return
         selected_packets = []
         for record in self.capture_view.get_selected_records():
@@ -5659,7 +5786,7 @@ class ApplicationWindow(QMainWindow):
             if raw is not None:
                 selected_packets.append(raw)
         if not selected_packets:
-            QMessageBox.warning(self, "Export Selected Flow CSV", "Khong co packet hop le de export (co the da ignored).")
+            QMessageBox.warning(self, "Export Selected Flow CSV", "No valid packets are available to export. Some packets may be ignored.")
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -5676,7 +5803,7 @@ class ApplicationWindow(QMainWindow):
             model_adapter = self._build_flow_model_adapter()
             behavior = analyze_flows(flows, use_model=model_adapter.loaded, model_adapter=model_adapter)
             warning = (
-                "Cac packet duoc chon co the chua du toan bo flow, feature chi phan anh phan luu luong da chon.\n\n"
+                "The selected packets may not contain the entire flow, so the features reflect only the selected portion.\n\n"
             )
             QMessageBox.information(
                 self,
@@ -5752,12 +5879,12 @@ class ApplicationWindow(QMainWindow):
                     lines.append('\t'.join(values))
                 QApplication.clipboard().setText('\n'.join(lines))
                 return
-        QMessageBox.information(self, 'Copy', 'Khong co du lieu de sao chep.')
+        QMessageBox.information(self, 'Copy', 'There is no data to copy.')
 
     def _require_capture_for_edit_action(self) -> bool:
         if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view and self.capture_view.has_packets():
             return True
-        QMessageBox.information(self, 'Edit', 'Khong co du lieu packet de thuc hien thao tac.')
+        QMessageBox.information(self, 'Edit', 'There is no packet data available for this action.')
         return False
 
     def _on_find_next(self):
@@ -5796,10 +5923,10 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.visible_indices:
-            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'Khong co packet hien thi.')
+            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'No displayed packets are available.')
             return
         if not self.capture_view.toggle_mark_all_displayed():
-            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'Khong thay doi du lieu.')
+            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'No packets were changed.')
             return
         self._update_capture_window_title()
 
@@ -5807,13 +5934,13 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.goto_next_mark():
-            QMessageBox.information(self, 'Next Mark', 'Khong tim thay packet da danh dau tiep theo.')
+            QMessageBox.information(self, 'Next Mark', 'No next marked packet was found.')
 
     def _on_previous_mark(self):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.goto_previous_mark():
-            QMessageBox.information(self, 'Previous Mark', 'Khong tim thay packet da danh dau truoc do.')
+            QMessageBox.information(self, 'Previous Mark', 'No previous marked packet was found.')
 
     def _on_ignore_unignore_selected(self):
         if not self._require_capture_for_edit_action():
@@ -5827,10 +5954,10 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.visible_indices:
-            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'Khong co packet hien thi.')
+            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'No displayed packets are available.')
             return
         if not self.capture_view.toggle_ignore_all_displayed():
-            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'Khong thay doi du lieu.')
+            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'No packets were changed.')
             return
         self._update_capture_window_title()
 
@@ -5841,20 +5968,20 @@ class ApplicationWindow(QMainWindow):
         text, ok = QInputDialog.getMultiLineText(
             self,
             'Packet Comment',
-            'Nhap ghi chu cho packet dang chon:',
+            'Enter a comment for the selected packet:',
             current_comment,
         )
         if not ok:
             return
         if not self.capture_view.set_comment_for_selected(text):
-            QMessageBox.information(self, 'Packet Comment', 'Hay chon packet can ghi chu.')
+            QMessageBox.information(self, 'Packet Comment', 'Select a packet before adding a comment.')
             return
         current_path = str(getattr(self.capture_view, 'loaded_file_path', '') or '').strip()
         if current_path and current_path.lower().endswith('.pcap'):
             reply = QMessageBox.question(
                 self,
                 'Packet Comment',
-                'File hien tai la .pcap. Packet comment can dinh dang .pcapng de luu ben vung.\nBan co muon luu moi sang .pcapng ngay bay gio khong?',
+                'The current file is .pcap. Packet comments require .pcapng for persistent storage.\nDo you want to save a new .pcapng file now?',
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
@@ -5870,7 +5997,7 @@ class ApplicationWindow(QMainWindow):
                     if not target_path.lower().endswith('.pcapng'):
                         target_path += '.pcapng'
                     if not self.capture_view.save_as_pcapng(target_path):
-                        QMessageBox.warning(self, 'Packet Comment', 'Khong the luu sang file pcapng.')
+                        QMessageBox.warning(self, 'Packet Comment', 'Could not save the comment to the pcapng file.')
                         self._update_capture_window_title()
                         return
                 else:
@@ -5879,7 +6006,7 @@ class ApplicationWindow(QMainWindow):
 
         persisted = self.capture_view.save_packet_comments_to_file()
         if not persisted:
-            QMessageBox.information(self, 'Packet Comment', 'Packet comment da cap nhat trong bo nho. Hay luu file pcapng de ghi ben vung.')
+            QMessageBox.information(self, 'Packet Comment', 'The packet comment was updated in memory. Save the file as pcapng to persist it.')
         self._update_capture_window_title()
 
     def _on_delete_all_packet_comments(self):
@@ -5888,7 +6015,7 @@ class ApplicationWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             'Delete All Packet Comments',
-            'Ban co chac muon xoa toan bo ghi chu packet?',
+            'Are you sure you want to delete all packet comments?',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -5896,11 +6023,11 @@ class ApplicationWindow(QMainWindow):
             return
         count = int(self.capture_view.delete_all_packet_comments() or 0)
         if count <= 0:
-            QMessageBox.information(self, 'Delete All Packet Comments', 'Khong co ghi chu nao de xoa.')
+            QMessageBox.information(self, 'Delete All Packet Comments', 'There are no packet comments to delete.')
             return
         self.capture_view.save_packet_comments_to_file()
         self._update_capture_window_title()
-        QMessageBox.information(self, 'Delete All Packet Comments', f'Da xoa {count} ghi chu packet.')
+        QMessageBox.information(self, 'Delete All Packet Comments', f'Deleted {count} packet comments.')
 
     def _default_edit_preferences(self) -> dict:
         default_columns = [
@@ -6757,7 +6884,7 @@ class ApplicationWindow(QMainWindow):
                 collected_columns.append(spec)
 
             if not collected_columns:
-                QMessageBox.warning(dialog, 'Preferences', 'Canh bao: Columns khong duoc de rong.')
+                QMessageBox.warning(dialog, 'Preferences', 'Warning: Columns cannot be left empty.')
                 return None
             if not any(bool(spec.get('displayed', True)) for spec in collected_columns):
                 QMessageBox.warning(dialog, 'Preferences', 'Canh bao: Phai hien thi it nhat 1 cot.')
@@ -6776,7 +6903,7 @@ class ApplicationWindow(QMainWindow):
             ]
             non_empty_panes = [value for value in pane_values if value != 'none']
             if len(non_empty_panes) != len(set(non_empty_panes)):
-                QMessageBox.warning(dialog, 'Preferences', 'Pane 1, Pane 2 va Pane 3 khong duoc trung noi dung.')
+                QMessageBox.warning(dialog, 'Preferences', 'Pane 1, Pane 2, and Pane 3 must use different content.')
                 return None
 
             new_prefs = dict(prefs)
@@ -9929,7 +10056,7 @@ class ApplicationWindow(QMainWindow):
         if not self.capture_view:
             return
 
-        proceed = self._prompt_save_before_destructive_action('Đóng file sẽ bỏ dữ liệu hiện tại. Bạn có muốn lưu trước không?')
+        proceed = self._prompt_save_before_destructive_action('Closing this file will discard the current data. Do you want to save it first?')
         if not proceed:
             return
 
@@ -10101,16 +10228,69 @@ class ApplicationWindow(QMainWindow):
                 rows.append(cv.records[idx])
         return rows
 
-    def _statistics_make_table(self, columns: list[str], rows: list[dict]) -> QTableWidget:
-        table = QTableWidget()
-        table.setColumnCount(len(columns))
-        table.setHorizontalHeaderLabels(columns)
+    def _create_standard_dialog(self, title: str, parent=None) -> tuple[QDialog, QVBoxLayout]:
+        dialog = QDialog(parent if parent is not None else self)
+        dialog.setWindowTitle(str(title or '').strip() or 'Dialog')
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        return dialog, layout
+
+    def _style_standard_tree(
+        self,
+        tree: QTreeWidget,
+        *,
+        stretch_column: int = 0,
+        resize_mode=QHeaderView.ResizeMode.ResizeToContents,
+        root_decorated: bool = True,
+    ) -> QTreeWidget:
+        tree.setRootIsDecorated(bool(root_decorated))
+        tree.setAlternatingRowColors(True)
+        tree.setAllColumnsShowFocus(True)
+        tree.setUniformRowHeights(False)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        header = tree.header()
+        for column in range(int(tree.columnCount() or 0)):
+            mode = QHeaderView.ResizeMode.Stretch if column == stretch_column else resize_mode
+            header.setSectionResizeMode(column, mode)
+        return tree
+
+    def _style_standard_table(
+        self,
+        table: QTableWidget,
+        *,
+        stretch_column: int | None = None,
+        resize_mode=QHeaderView.ResizeMode.ResizeToContents,
+    ) -> QTableWidget:
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
         header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        for column in range(int(table.columnCount() or 0)):
+            mode = QHeaderView.ResizeMode.Stretch if stretch_column == column else resize_mode
+            header.setSectionResizeMode(column, mode)
+        return table
+
+    def _create_standard_button_row(self, dialog: QDialog, *buttons: QPushButton) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        for button in buttons:
+            if button is not None:
+                row.addWidget(button)
+        row.addStretch(1)
+        close_btn = QPushButton('Close', dialog)
+        close_btn.clicked.connect(dialog.accept)
+        row.addWidget(close_btn)
+        return row
+
+    def _statistics_make_table(self, columns: list[str], rows: list[dict]) -> QTableWidget:
+        table = QTableWidget()
+        table.setColumnCount(len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        self._style_standard_table(table)
         self._statistics_fill_table(table, columns, rows)
         return table
 
@@ -10199,9 +10379,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Resolved Addresses', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Resolved Addresses')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('Resolved Addresses')
 
         top = QHBoxLayout()
         search_input = QLineEdit(dialog)
@@ -10214,18 +10392,14 @@ class ApplicationWindow(QMainWindow):
 
         columns = ['Address', 'Name']
         table = self._statistics_make_table(columns, [])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._style_standard_table(table, stretch_column=0)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(table, 1)
 
-        actions = QHBoxLayout()
         refresh_btn = QPushButton('Refresh', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        for btn in (refresh_btn, copy_btn, export_btn, close_btn):
-            actions.addWidget(btn)
-        layout.addLayout(actions)
+        layout.addLayout(self._create_standard_button_row(dialog, refresh_btn, copy_btn, export_btn))
 
         def _build_rows() -> list[dict]:
             records = self._statistics_scope_records(limit_check.isChecked())
@@ -10294,7 +10468,6 @@ class ApplicationWindow(QMainWindow):
 
         copy_btn.clicked.connect(_copy_current)
         export_btn.clicked.connect(_export_current)
-        close_btn.clicked.connect(dialog.accept)
         _refresh()
         dialog.resize(860, 620)
         self._fit_widget_90(dialog)
@@ -10305,9 +10478,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Protocol Hierarchy', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Protocol Hierarchy Statistics')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('Protocol Hierarchy')
 
         top = QHBoxLayout()
         limit_check = QCheckBox('Limit to display filter', dialog)
@@ -10324,8 +10495,12 @@ class ApplicationWindow(QMainWindow):
             'Protocol', 'Percent Packets', 'Packets', 'Percent Bytes', 'Bytes',
             'Bits/s', 'End Packets', 'End Bytes', 'End Bits/s', 'PDUs'
         ])
+        self._style_standard_tree(
+            tree,
+            stretch_column=0,
+            resize_mode=QHeaderView.ResizeMode.Interactive,
+        )
         header = tree.header()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(False)
         tree.setColumnWidth(0, 560)
         for col in range(1, 10):
@@ -10335,17 +10510,10 @@ class ApplicationWindow(QMainWindow):
         filter_label = QLabel('Display filter: (none)', dialog)
         layout.addWidget(filter_label)
 
-        bottom = QHBoxLayout()
         apply_btn = QPushButton('Apply as Filter', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        bottom.addWidget(apply_btn)
-        bottom.addWidget(copy_btn)
-        bottom.addWidget(export_btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
         canonical = {
             'frame': ('Frame', 'frame'),
@@ -10564,7 +10732,6 @@ class ApplicationWindow(QMainWindow):
             ['Protocol', 'Percent Packets', 'Packets', 'Percent Bytes', 'Bytes', 'Bits/s', 'End Packets', 'End Bytes', 'End Bits/s', 'PDUs'],
             _iter_rows(tree.topLevelItem(0)) if tree.topLevelItem(0) is not None else [],
         ))
-        close_btn.clicked.connect(dialog.accept)
         _refresh_tree()
         dialog.resize(1020, 640)
         self._fit_widget_90(dialog)
@@ -10575,9 +10742,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Endpoints', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Endpoints')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('Endpoints')
 
         top = QHBoxLayout()
         limit_check = QCheckBox('Limit to display filter', dialog)
@@ -10601,19 +10766,14 @@ class ApplicationWindow(QMainWindow):
         tables = {}
         for name, cols in table_defs.items():
             table = self._statistics_make_table(cols, [])
+            self._style_standard_table(table, stretch_column=0)
             tabs.addTab(table, name)
             tables[name] = table
 
-        bottom = QHBoxLayout()
         apply_btn = QPushButton('Apply as Filter', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        for btn in (apply_btn, copy_btn, export_btn):
-            bottom.addWidget(btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
         def _accumulate(stats_map, key, pkt_len, direction):
             item = stats_map.get(key)
@@ -10730,7 +10890,6 @@ class ApplicationWindow(QMainWindow):
         apply_btn.clicked.connect(_apply_as_filter)
         copy_btn.clicked.connect(_copy_current)
         export_btn.clicked.connect(_export_current)
-        close_btn.clicked.connect(dialog.accept)
         _refresh()
         dialog.resize(1180, 700)
         self._fit_widget_90(dialog)
@@ -10741,9 +10900,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Packet Lengths', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Packet Lengths')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('Packet Lengths')
 
         top = QHBoxLayout()
         limit_check = QCheckBox('Limit to display filter', dialog)
@@ -10757,18 +10914,12 @@ class ApplicationWindow(QMainWindow):
         tree = QTreeWidget(dialog)
         tree.setColumnCount(9)
         tree.setHeaderLabels(['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'])
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._style_standard_tree(tree, stretch_column=0)
         layout.addWidget(tree, 1)
 
-        bottom = QHBoxLayout()
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        bottom.addWidget(copy_btn)
-        bottom.addWidget(export_btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        layout.addLayout(self._create_standard_button_row(dialog, copy_btn, export_btn))
 
         buckets = [
             (0, 19), (20, 39), (40, 79), (80, 159), (160, 319),
@@ -10881,7 +11032,6 @@ class ApplicationWindow(QMainWindow):
 
         copy_btn.clicked.connect(_copy_tree)
         export_btn.clicked.connect(_export_tree)
-        close_btn.clicked.connect(dialog.accept)
         _refresh()
         dialog.resize(980, 620)
         self._fit_widget_90(dialog)
@@ -10892,9 +11042,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Flow Graph', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Flow Graph')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('Flow Graph')
         top_margin = 40
         row_h = 24
         left_margin = 120
@@ -10909,7 +11057,7 @@ class ApplicationWindow(QMainWindow):
 
         columns = ['Comment']
         table = self._statistics_make_table(columns, [])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._style_standard_table(table, stretch_column=0)
         table.verticalHeader().setVisible(False)
         table.verticalHeader().setDefaultSectionSize(row_h)
         table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -10951,7 +11099,7 @@ class ApplicationWindow(QMainWindow):
         export_btn = QPushButton('Export', dialog)
         help_btn = QPushButton('Help', dialog)
         close_btn = QPushButton('Close', dialog)
-        for btn in (refresh_btn, reset_btn, go_btn, apply_btn, export_btn, close_btn, help_btn):
+        for btn in (refresh_btn, reset_btn, go_btn, apply_btn, export_btn, help_btn, close_btn):
             bottom.addWidget(btn)
         layout.addLayout(bottom)
 
@@ -11352,9 +11500,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'HTTP Statistics', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('HTTP / Packet Counter')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('HTTP Packet Counter')
 
         top = QHBoxLayout()
         limit_check = QCheckBox('Limit to display filter', dialog)
@@ -11368,19 +11514,13 @@ class ApplicationWindow(QMainWindow):
         tree = QTreeWidget(dialog)
         tree.setColumnCount(8)
         tree.setHeaderLabels(['Packet Type', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate'])
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._style_standard_tree(tree, stretch_column=0)
         layout.addWidget(tree, 1)
 
-        bottom = QHBoxLayout()
         apply_btn = QPushButton('Apply as Filter', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        for btn in (apply_btn, copy_btn, export_btn):
-            bottom.addWidget(btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
         def _http_request_method(rec) -> str:
             info = str(getattr(rec, 'info', '') or '').strip()
@@ -11537,7 +11677,6 @@ class ApplicationWindow(QMainWindow):
 
         copy_btn.clicked.connect(_copy_tree)
         export_btn.clicked.connect(_export_tree)
-        close_btn.clicked.connect(dialog.accept)
         _refresh()
         dialog.resize(1020, 620)
         self._fit_widget_90(dialog)
@@ -11548,9 +11687,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'IPv4 Statistics', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('IPv4 Statistics')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('IPv4 Statistics')
 
         top = QHBoxLayout()
         limit_check = QCheckBox('Limit to display filter', dialog)
@@ -11564,19 +11701,13 @@ class ApplicationWindow(QMainWindow):
         tree = QTreeWidget(dialog)
         tree.setColumnCount(9)
         tree.setHeaderLabels(['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'])
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._style_standard_tree(tree, stretch_column=0)
         layout.addWidget(tree, 1)
 
-        bottom = QHBoxLayout()
         apply_btn = QPushButton('Apply as Filter', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        for btn in (apply_btn, copy_btn, export_btn):
-            bottom.addWidget(btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
         def _refresh():
             records = self._statistics_scope_records(limit_check.isChecked())
@@ -11604,7 +11735,7 @@ class ApplicationWindow(QMainWindow):
 
             duration = max(0.0, (max(all_times) - min(all_times))) if len(all_times) >= 2 else 0.0
             root = QTreeWidgetItem(tree)
-            root.setText(0, 'Ipv4 Statistics/All Addresses')
+            root.setText(0, 'IPv4 Statistics / All Addresses')
             root.setText(1, str(ip_packet_count))
             root.setText(2, '')
             root.setText(3, '')
@@ -11680,7 +11811,6 @@ class ApplicationWindow(QMainWindow):
 
         copy_btn.clicked.connect(_copy_tree)
         export_btn.clicked.connect(_export_tree)
-        close_btn.clicked.connect(dialog.accept)
         _refresh()
         dialog.resize(980, 620)
         self._fit_widget_90(dialog)
@@ -11691,9 +11821,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'IPv6 Statistics', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('IPv6 Statistics')
-        layout = QVBoxLayout(dialog)
+        dialog, layout = self._create_standard_dialog('IPv6 Statistics')
 
         top = QHBoxLayout()
         limit_check = QCheckBox('Limit to display filter', dialog)
@@ -11707,19 +11835,13 @@ class ApplicationWindow(QMainWindow):
         tree = QTreeWidget(dialog)
         tree.setColumnCount(9)
         tree.setHeaderLabels(['Topic / Item', 'Count', 'Average', 'Min Val', 'Max Val', 'Rate (ms)', 'Percent', 'Burst Rate', 'Burst Start'])
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._style_standard_tree(tree, stretch_column=0)
         layout.addWidget(tree, 1)
 
-        bottom = QHBoxLayout()
         apply_btn = QPushButton('Apply as Filter', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
-        close_btn = QPushButton('Close', dialog)
-        for btn in (apply_btn, copy_btn, export_btn):
-            bottom.addWidget(btn)
-        bottom.addStretch(1)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
         def _refresh():
             records = self._statistics_scope_records(limit_check.isChecked())
@@ -11747,7 +11869,7 @@ class ApplicationWindow(QMainWindow):
 
             duration = max(0.0, (max(all_times) - min(all_times))) if len(all_times) >= 2 else 0.0
             root = QTreeWidgetItem(tree)
-            root.setText(0, 'Ipv6 Statistics/All Addresses')
+            root.setText(0, 'IPv6 Statistics / All Addresses')
             root.setText(1, str(ip_packet_count))
             root.setText(2, '')
             root.setText(3, '')
@@ -11823,7 +11945,6 @@ class ApplicationWindow(QMainWindow):
 
         copy_btn.clicked.connect(_copy_tree)
         export_btn.clicked.connect(_export_tree)
-        close_btn.clicked.connect(dialog.accept)
         _refresh()
         dialog.resize(980, 620)
         self._fit_widget_90(dialog)
@@ -12020,17 +12141,23 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Expert Information', 'No capture is loaded.')
             return
 
+        existing_dialog = getattr(self, '_expert_info_dialog', None)
+        if existing_dialog is not None:
+            try:
+                self._restore_auxiliary_analysis_dialog(existing_dialog)
+                return
+            except Exception:
+                self._expert_info_dialog = None
+
         entries = self.capture_view.get_expert_information()
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Expert Information')
+        dialog = QDialog()
+        self._configure_auxiliary_analysis_dialog(dialog, 'Expert Information')
         layout = QVBoxLayout(dialog)
 
         tree = QTreeWidget(dialog)
         tree.setColumnCount(5)
         tree.setHeaderLabels(['Severity', 'Summary', 'Group', 'Protocol', 'Count'])
-        tree.setRootIsDecorated(True)
-        tree.setAlternatingRowColors(True)
-        tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._style_standard_tree(tree, stretch_column=1)
 
         grouped = {}
         for item in entries:
@@ -12078,59 +12205,51 @@ class ApplicationWindow(QMainWindow):
             if packet_number is None:
                 return
             try:
-                self.capture_view.goto_packet_number(int(packet_number))
-                self.raise_()
-                self.activateWindow()
+                self._collapse_auxiliary_analysis_dialog(dialog)
+                self._schedule_main_capture_navigation(first_packet=int(packet_number))
             except Exception:
                 pass
 
         tree.itemClicked.connect(_jump_to_packet)
+        tree.itemDoubleClicked.connect(_jump_to_packet)
         layout.addWidget(tree)
 
         if not entries:
             layout.addWidget(QLabel('No expert items were generated for the current capture.'))
 
         close_btn = QPushButton('Close', dialog)
-        close_btn.clicked.connect(dialog.accept)
+        close_btn.clicked.connect(dialog.close)
         layout.addWidget(close_btn)
         dialog.resize(960, 560)
         self._fit_widget_90(dialog)
-        dialog.exec()
+        self._expert_info_dialog = dialog
+        dialog.destroyed.connect(lambda *_args: setattr(self, '_expert_info_dialog', None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _on_open_capture_properties(self):
         if not self.capture_view:
             QMessageBox.information(self, 'Capture File Properties', 'No capture is loaded.')
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle('Capture File Properties')
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        dialog, main_layout = self._create_standard_dialog('Capture File Properties')
 
         # Single text browser for all content - formatted like a table
         content_browser = QTextBrowser(dialog)
         content_browser.setStyleSheet('QTextBrowser { border: none; background-color: white; }')
         main_layout.addWidget(content_browser)
 
-        button_row = QHBoxLayout()
-        button_row.setSpacing(8)
         refresh_btn = QPushButton('Refresh')
         copy_btn = QPushButton('Copy')
-        save_text_btn = QPushButton('Save As Text')
+        save_text_btn = QPushButton('Save as Text')
         edit_comment_btn = QPushButton('Edit Comments')
-        close_btn = QPushButton('Close')
         help_btn = QPushButton('Help')
-        button_row.addWidget(refresh_btn)
-        button_row.addStretch()
-        button_row.addWidget(copy_btn)
-        button_row.addWidget(save_text_btn)
-        button_row.addWidget(edit_comment_btn)
-        button_row.addWidget(close_btn)
-        button_row.addWidget(help_btn)
-        main_layout.addLayout(button_row)
+        main_layout.addLayout(
+            self._create_standard_button_row(dialog, refresh_btn, copy_btn, save_text_btn, edit_comment_btn, help_btn)
+        )
 
-        for btn in (refresh_btn, copy_btn, save_text_btn, edit_comment_btn, close_btn, help_btn):
+        for btn in (refresh_btn, copy_btn, save_text_btn, edit_comment_btn, help_btn):
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.setFixedWidth(btn.fontMetrics().horizontalAdvance(btn.text()) + 24)
 
@@ -12271,7 +12390,7 @@ class ApplicationWindow(QMainWindow):
             """Copy all content to clipboard"""
             text = content_browser.toPlainText()
             QApplication.clipboard().setText(text)
-            QMessageBox.information(dialog, 'Copy', 'Content copied to clipboard!')
+            QMessageBox.information(dialog, 'Copy', 'Content copied to the clipboard.')
 
         def save_as_text():
             path, _ = QFileDialog.getSaveFileName(
@@ -12285,7 +12404,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(path).write_text(content_browser.toPlainText(), encoding='utf-8')
             except Exception as exc:
-                QMessageBox.critical(dialog, 'Save As Text', f'Cannot save file:\n{exc}')
+                QMessageBox.critical(dialog, 'Save as Text', f'Cannot save file:\n{exc}')
 
         def edit_comment():
             props = self.capture_view.get_capture_properties()
@@ -12316,7 +12435,6 @@ class ApplicationWindow(QMainWindow):
         copy_btn.clicked.connect(copy_to_clipboard)
         save_text_btn.clicked.connect(save_as_text)
         edit_comment_btn.clicked.connect(edit_comment)
-        close_btn.clicked.connect(dialog.accept)
         help_btn.clicked.connect(show_help)
 
         dialog.resize(980, 760)
@@ -12332,7 +12450,61 @@ class ApplicationWindow(QMainWindow):
             self._apply_capture_defaults_to_view()
         self._refresh_capture_menu_state()
 
+    def event(self, event):
+        if event is not None and event.type() == QEvent.Type.WindowActivate:
+            QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
+        return super().event(event)
+
+    def eventFilter(self, watched, event):
+        try:
+            if watched is not None and event is not None:
+                event_type = event.type()
+                if event_type in {QEvent.Type.MouseButtonPress, QEvent.Type.FocusIn}:
+                    top_level = None
+                    try:
+                        top_level = watched.window()
+                    except Exception:
+                        top_level = None
+                    if top_level is self:
+                        QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
+        except Exception:
+            pass
+        return super().eventFilter(watched, event)
+
+    def _on_application_focus_window_changed(self, window):
+        try:
+            main_handle = self.windowHandle()
+        except Exception:
+            main_handle = None
+        if window is None or main_handle is None:
+            return
+        try:
+            if window == main_handle:
+                QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
+        except Exception:
+            pass
+
+    def _on_application_focus_changed(self, _old, now):
+        if now is None:
+            return
+        try:
+            top_level = now.window()
+        except Exception:
+            top_level = None
+        if top_level is None:
+            return
+        try:
+            if top_level is self:
+                QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
+        except Exception:
+            pass
+
     def closeEvent(self, event):
+        for _attr_name, dialog in list(self._iter_auxiliary_analysis_dialogs()):
+            try:
+                dialog.close()
+            except Exception:
+                pass
         """Xử lý khi đóng ứng dụng"""
         # 1. If capturing, prompt to stop capture first
         if self.capture_view and self.capture_view.is_capturing():

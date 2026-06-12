@@ -78,7 +78,7 @@ class InterfaceSelector(QWidget):
         label = QLabel('...using this filter')
         label.setStyleSheet('font-weight:600;')
         self.capture_filter_input = QLineEdit()
-        self.capture_filter_input.setPlaceholderText('Ví dụ: tcp port 443 or udp port 53')
+        self.capture_filter_input.setPlaceholderText('Example: tcp port 443 or udp port 53')
         self.interface_scope_combo = QComboBox()
         self.interface_scope_combo.addItems(['All interfaces shown', 'Only active interfaces', 'Wireless only'])
         sub.addWidget(label)

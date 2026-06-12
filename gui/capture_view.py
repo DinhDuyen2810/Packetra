@@ -1911,7 +1911,7 @@ class CaptureView(QWidget):
             self._file_format_record = self._build_file_format_mode_record()
             if self._file_format_record is None:
                 self._show_file_format_view = False
-                QMessageBox.information(None, 'Reload as File Format/Capture', 'Chế độ File Format chỉ hỗ trợ khi đang mở file capture từ đĩa.')
+                QMessageBox.information(None, 'Reload as File Format/Capture', 'File Format mode is available only when a capture file is open from disk.')
                 return
             self.packet_panes_stack.setCurrentWidget(self.main_splitter)
             self.table.replace_records([self._file_format_record])
@@ -3195,7 +3195,7 @@ class CaptureView(QWidget):
 
     def save_file(self, force_dialog: bool = False):
         if not self.records:
-            QMessageBox.warning(None, 'Warning', 'Không có packet nào để lưu.')
+            QMessageBox.warning(None, 'Warning', 'No packets are available to save.')
             return False
         if self.loaded_file_path and not force_dialog:
             if not self._is_dirty:
@@ -3381,7 +3381,7 @@ class CaptureView(QWidget):
 
     def reload_file(self):
         if not self.records:
-            QMessageBox.information(None, 'Reload', 'Không có capture hiện tại để reload.')
+            QMessageBox.information(None, 'Reload', 'No active capture is available to reload.')
             return
 
         packets = [r.raw for r in self.records]
@@ -4276,7 +4276,7 @@ class CaptureView(QWidget):
                     self._last_find_row = row
                     self._last_find_offset = None
                     return
-            QMessageBox.information(self, 'Find', 'Không tìm thấy kết quả phù hợp.')
+            QMessageBox.information(self, 'Find', 'No matching results were found.')
             return
 
         for row in self._iter_search_rows(backwards, include_current=False):
@@ -4327,7 +4327,7 @@ class CaptureView(QWidget):
 
             return
 
-        QMessageBox.information(self, 'Find', 'Không tìm thấy kết quả phù hợp.')
+        QMessageBox.information(self, 'Find', 'No matching results were found.')
 
     def find_next(self) -> bool:
         query = self.find_input.text().strip()
@@ -4561,9 +4561,9 @@ class CaptureView(QWidget):
         target = int(text)
         if not self.goto_packet_number(target):
             if self._record_exists_by_number(target):
-                QMessageBox.information(self, 'Hidden by filter', f'Packet {text} tồn tại nhưng đang bị ẩn bởi display filter hiện tại.')
+                QMessageBox.information(self, 'Hidden by Filter', f'Packet {text} exists but is hidden by the current display filter.')
             else:
-                QMessageBox.information(self, 'Not found', f'Không tìm thấy packet số {text}.')
+                QMessageBox.information(self, 'Not Found', f'Packet number {text} was not found.')
             return
         self.goto_packet_widget.setVisible(False)
 
@@ -5121,7 +5121,7 @@ class CaptureView(QWidget):
         """Xem tong quan capture."""
         effective_records = self.get_effective_records(include_ignored=False)
         if not effective_records:
-            QMessageBox.information(None, 'Summary', 'Khong co packet')
+            QMessageBox.information(None, 'Summary', 'No packets are available.')
             return
 
         proto_counts = Counter(r.protocol for r in effective_records)
@@ -5156,7 +5156,7 @@ class CaptureView(QWidget):
         """Xem conversations."""
         effective_records = self.get_effective_records(include_ignored=False)
         if not effective_records:
-            QMessageBox.information(None, 'Conversations', 'Khong co conversation')
+            QMessageBox.information(None, 'Conversations', 'No conversations are available.')
             return
 
         from gui.conversations_dialog import ConversationsDialog

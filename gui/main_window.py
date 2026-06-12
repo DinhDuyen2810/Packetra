@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
 
     def save_file(self):
         if not self.records:
-            QMessageBox.warning(self, 'Warning', 'Không có packet nào để lưu.')
+            QMessageBox.warning(self, 'Warning', 'No packets are available to save.')
             return
         filename, _ = QFileDialog.getSaveFileName(self, 'Save PCAP', '', 'PCAP Files (*.pcap)')
         if filename:

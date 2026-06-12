@@ -1,4 +1,3 @@
-from collections import defaultdict
 from dataclasses import dataclass
 
 from scapy.all import Ether, IP, IPv6, TCP, UDP
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QHeaderView,
+    QAbstractItemView,
 )
 
 
@@ -22,13 +22,10 @@ from PySide6.QtWidgets import (
 class ConversationStats:
     packets: int = 0
     bytes: int = 0
-
     packets_ab: int = 0
     bytes_ab: int = 0
-
     packets_ba: int = 0
     bytes_ba: int = 0
-
     first_time: float = None
     last_time: float = None
 
@@ -52,54 +49,37 @@ class ConversationEntry:
 class ConversationsDialog(QDialog):
     def __init__(self, packets, parent=None):
         super().__init__(parent)
-
         self.packets = packets
+        self.tables = {}
+        self._table_models = {}
 
         self.setWindowTitle("Conversations")
         self.resize(1400, 800)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         self.title = QLabel("Analyzing conversations...")
         self.title.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(self.title)
 
         self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
 
-        self.tables = {}
-        self._table_models = {}
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
 
         self._analyze_packets()
 
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-
-        btn_layout.addWidget(close_btn)
-
-        layout.addLayout(btn_layout)
-
     def _analyze_packets(self):
         tabs_order = ["Ethernet", "IPv4", "IPv6", "TCP", "UDP"]
-
-        stream_maps = {
-            "Ethernet": {},
-            "IPv4": {},
-            "IPv6": {},
-            "TCP": {},
-            "UDP": {},
-        }
-        next_stream = {
-            "Ethernet": 0,
-            "IPv4": 0,
-            "IPv6": 0,
-            "TCP": 0,
-            "UDP": 0,
-        }
-
+        stream_maps = {name: {} for name in tabs_order}
+        next_stream = {name: 0 for name in tabs_order}
         grouped = {name: {} for name in tabs_order}
 
         for record in self.packets:
@@ -107,7 +87,6 @@ class ConversationsDialog(QDialog):
                 packet = getattr(record, "raw", None)
                 pkt_len = int(getattr(record, "length", 0) or 0)
                 pkt_time = float(getattr(record, "epoch_time", 0.0) or 0.0)
-
                 if packet is None:
                     continue
 
@@ -218,7 +197,6 @@ class ConversationsDialog(QDialog):
                         pkt_time=pkt_time,
                         src_origin=(src, sport),
                     )
-
             except Exception:
                 continue
 
@@ -227,14 +205,12 @@ class ConversationsDialog(QDialog):
         self._table_models.clear()
 
         total_conversations = 0
-
         for tab_name in tabs_order:
             entries_map = grouped[tab_name]
             if not entries_map:
                 continue
-
             rows = [self._entry_to_row(tab_name, entry) for entry in entries_map.values()]
-            rows = sorted(rows, key=lambda r: r["Address A"])
+            rows = sorted(rows, key=lambda row: str(row["Address A"]))
             total_conversations += len(rows)
             self._create_tab(tab_name, rows)
 
@@ -285,7 +261,6 @@ class ConversationsDialog(QDialog):
         stats = entry.stats
         stats.packets += 1
         stats.bytes += pkt_len
-
         if stats.first_time is None:
             stats.first_time = pkt_time
         stats.last_time = pkt_time
@@ -312,28 +287,30 @@ class ConversationsDialog(QDialog):
             "Packets": stats.packets,
             "Bytes": stats.bytes,
             "Stream ID": entry.stream_id,
-            "Packets A → B": stats.packets_ab,
-            "Bytes A → B": stats.bytes_ab,
-            "Packets B → A": stats.packets_ba,
-            "Bytes B → A": stats.bytes_ba,
+            "Packets A -> B": stats.packets_ab,
+            "Bytes A -> B": stats.bytes_ab,
+            "Packets B -> A": stats.packets_ba,
+            "Bytes B -> A": stats.bytes_ba,
             "Duration": duration,
-            "Bits/s A → B": bits_ab,
-            "Bits/s B → A": bits_ba,
+            "Bits/s A -> B": bits_ab,
+            "Bits/s B -> A": bits_ba,
         }
-
         if tab_name in ("TCP", "UDP"):
             row["Port A"] = entry.port_a if entry.port_a is not None else ""
             row["Port B"] = entry.port_b if entry.port_b is not None else ""
             row["Flows"] = f"{entry.addr_a}:{entry.port_a} <-> {entry.addr_b}:{entry.port_b}"
-
         return row
 
     def _create_tab(self, tab_name, rows):
         tab = QWidget()
         tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
 
         table = QTableWidget()
         table.setSortingEnabled(False)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
 
         if tab_name in ("TCP", "UDP"):
             columns = [
@@ -344,13 +321,13 @@ class ConversationsDialog(QDialog):
                 "Packets",
                 "Bytes",
                 "Stream ID",
-                "Packets A → B",
-                "Bytes A → B",
-                "Packets B → A",
-                "Bytes B → A",
+                "Packets A -> B",
+                "Bytes A -> B",
+                "Packets B -> A",
+                "Bytes B -> A",
                 "Duration",
-                "Bits/s A → B",
-                "Bits/s B → A",
+                "Bits/s A -> B",
+                "Bits/s B -> A",
                 "Flows",
             ]
         else:
@@ -360,21 +337,21 @@ class ConversationsDialog(QDialog):
                 "Packets",
                 "Bytes",
                 "Stream ID",
-                "Packets A → B",
-                "Bytes A → B",
-                "Packets B → A",
-                "Bytes B → A",
+                "Packets A -> B",
+                "Bytes A -> B",
+                "Packets B -> A",
+                "Bytes B -> A",
                 "Duration",
-                "Bits/s A → B",
-                "Bits/s B → A",
+                "Bits/s A -> B",
+                "Bits/s B -> A",
             ]
 
         table.setColumnCount(len(columns))
         table.setHorizontalHeaderLabels(columns)
         header = table.horizontalHeader()
         header.setSectionsClickable(True)
-        for i in range(len(columns)):
-            header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        for column in range(len(columns)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
 
         model = {
             "rows": rows,
@@ -383,10 +360,7 @@ class ConversationsDialog(QDialog):
             "sort_state": 0,
         }
         self._table_models[tab_name] = model
-
-        header.sectionClicked.connect(
-            lambda col, name=tab_name: self._on_header_clicked(name, col)
-        )
+        header.sectionClicked.connect(lambda col, name=tab_name: self._on_header_clicked(name, col))
 
         self._render_rows(table, rows, columns)
 
@@ -401,7 +375,7 @@ class ConversationsDialog(QDialog):
                 value = row_data.get(col_name, "")
                 if col_name == "Duration":
                     text = f"{float(value):.4f}"
-                elif col_name in ("Bits/s A → B", "Bits/s B → A"):
+                elif col_name in ("Bits/s A -> B", "Bits/s B -> A"):
                     text = f"{int(value)} bits/s"
                 else:
                     text = str(value)
@@ -422,17 +396,14 @@ class ConversationsDialog(QDialog):
 
         rows = model["rows"]
         state = model["sort_state"]
-
         if state == 0:
-            sorted_rows = sorted(rows, key=lambda r: str(r["Address A"]))
+            sorted_rows = sorted(rows, key=lambda row: str(row["Address A"]))
         else:
-            reverse = state == 2
             sorted_rows = sorted(
                 rows,
-                key=lambda r: self._sort_key(r.get(clicked_name)),
-                reverse=reverse,
+                key=lambda row: self._sort_key(row.get(clicked_name)),
+                reverse=(state == 2),
             )
-
         self._render_rows(self.tables[tab_name], sorted_rows, columns)
 
     def _sort_key(self, value):
