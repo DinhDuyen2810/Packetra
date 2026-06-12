@@ -3519,8 +3519,11 @@ class ApplicationWindow(QMainWindow):
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
                 action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
                 _render_result_groups(action_groups)
+                flow_note = ''
+                if not flows and selected_records:
+                    flow_note = ' Only packets with IPv4/IPv6 plus TCP or UDP are counted as flows.'
                 result_summary.setText(
-                    f'Analysis complete. {selection_text} produced {len(flows)} flows and {len(action_groups)} actions.'
+                    f'Analysis complete. {selection_text} produced {len(flows)} flows and {len(action_groups)} actions.{flow_note}'
                 )
             except Exception as exc:
                 result_tree.clear()
@@ -3622,6 +3625,8 @@ class ApplicationWindow(QMainWindow):
                 yield attr_name, dialog
 
     def _collapse_auxiliary_analysis_windows(self, exclude=None):
+        if bool(getattr(self, '_auxiliary_analysis_opening', False)):
+            return
         for _attr_name, dialog in self._iter_auxiliary_analysis_dialogs():
             if dialog is None or dialog is exclude:
                 continue
@@ -3669,6 +3674,52 @@ class ApplicationWindow(QMainWindow):
                 handle.requestActivate()
             except Exception:
                 pass
+
+    def _center_widget_on_screen(self, widget):
+        if widget is None:
+            return
+        try:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+            if screen is None:
+                return
+            geom = screen.availableGeometry()
+            size = widget.frameGeometry().size()
+            if size.width() <= 0 or size.height() <= 0:
+                size = widget.sizeHint()
+            if size.width() <= 0 or size.height() <= 0:
+                size = widget.size()
+            if size.width() <= 0 or size.height() <= 0:
+                return
+            x = geom.x() + max(0, (geom.width() - size.width()) // 2)
+            y = geom.y() + max(0, (geom.height() - size.height()) // 2)
+            widget.move(x, y)
+        except Exception:
+            pass
+
+    def _present_auxiliary_analysis_dialog(self, dialog, *, force_topmost: bool = False):
+        if dialog is None:
+            return
+        try:
+            if force_topmost:
+                try:
+                    dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                except Exception:
+                    pass
+                try:
+                    self._center_widget_on_screen(dialog)
+                except Exception:
+                    pass
+            self._center_widget_on_screen(dialog)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            QApplication.processEvents()
+            self._request_window_activation(dialog)
+            QTimer.singleShot(0, lambda d=dialog: self._request_window_activation(d))
+            QTimer.singleShot(150, lambda d=dialog: self._request_window_activation(d))
+        except Exception:
+            pass
 
     def _activate_main_capture_view(self):
         self._collapse_auxiliary_analysis_windows()
@@ -3754,15 +3805,34 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'AI Analyst', 'All current packets are ignored.')
             return
 
+        dialog = QDialog()
+        self._configure_auxiliary_analysis_dialog(dialog, 'AI Analyst')
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        loading_label = QLabel('Loading... AI Analyst is preparing the analysis view.', dialog)
+        loading_label.setWordWrap(True)
+        root.addWidget(loading_label)
+        self._fit_widget_90(dialog)
+        self._center_widget_on_screen(dialog)
+        self._auxiliary_analysis_opening = True
+        self._ai_analyst_dialog = dialog
+        dialog.destroyed.connect(lambda *_args: setattr(self, '_ai_analyst_dialog', None))
+        self._present_auxiliary_analysis_dialog(dialog, force_topmost=True)
+        QApplication.processEvents()
+
         packet_numbers = sorted(int(r.number) for r in records)
         record_by_number = {int(rec.number): rec for rec in records}
         conversation_catalog = self._build_ai_conversation_catalog(records)
         conversation_numbers = [int(item.get('index', 0) or 0) for item in conversation_catalog]
         conversation_by_number = {int(item.get('index', 0) or 0): item for item in conversation_catalog}
 
-        dialog = QDialog()
-        self._configure_auxiliary_analysis_dialog(dialog, 'AI Analyst')
-        root = QVBoxLayout(dialog)
+        while root.count():
+            item = root.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
 
         selector_panel = QFrame(dialog)
         selector_panel.setFrameShape(QFrame.Shape.StyledPanel)
@@ -3913,8 +3983,11 @@ class ApplicationWindow(QMainWindow):
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
                 action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
                 render_result_groups(action_groups)
+                flow_note = ''
+                if not flows and selected_records:
+                    flow_note = ' Only packets with IPv4/IPv6 plus TCP or UDP are counted as flows.'
                 result_summary.setText(
-                    f'Analysis complete. {selection_text} produced {len(flows)} flows and {len(action_groups)} actions.'
+                    f'Analysis complete. {selection_text} produced {len(flows)} flows and {len(action_groups)} actions.{flow_note}'
                 )
             except Exception as exc:
                 result_tree.clear()
@@ -3960,14 +4033,12 @@ class ApplicationWindow(QMainWindow):
         dialog.resize(1120, 760)
         selector_panel.setMaximumHeight(max(140, int(dialog.height() * 0.2)))
         self._fit_widget_90(dialog)
+        self._center_widget_on_screen(dialog)
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self._ai_analyst_dialog = dialog
-        dialog.destroyed.connect(lambda *_args: setattr(self, '_ai_analyst_dialog', None))
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        self._present_auxiliary_analysis_dialog(dialog)
+        QTimer.singleShot(0, lambda: setattr(self, '_auxiliary_analysis_opening', False))
 
     def show_interface_selector(self):
         """Hiển thị màn hình chọn interface"""
@@ -12224,9 +12295,7 @@ class ApplicationWindow(QMainWindow):
         self._fit_widget_90(dialog)
         self._expert_info_dialog = dialog
         dialog.destroyed.connect(lambda *_args: setattr(self, '_expert_info_dialog', None))
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        self._present_auxiliary_analysis_dialog(dialog)
 
     def _on_open_capture_properties(self):
         if not self.capture_view:
@@ -12465,7 +12534,7 @@ class ApplicationWindow(QMainWindow):
                         top_level = watched.window()
                     except Exception:
                         top_level = None
-                    if top_level is self:
+                    if top_level is self and not bool(getattr(self, '_auxiliary_analysis_opening', False)):
                         QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
         except Exception:
             pass
@@ -12479,7 +12548,7 @@ class ApplicationWindow(QMainWindow):
         if window is None or main_handle is None:
             return
         try:
-            if window == main_handle:
+            if window == main_handle and not bool(getattr(self, '_auxiliary_analysis_opening', False)):
                 QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
         except Exception:
             pass
@@ -12494,7 +12563,7 @@ class ApplicationWindow(QMainWindow):
         if top_level is None:
             return
         try:
-            if top_level is self:
+            if top_level is self and not bool(getattr(self, '_auxiliary_analysis_opening', False)):
                 QTimer.singleShot(0, self._collapse_auxiliary_analysis_windows)
         except Exception:
             pass

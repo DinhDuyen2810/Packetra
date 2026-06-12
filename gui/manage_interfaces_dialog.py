@@ -901,7 +901,7 @@ Notes
                 cb.setChecked(bool(iface.get('show', True)))
                 self.remote_iface_tree.setItemWidget(child, 1, cb)
                 cb.stateChanged.connect(self._on_remote_iface_show_changed)
-            host_item.setExpanded(True)
+            host_item.setExpanded(False)
 
     def _on_remote_iface_show_changed(self, _state):
         remotes = self._collect_remote_interfaces_from_ui()
