@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packetra Capture Workflow Guide</title>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #f7fafc; color: #18324a; line-height: 1.68; }
+    .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 56px; }
+    .panel { background: #fff; border: 1px solid #dce6f0; border-radius: 16px; padding: 24px; margin-bottom: 18px; }
+    code { background: #edf5ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; }
+    pre { background: #13283e; color: #eef7ff; padding: 14px; border-radius: 12px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="panel">
+      <h1>Capture Workflow Guide</h1>
+      <p>This guide focuses on the capture lifecycle itself: selecting the correct interface, deciding whether to use a capture filter, running the capture, and preserving what you collected.</p>
+      <p><a href="index.html">Back to Help Center</a></p>
+    </section>
+
+    <section class="panel">
+      <h2>1. Choosing the correct interface</h2>
+      <ul>
+        <li>Choose the interface that shows active traffic in the interface selector instead of guessing by name.</li>
+        <li>On laptops and desktops, the correct interface is commonly the active Ethernet or Wi-Fi adapter.</li>
+        <li>VPN, virtual adapters, WSL adapters, and loopback-style interfaces may be valid but should only be chosen when you know your target traffic lives there.</li>
+        <li>For remote capture, the interface list is loaded from the remote host rather than the local machine.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>2. When to use a capture filter</h2>
+      <p>Use a capture filter when volume is high and you already know the traffic boundary you care about. If you are still exploring, capture more broadly and narrow down later with display filters.</p>
+      <pre>host 192.168.1.10
+port 443
+tcp port 80
+udp port 53
+net 10.0.0.0/8
+host 192.168.1.10 and port 3389
+not broadcast and not multicast</pre>
+      <p>These are BPF-style capture filters, not Packetra display filters.</p>
+    </section>
+
+    <section class="panel">
+      <h2>3. Start, Stop, and Restart</h2>
+      <ul>
+        <li><code>Start</code> begins a new live capture session.</li>
+        <li><code>Stop</code> ends the active capture but keeps the data already collected in the current view.</li>
+        <li><code>Restart</code> is the fast reset path when you want to discard the current live run and begin a new one immediately.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>4. A reliable capture sequence</h2>
+      <ol>
+        <li>Select the correct interface.</li>
+        <li>Apply a capture filter only if you are confident about the traffic scope.</li>
+        <li>Start capture.</li>
+        <li>Trigger the system behavior you want to observe.</li>
+        <li>Stop capture as soon as the relevant event has been captured.</li>
+        <li>Use display filters for investigation.</li>
+        <li>Save the capture if it has evidentiary or troubleshooting value.</li>
+      </ol>
+    </section>
+
+    <section class="panel">
+      <h2>5. Performance and quality tips</h2>
+      <ul>
+        <li>If the UI becomes busy, stop the live capture before applying many investigative filters.</li>
+        <li>If the capture is too large, use time-bounded runs and save multiple smaller files instead of one huge file.</li>
+        <li>If you are debugging a specific transaction, trigger only that transaction while capturing.</li>
+        <li>If you need both full context and narrow evidence, save the broader capture first, then work on filtered views.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>6. Common problems during capture</h2>
+      <ul>
+        <li>No packets visible: most often the wrong interface was selected or the capture filter is too strict.</li>
+        <li>Packets appear but not the traffic you want: the host may be using another adapter, a VPN path, or IPv6 while you expected IPv4.</li>
+        <li>Local Windows capture does not start: verify Npcap status in the Help menu.</li>
+        <li>Remote Linux capture fails: verify SSH access and `tcpdump` availability on the remote host.</li>
+      </ul>
+    </section>
+  </div>
+</body>
+</html>

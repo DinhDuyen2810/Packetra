@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packetra Remote Capture Guide</title>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #f4f7fb; color: #17324d; line-height: 1.7; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 56px; }
+    .panel { background: #fff; border: 1px solid #d9e5ef; border-radius: 16px; padding: 24px; margin-bottom: 18px; }
+    code { background: #edf4ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; }
+    pre { background: #12263b; color: #ecf5ff; padding: 14px; border-radius: 12px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #d7e2ee; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #eef6ff; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="panel">
+      <h1>Remote Capture Guide</h1>
+      <p>This guide is intentionally Linux-first. It explains the actual remote capture workflow used by Packetra: SSH into the remote host, list interfaces, and stream packet data back via <code>tcpdump</code>.</p>
+      <p><a href="index.html">Back to Help Center</a></p>
+    </section>
+
+    <section class="panel">
+      <h2>1. How Packetra remote capture works</h2>
+      <ul>
+        <li>Packetra connects to the remote system over SSH using Paramiko.</li>
+        <li>For Linux hosts, Packetra lists interfaces with <code>tcpdump -D</code>.</li>
+        <li>When capture starts, Packetra runs a command in the form:</li>
+      </ul>
+      <pre>tcpdump -n -s 0 -i 'INTERFACE' -U -w -</pre>
+      <ul>
+        <li>The packet stream is written to standard output and consumed locally by Packetra.</li>
+        <li>If Packetra capture options disable promiscuous mode, <code>-p</code> is added.</li>
+        <li>If you enter a capture filter, Packetra appends that BPF expression to the remote <code>tcpdump</code> command.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>2. Linux prerequisites</h2>
+      <table>
+        <tr><th>Requirement</th><th>Why it matters</th><th>Validation command</th></tr>
+        <tr><td>SSH server running</td><td>Packetra uses SSH for both interface listing and capture streaming</td><td><code>sudo systemctl status ssh</code> or <code>sudo systemctl status sshd</code></td></tr>
+        <tr><td><code>tcpdump</code> installed</td><td>Packetra depends on it for Linux remote capture</td><td><code>which tcpdump</code></td></tr>
+        <tr><td>User can connect via SSH</td><td>Packetra needs a successful login path</td><td><code>ssh user@host</code></td></tr>
+        <tr><td>User can run capture</td><td>Traffic access depends on permissions</td><td><code>tcpdump -D</code> and optionally <code>sudo tcpdump -D</code></td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>3. Linux installation and validation steps</h2>
+      <h3>Ubuntu / Debian</h3>
+      <pre>sudo apt update
+sudo apt install -y openssh-server tcpdump
+sudo systemctl enable ssh
+sudo systemctl start ssh
+which tcpdump
+tcpdump -D</pre>
+
+      <h3>RHEL / Rocky / Alma / CentOS</h3>
+      <pre>sudo dnf install -y openssh-server tcpdump
+sudo systemctl enable sshd
+sudo systemctl start sshd
+which tcpdump
+tcpdump -D</pre>
+
+      <h3>Arch Linux</h3>
+      <pre>sudo pacman -Sy --noconfirm openssh tcpdump
+sudo systemctl enable sshd
+sudo systemctl start sshd
+which tcpdump
+tcpdump -D</pre>
+    </section>
+
+    <section class="panel">
+      <h2>4. If permissions are not enough</h2>
+      <p>On many Linux systems, raw capture requires elevated privilege or packet-capture capability. If the SSH user cannot access interfaces directly, use one of these approaches:</p>
+      <ul>
+        <li>Run the remote session as a user that already has capture rights.</li>
+        <li>Grant capability to <code>tcpdump</code> on the remote host if that matches your security policy.</li>
+        <li>Use a privileged user only if that is acceptable in your environment.</li>
+      </ul>
+      <pre>sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
+      <p>After changing capabilities, test again with:</p>
+      <pre>tcpdump -D
+tcpdump -n -s 0 -i YOUR_INTERFACE -c 5</pre>
+    </section>
+
+    <section class="panel">
+      <h2>5. Packetra setup steps for a Linux remote host</h2>
+      <ol>
+        <li>Open <code>Manage Interfaces</code>.</li>
+        <li>Go to the <code>Remote Interfaces</code> tab.</li>
+        <li>Click <code>Add</code> to create a remote host row.</li>
+        <li>Fill in:
+          <ul>
+            <li><b>Host / Device URL</b>: the remote IP or hostname</li>
+            <li><b>Port</b>: usually <code>22</code></li>
+            <li><b>OS</b>: set to <code>linux</code></li>
+            <li><b>Username</b>: SSH login name</li>
+            <li><b>Auth Type</b>: key/agent or password, depending on your setup</li>
+            <li><b>Password</b>: only if password auth is used</li>
+          </ul>
+        </li>
+        <li>Select the row and click <code>Connect &amp; Load Interfaces</code>.</li>
+        <li>Tick the interfaces you want Packetra to show in the main interface picker.</li>
+        <li>Confirm the dialog and start capture from the chosen remote interface.</li>
+      </ol>
+    </section>
+
+    <section class="panel">
+      <h2>6. Full window flow inside Packetra from first click to first remote capture</h2>
+      <ol>
+        <li>Open the local interface/capture setup area and click <code>Manage Interfaces</code>.</li>
+        <li>In <code>Manage Interfaces</code>, switch to the <code>Remote Interfaces</code> tab.</li>
+        <li>Click <code>Add</code> to create a new remote-host row.</li>
+        <li>Fill <b>Host / Device URL</b>, <b>Port</b>, <b>OS</b>, <b>Username</b>, <b>Auth Type</b>, and <b>Password</b> if needed.</li>
+        <li>Select that row and click <code>Connect &amp;&amp; Load Interfaces</code>.</li>
+        <li>If Packetra connects successfully, the lower tree is populated with <code>Remote Host / Interface</code> entries.</li>
+        <li>Check the <b>Show</b> boxes for the interfaces you want visible in the main interface list.</li>
+        <li>Click <code>OK</code> or close the dialog in a way that saves settings.</li>
+        <li>Back in the interface picker / capture options screen, the selected remote interfaces appear as normal selectable capture targets.</li>
+        <li>Select the desired remote interface.</li>
+        <li>If needed, assign a capture filter to that interface.</li>
+        <li>Start capture. Packetra then opens the SSH capture stream and ingests packets locally.</li>
+      </ol>
+      <p>Important implementation detail: Packetra stores remote host rows and the per-interface <b>Show</b> state, so you do not need to rediscover everything every time unless the server or interface list changed.</p>
+    </section>
+
+    <section class="panel">
+      <h2>7. What Packetra sends to the Linux host</h2>
+      <p>Understanding the exact backend behavior helps troubleshooting:</p>
+      <ul>
+        <li>Interface list command: <code>tcpdump -D</code></li>
+        <li>Capture command base: <code>tcpdump -n -s 0 -i 'iface' -U -w -</code></li>
+        <li>Non-promiscuous mode adds: <code>-p</code></li>
+        <li>Capture filter appends directly as a BPF expression</li>
+      </ul>
+      <p>Examples:</p>
+      <pre>tcpdump -n -s 0 -i 'eth0' -U -w -
+tcpdump -n -s 0 -i 'eth0' -U -w - -p
+tcpdump -n -s 0 -i 'eth0' -U -w - port 443
+tcpdump -n -s 0 -i 'ens160' -U -w - host 10.10.10.25 and tcp port 8443</pre>
+    </section>
+
+    <section class="panel">
+      <h2>8. Recommended Linux validation sequence before using Packetra</h2>
+      <pre>ssh user@remote-host
+which tcpdump
+tcpdump -D
+tcpdump -n -s 0 -i eth0 -c 5
+exit</pre>
+      <p>If these commands work manually, Packetra is very likely to work as well once the same host, username, and auth method are entered correctly.</p>
+    </section>
+
+    <section class="panel">
+      <h2>9. How to keep the server side always available in the background</h2>
+      <p>Packetra does not require a Linux “agent” service for remote capture. What must stay available in the background is mainly the SSH service, and optionally your admin/session tooling.</p>
+
+      <h3>Keep SSH enabled permanently</h3>
+      <pre>sudo systemctl enable ssh
+sudo systemctl start ssh</pre>
+      <p>or, on systems using <code>sshd</code>:</p>
+      <pre>sudo systemctl enable sshd
+sudo systemctl start sshd</pre>
+
+      <h3>Verify SSH survives reboot</h3>
+      <pre>sudo systemctl is-enabled ssh
+sudo systemctl is-active ssh</pre>
+      <p>or:</p>
+      <pre>sudo systemctl is-enabled sshd
+sudo systemctl is-active sshd</pre>
+
+      <h3>If you want your own maintenance shell to keep running</h3>
+      <p>This is not required for Packetra itself, but useful during setup, testing, or long troubleshooting sessions:</p>
+      <pre>tmux new -s packetra-setup
+screen -S packetra-setup
+nohup tcpdump -D > /tmp/packetra_ifaces.txt 2>&1 &</pre>
+
+      <h3>If you want tcpdump capability to remain available after reboot</h3>
+      <p>Capabilities may need to be re-applied depending on how your environment manages binaries. Re-check after package upgrades.</p>
+      <pre>getcap $(command -v tcpdump)
+sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
+    </section>
+
+    <section class="panel">
+      <h2>10. Authentication choices</h2>
+      <ul>
+        <li><b>Key / agent auth</b>: preferred for stable SSH-based remote work.</li>
+        <li><b>Password auth</b>: works when enabled, but only if the password field is filled and the server permits password login.</li>
+      </ul>
+      <p>Packetra reuses SSH connections when it can, so repeated interface loads are usually faster after the first successful connection.</p>
+    </section>
+
+    <section class="panel">
+      <h2>11. Start-of-work checks and end-of-work checks</h2>
+      <h3>Start-of-work checks</h3>
+      <ol>
+        <li>Confirm the host is reachable with manual SSH.</li>
+        <li>Confirm <code>tcpdump</code> exists.</li>
+        <li>Confirm <code>tcpdump -D</code> lists interfaces.</li>
+        <li>Confirm the chosen SSH user has enough permission to capture or list interfaces.</li>
+        <li>Confirm Packetra can load interfaces through <code>Connect &amp;&amp; Load Interfaces</code>.</li>
+      </ol>
+
+      <h3>End-of-work checks</h3>
+      <ol>
+        <li>Stop the live capture in Packetra before closing the analysis session.</li>
+        <li>Save the capture locally if it is needed for later analysis.</li>
+        <li>If you changed Linux capture capabilities temporarily, decide whether they should remain in place.</li>
+        <li>If you opened extra validation shells with <code>tmux</code>, <code>screen</code>, or background jobs, clean them up if they are no longer needed.</li>
+      </ol>
+    </section>
+
+    <section class="panel">
+      <h2>12. Troubleshooting Linux remote capture</h2>
+      <table>
+        <tr><th>Symptom</th><th>Likely cause</th><th>What to check</th></tr>
+        <tr><td>Cannot connect to host</td><td>SSH unreachable, wrong host, wrong port, firewall, or auth failure</td><td>Test with manual SSH from the same machine running Packetra</td></tr>
+        <tr><td>Connects but loads no interfaces</td><td><code>tcpdump</code> missing or insufficient rights</td><td>Run <code>which tcpdump</code> and <code>tcpdump -D</code> on the host</td></tr>
+        <tr><td>Interfaces load but capture does not start</td><td>Permission issue or wrong interface name</td><td>Run a manual <code>tcpdump -n -s 0 -i iface -c 5</code></td></tr>
+        <tr><td>Capture starts but no useful traffic appears</td><td>Wrong interface or overly restrictive capture filter</td><td>Retry without a capture filter and confirm the interface choice</td></tr>
+        <tr><td>Intermittent failure</td><td>SSH drop or unstable remote host</td><td>Check network stability and whether the remote session remains active</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>13. Windows remote capture still exists, but is different</h2>
+      <p>For completeness: Windows remote capture in Packetra uses a downloadable remote agent package, not plain <code>tcpdump</code>. The Help menu now names this page <b>Remote Capture Guide</b> because the Linux workflow is usually the more universally useful one.</p>
+    </section>
+  </div>
+</body>
+</html>

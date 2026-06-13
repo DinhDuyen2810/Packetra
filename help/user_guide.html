@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packetra User Guide</title>
+  <style>
+    :root {
+      --bg: #f3f7fb;
+      --panel: #ffffff;
+      --line: #d8e4ef;
+      --ink: #18324a;
+      --muted: #5f7389;
+      --accent: #1457c1;
+      --accent-soft: #eaf2ff;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: linear-gradient(180deg, #edf5ff 0%, var(--bg) 45%, #f8fbfe 100%);
+      color: var(--ink);
+      line-height: 1.72;
+    }
+    .page {
+      max-width: 1460px;
+      margin: 0 auto;
+      padding: 24px 20px 56px;
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      gap: 22px;
+    }
+    .toc {
+      position: sticky;
+      top: 18px;
+      align-self: start;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 20px 18px;
+      box-shadow: 0 12px 34px rgba(20, 49, 81, 0.08);
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+    }
+    .toc h2 {
+      margin: 0 0 10px;
+      font-size: 1.05rem;
+    }
+    .toc p {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+    .toc ul {
+      list-style: none;
+      padding-left: 0;
+      margin: 0;
+    }
+    .toc li {
+      margin: 4px 0;
+    }
+    .toc .lvl2 {
+      padding-left: 14px;
+      margin-top: 3px;
+      border-left: 2px solid #edf3fb;
+    }
+    .toc a {
+      text-decoration: none;
+      color: #23425d;
+      display: block;
+      padding: 6px 8px;
+      border-radius: 8px;
+      font-size: 0.95rem;
+    }
+    .toc a:hover {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .content {
+      min-width: 0;
+    }
+    .nav, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 12px 34px rgba(20, 49, 81, 0.08);
+    }
+    .nav {
+      padding: 16px 20px;
+      margin-bottom: 18px;
+    }
+    .nav a {
+      margin-right: 14px;
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .panel {
+      padding: 26px;
+      margin-bottom: 18px;
+    }
+    h1, h2, h3, h4 {
+      margin-top: 0;
+      scroll-margin-top: 24px;
+    }
+    h1 { font-size: 2rem; }
+    h2 { font-size: 1.45rem; margin-bottom: 12px; }
+    h3 { font-size: 1.08rem; margin-bottom: 10px; color: #204466; }
+    h4 { font-size: 1rem; margin-bottom: 8px; color: #335573; }
+    p.lead {
+      font-size: 1.04rem;
+      color: #2d4e6a;
+      margin-bottom: 0;
+    }
+    code {
+      background: #edf4ff;
+      color: #1d4ed8;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    pre {
+      background: #10243a;
+      color: #eaf3ff;
+      padding: 14px;
+      border-radius: 12px;
+      overflow: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+    th, td {
+      border: 1px solid #d9e4ef;
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #eef6ff;
+    }
+    ul, ol {
+      padding-left: 22px;
+      margin-top: 8px;
+    }
+    .note {
+      background: #f6fbff;
+      border-left: 4px solid #7aa7e8;
+      padding: 12px 14px;
+      border-radius: 10px;
+      color: #35526d;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .chip {
+      background: #eef5ff;
+      color: #20476d;
+      border: 1px solid #d3e3f7;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 0.92rem;
+    }
+    @media (max-width: 1080px) {
+      .page {
+        grid-template-columns: 1fr;
+      }
+      .toc {
+        position: static;
+        max-height: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <aside class="toc">
+      <h2>Contents</h2>
+      <p>This guide is organized like a structured handbook. Use the left outline to jump directly to the section you need.</p>
+      <ul>
+        <li><a href="#overview">1. Overview</a></li>
+        <li>
+          <a href="#startup">2. Startup and First Decisions</a>
+          <ul class="lvl2">
+            <li><a href="#startup-live-vs-file">2.1 Live capture vs file analysis</a></li>
+            <li><a href="#startup-windows">2.2 Windows and Npcap</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#layout">3. Main Interface Layout</a>
+          <ul class="lvl2">
+            <li><a href="#layout-menubar">3.1 Menu bar</a></li>
+            <li><a href="#layout-toolbar">3.2 Main toolbar</a></li>
+            <li><a href="#layout-panes">3.3 Packet panes</a></li>
+            <li><a href="#layout-statusbar">3.4 Status bar</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#capture">4. Capturing Traffic</a>
+          <ul class="lvl2">
+            <li><a href="#capture-local">4.1 Local capture</a></li>
+            <li><a href="#capture-remote">4.2 Remote capture</a></li>
+            <li><a href="#capture-open-file">4.3 Open an existing file</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#menus">5. Full Menu Reference</a>
+          <ul class="lvl2">
+            <li><a href="#menu-file">5.1 File</a></li>
+            <li><a href="#menu-edit">5.2 Edit</a></li>
+            <li><a href="#menu-view">5.3 View</a></li>
+            <li><a href="#menu-go">5.4 Go</a></li>
+            <li><a href="#menu-capture">5.5 Capture</a></li>
+            <li><a href="#menu-analyze">5.6 Analyze</a></li>
+            <li><a href="#menu-statistics">5.7 Statistics</a></li>
+            <li><a href="#menu-tools">5.8 Tools</a></li>
+            <li><a href="#menu-help">5.9 Help</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#workflow">6. Packet Analysis Workflow</a>
+          <ul class="lvl2">
+            <li><a href="#workflow-filter">6.1 Filter</a></li>
+            <li><a href="#workflow-details">6.2 Inspect details and bytes</a></li>
+            <li><a href="#workflow-follow">6.3 Follow streams and conversations</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#statistics">7. Statistics Windows</a>
+          <ul class="lvl2">
+            <li><a href="#statistics-addresses">7.1 Addresses and hierarchy</a></li>
+            <li><a href="#statistics-endpoints">7.2 Endpoints and conversations</a></li>
+            <li><a href="#statistics-lengths">7.3 Packet lengths and flow graph</a></li>
+            <li><a href="#statistics-http-ip">7.4 HTTP, IPv4, IPv6</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#tools">8. Advanced Tools</a>
+          <ul class="lvl2">
+            <li><a href="#tools-ai">8.1 AI Analyst</a></li>
+            <li><a href="#tools-demo">8.2 Demo Packet</a></li>
+            <li><a href="#tools-topology">8.3 Network Topology Graph</a></li>
+            <li><a href="#tools-dashboard">8.4 Dashboard</a></li>
+            <li><a href="#tools-firewall">8.5 Firewall ACL Rules</a></li>
+          </ul>
+        </li>
+        <li>
+          <a href="#preferences">9. Preferences and Customization</a>
+          <ul class="lvl2">
+            <li><a href="#preferences-appearance">9.1 Appearance and filter UX</a></li>
+            <li><a href="#preferences-layout">9.2 Layout and pane behavior</a></li>
+            <li><a href="#preferences-capture">9.3 Capture behavior</a></li>
+          </ul>
+        </li>
+        <li><a href="#end-to-end">10. End-to-End Example Session</a></li>
+        <li><a href="#mistakes">11. Common Mistakes and Advice</a></li>
+      </ul>
+    </aside>
+
+    <main class="content">
+      <div class="nav">
+        <a href="index.html">Help Center</a>
+        <a href="capture_workflow.html">Capture Workflow</a>
+        <a href="capture_filter_guide.html">Capture Filter Guide</a>
+        <a href="filter_reference.html">Display Filter Reference</a>
+        <a href="dashboard_guide.html">Dashboard Guide</a>
+        <a href="agent_guide.html">Remote Capture Guide</a>
+      </div>
+
+      <section class="panel" id="overview">
+        <h1>Packetra User Guide</h1>
+        <p class="lead">This is the complete user-facing guide for the current Packetra build. It is designed as an operator manual: what the application contains, what each major screen and command does, and how to move from raw traffic to a finished analysis session.</p>
+        <div class="chips">
+          <span class="chip">Capture</span>
+          <span class="chip">Open PCAP / PCAPNG</span>
+          <span class="chip">Display filters</span>
+          <span class="chip">Statistics</span>
+          <span class="chip">Dashboard</span>
+          <span class="chip">AI Analyst</span>
+          <span class="chip">Topology graph</span>
+          <span class="chip">Firewall ACL rules</span>
+        </div>
+      </section>
+
+      <section class="panel" id="startup">
+        <h2>2. Startup and First Decisions</h2>
+
+        <h3 id="startup-live-vs-file">2.1 Live capture vs file analysis</h3>
+        <table>
+          <tr><th>Mode</th><th>Use it when</th><th>Typical entry point</th></tr>
+          <tr><td>Live capture</td><td>You need to observe traffic happening now on a local or remote interface.</td><td>Select an interface and press Start.</td></tr>
+          <tr><td>File analysis</td><td>You already have a `.pcap` or `.pcapng` capture for offline investigation.</td><td><code>File &gt; Open...</code></td></tr>
+        </table>
+
+        <h3 id="startup-windows">2.2 Windows and Npcap</h3>
+        <p>On Windows, local live capture depends on Npcap. If Packetra cannot use Npcap, live capture on local Windows interfaces will not start. You can verify the environment under <code>Help &gt; System and Version Information</code>.</p>
+        <div class="note">Remote capture to a Linux server is different: it relies on SSH and <code>tcpdump</code> on the remote host, not local Npcap.</div>
+      </section>
+
+      <section class="panel" id="layout">
+        <h2>3. Main Interface Layout</h2>
+
+        <h3 id="layout-menubar">3.1 Menu bar</h3>
+        <p>The menu bar is the full command surface of Packetra. It contains the primary application actions: file handling, capture, navigation, analysis, statistics, advanced tools, and help.</p>
+
+        <h3 id="layout-toolbar">3.2 Main toolbar</h3>
+        <p>The toolbar gives quick access to common operations such as start, stop, restart, capture options, open, save, reload, search, packet navigation, stay-at-end mode, zoom, resize columns, and layout reset.</p>
+
+        <h3 id="layout-panes">3.3 Packet panes</h3>
+        <ul>
+          <li><b>Packet list</b>: the high-level packet table showing packet number, time, source, destination, protocol, length, and info.</li>
+          <li><b>Packet details</b>: the tree representation of protocols and fields for the currently selected packet.</li>
+          <li><b>Packet bytes</b>: the byte and hex view used for payload verification and low-level inspection.</li>
+          <li><b>Packet diagram placeholder</b>: a reserved packet-diagram area that is present in the layout control model.</li>
+        </ul>
+
+        <h3 id="layout-statusbar">3.4 Status bar</h3>
+        <p>The status bar reflects the current mode of the session: load activity, capture activity, selected frame information, filtered state, packet counts, dropped counts, and quick access buttons such as expert information or capture file properties.</p>
+      </section>
+
+      <section class="panel" id="capture">
+        <h2>4. Capturing Traffic</h2>
+
+        <h3 id="capture-local">4.1 Local capture</h3>
+        <ol>
+          <li>Choose a local interface from the interface selection screen or capture options dialog.</li>
+          <li>If needed, assign a capture filter to that interface.</li>
+          <li>Choose whether promiscuous mode should be enabled.</li>
+          <li>Start capture.</li>
+          <li>Watch packets arrive live in the packet list.</li>
+          <li>Stop or restart capture when needed.</li>
+        </ol>
+
+        <h3 id="capture-remote">4.2 Remote capture</h3>
+        <p>Packetra also supports remote interfaces. The remote host and interface exposure are managed through <code>Manage Interfaces</code>. Linux-focused remote guidance is documented in <a href="agent_guide.html">Remote Capture Guide</a>.</p>
+
+        <h3 id="capture-open-file">4.3 Open an existing file</h3>
+        <p>Use <code>File &gt; Open...</code> to load a file. Packetra supports saved capture workflows including reload, merge, save, save as, separate packets, export selected scopes, and print-related flows.</p>
+      </section>
+
+      <section class="panel" id="menus">
+        <h2>5. Full Menu Reference</h2>
+
+        <h3 id="menu-file">5.1 File menu</h3>
+        <ul>
+          <li><code>Open...</code>: load a capture file.</li>
+          <li><code>Merge...</code>: merge another file into the current analysis flow.</li>
+          <li><code>Save</code> and <code>Save As...</code>: persist the current capture.</li>
+          <li><code>Separate</code>: split out packets into new capture outputs by selected logic.</li>
+          <li><code>Export Specified Packets...</code>: export a chosen subset of packets.</li>
+          <li><code>Print...</code>: print-oriented output flow.</li>
+          <li><code>Quit</code>: exit the application, with save prompts when appropriate.</li>
+        </ul>
+
+        <h3 id="menu-edit">5.2 Edit menu</h3>
+        <ul>
+          <li><code>Copy</code>: copy selected content depending on current context.</li>
+          <li><code>Find Packet...</code>, <code>Find Next</code>, <code>Find Previous</code>: find workflow across packet list, details, or bytes.</li>
+          <li><code>Mark/Unmark Selected</code>, <code>Mark/Unmark All Displayed Packets</code>, <code>Next Mark</code>, <code>Previous Mark</code>: annotation and navigation over marked packets.</li>
+          <li><code>Ignore/Unignore Selected</code>, <code>Ignore/Unignore All Displayed</code>: remove or restore packets from active analytical visibility.</li>
+          <li><code>Packet Comment...</code>, <code>Delete All Packet Comments</code>: comment system for per-packet notes.</li>
+          <li><code>Preferences...</code>: application configuration and customization.</li>
+        </ul>
+
+        <h3 id="menu-view">5.3 View menu</h3>
+        <ul>
+          <li>Show or hide the main toolbar, filter toolbar, and status bar.</li>
+          <li>Show or hide the packet list, packet details, packet bytes, and packet diagram panes.</li>
+          <li>Zoom in, zoom out, and reset to normal text size.</li>
+          <li>Expand or collapse selected subtrees and all subtrees in the details pane.</li>
+          <li>Enable packet coloring and conversation coloring, and open coloring-rule configuration.</li>
+          <li>Resize all columns, show a packet in a new window, redissect packets, reload as file-format view, or reload the current file.</li>
+        </ul>
+
+        <h3 id="menu-go">5.4 Go menu</h3>
+        <ul>
+          <li>Back and Forward for navigation state.</li>
+          <li>Go to Packet and Go to Corresponding Packet.</li>
+          <li>Previous / Next / First / Last packet navigation.</li>
+          <li>Previous / Next packet in conversation.</li>
+          <li>Auto Scroll in Live Capture to keep the newest traffic visible during capture.</li>
+        </ul>
+
+        <h3 id="menu-capture">5.5 Capture menu</h3>
+        <ul>
+          <li><code>Options...</code>: open capture configuration.</li>
+          <li><code>Start</code>, <code>Stop</code>, <code>Restart</code>: primary live-capture controls.</li>
+          <li><code>Capture Filters...</code>: open the capture-filter preset manager.</li>
+          <li><code>Refresh Interfaces</code>: refresh the available interface list when not actively capturing.</li>
+        </ul>
+
+        <h3 id="menu-analyze">5.6 Analyze menu</h3>
+        <ul>
+          <li><code>Display Filter Macros...</code>: reusable named display-filter snippets.</li>
+          <li><code>Display Filter Expression...</code>: builder for field/operator/value display filters.</li>
+          <li><code>Apply as Column</code>: turn a selected field into a visible analytical column.</li>
+          <li><code>Apply as Filter</code>: generate a display filter from the selected field.</li>
+          <li><code>Conversation Filter</code>: build a conversation-scoped filter from the current packet.</li>
+          <li><code>Follow</code>: follow TCP or UDP stream / conversation data flow.</li>
+          <li><code>Expert Info</code>: open the expert-information window for warnings and notable observations.</li>
+        </ul>
+
+        <h3 id="menu-statistics">5.7 Statistics menu</h3>
+        <ul>
+          <li><code>Capture File Properties</code></li>
+          <li><code>Resolved Addresses</code></li>
+          <li><code>Protocol Hierarchy</code></li>
+          <li><code>Conversations</code></li>
+          <li><code>Endpoints</code></li>
+          <li><code>Packet Lengths</code></li>
+          <li><code>Flow Graph</code></li>
+          <li><code>HTTP</code></li>
+          <li><code>IPv4 Statistics</code></li>
+          <li><code>IPv6 Statistics</code></li>
+        </ul>
+
+        <h3 id="menu-tools">5.8 Tools menu</h3>
+        <ul>
+          <li><code>AI Analyst</code>: AI-assisted interpretation of selected traffic.</li>
+          <li><code>Demo Packet</code>: sample/demo exploration flow.</li>
+          <li><code>Network Topology Graph</code>: graph-based communication visualization.</li>
+          <li><code>Dashboard</code>: dashboard gallery and template-driven overview system.</li>
+          <li><code>Firewall ACL Rules</code>: generate firewall rule suggestions from a selected packet.</li>
+        </ul>
+
+        <h3 id="menu-help">5.9 Help menu</h3>
+        <ul>
+          <li><code>System and Version Information</code>: Packetra, Python, Npcap, and dependency versions.</li>
+          <li>HTML documentation pages for user guide, capture workflow, capture filters, display filters, dashboard usage, and remote capture.</li>
+          <li><code>About Packetra</code> and <code>About Qt</code>.</li>
+        </ul>
+      </section>
+
+      <section class="panel" id="workflow">
+        <h2>6. Packet Analysis Workflow</h2>
+
+        <h3 id="workflow-filter">6.1 Filter</h3>
+        <p>Packetra uses a display-filter workflow after packets have already been loaded or captured. You can type directly into the filter bar, use right-click filter helpers, drag certain packet-list cells into the filter bar, use macros, use the expression builder, or push filters from statistics and topology views.</p>
+        <p>For the full filter mechanics, use <a href="filter_reference.html">Display Filter Reference</a>. For pre-capture filtering, use <a href="capture_filter_guide.html">Capture Filter Guide</a>.</p>
+
+        <h3 id="workflow-details">6.2 Inspect details and bytes</h3>
+        <ul>
+          <li>Select a packet in the packet list.</li>
+          <li>Inspect protocol layers and fields in the details tree.</li>
+          <li>Use expand, collapse, or copy actions from the detail context menu.</li>
+          <li>Inspect packet bytes in the byte pane and use byte-selection linking with details when needed.</li>
+        </ul>
+
+        <h3 id="workflow-follow">6.3 Follow streams and conversations</h3>
+        <p>For supported packets, Packetra can open a Follow dialog with view modes such as full conversation or directional stream output. From there you can:</p>
+        <ul>
+          <li>Change rendering format such as ASCII, Hex Dump, or Base64-like raw output.</li>
+          <li>Restrict to client-to-server or server-to-client direction.</li>
+          <li>Filter this stream, filter out this stream, copy the rendered text, or save it.</li>
+        </ul>
+      </section>
+
+      <section class="panel" id="statistics">
+        <h2>7. Statistics Windows</h2>
+
+        <h3 id="statistics-addresses">7.1 Addresses and hierarchy</h3>
+        <ul>
+          <li><b>Resolved Addresses</b>: map MAC OUIs and vendor names, with search and optional limit-to-display-filter behavior.</li>
+          <li><b>Protocol Hierarchy</b>: show protocol breakdown with percentages, bytes, and optional Apply as Filter for selected protocols.</li>
+        </ul>
+
+        <h3 id="statistics-endpoints">7.2 Endpoints and conversations</h3>
+        <ul>
+          <li><b>Conversations</b>: analyze peer-to-peer exchanges.</li>
+          <li><b>Endpoints</b>: tabbed breakdown by Ethernet, IPv4, IPv6, TCP, and UDP endpoints.</li>
+        </ul>
+
+        <h3 id="statistics-lengths">7.3 Packet lengths and flow graph</h3>
+        <ul>
+          <li><b>Packet Lengths</b>: inspect packet-size distribution and related summary metrics.</li>
+          <li><b>Flow Graph</b>: sequence-oriented flow inspection with row selection, apply-filter options, and navigation back to packets.</li>
+        </ul>
+
+        <h3 id="statistics-http-ip">7.4 HTTP, IPv4, IPv6</h3>
+        <ul>
+          <li><b>HTTP Packet Counter</b>: request/response counts and HTTP status-class grouping.</li>
+          <li><b>IPv4 Statistics</b>: address-based packet and burst summaries with filter push-back.</li>
+          <li><b>IPv6 Statistics</b>: same style of analytical breakdown for IPv6 addresses.</li>
+        </ul>
+      </section>
+
+      <section class="panel" id="tools">
+        <h2>8. Advanced Tools</h2>
+
+        <h3 id="tools-ai">8.1 AI Analyst</h3>
+        <p>AI Analyst is a guided interpretation tool for selected traffic. It should be used as an assistant, not as final proof. Its output should be verified with packet fields, bytes, conversation scope, and statistical context.</p>
+
+        <h3 id="tools-demo">8.2 Demo Packet</h3>
+        <p>Demo Packet provides a curated or sample-style exploration path to help test the analysis UI or demonstrate packet interpretation features.</p>
+
+        <h3 id="tools-topology">8.3 Network Topology Graph</h3>
+        <p>The topology graph visualizes relationships between communicating nodes. It also provides filter-related actions such as Apply Filter and Copy Filter based on the selected node or edge.</p>
+
+        <h3 id="tools-dashboard">8.4 Dashboard</h3>
+        <p>The dashboard system gives template-based summarized views over the currently displayed packet scope. It includes templates such as Network Overview, DNS Analysis, Timeline Analysis, HTTP/TLS Analysis, Protocol Analysis, Endpoint Activity, Security Investigation, and Topology View.</p>
+
+        <h3 id="tools-firewall">8.5 Firewall ACL Rules</h3>
+        <p>When exactly one suitable packet is selected, Packetra can generate firewall rule suggestions for products such as Cisco, iptables, pf, ipfw, and Windows netsh variants. The generated content is a template that must still be reviewed before real deployment.</p>
+      </section>
+
+      <section class="panel" id="preferences">
+        <h2>9. Preferences and Customization</h2>
+
+        <h3 id="preferences-appearance">9.1 Appearance and filter UX</h3>
+        <ul>
+          <li>Display-filter autocomplete behavior.</li>
+          <li>How many recent filter entries to show.</li>
+          <li>Fonts and colors for packet list, details, bytes, marked packets, ignored packets, and search highlighting.</li>
+        </ul>
+
+        <h3 id="preferences-layout">9.2 Layout and pane behavior</h3>
+        <ul>
+          <li>Default pane layout and restore-layout behavior.</li>
+          <li>Visibility of major panes and toolbar components.</li>
+          <li>Column sizing and reset actions.</li>
+        </ul>
+
+        <h3 id="preferences-capture">9.3 Capture behavior</h3>
+        <ul>
+          <li>Promiscuous mode defaults.</li>
+          <li>Capture-output file naming, format, rollover, compression, and ring-buffer settings.</li>
+          <li>Related real-time and save/output behavior.</li>
+        </ul>
+      </section>
+
+      <section class="panel" id="end-to-end">
+        <h2>10. End-to-End Example Session</h2>
+        <ol>
+          <li>Start Packetra.</li>
+          <li>Choose whether to work with a live interface or an existing capture file.</li>
+          <li>If capturing live, assign an optional capture filter and start capture.</li>
+          <li>Watch the packet list fill with traffic.</li>
+          <li>Apply a broad display filter such as <code>tcp</code>, <code>dns</code>, or <code>http or tls</code>.</li>
+          <li>Select representative packets and inspect details and bytes.</li>
+          <li>Use Follow or Conversation Filter if you need stream-level focus.</li>
+          <li>Open Protocol Hierarchy, Endpoints, or Dashboard for summary context.</li>
+          <li>If needed, use AI Analyst or Topology Graph to get alternate views of the same traffic.</li>
+          <li>Save the capture or export the subset that matters.</li>
+        </ol>
+      </section>
+
+      <section class="panel" id="mistakes">
+        <h2>11. Common Mistakes and Advice</h2>
+        <ul>
+          <li>Do not confuse capture filters with display filters.</li>
+          <li>Do not rely on AI output without technical verification.</li>
+          <li>Do not over-filter too early in a new investigation.</li>
+          <li>Do not forget that many statistics and tool windows operate on the currently displayed packet scope.</li>
+          <li>Do not close or replace an important capture before deciding whether it should be saved.</li>
+        </ul>
+        <div class="note">Best operator pattern: capture or open data first, filter second, verify with details and bytes third, summarize with statistics/dashboard fourth, and save/export last.</div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

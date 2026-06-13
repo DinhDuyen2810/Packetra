@@ -9,10 +9,14 @@ import csv
 import os
 import re
 import time
+import sys
+import html
+import platform
+from importlib import metadata as importlib_metadata
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings, QRectF, QEvent
+from PySide6.QtCore import Qt, QTimer, QSize, QPoint, QPointF, QSettings, QRectF, QEvent, QUrl
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QMenuBar, QToolBar, QLabel, QMenu, QMessageBox, QFileDialog,
@@ -22,7 +26,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QTreeWidget, QTreeWidgetItem, QToolTip, QRadioButton, QGroupBox, QButtonGroup,
     QListWidget, QSplitter, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsSimpleTextItem, QGraphicsItem, QGraphicsPixmapItem
 )
-from PySide6.QtGui import QAction, QCursor, QFontMetrics, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont, QPainter, QPen, QBrush
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QFontMetrics, QIcon, QKeySequence, QPixmap, QTextDocument, QColor, QFont, QPainter, QPen, QBrush
 from PySide6.QtWidgets import QColorDialog, QFontDialog
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from scapy.all import ARP, DNS, Ether, IP, IPv6, TCP, UDP
@@ -65,6 +69,7 @@ from utils.pcap_io import (
     save_capture_file,
     save_capture_file_with_metadata,
 )
+from utils.system_check import get_npcap_info
 
 log = logging.getLogger('application')
 
@@ -1838,6 +1843,7 @@ class CaptureOptionsDialog(QDialog):
 
 
 class ApplicationWindow(QMainWindow):
+    APP_VERSION = '1.0'
     AI_TRAFFIC_COLUMNS = [
         'Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Destination Port', 'Protocol', 'Timestamp',
         'Flow Duration', 'Total Fwd Packets', 'Total Backward Packets', 'Total Length of Fwd Packets',
@@ -1867,6 +1873,7 @@ class ApplicationWindow(QMainWindow):
     AI_MODEL_INFO_FILE = 'model_info.json'
     DEMO_DOC_PATH = Path(__file__).resolve().parents[1] / 'docs' / 'md' / 'demo packet.md'
     DEMO_DIR = Path(__file__).resolve().parents[1] / 'demo'
+    HELP_DOC_DIR = Path(__file__).resolve().parents[1] / 'help'
     AI_FALLBACK_LABELS = [
         'BENIGN',
         'Bot',
@@ -2324,8 +2331,29 @@ class ApplicationWindow(QMainWindow):
 
         self.action_contents = QAction('&Contents', self)
         self.action_contents.setShortcut(QKeySequence.HelpContents)
+        self.action_help_versions = QAction('&System and Version Information', self)
+        self.action_help_user_guide = QAction('&User Guide', self)
+        self.action_help_capture_guide = QAction('&Capture Workflow Guide', self)
+        self.action_help_capture_filter_guide = QAction('Capture Filter &Guide', self)
+        self.action_help_filter_reference = QAction('Display &Filter Reference', self)
+        self.action_help_dashboard_guide = QAction('&Dashboard Guide', self)
+        self.action_help_agent_guide = QAction('&Remote Capture Guide', self)
         self.action_about = QAction('&About Packetra', self)
         self.action_about_qt = QAction('About &Qt', self)
+
+        help_menu = menubar.addMenu('&Help')
+        help_menu.addAction(self.action_help_versions)
+        help_menu.addSeparator()
+        help_menu.addAction(self.action_contents)
+        help_menu.addAction(self.action_help_user_guide)
+        help_menu.addAction(self.action_help_capture_guide)
+        help_menu.addAction(self.action_help_capture_filter_guide)
+        help_menu.addAction(self.action_help_filter_reference)
+        help_menu.addAction(self.action_help_dashboard_guide)
+        help_menu.addAction(self.action_help_agent_guide)
+        help_menu.addSeparator()
+        help_menu.addAction(self.action_about)
+        help_menu.addAction(self.action_about_qt)
 
     def _build_toolbar(self):
         """Build the toolbar"""
@@ -2559,6 +2587,14 @@ class ApplicationWindow(QMainWindow):
         self.action_advanced_fwrule.triggered.connect(lambda: self._on_advanced_analysis_action('Firewall ACL Rules'))
 
         # Help
+        self.action_contents.triggered.connect(lambda: self._open_help_document('index.html'))
+        self.action_help_versions.triggered.connect(self._on_help_versions)
+        self.action_help_user_guide.triggered.connect(lambda: self._open_help_document('user_guide.html'))
+        self.action_help_capture_guide.triggered.connect(lambda: self._open_help_document('capture_workflow.html'))
+        self.action_help_capture_filter_guide.triggered.connect(lambda: self._open_help_document('capture_filter_guide.html'))
+        self.action_help_filter_reference.triggered.connect(lambda: self._open_help_document('filter_reference.html'))
+        self.action_help_dashboard_guide.triggered.connect(lambda: self._open_help_document('dashboard_guide.html'))
+        self.action_help_agent_guide.triggered.connect(lambda: self._open_help_document('agent_guide.html'))
         self.action_about.triggered.connect(self._on_about)
         self.action_about_qt.triggered.connect(self._on_about_qt)
 
@@ -12030,6 +12066,130 @@ class ApplicationWindow(QMainWindow):
         if self.capture_view:
             self.capture_view.show_conversations()
 
+    def _package_version(self, package_name):
+        try:
+            return importlib_metadata.version(package_name)
+        except Exception:
+            return 'Not installed'
+
+    def _requirements_version_rows(self):
+        requirements_path = Path(__file__).resolve().parents[1] / 'requirements.txt'
+        rows = []
+        if not requirements_path.exists():
+            return rows
+
+        for raw_line in requirements_path.read_text(encoding='utf-8').splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+            package_name = re.split(r'[<>=!~ ]', line, maxsplit=1)[0].strip()
+            if '@' in package_name:
+                package_name = package_name.split('@', 1)[0].strip()
+            if not package_name:
+                continue
+            rows.append((package_name, line, self._package_version(package_name)))
+        return rows
+
+    def _requirements_lookup(self):
+        return {name.lower(): requirement for name, requirement, _installed in self._requirements_version_rows()}
+
+    def _build_versions_html(self):
+        npcap_info = get_npcap_info()
+        requirement_map = self._requirements_lookup()
+        core_rows = [
+            ('Packetra', self.APP_VERSION, self.APP_VERSION),
+            ('Python', sys.version.split()[0], sys.version.split()[0]),
+            ('PySide6', requirement_map.get('pyside6', 'requirements.txt'), self._package_version('PySide6')),
+            ('scapy', requirement_map.get('scapy', 'requirements.txt'), self._package_version('scapy')),
+        ]
+        requirement_rows = self._requirements_version_rows()
+        system_name = platform.platform()
+        npcap_version = npcap_info.get('version') or 'Unknown'
+        npcap_status = 'Installed' if npcap_info.get('installed') else 'Not detected'
+        npcap_service = npcap_info.get('service_status') or 'Unknown'
+        npcap_dll = npcap_info.get('dll_path') or 'Not found'
+        npcap_driver = npcap_info.get('driver_path') or 'Not found'
+
+        def render_rows(rows):
+            return ''.join(
+                '<tr>'
+                f'<td>{html.escape(name)}</td>'
+                f'<td>{html.escape(required)}</td>'
+                f'<td>{html.escape(installed)}</td>'
+                '</tr>'
+                for name, required, installed in rows
+            )
+
+        return f"""
+        <html>
+        <body style="font-family: Segoe UI, Arial, sans-serif; font-size: 13px; color: #1f2937;">
+            <h2 style="margin-bottom: 8px;">Packetra - System and Version Information</h2>
+            <p><b>Software version:</b> {html.escape(self.APP_VERSION)}<br>
+            <b>Operating system:</b> {html.escape(system_name)}<br>
+            <b>Npcap status:</b> {html.escape(npcap_status)}<br>
+            <b>Npcap version:</b> {html.escape(npcap_version)}<br>
+            <b>Npcap service:</b> {html.escape(npcap_service)}<br>
+            <b>Npcap DLL path:</b> {html.escape(npcap_dll)}<br>
+            <b>Npcap driver path:</b> {html.escape(npcap_driver)}</p>
+
+            <h3 style="margin: 18px 0 8px;">Core runtime</h3>
+            <table cellspacing="0" cellpadding="6" border="1" style="border-collapse: collapse; width: 100%;">
+                <thead style="background: #e5eef9;">
+                    <tr><th align="left">Component</th><th align="left">Required</th><th align="left">Installed</th></tr>
+                </thead>
+                <tbody>{render_rows(core_rows)}</tbody>
+            </table>
+
+            <h3 style="margin: 18px 0 8px;">Library versions from requirements.txt</h3>
+            <table cellspacing="0" cellpadding="6" border="1" style="border-collapse: collapse; width: 100%;">
+                <thead style="background: #eef6e8;">
+                    <tr><th align="left">Package</th><th align="left">Requirement</th><th align="left">Installed</th></tr>
+                </thead>
+                <tbody>{render_rows(requirement_rows)}</tbody>
+            </table>
+
+            <p style="margin-top: 16px; color: #4b5563;">
+                Npcap version is read from the installed Windows driver/DLL when available.
+            </p>
+        </body>
+        </html>
+        """
+
+    def _on_help_versions(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('System and Version Information')
+        dialog.resize(980, 720)
+        layout = QVBoxLayout(dialog)
+
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(self._build_versions_html())
+        layout.addWidget(browser)
+
+        button_row = QHBoxLayout()
+        open_help_btn = QPushButton('Open Help Index', dialog)
+        close_btn = QPushButton('Close', dialog)
+        button_row.addWidget(open_help_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+        open_help_btn.clicked.connect(lambda: self._open_help_document('index.html'))
+        close_btn.clicked.connect(dialog.accept)
+        self._fit_widget_90(dialog)
+        dialog.exec()
+
+    def _open_help_document(self, filename):
+        doc_path = self.HELP_DOC_DIR / filename
+        if not doc_path.exists():
+            QMessageBox.warning(
+                self,
+                'Help file not found',
+                f'Cannot find help document:\n{doc_path}'
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(doc_path)))
+
     def _on_about(self):
         """Show About Packetra"""
         dialog = QMessageBox(self)
@@ -12037,7 +12197,7 @@ class ApplicationWindow(QMainWindow):
         dialog.setIcon(QMessageBox.Information)
         dialog.setText(
             'Packetra - Network Packet Analyzer\n\n'
-            'Version 1.0\n\n'
+            f'Version {self.APP_VERSION}\n\n'
             'A powerful packet sniffer and analyzer tool.\n\n'
             'Built with Python, Scapy, and PySide6\n\n'
             'https://github.com/packetra/packetra'

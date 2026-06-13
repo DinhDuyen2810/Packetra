@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packetra Dashboard Guide</title>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #f5f8fd; color: #18324a; line-height: 1.7; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; }
+    .panel { background: #fff; border: 1px solid #dce7f2; border-radius: 16px; padding: 24px; margin-bottom: 18px; }
+    code { background: #edf4ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #d7e2ee; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #eef6ff; }
+    pre { background: #10243a; color: #eef6ff; padding: 14px; border-radius: 12px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="panel">
+      <h1>Dashboard Guide</h1>
+      <p>This guide explains the dashboard system in detail: what each template is good at, what each widget means, which data source powers it, and how to combine dashboards with filters and packet-level inspection.</p>
+      <p><a href="index.html">Back to Help Center</a></p>
+    </section>
+
+    <section class="panel">
+      <h2>1. Dashboard concepts</h2>
+      <table>
+        <tr><th>Concept</th><th>Meaning</th></tr>
+        <tr><td>Template</td><td>A prebuilt dashboard layout such as Network Overview or DNS Analysis.</td></tr>
+        <tr><td>Widget</td><td>A single visual block: metric, table, bar chart, line chart, donut, topology, and so on.</td></tr>
+        <tr><td>Data source</td><td>The backing dataset used by a widget, such as <code>packets</code>, <code>endpoints</code>, <code>conversations</code>, <code>protocol_stats</code>, <code>dns_queries</code>, or <code>http_requests</code>.</td></tr>
+        <tr><td>Query</td><td>The widget’s filter, grouping, metrics, sorting, limit, and time bucketing settings.</td></tr>
+        <tr><td>Visualization</td><td>How the query result is rendered: metric, table, bar, line, area, scatter, radar, treemap, sunburst, pie, donut, histogram, heatmap, or topology.</td></tr>
+        <tr><td>Data scope</td><td>Dashboards typically operate on the currently displayed packets, so your current display filter matters.</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>2. Available data sources in the current build</h2>
+      <table>
+        <tr><th>Data source</th><th>What it represents</th><th>Useful fields</th></tr>
+        <tr><td><code>packets</code></td><td>Per-packet rows from the current capture view</td><td><code>number</code>, <code>time</code>, <code>src_ip</code>, <code>dst_ip</code>, <code>protocol</code>, <code>length</code>, <code>src_port</code>, <code>dst_port</code>, <code>info</code></td></tr>
+        <tr><td><code>endpoints</code></td><td>Aggregated per-address activity</td><td><code>address</code>, <code>packets</code>, <code>bytes</code>, <code>protocols</code></td></tr>
+        <tr><td><code>conversations</code></td><td>Aggregated per-flow / per-conversation activity</td><td><code>conversation</code>, <code>protocol</code>, <code>packets</code>, <code>bytes</code></td></tr>
+        <tr><td><code>protocol_stats</code></td><td>Protocol-level summary</td><td><code>protocol</code>, <code>packets</code>, <code>bytes</code></td></tr>
+        <tr><td><code>dns_queries</code></td><td>Aggregated DNS questions and response timing</td><td><code>query</code>, <code>count</code>, <code>responses</code>, <code>avg_time_ms</code></td></tr>
+        <tr><td><code>http_requests</code></td><td>HTTP message summary rows</td><td><code>src_ip</code>, <code>dst_ip</code>, <code>kind</code>, <code>method</code>, <code>uri</code>, <code>status</code>, <code>latency_ms</code>, <code>bytes</code></td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>3. Available visualization types in the current build</h2>
+      <p>The dashboard system registers these visualization types: <code>metric</code>, <code>table</code>, <code>bar</code>, <code>horizontal_bar</code>, <code>line</code>, <code>area</code>, <code>scatter</code>, <code>radar</code>, <code>treemap</code>, <code>sunburst</code>, <code>pie</code>, <code>donut</code>, <code>histogram</code>, <code>heatmap</code>, and <code>topology</code>.</p>
+      <ul>
+        <li>Use <b>metric</b> when you want one number such as total packets or distinct DNS queries.</li>
+        <li>Use <b>table</b> when you need exact rows for drill-down or reporting.</li>
+        <li>Use <b>bar</b> or <b>donut</b> when comparing categories such as protocols, endpoints, or ports.</li>
+        <li>Use <b>line</b> when time is the primary dimension.</li>
+        <li>Use <b>topology</b> when the relationship between nodes matters more than raw count tables.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>4. Template-by-template guide</h2>
+
+      <h3>Network Overview</h3>
+      <ul>
+        <li><b>Total Packets</b> (`packets`, `metric`): immediate sense of volume.</li>
+        <li><b>Total Bytes</b> (`packets`, `metric`): useful for comparing noisy captures that do not necessarily have many packets.</li>
+        <li><b>Protocol Distribution</b> (`protocol_stats`, `donut`): the fastest way to see whether the capture is DNS-heavy, HTTP-heavy, TLS-heavy, or dominated by one unexpected protocol.</li>
+        <li><b>Packets Over Time</b> (`packets`, `line`): shows burstiness, steady flow, or silent gaps.</li>
+        <li><b>Top Endpoints</b> (`endpoints`, `table`): shows who is talking the most.</li>
+      </ul>
+      <p>Best use: first dashboard to open on an unfamiliar capture. Combine it with a broad display filter, then narrow further once you know the dominant hosts and protocols.</p>
+
+      <h3>Timeline Analysis</h3>
+      <ul>
+        <li><b>Packets Over Time</b> (`packets`, `line`): packet-rate rhythm.</li>
+        <li><b>Bytes Over Time</b> (`packets`, `line`): volume rhythm; helps distinguish many-small-packet traffic from fewer large transfers.</li>
+        <li><b>Top Conversations</b> (`conversations`, `bar`): which conversations dominate during the displayed time scope.</li>
+        <li><b>Protocol Mix</b> (`protocol_stats`, `donut`): what kinds of traffic are present in the same time-filtered slice.</li>
+      </ul>
+      <p>Best use: incidents with spikes, bursts, timing anomalies, or “something happened around this minute” cases.</p>
+
+      <h3>DNS Analysis</h3>
+      <ul>
+        <li><b>Distinct Queries</b> (`dns_queries`, `metric`): quick count of unique DNS questions.</li>
+        <li><b>Top DNS Queries</b> (`dns_queries`, `bar`): domains with the most attention.</li>
+        <li><b>DNS Query Table</b> (`dns_queries`, `table`): exact domain list and counts.</li>
+        <li><b>DNS Response Time</b> (`dns_queries`, `table`): sort by latency to spot slow or failing lookups.</li>
+      </ul>
+      <p>Best use: name-resolution issues, suspicious domains, repeated retries, and malware-style beacon domain patterns.</p>
+
+      <h3>HTTP/TLS Analysis</h3>
+      <ul>
+        <li><b>HTTP Messages</b> (`http_requests`, `metric`): whether actual HTTP content is present in the visible scope.</li>
+        <li><b>HTTP vs SSL</b> (`packets`, `donut`): rough split between plain HTTP and encrypted traffic as modeled by the template.</li>
+        <li><b>HTTP Request Table</b> (`http_requests`, `table`): method, URI, status, latency, and peer addresses.</li>
+        <li><b>Largest SSL Packets</b> (`packets`, `table`): useful when TLS traffic is dominant and you want large-transfer clues.</li>
+      </ul>
+      <p>Best use: web troubleshooting, API tracing, login failures, or TLS-heavy application flows.</p>
+
+      <h3>Endpoint Activity</h3>
+      <ul>
+        <li><b>Top Talkers by Bytes</b> (`endpoints`, `bar`): who moves the most data.</li>
+        <li><b>Top Talkers by Packets</b> (`endpoints`, `bar`): who sends the most units of traffic.</li>
+        <li><b>Endpoint Table</b> (`endpoints`, `table`): exact address, packet, byte, and protocol participation summary.</li>
+      </ul>
+      <p>Best use: identifying noisy clients, busy servers, or one host dominating the conversation graph.</p>
+
+      <h3>Protocol Analysis</h3>
+      <ul>
+        <li><b>Top Protocols</b> (`protocol_stats`, `bar`): protocol ranking by packet count.</li>
+        <li><b>Protocol Bytes</b> (`protocol_stats`, `donut`): protocol ranking by byte volume.</li>
+        <li><b>Top DNS Queries</b> (`dns_queries`, `table`): lets DNS stand out even in a broader protocol review.</li>
+        <li><b>HTTP Messages</b> (`http_requests`, `table`): gives application-level context inside the same dashboard.</li>
+      </ul>
+      <p>Best use: multi-protocol captures where you need a fast traffic taxonomy before drilling into one protocol family.</p>
+
+      <h3>Security Investigation</h3>
+      <ul>
+        <li><b>Top Destination Ports</b> (`packets`, `bar`): surfaces hot ports and possible scan focus areas.</li>
+        <li><b>Slow DNS Responses</b> (`dns_queries`, `table`): useful for suspicious or failing name-resolution paths.</li>
+        <li><b>Largest Conversations</b> (`conversations`, `table`): exposes the heaviest exchanges that may deserve packet-level review.</li>
+      </ul>
+      <p>Best use: suspicious activity triage, service discovery patterns, noisy traffic, or broad security review.</p>
+
+      <h3>Topology View</h3>
+      <ul>
+        <li><b>Conversation Bytes</b> (`conversations`, `bar`): shows the heaviest relationships.</li>
+        <li><b>Protocol Distribution</b> (`protocol_stats`, `donut`): explains what kinds of relationships dominate the graph.</li>
+        <li><b>Top Conversations</b> (`conversations`, `table`): gives exact pairs to validate the graph visually.</li>
+      </ul>
+      <p>Best use: understanding node-to-node structure, peer relationships, and major traffic pathways.</p>
+    </section>
+
+    <section class="panel">
+      <h2>5. How to combine dashboards effectively</h2>
+      <ol>
+        <li>Start with <b>Network Overview</b> to understand the broad shape.</li>
+        <li>Move to <b>Timeline Analysis</b> if the issue is time-dependent.</li>
+        <li>Move to <b>Protocol Analysis</b>, <b>DNS Analysis</b>, or <b>HTTP/TLS Analysis</b> once one protocol family becomes suspicious.</li>
+        <li>Open <b>Endpoint Activity</b> or <b>Topology View</b> if you need to understand relationships between hosts.</li>
+        <li>Use <b>Security Investigation</b> when the question becomes “which pattern looks dangerous or abnormal?”</li>
+      </ol>
+      <p>In practice the strongest combination is often:</p>
+      <pre>Network Overview
+-> Endpoint Activity
+-> Timeline Analysis
+-> Protocol-specific dashboard
+-> Packet list / packet details for proof</pre>
+    </section>
+
+    <section class="panel">
+      <h2>6. How display filters interact with dashboards</h2>
+      <ul>
+        <li>Most dashboard templates operate on the currently displayed packet scope.</li>
+        <li>This means your active display filter acts like a pre-filter for the dashboard.</li>
+        <li>Example: if you apply <code>dns</code> first and then open Network Overview, the totals and charts reflect only displayed DNS packets, not the entire original capture.</li>
+      </ul>
+      <p>Recommended pattern:</p>
+      <pre>1. Apply a broad display filter, e.g. tcp.port == 443
+2. Open Network Overview
+3. If needed, refine to one host, e.g. tcp.port == 443 and ip.addr == 10.0.0.12
+4. Re-open or refresh dashboard interpretation
+5. Drill into specific packets</pre>
+    </section>
+
+    <section class="panel">
+      <h2>7. Query knobs that matter when editing dashboards</h2>
+      <table>
+        <tr><th>Setting</th><th>What it does</th><th>When to use it</th></tr>
+        <tr><td><code>filter</code></td><td>Applies row filtering inside the widget query</td><td>When a widget should be narrower than the overall dashboard scope</td></tr>
+        <tr><td><code>group_by</code></td><td>Groups rows by one or more fields</td><td>When building category-based charts such as ports, protocols, or endpoints</td></tr>
+        <tr><td><code>metrics</code></td><td>Computes count, sum, avg, min, max, distinct_count, first, last</td><td>For aggregate widgets and summarized tables</td></tr>
+        <tr><td><code>sort</code></td><td>Orders result rows</td><td>For top-N tables and charts</td></tr>
+        <tr><td><code>limit</code></td><td>Restricts result size</td><td>To keep dashboards readable and focused</td></tr>
+        <tr><td><code>time_bucket</code></td><td>Builds time series with bucket sizes like <code>1s</code>, <code>1m</code>, <code>1h</code></td><td>For packet-rate and byte-rate timelines</td></tr>
+        <tr><td><code>columns</code></td><td>Selects visible columns in table widgets</td><td>For clean reporting and focused triage tables</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>8. What dashboards do not replace</h2>
+      <ul>
+        <li>Dashboards do not replace packet-level verification.</li>
+        <li>Dashboards do not guarantee causal explanation; they show shape, concentration, and ranking.</li>
+        <li>When a widget looks suspicious, the next step should still be a filter plus packet inspection.</li>
+      </ul>
+    </section>
+  </div>
+</body>
+</html>
