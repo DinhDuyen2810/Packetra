@@ -4,26 +4,87 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packetra Remote Capture Guide</title>
+  <link rel="stylesheet" href="help-theme.css">
   <style>
-    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #f4f7fb; color: #17324d; line-height: 1.7; }
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 56px; }
-    .panel { background: #fff; border: 1px solid #d9e5ef; border-radius: 16px; padding: 24px; margin-bottom: 18px; }
-    code { background: #edf4ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; }
-    pre { background: #12263b; color: #ecf5ff; padding: 14px; border-radius: 12px; overflow: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-    th, td { border: 1px solid #d7e2ee; padding: 10px; text-align: left; vertical-align: top; }
-    th { background: #eef6ff; }
+    .layout-page {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: 100vh;
+    }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      overflow: auto;
+      padding: 28px 24px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 250, 243, 0.92);
+      backdrop-filter: blur(6px);
+    }
+    .wrap {
+      padding: 32px;
+      max-width: 1120px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }
+    .panel:first-of-type {
+      background: linear-gradient(135deg, #fffaf3 0%, #f7efe4 100%);
+    }
+    @media (max-width: 960px) {
+      .layout-page {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        position: static;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      .wrap {
+        padding: 22px;
+      }
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="layout-page">
+    <aside class="sidebar">
+      <div class="toc-title">Remote Capture</div>
+      <p class="toc-note">Linux-first setup, validation, permission checks, Packetra UI flow, and end-of-work checks for stable remote capture.</p>
+      <ul class="toc">
+        <li><a href="#how-it-works">1. How It Works</a></li>
+        <li><a href="#prerequisites">2. Linux Prerequisites</a></li>
+        <li><a href="#install">3. Linux Installation and Validation</a></li>
+        <li><a href="#permissions">4. Permission Fixes</a></li>
+        <li><a href="#setup">5. Packetra Setup Steps</a></li>
+        <li><a href="#window-flow">6. Full Window Flow</a></li>
+        <li><a href="#commands">7. Commands Sent to Linux</a></li>
+        <li><a href="#validate">8. Validation Sequence</a></li>
+        <li><a href="#background">9. Keep Server Side Available</a></li>
+        <li><a href="#auth">10. Authentication Choices</a></li>
+        <li><a href="#checks">11. Start and End Checks</a></li>
+        <li><a href="#troubleshooting">12. Troubleshooting</a></li>
+        <li><a href="#windows-note">13. Windows Remote Note</a></li>
+      </ul>
+    </aside>
+    <div class="wrap">
     <section class="panel">
       <h1>Remote Capture Guide</h1>
-      <p>This guide is intentionally Linux-first. It explains the actual remote capture workflow used by Packetra: SSH into the remote host, list interfaces, and stream packet data back via <code>tcpdump</code>.</p>
-      <p><a href="index.html">Back to Help Center</a></p>
+      <p class="lead">This guide is intentionally Linux-first. It explains the actual remote capture workflow used by Packetra: SSH into the remote host, list interfaces, and stream packet data back via <code>tcpdump</code>.</p>
+      <div class="backlinks">
+        <a href="index.html">Back to Help Center</a>
+        <a href="capture_filter_guide.html">Open Capture Filter Guide</a>
+      </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="how-it-works">
       <h2>1. How Packetra remote capture works</h2>
       <ul>
         <li>Packetra connects to the remote system over SSH using Paramiko.</li>
@@ -38,7 +99,7 @@
       </ul>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="prerequisites">
       <h2>2. Linux prerequisites</h2>
       <table>
         <tr><th>Requirement</th><th>Why it matters</th><th>Validation command</th></tr>
@@ -49,7 +110,7 @@
       </table>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="install">
       <h2>3. Linux installation and validation steps</h2>
       <h3>Ubuntu / Debian</h3>
       <pre>sudo apt update
@@ -74,7 +135,7 @@ which tcpdump
 tcpdump -D</pre>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="permissions">
       <h2>4. If permissions are not enough</h2>
       <p>On many Linux systems, raw capture requires elevated privilege or packet-capture capability. If the SSH user cannot access interfaces directly, use one of these approaches:</p>
       <ul>
@@ -88,7 +149,7 @@ tcpdump -D</pre>
 tcpdump -n -s 0 -i YOUR_INTERFACE -c 5</pre>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="setup">
       <h2>5. Packetra setup steps for a Linux remote host</h2>
       <ol>
         <li>Open <code>Manage Interfaces</code>.</li>
@@ -110,7 +171,7 @@ tcpdump -n -s 0 -i YOUR_INTERFACE -c 5</pre>
       </ol>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="window-flow">
       <h2>6. Full window flow inside Packetra from first click to first remote capture</h2>
       <ol>
         <li>Open the local interface/capture setup area and click <code>Manage Interfaces</code>.</li>
@@ -129,7 +190,7 @@ tcpdump -n -s 0 -i YOUR_INTERFACE -c 5</pre>
       <p>Important implementation detail: Packetra stores remote host rows and the per-interface <b>Show</b> state, so you do not need to rediscover everything every time unless the server or interface list changed.</p>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="commands">
       <h2>7. What Packetra sends to the Linux host</h2>
       <p>Understanding the exact backend behavior helps troubleshooting:</p>
       <ul>
@@ -145,7 +206,7 @@ tcpdump -n -s 0 -i 'eth0' -U -w - port 443
 tcpdump -n -s 0 -i 'ens160' -U -w - host 10.10.10.25 and tcp port 8443</pre>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="validate">
       <h2>8. Recommended Linux validation sequence before using Packetra</h2>
       <pre>ssh user@remote-host
 which tcpdump
@@ -155,7 +216,7 @@ exit</pre>
       <p>If these commands work manually, Packetra is very likely to work as well once the same host, username, and auth method are entered correctly.</p>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="background">
       <h2>9. How to keep the server side always available in the background</h2>
       <p>Packetra does not require a Linux “agent” service for remote capture. What must stay available in the background is mainly the SSH service, and optionally your admin/session tooling.</p>
 
@@ -185,7 +246,7 @@ nohup tcpdump -D > /tmp/packetra_ifaces.txt 2>&1 &</pre>
 sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="auth">
       <h2>10. Authentication choices</h2>
       <ul>
         <li><b>Key / agent auth</b>: preferred for stable SSH-based remote work.</li>
@@ -194,7 +255,7 @@ sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
       <p>Packetra reuses SSH connections when it can, so repeated interface loads are usually faster after the first successful connection.</p>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="checks">
       <h2>11. Start-of-work checks and end-of-work checks</h2>
       <h3>Start-of-work checks</h3>
       <ol>
@@ -214,7 +275,7 @@ sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
       </ol>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="troubleshooting">
       <h2>12. Troubleshooting Linux remote capture</h2>
       <table>
         <tr><th>Symptom</th><th>Likely cause</th><th>What to check</th></tr>
@@ -226,10 +287,11 @@ sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
       </table>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="windows-note">
       <h2>13. Windows remote capture still exists, but is different</h2>
       <p>For completeness: Windows remote capture in Packetra uses a downloadable remote agent package, not plain <code>tcpdump</code>. The Help menu now names this page <b>Remote Capture Guide</b> because the Linux workflow is usually the more universally useful one.</p>
     </section>
+    </div>
   </div>
 </body>
 </html>

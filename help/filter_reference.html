@@ -4,147 +4,127 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packetra Display Filter Reference</title>
-  <style>
-    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #f3f7fb; color: #17324d; line-height: 1.72; }
-    .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 56px; }
-    .panel { background: #fff; border: 1px solid #d9e5ef; border-radius: 16px; padding: 24px; margin-bottom: 18px; }
-    code { background: #edf3ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; }
-    pre { background: #10243a; color: #eef6ff; padding: 14px; border-radius: 12px; overflow: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-    th, td { border: 1px solid #d7e2ee; padding: 10px; text-align: left; vertical-align: top; }
-    th { background: #eef6ff; }
-    .mono { font-family: Consolas, monospace; }
-  </style>
+  <link rel="stylesheet" href="help-theme.css">
 </head>
 <body>
-  <div class="wrap">
-    <section class="panel">
-      <h1>Display Filter Reference</h1>
-      <p>This page documents the display filter engine currently implemented in Packetra and every major in-app way a user can create, apply, combine, copy, or reuse a display filter. Every example here is intended for the main display filter system, not capture-filter fields.</p>
-      <p><a href="index.html">Back to Help Center</a></p>
-    </section>
-
-    <section class="panel">
-      <h2>1. Grammar overview</h2>
-      <table>
-        <tr><th>Feature</th><th>Supported form</th><th>Examples</th></tr>
-        <tr><td>Protocol-only token</td><td>Single protocol alias</td><td><code>tcp</code>, <code>dns</code>, <code>http</code>, <code>tls</code></td></tr>
-        <tr><td>Equality / inequality</td><td><code>==</code>, <code>!=</code></td><td><code>ip.src == 192.168.1.10</code>, <code>http.request.method != "GET"</code></td></tr>
-        <tr><td>Relational comparison</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></td><td><code>frame.len &gt; 512</code>, <code>tcp.stream &gt;= 3</code></td></tr>
-        <tr><td>Substring search</td><td><code>contains</code></td><td><code>dns.qry.name contains "corp"</code>, <code>detail contains "Server Name"</code></td></tr>
-        <tr><td>Boolean operators</td><td><code>and</code>, <code>or</code>, <code>not</code>, <code>&amp;&amp;</code>, <code>||</code>, <code>!</code></td><td><code>tcp and ip.addr == 10.0.0.5</code></td></tr>
-        <tr><td>Grouping</td><td>Parentheses</td><td><code>(http or tls) and ip.dst == 1.1.1.1</code></td></tr>
-        <tr><td>Quoted strings</td><td>Single or double quotes</td><td><code>http.host contains "api"</code>, <code>detail.value == '200 OK'</code></td></tr>
-      </table>
-    </section>
-
-    <section class="panel">
-      <h2>2. Every in-app way to create or apply a display filter</h2>
-      <table>
-        <tr><th>Path</th><th>What it does</th></tr>
-        <tr><td>Main display filter bar</td><td>Type into the filter bar above the packet list and press Enter or click the arrow button.</td></tr>
-        <tr><td>Clear button on filter bar</td><td>Clears the current display filter and reapplies the empty filter.</td></tr>
-        <tr><td>Filter history drop-down</td><td>Reuses recently applied display filters from history.</td></tr>
-        <tr><td>Autocomplete</td><td>Suggests protocol tokens, field names, and operators while typing.</td></tr>
-        <tr><td>Drag from packet list into filter bar</td><td>Drag Source, Destination, Protocol, or Length cells into the filter bar to create a filter expression automatically.</td></tr>
-        <tr><td>Packet-list right click → Apply as a Filter</td><td>Creates a filter from the clicked packet-list cell and lets you merge it as Selected, Not Selected, AND, OR, AND NOT, or OR NOT.</td></tr>
-        <tr><td>Packet-details right click → Apply as a Filter</td><td>Creates a strict detail-based filter from the selected detail node.</td></tr>
-        <tr><td>Analyze → Apply as Filter</td><td>Creates a display filter from the currently selected detail field via a mode selection dialog.</td></tr>
-        <tr><td>Analyze → Display Filter Expression...</td><td>Opens the expression builder with field, relation, value, and combination mode.</td></tr>
-        <tr><td>Analyze → Display Filter Macros...</td><td>Lets you define reusable named macros that expand inside display-filter expressions.</td></tr>
-        <tr><td>Analyze → Conversation Filter</td><td>Builds a filter for TCP, UDP, IPv4, IPv6, or Ethernet conversation scope based on the current packet.</td></tr>
-        <tr><td>Follow dialog</td><td>Uses Filter This Stream or Filter Out This Stream from the Follow view.</td></tr>
-        <tr><td>Statistics dialogs</td><td>Many statistics windows provide Apply as Filter buttons for selected protocol, endpoint, address, or row context.</td></tr>
-        <tr><td>Topology graph dialog</td><td>Apply Filter and Copy Filter can generate host or edge-based display filters.</td></tr>
-        <tr><td>Find panel with search type = Display filter</td><td>Uses the display-filter engine as a search matcher instead of changing the active filter bar.</td></tr>
-      </table>
-    </section>
-
-    <section class="panel">
-      <h2>3. Step-by-step display-filter entry paths</h2>
-      <h3>Main filter bar</h3>
-      <ol>
-        <li>Locate the filter bar above the packet list.</li>
-        <li>Type an expression.</li>
-        <li>Press Enter or click the arrow button.</li>
-        <li>Use the <code>x</code> button to clear it.</li>
-      </ol>
-
-      <h3>History and autocomplete</h3>
-      <ol>
-        <li>Click the trailing drop-down icon inside the filter input to open recent filters.</li>
-        <li>Choose an older expression to reapply it immediately.</li>
-        <li>While typing, use autocomplete suggestions for protocols, fields, and operators.</li>
-      </ol>
-
-      <h3>Drag and drop from packet list</h3>
-      <p>The packet list supports dragging from these columns only:</p>
-      <ul>
-        <li><b>Source</b> → creates <code>src == "value"</code></li>
-        <li><b>Destination</b> → creates <code>dst == "value"</code></li>
-        <li><b>Protocol</b> → creates <code>protocol == "value"</code></li>
-        <li><b>Length</b> → creates <code>frame.len == number</code></li>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="toc-title">Display Filters</div>
+      <p class="toc-note">This page documents the current filter engine implemented by Packetra, including every major in-app way to generate or apply a display filter.</p>
+      <ul class="toc">
+        <li><a href="#overview">1. Grammar Overview</a></li>
+        <li><a href="#entry-points">2. Every In-App Creation Path</a></li>
+        <li><a href="#paths">3. Step-by-Step Entry Paths</a></li>
+        <li><a href="#protocols">4. Full Protocol Aliases</a></li>
+        <li><a href="#fields">5. Field Inventory</a></li>
+        <li><a href="#examples">6. Example Patterns</a></li>
       </ul>
-      <ol>
-        <li>Left-click one of those cells.</li>
-        <li>Drag it onto the display filter input.</li>
-        <li>Drop it into the filter bar.</li>
-        <li>The filter bar is populated with the generated expression.</li>
-      </ol>
+    </aside>
+    <main class="content">
+      <section class="card hero" id="overview">
+        <h1>Display Filter Reference</h1>
+        <p class="lead">This page documents the display filter engine currently implemented in Packetra and every major in-app way a user can create, apply, combine, copy, or reuse a display filter. Every example here is intended for the main display filter system, not capture-filter fields.</p>
+        <div class="backlinks">
+          <a href="index.html">Back to Help Center</a>
+          <a href="capture_filter_guide.html">Open Capture Filter Guide</a>
+        </div>
+      </section>
 
-      <h3>Packet list right-click context menu</h3>
-      <ol>
-        <li>Right-click a packet-list cell.</li>
-        <li>Open <code>Apply as a Filter</code>.</li>
-        <li>Choose one of:
-          <ul>
-            <li><code>Selected</code></li>
-            <li><code>Not Selected</code></li>
-            <li><code>... and Selected</code></li>
-            <li><code>... or Selected</code></li>
-            <li><code>... and not Selected</code></li>
-            <li><code>... or not Selected</code></li>
-          </ul>
-        </li>
-      </ol>
+      <section class="card">
+        <h2>1. Grammar Overview</h2>
+        <table>
+          <tr><th>Feature</th><th>Supported form</th><th>Examples</th></tr>
+          <tr><td>Protocol-only token</td><td>Single protocol alias</td><td><code>tcp</code>, <code>dns</code>, <code>http</code>, <code>tls</code></td></tr>
+          <tr><td>Equality / inequality</td><td><code>==</code>, <code>!=</code></td><td><code>ip.src == 192.168.1.10</code></td></tr>
+          <tr><td>Relational comparison</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></td><td><code>frame.len &gt; 512</code></td></tr>
+          <tr><td>Substring search</td><td><code>contains</code></td><td><code>dns.qry.name contains "corp"</code></td></tr>
+          <tr><td>Boolean operators</td><td><code>and</code>, <code>or</code>, <code>not</code>, <code>&amp;&amp;</code>, <code>||</code>, <code>!</code></td><td><code>tcp and ip.addr == 10.0.0.5</code></td></tr>
+          <tr><td>Grouping</td><td>Parentheses</td><td><code>(http or tls) and ip.dst == 1.1.1.1</code></td></tr>
+          <tr><td>Quoted strings</td><td>Single or double quotes</td><td><code>protocol == "TCP"</code></td></tr>
+        </table>
+      </section>
 
-      <h3>Packet details right-click or Analyze menu</h3>
-      <ol>
-        <li>Select a field in the packet details tree.</li>
-        <li>Either right-click and use <code>Apply as a Filter</code>, or open <code>Analyze &gt; Apply as Filter</code>.</li>
-        <li>Packetra builds a strict detail filter based on the selected node such as <code>detail.pair</code>, <code>detail.key</code>, or <code>detail.title</code>.</li>
-      </ol>
+      <section class="card" id="entry-points">
+        <h2>2. Every In-App Way to Create or Apply a Display Filter</h2>
+        <table>
+          <tr><th>Path</th><th>What it does</th></tr>
+          <tr><td>Main display filter bar</td><td>Type into the filter bar above the packet list and press Enter or click the arrow button.</td></tr>
+          <tr><td>Clear button on filter bar</td><td>Clears the current display filter and reapplies the empty filter.</td></tr>
+          <tr><td>Filter history drop-down</td><td>Reuses recently applied display filters from history.</td></tr>
+          <tr><td>Autocomplete</td><td>Suggests protocol tokens, field names, and operators while typing.</td></tr>
+          <tr><td>Drag from packet list into filter bar</td><td>Drag Source, Destination, Protocol, or Length cells into the filter bar to create a filter expression automatically.</td></tr>
+          <tr><td>Packet-list right click -> Apply as a Filter</td><td>Creates a filter from the clicked packet-list cell and lets you merge it as Selected, Not Selected, AND, OR, AND NOT, or OR NOT.</td></tr>
+          <tr><td>Packet-details right click -> Apply as a Filter</td><td>Creates a strict detail-based filter from the selected detail node.</td></tr>
+          <tr><td>Analyze -> Apply as Filter</td><td>Creates a display filter from the currently selected detail field via a mode selection dialog.</td></tr>
+          <tr><td>Analyze -> Display Filter Expression...</td><td>Opens the expression builder with field, relation, value, and combination mode.</td></tr>
+          <tr><td>Analyze -> Display Filter Macros...</td><td>Lets you define reusable named macros that expand inside display-filter expressions.</td></tr>
+          <tr><td>Analyze -> Conversation Filter</td><td>Builds a filter for TCP, UDP, IPv4, IPv6, or Ethernet conversation scope based on the current packet.</td></tr>
+          <tr><td>Follow dialog</td><td>Uses Filter This Stream or Filter Out This Stream from the Follow view.</td></tr>
+          <tr><td>Statistics dialogs</td><td>Many statistics windows provide Apply as Filter buttons for selected protocol, endpoint, address, or row context.</td></tr>
+          <tr><td>Topology graph dialog</td><td>Apply Filter and Copy Filter can generate host or edge-based display filters.</td></tr>
+          <tr><td>Find panel with search type = Display filter</td><td>Uses the display-filter engine as a search matcher instead of changing the active filter bar.</td></tr>
+        </table>
+      </section>
 
-      <h3>Expression builder</h3>
-      <ol>
-        <li>Open <code>Analyze &gt; Display Filter Expression...</code>.</li>
-        <li>Choose a field.</li>
-        <li>Choose a relation.</li>
-        <li>Enter a value.</li>
-        <li>Choose whether to replace, AND, OR, AND NOT, or OR NOT with the current filter.</li>
-        <li>Use Copy, Insert into Filter Bar, Apply, or OK.</li>
-      </ol>
+      <section class="card" id="paths">
+        <h2>3. Step-by-Step Display-Filter Entry Paths</h2>
+        <h3>Main filter bar</h3>
+        <ol>
+          <li>Locate the filter bar above the packet list.</li>
+          <li>Type an expression.</li>
+          <li>Press Enter or click the arrow button.</li>
+          <li>Use the clear button to reset it.</li>
+        </ol>
 
-      <h3>Macros</h3>
-      <ol>
-        <li>Open <code>Analyze &gt; Display Filter Macros...</code>.</li>
-        <li>Create a macro name and expression.</li>
-        <li>Save it.</li>
-        <li>Use that macro name later inside a display-filter expression where macro expansion is supported by Packetra’s filter input flow.</li>
-      </ol>
+        <h3>History and autocomplete</h3>
+        <ol>
+          <li>Click the trailing drop-down icon inside the filter input to open recent filters.</li>
+          <li>Choose an older expression to reapply it immediately.</li>
+          <li>While typing, use autocomplete suggestions for protocols, fields, and operators.</li>
+        </ol>
 
-      <h3>Conversation filter and Follow Stream</h3>
-      <ol>
-        <li>Select a packet.</li>
-        <li>Use <code>Analyze &gt; Conversation Filter</code> to build a TCP, UDP, IPv4, IPv6, or Ethernet conversation expression.</li>
-        <li>Or open Follow and use <code>Filter This Stream</code> / <code>Filter Out This Stream</code>.</li>
-      </ol>
-    </section>
+        <h3>Drag and drop from packet list</h3>
+        <ul>
+          <li><b>Source</b> -> creates <code>src == "value"</code></li>
+          <li><b>Destination</b> -> creates <code>dst == "value"</code></li>
+          <li><b>Protocol</b> -> creates <code>protocol == "value"</code></li>
+          <li><b>Length</b> -> creates <code>frame.len == number</code></li>
+        </ul>
 
-    <section class="panel">
-      <h2>4. Full protocol aliases implemented today</h2>
-      <p>These tokens can be used by themselves as a whole filter, or inside a larger boolean expression.</p>
-      <pre>tcp
+        <h3>Packet list right-click context menu</h3>
+        <ol>
+          <li>Right-click a packet-list cell.</li>
+          <li>Open <code>Apply as a Filter</code>.</li>
+          <li>Choose one of the merge modes such as Selected, Not Selected, AND, OR, AND NOT, or OR NOT.</li>
+        </ol>
+
+        <h3>Packet details right-click or Analyze menu</h3>
+        <ol>
+          <li>Select a field in the packet details tree.</li>
+          <li>Either right-click and use <code>Apply as a Filter</code>, or open <code>Analyze &gt; Apply as Filter</code>.</li>
+          <li>Packetra builds a detail-based filter from the selected node.</li>
+        </ol>
+
+        <h3>Expression builder</h3>
+        <ol>
+          <li>Open <code>Analyze &gt; Display Filter Expression...</code>.</li>
+          <li>Choose a field.</li>
+          <li>Choose a relation.</li>
+          <li>Enter a value.</li>
+          <li>Choose whether to replace, AND, OR, AND NOT, or OR NOT with the current filter.</li>
+        </ol>
+
+        <h3>Macros, conversation filters, and Follow Stream</h3>
+        <ol>
+          <li>Use <code>Analyze &gt; Display Filter Macros...</code> for reusable named expressions.</li>
+          <li>Use <code>Analyze &gt; Conversation Filter</code> to build scoped expressions for TCP, UDP, IPv4, IPv6, or Ethernet conversations.</li>
+          <li>In Follow views, use Filter This Stream or Filter Out This Stream.</li>
+        </ol>
+      </section>
+
+      <section class="card" id="protocols">
+        <h2>4. Full Protocol Aliases Implemented Today</h2>
+        <pre><code>tcp
 udp
 dns
 mdns
@@ -198,180 +178,71 @@ bgp
 gre
 vlan
 ssl
-icmpv4</pre>
-      <p>Examples:</p>
-      <pre>dns
+icmpv4</code></pre>
+      </section>
+
+      <section class="card" id="fields">
+        <h2>5. Field Inventory Implemented in the Display Filter Engine</h2>
+        <table>
+          <tr><th>Field</th><th>Meaning</th><th>Typical example</th></tr>
+          <tr><td class="mono">frame.number</td><td>Packet/frame number</td><td><code>frame.number == 25</code></td></tr>
+          <tr><td class="mono">frame.len</td><td>Packet length in bytes</td><td><code>frame.len &gt; 1000</code></td></tr>
+          <tr><td class="mono">length</td><td>Alias of packet length</td><td><code>length &lt;= 64</code></td></tr>
+          <tr><td class="mono">len</td><td>Alias of packet length</td><td><code>len &gt; 1500</code></td></tr>
+          <tr><td class="mono">frame.time_delta</td><td>Time delta between frames when metadata is available</td><td><code>frame.time_delta &gt; 1</code></td></tr>
+          <tr><td class="mono">protocol</td><td>Summary protocol name</td><td><code>protocol == TCP</code></td></tr>
+          <tr><td class="mono">proto</td><td>Alias of protocol</td><td><code>proto == DNS</code></td></tr>
+          <tr><td class="mono">src</td><td>Displayed source column value</td><td><code>src == 192.168.1.20</code></td></tr>
+          <tr><td class="mono">source</td><td>Alias of source</td><td><code>source contains "fe80"</code></td></tr>
+          <tr><td class="mono">dst</td><td>Displayed destination column value</td><td><code>dst == 8.8.8.8</code></td></tr>
+          <tr><td class="mono">destination</td><td>Alias of destination</td><td><code>destination contains "server"</code></td></tr>
+          <tr><td class="mono">eth.addr</td><td>Ethernet source or destination MAC</td><td><code>eth.addr contains "00:11"</code></td></tr>
+          <tr><td class="mono">eth.src</td><td>Ethernet source MAC</td><td><code>eth.src == 00:11:22:33:44:55</code></td></tr>
+          <tr><td class="mono">eth.dst</td><td>Ethernet destination MAC</td><td><code>eth.dst == ff:ff:ff:ff:ff:ff</code></td></tr>
+          <tr><td class="mono">eth.type</td><td>EtherType</td><td><code>eth.type == 2048</code></td></tr>
+          <tr><td class="mono">vlan.id</td><td>VLAN ID</td><td><code>vlan.id == 10</code></td></tr>
+          <tr><td class="mono">arp.opcode</td><td>ARP op code</td><td><code>arp.opcode == 1</code></td></tr>
+          <tr><td class="mono">arp.src.proto_ipv4</td><td>ARP sender protocol IPv4</td><td><code>arp.src.proto_ipv4 == 192.168.1.1</code></td></tr>
+          <tr><td class="mono">arp.dst.proto_ipv4</td><td>ARP target protocol IPv4</td><td><code>arp.dst.proto_ipv4 == 192.168.1.100</code></td></tr>
+          <tr><td class="mono">ip.addr</td><td>IPv4 source or destination address</td><td><code>ip.addr == 10.0.0.5</code></td></tr>
+          <tr><td class="mono">ip.host</td><td>Alias of <code>ip.addr</code></td><td><code>ip.host == 8.8.8.8</code></td></tr>
+          <tr><td class="mono">ip.src</td><td>IPv4 source address</td><td><code>ip.src == 192.168.1.5</code></td></tr>
+          <tr><td class="mono">ip.dst</td><td>IPv4 destination address</td><td><code>ip.dst == 1.1.1.1</code></td></tr>
+          <tr><td class="mono">ip.proto</td><td>IPv4 protocol number</td><td><code>ip.proto == 6</code></td></tr>
+          <tr><td class="mono">ip.ttl</td><td>IPv4 TTL</td><td><code>ip.ttl &lt; 5</code></td></tr>
+          <tr><td class="mono">ipv6.addr</td><td>IPv6 source or destination address</td><td><code>ipv6.addr contains "fe80"</code></td></tr>
+          <tr><td class="mono">ipv6.host</td><td>Alias of <code>ipv6.addr</code></td><td><code>ipv6.host contains "2001:"</code></td></tr>
+          <tr><td class="mono">ipv6.src</td><td>IPv6 source address</td><td><code>ipv6.src contains "2001:"</code></td></tr>
+          <tr><td class="mono">ipv6.dst</td><td>IPv6 destination address</td><td><code>ipv6.dst contains "2606:"</code></td></tr>
+          <tr><td class="mono">icmp.type</td><td>ICMP type value</td><td><code>icmp.type == 8</code></td></tr>
+          <tr><td class="mono">tcp.port</td><td>Either TCP port of the packet</td><td><code>tcp.port == 443</code></td></tr>
+          <tr><td class="mono">tcp.srcport</td><td>TCP source port</td><td><code>tcp.srcport == 51515</code></td></tr>
+          <tr><td class="mono">tcp.dstport</td><td>TCP destination port</td><td><code>tcp.dstport == 443</code></td></tr>
+          <tr><td class="mono">tcp.stream</td><td>TCP conversation stream index</td><td><code>tcp.stream == 4</code></td></tr>
+          <tr><td class="mono">tcp.flags.syn</td><td>TCP SYN flag</td><td><code>tcp.flags.syn == 1</code></td></tr>
+          <tr><td class="mono">tcp.flags.ack</td><td>TCP ACK flag</td><td><code>tcp.flags.ack == 1</code></td></tr>
+          <tr><td class="mono">tcp.flags.fin</td><td>TCP FIN flag</td><td><code>tcp.flags.fin == 1</code></td></tr>
+          <tr><td class="mono">tcp.flags.reset</td><td>TCP RST flag</td><td><code>tcp.flags.reset == 1</code></td></tr>
+          <tr><td class="mono">tcp.flags.rst</td><td>Alias of reset</td><td><code>tcp.flags.rst == 1</code></td></tr>
+          <tr><td class="mono">udp.port</td><td>Either UDP port of the packet</td><td><code>udp.port == 53</code></td></tr>
+          <tr><td class="mono">udp.srcport</td><td>UDP source port</td><td><code>udp.srcport == 5353</code></td></tr>
+          <tr><td class="mono">udp.dstport</td><td>UDP destination port</td><td><code>udp.dstport == 53</code></td></tr>
+          <tr><td class="mono">udp.stream</td><td>UDP stream index if metadata exists</td><td><code>udp.stream == 2</code></td></tr>
+        </table>
+      </section>
+
+      <section class="card" id="examples">
+        <h2>6. Example Patterns</h2>
+        <pre><code>tcp
+udp and udp.port == 53
+ip.src == "192.168.1.10"
+ip.addr == "8.8.8.8"
+frame.len > 1000
+tcp.flags.syn and not tcp.flags.ack
 http or tls
-arp or icmp
-tcp and not tls
-ipv6 and udp</pre>
-    </section>
-
-    <section class="panel">
-      <h2>5. Full field inventory implemented in the display filter engine</h2>
-      <table>
-        <tr><th>Field</th><th>Meaning</th><th>Typical examples</th></tr>
-        <tr><td class="mono">frame.number</td><td>Packet/frame number</td><td><code>frame.number == 25</code></td></tr>
-        <tr><td class="mono">frame.len</td><td>Packet length in bytes</td><td><code>frame.len &gt; 1000</code></td></tr>
-        <tr><td class="mono">length</td><td>Alias of packet length</td><td><code>length &lt;= 64</code></td></tr>
-        <tr><td class="mono">len</td><td>Alias of packet length</td><td><code>len &gt; 1500</code></td></tr>
-        <tr><td class="mono">frame.time_delta</td><td>Time delta between frames when metadata is available</td><td><code>frame.time_delta &gt; 1</code></td></tr>
-        <tr><td class="mono">protocol</td><td>Summary protocol name</td><td><code>protocol == TCP</code></td></tr>
-        <tr><td class="mono">proto</td><td>Alias of protocol</td><td><code>proto == DNS</code></td></tr>
-        <tr><td class="mono">src</td><td>Displayed source column value</td><td><code>src == 192.168.1.20</code></td></tr>
-        <tr><td class="mono">source</td><td>Alias of source</td><td><code>source contains "fe80"</code></td></tr>
-        <tr><td class="mono">dst</td><td>Displayed destination column value</td><td><code>dst == 8.8.8.8</code></td></tr>
-        <tr><td class="mono">destination</td><td>Alias of destination</td><td><code>destination contains "server"</code></td></tr>
-        <tr><td class="mono">eth.addr</td><td>Ethernet source or destination MAC</td><td><code>eth.addr contains "00:11"</code></td></tr>
-        <tr><td class="mono">eth.src</td><td>Ethernet source MAC</td><td><code>eth.src == 00:11:22:33:44:55</code></td></tr>
-        <tr><td class="mono">eth.dst</td><td>Ethernet destination MAC</td><td><code>eth.dst == ff:ff:ff:ff:ff:ff</code></td></tr>
-        <tr><td class="mono">eth.type</td><td>EtherType</td><td><code>eth.type == 2048</code></td></tr>
-        <tr><td class="mono">vlan.id</td><td>VLAN ID</td><td><code>vlan.id == 10</code></td></tr>
-        <tr><td class="mono">arp.opcode</td><td>ARP op code</td><td><code>arp.opcode == 1</code></td></tr>
-        <tr><td class="mono">arp.src.proto_ipv4</td><td>ARP sender protocol IPv4</td><td><code>arp.src.proto_ipv4 == 192.168.1.1</code></td></tr>
-        <tr><td class="mono">arp.dst.proto_ipv4</td><td>ARP target protocol IPv4</td><td><code>arp.dst.proto_ipv4 == 192.168.1.100</code></td></tr>
-        <tr><td class="mono">ip.addr</td><td>IPv4 source or destination address</td><td><code>ip.addr == 10.0.0.5</code></td></tr>
-        <tr><td class="mono">ip.host</td><td>Alias of <code>ip.addr</code></td><td><code>ip.host == 8.8.8.8</code></td></tr>
-        <tr><td class="mono">ip.src</td><td>IPv4 source address</td><td><code>ip.src == 192.168.1.5</code></td></tr>
-        <tr><td class="mono">ip.dst</td><td>IPv4 destination address</td><td><code>ip.dst == 1.1.1.1</code></td></tr>
-        <tr><td class="mono">ip.proto</td><td>IPv4 protocol number</td><td><code>ip.proto == 6</code></td></tr>
-        <tr><td class="mono">ip.ttl</td><td>IPv4 TTL</td><td><code>ip.ttl &lt; 5</code></td></tr>
-        <tr><td class="mono">ipv6.addr</td><td>IPv6 source or destination address</td><td><code>ipv6.addr contains "fe80"</code></td></tr>
-        <tr><td class="mono">ipv6.host</td><td>Alias of <code>ipv6.addr</code></td><td><code>ipv6.host contains "2001:"</code></td></tr>
-        <tr><td class="mono">ipv6.src</td><td>IPv6 source address</td><td><code>ipv6.src contains "2001:"</code></td></tr>
-        <tr><td class="mono">ipv6.dst</td><td>IPv6 destination address</td><td><code>ipv6.dst contains "2606:"</code></td></tr>
-        <tr><td class="mono">icmp.type</td><td>ICMP type value</td><td><code>icmp.type == 8</code></td></tr>
-        <tr><td class="mono">tcp.port</td><td>Either TCP port of the packet</td><td><code>tcp.port == 443</code></td></tr>
-        <tr><td class="mono">tcp.srcport</td><td>TCP source port</td><td><code>tcp.srcport == 51515</code></td></tr>
-        <tr><td class="mono">tcp.dstport</td><td>TCP destination port</td><td><code>tcp.dstport == 443</code></td></tr>
-        <tr><td class="mono">tcp.stream</td><td>TCP conversation stream index</td><td><code>tcp.stream == 4</code></td></tr>
-        <tr><td class="mono">tcp.flags.syn</td><td>TCP SYN flag as boolean / numeric comparison</td><td><code>tcp.flags.syn == 1</code></td></tr>
-        <tr><td class="mono">tcp.flags.ack</td><td>TCP ACK flag</td><td><code>tcp.flags.ack == 1</code></td></tr>
-        <tr><td class="mono">tcp.flags.fin</td><td>TCP FIN flag</td><td><code>tcp.flags.fin == 1</code></td></tr>
-        <tr><td class="mono">tcp.flags.reset</td><td>TCP RST flag</td><td><code>tcp.flags.reset == 1</code></td></tr>
-        <tr><td class="mono">tcp.flags.rst</td><td>Alias of reset</td><td><code>tcp.flags.rst == 1</code></td></tr>
-        <tr><td class="mono">udp.port</td><td>Either UDP port of the packet</td><td><code>udp.port == 53</code></td></tr>
-        <tr><td class="mono">udp.srcport</td><td>UDP source port</td><td><code>udp.srcport == 5353</code></td></tr>
-        <tr><td class="mono">udp.dstport</td><td>UDP destination port</td><td><code>udp.dstport == 53</code></td></tr>
-        <tr><td class="mono">udp.stream</td><td>UDP stream index if metadata exists</td><td><code>udp.stream == 2</code></td></tr>
-        <tr><td class="mono">dns.flags.response</td><td>DNS QR flag: request or response</td><td><code>dns.flags.response == 1</code></td></tr>
-        <tr><td class="mono">dns.qry.name</td><td>DNS query name</td><td><code>dns.qry.name contains "example"</code></td></tr>
-        <tr><td class="mono">dns.qry.type</td><td>DNS query type numeric code</td><td><code>dns.qry.type == 1</code></td></tr>
-        <tr><td class="mono">dns.flags.rcode</td><td>DNS response code</td><td><code>dns.flags.rcode != 0</code></td></tr>
-        <tr><td class="mono">bootp.option.dhcp</td><td>DHCP message type</td><td><code>bootp.option.dhcp == 5</code></td></tr>
-        <tr><td class="mono">http.request</td><td>True when the payload is recognized as an HTTP request</td><td><code>http.request</code></td></tr>
-        <tr><td class="mono">http.response</td><td>True when the payload is recognized as an HTTP response</td><td><code>http.response</code></td></tr>
-        <tr><td class="mono">http.request.method</td><td>HTTP method</td><td><code>http.request.method == "POST"</code></td></tr>
-        <tr><td class="mono">http.host</td><td>HTTP Host header value</td><td><code>http.host contains "api"</code></td></tr>
-        <tr><td class="mono">http.request.uri</td><td>HTTP request URI</td><td><code>http.request.uri contains "/login"</code></td></tr>
-        <tr><td class="mono">tls.handshake</td><td>True if a TLS handshake record is present</td><td><code>tls.handshake</code></td></tr>
-        <tr><td class="mono">tls.handshake.type</td><td>TLS handshake type number</td><td><code>tls.handshake.type == 1</code></td></tr>
-        <tr><td class="mono">tls.handshake.extensions_server_name</td><td>TLS SNI value</td><td><code>tls.handshake.extensions_server_name contains "github"</code></td></tr>
-        <tr><td class="mono">tls.record.content_type</td><td>TLS content type</td><td><code>tls.record.content_type == 22</code></td></tr>
-        <tr><td class="mono">ftp.request.command</td><td>FTP command</td><td><code>ftp.request.command == "USER"</code></td></tr>
-        <tr><td class="mono">smtp.req.command</td><td>SMTP command</td><td><code>smtp.req.command == "MAIL"</code></td></tr>
-        <tr><td class="mono">smb2.cmd</td><td>SMB2 command code</td><td><code>smb2.cmd == 5</code></td></tr>
-        <tr><td class="mono">smb2.filename</td><td>SMB2 file name</td><td><code>smb2.filename contains ".docx"</code></td></tr>
-        <tr><td class="mono">port</td><td>Either TCP or UDP port</td><td><code>port == 443</code></td></tr>
-        <tr><td class="mono">detail</td><td>Search across generated details-tree terms</td><td><code>detail contains "Server Name"</code></td></tr>
-        <tr><td class="mono">detail.title</td><td>Exact details-tree node title text</td><td><code>detail.title contains "Status Code"</code></td></tr>
-        <tr><td class="mono">detail.key</td><td>Left-side field name inside details tree</td><td><code>detail.key contains "response"</code></td></tr>
-        <tr><td class="mono">detail.value</td><td>Right-side field value inside details tree</td><td><code>detail.value contains "200"</code></td></tr>
-        <tr><td class="mono">detail.pair</td><td>Combined details key-value pair</td><td><code>detail.pair contains "Status Code: 5"</code></td></tr>
-        <tr><td class="mono">detail.path</td><td>Path through the details tree</td><td><code>detail.path contains "transport layer security"</code></td></tr>
-      </table>
-    </section>
-
-    <section class="panel">
-      <h2>6. Operator behavior notes</h2>
-      <ul>
-        <li><code>contains</code> is case-insensitive substring matching.</li>
-        <li>Numeric operators are numeric when both sides can be parsed as numbers; otherwise comparison falls back to case-insensitive text comparison.</li>
-        <li>A bare field without an operator acts as a boolean presence test. Example: <code>http.request</code> is true when the engine recognizes an HTTP request.</li>
-        <li>A bare protocol alias such as <code>tcp</code> or <code>dns</code> triggers protocol-aware matching logic, not just simple text matching.</li>
-      </ul>
-    </section>
-
-    <section class="panel">
-      <h2>7. Example filters by task</h2>
-      <h3>Web / HTTP / TLS</h3>
-      <pre>http
-http.request
-http.response
-http.request.method == "GET"
-http.request.uri contains "/api/"
-http.host contains "example.com"
-tls
-tls.handshake
-tls.handshake.type == 1
-tls.handshake.extensions_server_name contains "login"
-tcp.port == 443 and ip.addr == 192.168.1.5</pre>
-
-      <h3>DNS</h3>
-      <pre>dns
-dns.flags.response == 0
-dns.flags.response == 1
-dns.qry.name contains "corp"
-dns.qry.type == 1
-dns.flags.rcode != 0</pre>
-
-      <h3>TCP troubleshooting</h3>
-      <pre>tcp
-tcp.stream == 3
-tcp.flags.syn == 1 and tcp.flags.ack == 0
-tcp.flags.reset == 1
-tcp.srcport == 443
-tcp.dstport == 80</pre>
-
-      <h3>DHCP and ARP</h3>
-      <pre>dhcp
-bootp.option.dhcp == 1
-bootp.option.dhcp == 5
-arp
-arp.opcode == 1
-arp.src.proto_ipv4 == 192.168.1.1</pre>
-
-      <h3>Deep detail-tree hunting</h3>
-      <pre>detail contains "Server Name"
-detail.title contains "Cipher Suite"
-detail.key contains "request"
-detail.value contains "200"
-detail.pair contains "Status Code: 4"
-detail.path contains "hypertext transfer protocol"</pre>
-    </section>
-
-    <section class="panel">
-      <h2>8. Statistics and visual tools that can push filters back into the main filter bar</h2>
-      <ul>
-        <li><b>Protocol Hierarchy</b>: selected protocol can be applied as a display filter.</li>
-        <li><b>Endpoints</b>: selected endpoint rows can be converted into host/address filters.</li>
-        <li><b>Conversations</b>: selected rows can push conversation expressions.</li>
-        <li><b>Flow Graph</b>: selected rows can apply an associated filter expression.</li>
-        <li><b>HTTP Statistics</b>: common status-class and request/response filters can be pushed into the filter bar.</li>
-        <li><b>IPv4 Statistics / IPv6 Statistics</b>: selected address entries can become address-based filters.</li>
-        <li><b>Network Topology Graph</b>: selected nodes or edges can produce address/protocol filter expressions through Apply Filter or Copy Filter.</li>
-      </ul>
-    </section>
-
-    <section class="panel">
-      <h2>9. What is not implemented in this engine</h2>
-      <ul>
-        <li>Wireshark-style fields that are not explicitly listed above are not guaranteed to work.</li>
-        <li>Expressions such as <code>frame contains "text"</code> are not part of the documented implemented field set unless a corresponding field exists. Prefer <code>detail contains ...</code> or a concrete field name.</li>
-        <li>Advanced Wireshark-only helpers like <code>tcp.analysis.retransmission</code> are not implemented by this display-filter engine unless Packetra exposes equivalent fields.</li>
-      </ul>
-    </section>
-
-    <section class="panel">
-      <h2>10. Debugging a filter that returns nothing</h2>
-      <ol>
-        <li>Start with a protocol token such as <code>tcp</code> or <code>dns</code>.</li>
-        <li>Add a single IP field next, for example <code>tcp and ip.addr == 10.0.0.5</code>.</li>
-        <li>Add ports after that, for example <code>tcp and ip.addr == 10.0.0.5 and tcp.port == 443</code>.</li>
-        <li>Only then add string conditions like <code>contains</code>.</li>
-        <li>If a detail-based condition fails, click a matching packet first and verify the exact details-tree text that Packetra is generating.</li>
-      </ol>
-    </section>
+(tcp.port == 80 or tcp.port == 443) and ip.dst == "10.0.0.5"</code></pre>
+      </section>
+    </main>
   </div>
 </body>
 </html>

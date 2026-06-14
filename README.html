@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Packetra Quick Start</title>
+  <style>
+    :root {
+      --bg: #f4efe7;
+      --panel: #fffaf3;
+      --ink: #202020;
+      --muted: #5a5a5a;
+      --line: #d8cdbd;
+      --accent: #125b50;
+      --accent-2: #b85c38;
+      --code: #272822;
+      --code-ink: #f8f8f2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(184,92,56,0.12), transparent 28%),
+        linear-gradient(180deg, #f8f3eb 0%, var(--bg) 100%);
+      line-height: 1.65;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      min-height: 100vh;
+    }
+    aside {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      overflow: auto;
+      padding: 28px 24px;
+      border-right: 1px solid var(--line);
+      background: rgba(255,250,243,0.92);
+      backdrop-filter: blur(6px);
+    }
+    main {
+      padding: 32px;
+      max-width: 980px;
+    }
+    h1, h2, h3 {
+      line-height: 1.25;
+      color: #14342f;
+    }
+    h1 {
+      font-size: 2.05rem;
+      margin-top: 0;
+    }
+    h2 {
+      margin-top: 2rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .lead {
+      font-size: 1.05rem;
+      color: var(--muted);
+      max-width: 760px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 20px;
+      margin: 16px 0;
+      box-shadow: 0 10px 24px rgba(50, 40, 20, 0.05);
+    }
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      background: rgba(18,91,80,0.08);
+      padding: 0.12rem 0.35rem;
+      border-radius: 4px;
+    }
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border-radius: 12px;
+      background: var(--code);
+      color: var(--code-ink);
+      border: 1px solid #111;
+    }
+    pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+    }
+    .toc-title {
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+      margin-bottom: 10px;
+    }
+    .toc {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .toc li {
+      margin: 6px 0;
+    }
+    .toc a {
+      color: #1d3b36;
+      text-decoration: none;
+    }
+    .toc a:hover {
+      text-decoration: underline;
+    }
+    .badge {
+      display: inline-block;
+      margin-right: 8px;
+      margin-bottom: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #e8f0ee;
+      border: 1px solid #c7ddd8;
+      color: #154740;
+      font-size: 0.92rem;
+    }
+    @media (max-width: 960px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+      aside {
+        position: static;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      main {
+        padding: 22px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <div class="toc-title">Quick Start</div>
+      <ul class="toc">
+        <li><a href="#start">1. Project Folder</a></li>
+        <li><a href="#install">2. Install Libraries</a></li>
+        <li><a href="#run">3. Run the App</a></li>
+        <li><a href="#package">4. Package the App</a></li>
+      </ul>
+    </aside>
+    <main>
+      <h1>Packetra Quick Start</h1>
+      <p class="lead">
+        This page is a short quick-start guide. It assumes you already downloaded the source code and only need the basic steps: enter the project folder, install libraries, run the app, and package it.
+      </p>
+
+      <div class="card">
+        <span class="badge">Source already downloaded</span>
+        <span class="badge">Install packages</span>
+        <span class="badge">Run</span>
+        <span class="badge">Package</span>
+      </div>
+
+      <h2 id="start">1. Open the Project Folder</h2>
+      <div class="card">
+        <pre><code>cd DATN-Packetra</code></pre>
+        <p>If you use a virtual environment, activate it before installing packages.</p>
+      </div>
+
+      <h2 id="install">2. Install Libraries</h2>
+      <div class="card">
+        <pre><code>pip install -r requirements.txt</code></pre>
+        <p>This installs the GUI, packet analysis, and AI runtime dependencies used by the project.</p>
+      </div>
+
+      <h2 id="run">3. Run the App</h2>
+      <div class="card">
+        <pre><code>python main.py</code></pre>
+        <p>If the main window opens, the project is ready to use.</p>
+      </div>
+
+      <h2 id="package">4. Package the App</h2>
+      <div class="card">
+        <p>One simple Windows packaging option is PyInstaller.</p>
+        <pre><code>pip install pyinstaller
+pyinstaller --noconfirm --clean --windowed --name Packetra ^
+  --add-data "ai;ai" ^
+  --add-data "data;data" ^
+  --add-data "demo;demo" ^
+  --add-data "help;help" ^
+  --add-data "image;image" ^
+  --collect-all PySide6 ^
+  main.py</code></pre>
+        <p>After build completes, check the packaged app in <code>dist/Packetra/</code>.</p>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

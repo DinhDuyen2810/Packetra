@@ -4,137 +4,78 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packetra Help Center</title>
-  <style>
-    :root {
-      --bg: #f4f7fb;
-      --panel: #ffffff;
-      --ink: #17324d;
-      --muted: #5a6c80;
-      --line: #d7e2ee;
-      --accent: #0f766e;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", Arial, sans-serif;
-      background: linear-gradient(180deg, #edf5ff 0%, var(--bg) 55%, #f9fcff 100%);
-      color: var(--ink);
-      line-height: 1.65;
-    }
-    .wrap {
-      max-width: 1160px;
-      margin: 0 auto;
-      padding: 32px 20px 60px;
-    }
-    .hero, .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      box-shadow: 0 14px 40px rgba(30, 64, 175, 0.08);
-    }
-    .hero {
-      padding: 30px;
-      margin-bottom: 22px;
-      background: linear-gradient(135deg, #ffffff 0%, #eef7ff 55%, #eefcf8 100%);
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 16px;
-      margin-top: 22px;
-    }
-    .card {
-      display: block;
-      text-decoration: none;
-      color: inherit;
-      padding: 18px;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      background: #fff;
-      transition: transform 0.18s ease, box-shadow 0.18s ease;
-    }
-    .card:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 28px rgba(15, 118, 110, 0.12);
-    }
-    .panel {
-      padding: 24px;
-      margin-top: 20px;
-    }
-    h1, h2, h3 { margin-top: 0; }
-    code {
-      background: #eef4ff;
-      color: #1d4ed8;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
-    ul, ol { padding-left: 22px; }
-  </style>
+  <link rel="stylesheet" href="help-theme.css">
 </head>
 <body>
-  <div class="wrap">
-    <section class="hero">
-      <h1>Packetra Help Center</h1>
-      <p>This help center is meant to be practical, not superficial. Each page focuses on what you can actually do in the current Packetra build: capture traffic, apply display filters, use dashboards, and work with remote capture from Linux or Windows hosts.</p>
-      <div class="grid">
-        <a class="card" href="user_guide.html">
-          <h3>User Guide</h3>
-          <p>Full end-to-end workflow from opening Packetra to saving an investigation result.</p>
-        </a>
-        <a class="card" href="capture_workflow.html">
-          <h3>Capture Workflow Guide</h3>
-          <p>Interface selection, capture filters, start/stop/restart behavior, and save flow.</p>
-        </a>
-        <a class="card" href="capture_filter_guide.html">
-          <h3>Capture Filter Guide</h3>
-          <p>All capture-filter entry points, BPF examples, presets, validation, and interface assignment flow.</p>
-        </a>
-        <a class="card" href="filter_reference.html">
-          <h3>Display Filter Reference</h3>
-          <p>Complete display-filter syntax, implemented fields, and every in-app way to build or apply a display filter.</p>
-        </a>
-        <a class="card" href="dashboard_guide.html">
-          <h3>Dashboard Guide</h3>
-          <p>Detailed explanation of templates, widgets, data sources, and how to combine views.</p>
-        </a>
-        <a class="card" href="agent_guide.html">
-          <h3>Remote Capture Guide</h3>
-          <p>Linux-first remote capture setup, SSH requirements, `tcpdump`, and Packetra integration.</p>
-        </a>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>1. Recommended reading order</h2>
-      <ol>
-        <li>If you are new to Packetra, begin with <a href="user_guide.html">User Guide</a>.</li>
-        <li>If your main pain point is filtering, jump directly to <a href="filter_reference.html">Display Filter Reference</a>.</li>
-        <li>If you need BPF-style input before packets are captured, open <a href="capture_filter_guide.html">Capture Filter Guide</a>.</li>
-        <li>If you need to work with a Linux server instead of a local interface, open <a href="agent_guide.html">Remote Capture Guide</a>.</li>
-        <li>If you want summaries and visual investigation instead of raw packet-by-packet reading, open <a href="dashboard_guide.html">Dashboard Guide</a>.</li>
-      </ol>
-    </section>
-
-    <section class="panel">
-      <h2>2. What this help set covers</h2>
-      <ul>
-        <li>The menu structure Packetra exposes today: capture, analysis, statistics, tools, and help.</li>
-        <li>The display filter syntax implemented in `core/filtering.py`, including supported protocol aliases and field names.</li>
-        <li>The capture filter preset manager and per-interface capture-filter assignment flow implemented in the capture options UI.</li>
-        <li>The remote capture flow implemented through SSH in `core/remote_capture.py` and the remote interface manager dialog.</li>
-        <li>The dashboard system backed by `packets`, `endpoints`, `conversations`, `protocol_stats`, `dns_queries`, and `http_requests` data sources.</li>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="toc-title">Help Center</div>
+      <p class="toc-note">Choose the guide that matches the question you want to solve fastest.</p>
+      <ul class="toc">
+        <li><a href="#start">1. Start Here</a></li>
+        <li><a href="#guides">2. Available Guides</a></li>
+        <li><a href="#order">3. Recommended Reading Order</a></li>
+        <li><a href="#coverage">4. What This Help Set Covers</a></li>
+        <li><a href="#companion">5. Useful Companion Menu Items</a></li>
       </ul>
-    </section>
+    </aside>
+    <main class="content">
+      <section class="card hero" id="start">
+        <h1>Packetra Help Center</h1>
+        <p class="lead">This help center is meant to be practical, not superficial. Each page focuses on what you can actually do in the current Packetra build: capture traffic, apply display filters, use dashboards, and work with remote capture from Linux or Windows hosts.</p>
+        <div>
+          <span class="badge">Detailed workflow guides</span>
+          <span class="badge">Filter references</span>
+          <span class="badge">Dashboard usage</span>
+          <span class="badge">Remote capture setup</span>
+        </div>
+      </section>
 
-    <section class="panel">
-      <h2>3. Useful companion menu items</h2>
-      <ul>
-        <li><code>Help &gt; System and Version Information</code> shows Packetra version, Python version, Npcap status, and installed library versions.</li>
-        <li><code>Analyze &gt; Display Filter Expression</code> opens the filter expression builder with the in-app field catalog.</li>
-        <li><code>Tools &gt; Dashboard</code> opens the dashboard overview and template gallery.</li>
-        <li><code>Tools &gt; AI Analyst</code> remains available for local traffic interpretation, but this documentation page focuses the remote section on actual remote capture instead.</li>
-      </ul>
-    </section>
+      <section class="card" id="guides">
+        <h2>2. Available Guides</h2>
+        <table>
+          <tr><th>Guide</th><th>Best for</th><th>Open</th></tr>
+          <tr><td>User Guide</td><td>Full end-to-end workflow from opening Packetra to saving an investigation result</td><td><a href="user_guide.html">Open</a></td></tr>
+          <tr><td>Capture Workflow Guide</td><td>Interface selection, capture filters, start/stop/restart behavior, and save flow</td><td><a href="capture_workflow.html">Open</a></td></tr>
+          <tr><td>Capture Filter Guide</td><td>All capture-filter entry points, BPF examples, presets, validation, and interface assignment flow</td><td><a href="capture_filter_guide.html">Open</a></td></tr>
+          <tr><td>Display Filter Reference</td><td>Complete display-filter syntax, implemented fields, and every in-app way to build or apply a display filter</td><td><a href="filter_reference.html">Open</a></td></tr>
+          <tr><td>Dashboard Guide</td><td>Templates, widgets, data sources, and how to combine views effectively</td><td><a href="dashboard_guide.html">Open</a></td></tr>
+          <tr><td>Remote Capture Guide</td><td>Linux-first remote capture setup, SSH requirements, <code>tcpdump</code>, and Packetra integration</td><td><a href="agent_guide.html">Open</a></td></tr>
+        </table>
+      </section>
+
+      <section class="card" id="order">
+        <h2>3. Recommended Reading Order</h2>
+        <ol>
+          <li>If you are new to Packetra, begin with <a href="user_guide.html">User Guide</a>.</li>
+          <li>If your main pain point is filtering, jump directly to <a href="filter_reference.html">Display Filter Reference</a>.</li>
+          <li>If you need BPF-style input before packets are captured, open <a href="capture_filter_guide.html">Capture Filter Guide</a>.</li>
+          <li>If you need to work with a Linux server instead of a local interface, open <a href="agent_guide.html">Remote Capture Guide</a>.</li>
+          <li>If you want summaries and visual investigation instead of raw packet-by-packet reading, open <a href="dashboard_guide.html">Dashboard Guide</a>.</li>
+        </ol>
+      </section>
+
+      <section class="card" id="coverage">
+        <h2>4. What This Help Set Covers</h2>
+        <ul>
+          <li>The menu structure Packetra exposes today: capture, analysis, statistics, tools, and help.</li>
+          <li>The display filter syntax implemented in <code>core/filtering.py</code>, including supported protocol aliases and field names.</li>
+          <li>The capture filter preset manager and per-interface capture-filter assignment flow implemented in the capture options UI.</li>
+          <li>The remote capture flow implemented through SSH in <code>core/remote_capture.py</code> and the remote interface manager dialog.</li>
+          <li>The dashboard system backed by packet, endpoint, conversation, protocol, DNS, and HTTP-oriented data sources.</li>
+        </ul>
+      </section>
+
+      <section class="card" id="companion">
+        <h2>5. Useful Companion Menu Items</h2>
+        <ul>
+          <li><code>Help &gt; System and Version Information</code> shows Packetra version, Python version, Npcap status, and installed library versions.</li>
+          <li><code>Analyze &gt; Display Filter Expression</code> opens the filter expression builder with the in-app field catalog.</li>
+          <li><code>Tools &gt; Dashboard</code> opens the dashboard overview and template gallery.</li>
+          <li><code>Tools &gt; AI Analyst</code> remains available for local traffic interpretation, while the remote page focuses on capture from real servers.</li>
+        </ul>
+      </section>
+    </main>
   </div>
 </body>
 </html>

@@ -4,26 +4,82 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packetra Dashboard Guide</title>
+  <link rel="stylesheet" href="help-theme.css">
   <style>
-    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: #f5f8fd; color: #18324a; line-height: 1.7; }
-    .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; }
-    .panel { background: #fff; border: 1px solid #dce7f2; border-radius: 16px; padding: 24px; margin-bottom: 18px; }
-    code { background: #edf4ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-    th, td { border: 1px solid #d7e2ee; padding: 10px; text-align: left; vertical-align: top; }
-    th { background: #eef6ff; }
-    pre { background: #10243a; color: #eef6ff; padding: 14px; border-radius: 12px; overflow: auto; }
+    .layout-page {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: 100vh;
+    }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      overflow: auto;
+      padding: 28px 24px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 250, 243, 0.92);
+      backdrop-filter: blur(6px);
+    }
+    .wrap {
+      padding: 32px;
+      max-width: 1120px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }
+    .panel:first-of-type {
+      background: linear-gradient(135deg, #fffaf3 0%, #f7efe4 100%);
+    }
+    @media (max-width: 960px) {
+      .layout-page {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        position: static;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      .wrap {
+        padding: 22px;
+      }
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="layout-page">
+    <aside class="sidebar">
+      <div class="toc-title">Dashboards</div>
+      <p class="toc-note">Use this guide to understand which template to open, what each widget means, and how to combine dashboards with packet-level verification.</p>
+      <ul class="toc">
+        <li><a href="#concepts">1. Dashboard Concepts</a></li>
+        <li><a href="#sources">2. Data Sources</a></li>
+        <li><a href="#visualizations">3. Visualization Types</a></li>
+        <li><a href="#templates">4. Template-by-Template Guide</a></li>
+        <li><a href="#combine">5. Combine Dashboards Effectively</a></li>
+        <li><a href="#filters">6. How Display Filters Interact</a></li>
+        <li><a href="#query">7. Query Knobs That Matter</a></li>
+        <li><a href="#limits">8. What Dashboards Do Not Replace</a></li>
+      </ul>
+    </aside>
+    <div class="wrap">
     <section class="panel">
       <h1>Dashboard Guide</h1>
-      <p>This guide explains the dashboard system in detail: what each template is good at, what each widget means, which data source powers it, and how to combine dashboards with filters and packet-level inspection.</p>
-      <p><a href="index.html">Back to Help Center</a></p>
+      <p class="lead">This guide explains the dashboard system in detail: what each template is good at, what each widget means, which data source powers it, and how to combine dashboards with filters and packet-level inspection.</p>
+      <div class="backlinks">
+        <a href="index.html">Back to Help Center</a>
+        <a href="filter_reference.html">Open Display Filter Reference</a>
+      </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="concepts">
       <h2>1. Dashboard concepts</h2>
       <table>
         <tr><th>Concept</th><th>Meaning</th></tr>
@@ -36,7 +92,7 @@
       </table>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="sources">
       <h2>2. Available data sources in the current build</h2>
       <table>
         <tr><th>Data source</th><th>What it represents</th><th>Useful fields</th></tr>
@@ -49,7 +105,7 @@
       </table>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="visualizations">
       <h2>3. Available visualization types in the current build</h2>
       <p>The dashboard system registers these visualization types: <code>metric</code>, <code>table</code>, <code>bar</code>, <code>horizontal_bar</code>, <code>line</code>, <code>area</code>, <code>scatter</code>, <code>radar</code>, <code>treemap</code>, <code>sunburst</code>, <code>pie</code>, <code>donut</code>, <code>histogram</code>, <code>heatmap</code>, and <code>topology</code>.</p>
       <ul>
@@ -61,7 +117,7 @@
       </ul>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="templates">
       <h2>4. Template-by-template guide</h2>
 
       <h3>Network Overview</h3>
@@ -135,7 +191,7 @@
       <p>Best use: understanding node-to-node structure, peer relationships, and major traffic pathways.</p>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="combine">
       <h2>5. How to combine dashboards effectively</h2>
       <ol>
         <li>Start with <b>Network Overview</b> to understand the broad shape.</li>
@@ -152,7 +208,7 @@
 -> Packet list / packet details for proof</pre>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="filters">
       <h2>6. How display filters interact with dashboards</h2>
       <ul>
         <li>Most dashboard templates operate on the currently displayed packet scope.</li>
@@ -167,7 +223,7 @@
 5. Drill into specific packets</pre>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="query">
       <h2>7. Query knobs that matter when editing dashboards</h2>
       <table>
         <tr><th>Setting</th><th>What it does</th><th>When to use it</th></tr>
@@ -181,7 +237,7 @@
       </table>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="limits">
       <h2>8. What dashboards do not replace</h2>
       <ul>
         <li>Dashboards do not replace packet-level verification.</li>
@@ -189,6 +245,7 @@
         <li>When a widget looks suspicious, the next step should still be a filter plus packet inspection.</li>
       </ul>
     </section>
+    </div>
   </div>
 </body>
 </html>

@@ -4,53 +4,36 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packetra User Guide</title>
+  <link rel="stylesheet" href="help-theme.css">
   <style>
-    :root {
-      --bg: #f3f7fb;
-      --panel: #ffffff;
-      --line: #d8e4ef;
-      --ink: #18324a;
-      --muted: #5f7389;
-      --accent: #1457c1;
-      --accent-soft: #eaf2ff;
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", Arial, sans-serif;
-      background: linear-gradient(180deg, #edf5ff 0%, var(--bg) 45%, #f8fbfe 100%);
-      color: var(--ink);
-      line-height: 1.72;
-    }
     .page {
-      max-width: 1460px;
-      margin: 0 auto;
-      padding: 24px 20px 56px;
       display: grid;
-      grid-template-columns: 300px minmax(0, 1fr);
-      gap: 22px;
+      grid-template-columns: 320px 1fr;
+      min-height: 100vh;
     }
-    .toc {
+    aside.toc {
       position: sticky;
-      top: 18px;
+      top: 0;
       align-self: start;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 20px 18px;
-      box-shadow: 0 12px 34px rgba(20, 49, 81, 0.08);
-      max-height: calc(100vh - 36px);
+      height: 100vh;
       overflow: auto;
+      padding: 28px 24px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 250, 243, 0.92);
+      backdrop-filter: blur(6px);
     }
     .toc h2 {
-      margin: 0 0 10px;
-      font-size: 1.05rem;
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+      margin-bottom: 10px;
     }
     .toc p {
-      margin: 0 0 14px;
       color: var(--muted);
-      font-size: 0.94rem;
+      margin-top: 0;
+      margin-bottom: 16px;
+      font-size: 0.96rem;
     }
     .toc ul {
       list-style: none;
@@ -58,37 +41,41 @@
       margin: 0;
     }
     .toc li {
-      margin: 4px 0;
+      margin: 6px 0;
     }
     .toc .lvl2 {
-      padding-left: 14px;
-      margin-top: 3px;
-      border-left: 2px solid #edf3fb;
+      margin-left: 16px;
+      padding-left: 0;
+      border-left: none;
     }
     .toc a {
+      color: #1d3b36;
       text-decoration: none;
-      color: #23425d;
       display: block;
-      padding: 6px 8px;
-      border-radius: 8px;
-      font-size: 0.95rem;
+      padding: 4px 0;
+      border-radius: 0;
+      font-size: 0.96rem;
     }
     .toc a:hover {
-      background: var(--accent-soft);
+      text-decoration: underline;
+      background: transparent;
       color: var(--accent);
     }
     .content {
+      padding: 32px;
+      max-width: 1120px;
       min-width: 0;
     }
     .nav, .panel {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 18px;
-      box-shadow: 0 12px 34px rgba(20, 49, 81, 0.08);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
     }
     .nav {
-      padding: 16px 20px;
-      margin-bottom: 18px;
+      padding: 18px 20px;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, #fffaf3 0%, #f7efe4 100%);
     }
     .nav a {
       margin-right: 14px;
@@ -97,59 +84,18 @@
       font-weight: 600;
     }
     .panel {
-      padding: 26px;
-      margin-bottom: 18px;
+      padding: 20px;
+      margin-bottom: 16px;
     }
-    h1, h2, h3, h4 {
-      margin-top: 0;
-      scroll-margin-top: 24px;
-    }
-    h1 { font-size: 2rem; }
-    h2 { font-size: 1.45rem; margin-bottom: 12px; }
-    h3 { font-size: 1.08rem; margin-bottom: 10px; color: #204466; }
-    h4 { font-size: 1rem; margin-bottom: 8px; color: #335573; }
-    p.lead {
-      font-size: 1.04rem;
-      color: #2d4e6a;
-      margin-bottom: 0;
-    }
-    code {
-      background: #edf4ff;
-      color: #1d4ed8;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
-    pre {
-      background: #10243a;
-      color: #eaf3ff;
-      padding: 14px;
-      border-radius: 12px;
-      overflow: auto;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 12px;
-    }
-    th, td {
-      border: 1px solid #d9e4ef;
-      padding: 10px;
-      text-align: left;
-      vertical-align: top;
-    }
-    th {
-      background: #eef6ff;
-    }
-    ul, ol {
-      padding-left: 22px;
-      margin-top: 8px;
+    .panel:first-of-type {
+      background: linear-gradient(135deg, #fffaf3 0%, #f7efe4 100%);
     }
     .note {
-      background: #f6fbff;
-      border-left: 4px solid #7aa7e8;
+      border-left: 5px solid var(--accent-2);
       padding: 12px 14px;
       border-radius: 10px;
-      color: #35526d;
+      background: #fff7ee;
+      color: inherit;
     }
     .chips {
       display: flex;
@@ -158,20 +104,25 @@
       margin-top: 14px;
     }
     .chip {
-      background: #eef5ff;
-      color: #20476d;
-      border: 1px solid #d3e3f7;
+      background: #e8f0ee;
+      color: #154740;
+      border: 1px solid #c7ddd8;
       border-radius: 999px;
       padding: 7px 12px;
       font-size: 0.92rem;
     }
-    @media (max-width: 1080px) {
+    @media (max-width: 960px) {
       .page {
         grid-template-columns: 1fr;
       }
-      .toc {
+      aside.toc {
         position: static;
-        max-height: none;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      .content {
+        padding: 22px;
       }
     }
   </style>
