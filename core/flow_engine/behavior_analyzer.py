@@ -52,7 +52,7 @@ class BehaviorAnalyzer:
             syn_only_src_count = len(syn_only_unique_src_by_dst.get(dst, set()))
             bwd_pkts = int(row.get("Total Backward Packets", 0) or 0)
 
-            summary = "Khong phat hien bat thuong ro rang trong flow nay."
+            summary = "No clear abnormal behavior was detected in this flow."
             behavior = "normal"
             severity = "normal"
             evidence = [
@@ -70,8 +70,8 @@ class BehaviorAnalyzer:
                 and (syn_only_to_dst >= 30 or syn_only_src_count >= 10)
             ):
                 summary = (
-                    f"{dst} dang nhan luong SYN bat thuong lon"
-                    f" ({syn_only_to_dst} flow SYN-only), nghi ngo SYN flood."
+                    f"{dst} is receiving unusually high SYN traffic "
+                    f"({syn_only_to_dst} SYN-only flows), suggesting a possible SYN flood."
                 )
                 behavior = "syn_flood_distributed"
                 severity = "high"
@@ -82,37 +82,37 @@ class BehaviorAnalyzer:
                     ]
                 )
             elif protocol == "TCP" and dst_port_count >= 10:
-                summary = f"{src} dang quet nhieu cong tren {dst}, nghi ngo port scan."
+                summary = f"{src} is probing many ports on {dst}, suggesting a possible port scan."
                 behavior = "port_scan"
                 severity = "high"
                 evidence.append(f"unique_dst_ports_to_same_dst={dst_port_count}")
             elif protocol == "TCP" and syn >= 20 and ack <= max(1, syn // 5):
-                summary = f"{src} gui nhieu goi SYN toi {dst}, nghi ngo SYN scan hoac SYN flood."
+                summary = f"{src} is sending many SYN packets to {dst}, suggesting a SYN scan or SYN flood."
                 behavior = "syn_scan_or_flood"
                 severity = "high"
                 evidence.extend([f"syn_count={syn}", f"ack_count={ack}"])
             elif protocol == "UDP" and dst_port_count >= 10:
-                summary = f"{src} gui nhieu UDP packet toi {dst}, co the la UDP scan hoac UDP flood."
+                summary = f"{src} is sending many UDP packets to {dst}, which may indicate a UDP scan or UDP flood."
                 behavior = "udp_scan_or_flood"
                 severity = "medium"
                 evidence.append(f"unique_udp_dst_ports={dst_port_count}")
             elif protocol == "UDP" and dst_port == 53 and dns_counter.get(src, 0) >= 20:
-                summary = f"{src} gui nhieu truy van DNS bat thuong, co the la DNS tunneling hoac DNS flood."
+                summary = f"{src} is generating an unusually high number of DNS queries, which may indicate DNS tunneling or a DNS flood."
                 behavior = "dns_anomaly"
                 severity = "medium"
                 evidence.append(f"dns_flow_count_from_src={dns_counter.get(src, 0)}")
             elif protocol == "TCP" and dst_port in {80, 8080, 443}:
-                summary = f"{src} dang truy cap dich vu web tren {dst}."
+                summary = f"{src} is accessing a web service on {dst}."
                 behavior = "web_access"
                 severity = "normal"
                 evidence.append(f"dst_port={dst_port}")
             elif protocol == "TCP" and dst_port == 22 and int(row.get("Total Fwd Packets", 0) or 0) >= 10:
-                summary = f"{src} co nhieu ket noi toi SSH cua {dst}, can kiem tra brute force."
+                summary = f"{src} has many SSH connections to {dst}; review for possible brute-force activity."
                 behavior = "ssh_suspicious"
                 severity = "medium"
                 evidence.append("dst_port=22")
             elif protocol.startswith("ICMP") and icmp_counter.get((src, dst), 0) >= 20:
-                summary = f"{src} gui nhieu ICMP toi {dst}, co the la ping scan hoac ICMP flood."
+                summary = f"{src} is sending a large amount of ICMP traffic to {dst}, which may indicate a ping scan or ICMP flood."
                 behavior = "icmp_anomaly"
                 severity = "medium"
                 evidence.append(f"icmp_flow_count_src_dst={icmp_counter.get((src, dst), 0)}")

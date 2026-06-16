@@ -61,5 +61,5 @@
         "Webmin 1.962 - Package Update Escape Bypass RCE"
     ],
     "input_dtype": "float32",
-    "note": "Load bằng torch.jit.load, không cần viết lại class FTTransformer."
+    "note": "Load with torch.jit.load; there is no need to reimplement the FTTransformer class."
 }

@@ -1892,25 +1892,22 @@ class ApplicationWindow(QMainWindow):
         'Web Attack - XSS',
     ]
     AI_LABEL_DESCRIPTIONS = {
-        'BENIGN': 'Luu luong binh thuong, chua thay dau hieu tan cong ro rang trong cac flow da chon.',
-        'Benign': 'Luu luong binh thuong, chua thay dau hieu tan cong ro rang trong cac flow da chon.',
-        'Bot': 'Co dau hieu bot/botnet: may nguon co the dang bi dieu khien tu xa hoac tu dong tao ket noi bat thuong.',
-        'DDoS': 'Co dau hieu tan cong DDoS: nhieu goi/flow tao tai lon ve dich trong thoi gian ngan.',
-        'DoS GoldenEye': 'Co mau DoS GoldenEye: tan cong HTTP lam can kiet tai nguyen dich vu web.',
+        'BENIGN': 'Normal traffic with no clear signs of malicious activity in the selected flows.',
+        'Benign': 'Normal traffic with no clear signs of malicious activity in the selected flows.',
+        'Bot': 'Possible bot or botnet activity: the source host may be remotely controlled or generating unusual automated connections.',
+        'DDoS': 'Possible DDoS activity: many packets or flows are creating a high load on the target within a short time window.',
+        'DoS GoldenEye': 'GoldenEye-like DoS pattern: HTTP traffic appears to be exhausting web-service resources.',
         'DoS Hulk': 'DoS Hulk pattern: high-rate HTTP attack traffic targeting a web server.',
-        'DoS Slowhttptest': 'Co mau DoS SlowHTTPTest: giu ket noi HTTP cham de lam can kiet tai nguyen server.',
-        'DoS slowloris': 'Co mau Slowloris: mo/giu nhieu ket noi HTTP chua hoan tat de lam treo web server.',
-        'FTP-Patator': 'Co dau hieu brute force FTP: nhieu thu nghiem dang nhap hoac flow FTP bat thuong.',
-        'Heartbleed': 'Co dau hieu Heartbleed/TLS heartbeat bat thuong, can kiem tra dich vu TLS lien quan.',
-        'Infiltration': 'Co dau hieu xam nhap/di chuyen du lieu bat thuong, nen kiem tra host nguon va dich.',
-        'PortScan': 'Co dau hieu quet cong: mot nguon truy van nhieu cong/dich vu de do tim be mat tan cong.',
-        'SSH-Patator': 'Co dau hieu brute force SSH: nhieu thu nghiem ket noi/dang nhap SSH.',
-        'Web Attack - Brute Force': 'Co dau hieu brute force tren ung dung web.',
-        'Web Attack - Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
-        'Web Attack - XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
-        'Web Attack - Brute Force': 'Co dau hieu brute force tren ung dung web.',
-        'Web Attack - Sql Injection': 'Co dau hieu tan cong SQL Injection vao ung dung web.',
-        'Web Attack - XSS': 'Co dau hieu tan cong Cross-Site Scripting vao ung dung web.',
+        'DoS Slowhttptest': 'Slow HTTP test pattern: long-lived slow HTTP connections may be exhausting server resources.',
+        'DoS slowloris': 'Slowloris-like pattern: many incomplete or intentionally slow HTTP connections may be stalling the web server.',
+        'FTP-Patator': 'Possible FTP brute-force activity: repeated login attempts or unusual FTP authentication flows were observed.',
+        'Heartbleed': 'Possible Heartbleed or abnormal TLS heartbeat activity; review the related TLS service.',
+        'Infiltration': 'Possible infiltration or suspicious data movement; inspect the source and destination hosts more closely.',
+        'PortScan': 'Possible port-scanning behavior: one source is probing many ports or services to discover attack surface.',
+        'SSH-Patator': 'Possible SSH brute-force activity: repeated SSH connection or authentication attempts were observed.',
+        'Web Attack - Brute Force': 'Possible brute-force activity against a web application.',
+        'Web Attack - Sql Injection': 'Possible SQL injection activity targeting a web application.',
+        'Web Attack - XSS': 'Possible cross-site scripting activity targeting a web application.',
     }
 
     def __init__(self):
@@ -2485,7 +2482,7 @@ class ApplicationWindow(QMainWindow):
         self.toolbar.addWidget(spacer)
 
     def _connect_signals(self):
-        """Ket noi tat ca signals."""
+        """Connect all signals."""
         # File menu
         self.action_open.triggered.connect(self._on_open_file)
         self.action_merge.triggered.connect(self._on_merge_file)
@@ -3082,7 +3079,7 @@ class ApplicationWindow(QMainWindow):
             for label, count in attack_counts.most_common():
                 description = self.AI_LABEL_DESCRIPTIONS.get(
                     label,
-                    self.AI_LABEL_DESCRIPTIONS.get('Benign', self.AI_LABEL_DESCRIPTIONS.get('BENIGN', 'Can kiem tra them flow lien quan.'))
+                    self.AI_LABEL_DESCRIPTIONS.get('Benign', self.AI_LABEL_DESCRIPTIONS.get('BENIGN', 'Review the related flows for more context.'))
                 )
                 lines.append(f'- {label}: {description}')
 
@@ -3191,19 +3188,140 @@ class ApplicationWindow(QMainWindow):
         dialog.exec()
 
     def _default_demo_packet_entries(self):
+        scenario_names = {
+            1: 'ARP Request and Reply',
+            2: 'Gratuitous ARP',
+            3: 'ARP Probe and Address Announcement',
+            4: 'ICMP Echo Ping',
+            5: 'ICMPv6 Echo Ping',
+            6: 'ICMP Destination Unreachable',
+            7: 'ICMP Port Unreachable',
+            8: 'ICMP TTL Exceeded',
+            9: 'ICMP Packet Too Big / MTU Exceeded',
+            10: 'Traceroute ICMP TTL Exceeded',
+            11: 'UDP Traceroute with ICMP Responses',
+            12: 'IPv6 Neighbor Discovery',
+            13: 'IPv6 Router Solicitation and Advertisement',
+            14: 'IPv6 Duplicate Address Detection',
+            15: 'TCP Three-Way Handshake',
+            16: 'HTTP Response over TCP',
+            17: 'TCP Connection Teardown',
+            18: 'WHOIS Query over IPv6',
+            19: 'TLS Encrypted Web Traffic',
+            20: 'IPP Printer Traffic over IPv6',
+            21: 'SSH Encrypted Payload Retransmission',
+            22: 'SSH Duplicate ACK and Retransmission',
+            23: 'SMTPS Traffic over IPv6',
+            24: 'TCP ACK / SACK Traffic',
+            25: 'IPv6 TCP Three-Way Handshake',
+            26: 'UDP Application Exchange',
+            27: 'DNS A Record Lookup',
+            28: 'DNS AAAA Record Lookup',
+            29: 'Dual-Stack DNS A and AAAA Lookup',
+            30: 'DNS MX Lookup for IDN / Punycode Domain',
+            31: 'DNS TXT Query with Multiple Records',
+            32: 'IPv6 Reverse DNS PTR Lookup',
+            33: 'DNSSEC NXDOMAIN Response',
+            34: 'DNSSEC SERVFAIL Response',
+            35: 'mDNS Service Discovery',
+            36: 'LLMNR Name Query',
+            37: 'NetBIOS Name Service Query',
+            38: 'DHCP Discover Offer Request ACK',
+            39: 'DHCP Multiple Client Lease Assignment',
+            40: 'DHCP Multi-Subnet / Relay Scenario',
+            41: 'NTP Client Server Exchange',
+            42: 'HTTP Proxy GET Request',
+            43: 'HTTP Login POST Request',
+            44: 'HTTP Redirect on Nonstandard Port',
+            45: 'HTTP Error Responses',
+            46: 'TLS Handshake',
+            47: 'TLS Handshake with SNI',
+            48: 'DNS over QUIC / DoQ',
+            49: 'SMB Negotiate Protocol Request',
+            50: 'SSH Protocol Handshake',
+            51: 'ARP Spoofing',
+            52: 'UDP Broadcast Flood',
+            53: 'ARP Scan / ARP Sweep',
+            54: 'STP Root Bridge Attack',
+            55: 'ARP-Based VLAN / Subnet Spoofing',
+            56: 'ICMP Ping Sweep',
+            57: 'ICMP Flood',
+            58: 'ICMP Redirect Attack',
+            59: 'IPv6 Router Advertisement Spoofing',
+            60: 'IPv6 Neighbor Advertisement Spoofing',
+            61: 'TCP SYN Port Scan',
+            62: 'TCP Connect Port Scan',
+            63: 'TCP FIN Scan',
+            64: 'TCP NULL Scan',
+            65: 'TCP Xmas Scan',
+            66: 'TCP ACK Scan',
+            67: 'TCP Window Scan',
+            68: 'UDP Port Scan',
+            69: 'TCP SYN Flood',
+            70: 'UDP Flood',
+            71: 'HTTP Connection Flood',
+            72: 'HTTP Request Flood',
+            73: 'DNS Amplification',
+            74: 'NTP Amplification / Monlist-Style Queries',
+            75: 'DNS Cache Poisoning Attempt',
+            76: 'DNS Spoofing / Pharming',
+            77: 'DNS Zone Transfer Attempt',
+            78: 'DNS Tunneling',
+            79: 'DNS Data Exfiltration',
+            80: 'Domain Generation Algorithm DNS Queries',
+            81: 'LLMNR Poisoning with SMB Capture',
+            82: 'NetBIOS Name Poisoning with SMB Capture',
+            83: 'DHCP Starvation',
+            84: 'Rogue DHCP Server',
+            85: 'Cleartext FTP Login',
+            86: 'Cleartext Telnet Login',
+            87: 'HTTP Basic Authentication / Admin Access',
+            88: 'Cleartext SMTP Authentication',
+            89: 'SMB Brute Force Login',
+            90: 'HTTP Login Brute Force',
+            91: 'SQL Injection',
+            92: 'Blind SQL Injection',
+            93: 'Reflected Cross-Site Scripting',
+            94: 'Stored Cross-Site Scripting',
+            95: 'Command Injection',
+            96: 'Path Traversal',
+            97: 'Local File Inclusion',
+            98: 'Remote File Inclusion',
+            99: 'Malicious File Upload / Web Shell',
+            100: 'Malware Callback over DNS and HTTPS',
+        }
         entries = []
         for index in range(1, 101):
             file_name = f"{index:03d}.pcapng"
             entries.append({
                 'id': index,
                 'category': 'Demo',
-                'name': f'Demo Packet {index:03d}',
+                'name': scenario_names.get(index, f'Demo Packet {index:03d}'),
                 'protocol': '',
                 'file': file_name,
                 'description': '',
                 'path': str((self.DEMO_DIR / file_name).resolve()),
             })
         return entries
+
+    def _demo_entry_display_name(self, entry: dict) -> str:
+        name = str((entry or {}).get('name', '') or '').strip()
+        if name and not re.fullmatch(r'Demo Packet\s+\d{1,3}', name, re.IGNORECASE):
+            return name
+
+        description = str((entry or {}).get('description', '') or '').strip()
+        if description:
+            return description.splitlines()[0].strip()
+
+        category = str((entry or {}).get('category', '') or '').strip()
+        protocol = str((entry or {}).get('protocol', '') or '').strip()
+        if category and category.lower() != 'demo' and protocol:
+            return f'{category} - {protocol}'
+        if protocol:
+            return protocol
+        if category and category.lower() != 'demo':
+            return category
+        return 'Unnamed Demo Action'
 
     def _load_demo_packet_entries(self):
         if isinstance(self._demo_packet_entries, list) and self._demo_packet_entries:
@@ -3260,7 +3378,7 @@ class ApplicationWindow(QMainWindow):
         for entry in entries:
             demo_id = int(entry.get('id', 0) or 0)
             entry_by_id[demo_id] = entry
-            combo.addItem(f"{demo_id:03d} - {entry.get('name', '')}", demo_id)
+            combo.addItem(self._demo_entry_display_name(entry), demo_id)
         root.addWidget(combo)
 
         info = QTextEdit(dialog)
@@ -3289,8 +3407,9 @@ class ApplicationWindow(QMainWindow):
             demo_path = str(entry.get('path') or '')
             exists = os.path.exists(demo_path)
             open_btn.setEnabled(exists)
+            display_name = self._demo_entry_display_name(entry)
             lines = [
-                f"ID: {int(entry.get('id', 0) or 0):03d}",
+                f"Action: {display_name}",
                 f"Category: {str(entry.get('category', '') or '-').strip() or '-'}",
                 f"Protocol: {str(entry.get('protocol', '') or '-').strip() or '-'}",
                 '',
@@ -3305,10 +3424,10 @@ class ApplicationWindow(QMainWindow):
                 return
 
             demo_id = int(entry.get('id', 0) or 0)
-            demo_name = str(entry.get('name', '') or '').strip() or f'Demo {demo_id:03d}'
+            demo_name = self._demo_entry_display_name(entry)
             demo_path = str(entry.get('path') or '')
             if not os.path.exists(demo_path):
-                QMessageBox.critical(dialog, 'Demo Packet', f'Could not find the demo file for item {demo_id:03d}.')
+                QMessageBox.critical(dialog, 'Demo Packet', f'Could not find the demo file for "{demo_name}".')
                 return
 
             proceed = self._prompt_save_before_destructive_action(
@@ -3326,11 +3445,11 @@ class ApplicationWindow(QMainWindow):
             try:
                 packets = list(iter_pcap_packets(demo_path))
             except Exception as exc:
-                QMessageBox.critical(dialog, 'Demo Packet', f'Could not read the demo file for item {demo_id:03d}.\n\n{exc}')
+                QMessageBox.critical(dialog, 'Demo Packet', f'Could not read the demo file for "{demo_name}".\n\n{exc}')
                 return
 
             if not packets:
-                QMessageBox.warning(dialog, 'Demo Packet', f'Demo {demo_id:03d} does not contain valid packets.')
+                QMessageBox.warning(dialog, 'Demo Packet', f'"{demo_name}" does not contain valid packets.')
                 return
 
             self._replace_capture_packets(
@@ -3338,7 +3457,7 @@ class ApplicationWindow(QMainWindow):
                 preserve_metadata=False,
                 preserve_loaded_path=False,
                 mark_dirty=True,
-                status_message=f'Loaded demo {demo_id:03d} - {demo_name}. The capture now has unsaved changes.',
+                status_message=f'Loaded demo action "{demo_name}". The capture now has unsaved changes.',
                 preserve_display_filter=False,
             )
 
