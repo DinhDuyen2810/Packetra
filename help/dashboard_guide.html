@@ -66,7 +66,8 @@
         <li><a href="#combine">5. Combine Dashboards Effectively</a></li>
         <li><a href="#filters">6. How Display Filters Interact</a></li>
         <li><a href="#query">7. Query Knobs That Matter</a></li>
-        <li><a href="#limits">8. What Dashboards Do Not Replace</a></li>
+        <li><a href="#importing">8. Import And JSON Format</a></li>
+        <li><a href="#limits">9. What Dashboards Do Not Replace</a></li>
       </ul>
     </aside>
     <div class="wrap">
@@ -237,8 +238,208 @@
       </table>
     </section>
 
+    <section class="panel" id="importing">
+      <h2>8. Importing dashboards and creating JSON files manually</h2>
+      <p>The <b>Import Dashboard</b> button is active in the current build and loads a <code>.json</code> file through the dashboard repository. A real round-trip test confirms the flow works: export a dashboard to JSON, import it again, and the application saves it into the user dashboard store. If the imported <code>dashboard_id</code> already exists, Packetra automatically generates a new dashboard ID so the import does not overwrite the existing one.</p>
+
+      <h3>What the import button expects</h3>
+      <ol>
+        <li>Open the Dashboard home page.</li>
+        <li>Click <b>Import Dashboard</b>.</li>
+        <li>Select a file with the extension <code>.json</code>.</li>
+        <li>Packetra reads the whole file as text and tries to convert it into a <code>Dashboard</code> object.</li>
+        <li>If the JSON matches the schema, the dashboard is saved and appears in <b>My Dashboards</b>.</li>
+        <li>If the JSON is malformed or missing required structure, import fails and the dialog shows an error or failure message.</li>
+      </ol>
+
+      <h3>Fastest and safest way to create an import file</h3>
+      <p>If you do not already know the schema, use this workflow first:</p>
+      <ol>
+        <li>Create a dashboard inside Packetra.</li>
+        <li>Add one or more widgets and save it.</li>
+        <li>Open the dashboard card menu and choose <b>Export JSON</b>.</li>
+        <li>Use that exported file as your base template.</li>
+        <li>Duplicate it, then edit only the fields you need to change.</li>
+      </ol>
+      <p>This is the most reliable method because your starting file already matches the exact schema used by the running build.</p>
+      <p>If you want a ready-made reference file, download <a href="examples/sample_dashboard_import.json" download>sample_dashboard_import.json</a>. You can open it in any text editor, inspect the structure, then change the name, IDs, filters, widgets, and layout before importing it into Packetra.</p>
+
+      <h3>Dashboard JSON structure</h3>
+      <p>The imported file is one JSON object representing a full dashboard. These top-level fields matter the most:</p>
+      <table>
+        <tr><th>Field</th><th>Required</th><th>Meaning</th></tr>
+        <tr><td><code>schema_version</code></td><td>Yes</td><td>Dashboard schema version. Current dashboards use <code>1</code>.</td></tr>
+        <tr><td><code>dashboard_id</code></td><td>Yes</td><td>Unique dashboard identifier. Use a UUID-like string. If it already exists, Packetra generates a new one during import.</td></tr>
+        <tr><td><code>name</code></td><td>Yes</td><td>The dashboard name shown in the gallery.</td></tr>
+        <tr><td><code>description</code></td><td>No</td><td>Optional text shown under the dashboard name.</td></tr>
+        <tr><td><code>is_template</code></td><td>Yes</td><td>Can be present as either <code>true</code> or <code>false</code>, but imported dashboards are forced to user dashboards internally.</td></tr>
+        <tr><td><code>created_at</code></td><td>Yes</td><td>ISO timestamp string.</td></tr>
+        <tr><td><code>updated_at</code></td><td>Yes</td><td>ISO timestamp string.</td></tr>
+        <tr><td><code>layout</code></td><td>Yes</td><td>Dashboard grid settings, usually <code>columns</code> and <code>row_height</code>.</td></tr>
+        <tr><td><code>widgets</code></td><td>Yes</td><td>Array of widget objects. An empty list is valid, but the dashboard will open with no widgets.</td></tr>
+        <tr><td><code>global_filter</code></td><td>No</td><td>Optional dashboard-wide query filter string.</td></tr>
+        <tr><td><code>time_range</code></td><td>No</td><td>Optional time-range object.</td></tr>
+        <tr><td><code>data_scope</code></td><td>No</td><td>Usually <code>displayed_packets</code> or <code>all_packets</code>.</td></tr>
+        <tr><td><code>tags</code></td><td>No</td><td>Optional list of tags.</td></tr>
+        <tr><td><code>thumbnail</code></td><td>No</td><td>Optional thumbnail metadata.</td></tr>
+      </table>
+
+      <h3>Widget object structure</h3>
+      <p>Each widget inside <code>widgets</code> must include these blocks:</p>
+      <table>
+        <tr><th>Field</th><th>Required</th><th>Meaning</th></tr>
+        <tr><td><code>id</code></td><td>Yes</td><td>Unique widget ID.</td></tr>
+        <tr><td><code>title</code></td><td>Yes</td><td>Widget title shown in the dashboard.</td></tr>
+        <tr><td><code>data_source</code></td><td>Yes</td><td>Dataset used by the widget, such as <code>packets</code>, <code>endpoints</code>, <code>conversations</code>, <code>protocol_stats</code>, <code>dns_queries</code>, or <code>http_requests</code>.</td></tr>
+        <tr><td><code>query</code></td><td>Yes</td><td>Widget query block.</td></tr>
+        <tr><td><code>visualization</code></td><td>Yes</td><td>Chart or table configuration block.</td></tr>
+        <tr><td><code>layout</code></td><td>Yes</td><td>Widget position and size in the grid: <code>x</code>, <code>y</code>, <code>w</code>, <code>h</code>.</td></tr>
+        <tr><td><code>description</code></td><td>No</td><td>Optional text shown below the widget.</td></tr>
+        <tr><td><code>style</code></td><td>No</td><td>Optional style and display settings such as chart/table display mode and widget-specific editor settings.</td></tr>
+      </table>
+
+      <h3>Query block structure</h3>
+      <table>
+        <tr><th>Field</th><th>Meaning</th></tr>
+        <tr><td><code>filter</code></td><td>Optional widget-level filter string.</td></tr>
+        <tr><td><code>group_by</code></td><td>Optional list of grouping fields.</td></tr>
+        <tr><td><code>metrics</code></td><td>Optional list of metrics. Each metric uses <code>type</code>, <code>field</code>, and <code>as</code>.</td></tr>
+        <tr><td><code>sort</code></td><td>Optional list of sort rules. Each sort uses <code>field</code> and <code>direction</code>.</td></tr>
+        <tr><td><code>limit</code></td><td>Optional integer result limit.</td></tr>
+        <tr><td><code>time_bucket</code></td><td>Optional bucket size such as <code>1s</code>, <code>5s</code>, <code>1m</code>, or <code>1h</code>.</td></tr>
+        <tr><td><code>columns</code></td><td>Optional table column list.</td></tr>
+      </table>
+      <p>For metric aliases, JSON uses the key <code>as</code>. Internally the Python model maps it to <code>as_</code>, but you should write <code>"as": "packets"</code> in the JSON file.</p>
+
+      <h3>Visualization block structure</h3>
+      <p>The <code>visualization</code> object always needs at least <code>type</code>. Depending on chart type, you may also use:</p>
+      <ul>
+        <li><code>x_field</code> and <code>y_field</code> for XY charts such as line, area, and scatter.</li>
+        <li><code>category_field</code> and <code>value_field</code> for category/value charts such as bar, pie, donut, radar, treemap, and sunburst.</li>
+        <li><code>series_field</code> when the chart uses series grouping or split colors.</li>
+        <li><code>show_legend</code> and <code>show_labels</code> for display behavior.</li>
+      </ul>
+
+      <h3>Minimal import example</h3>
+      <p>This is a compact example that should be understandable even if you are creating your first import file:</p>
+<pre>{
+  "schema_version": 1,
+  "dashboard_id": "11111111-2222-3333-4444-555555555555",
+  "name": "My Imported Dashboard",
+  "description": "Simple imported dashboard example",
+  "is_template": false,
+  "created_at": "2026-06-17T08:00:00",
+  "updated_at": "2026-06-17T08:00:00",
+  "layout": {
+    "columns": 12,
+    "row_height": 80
+  },
+  "widgets": [
+    {
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "title": "Top Protocols",
+      "data_source": "protocol_stats",
+      "query": {
+        "group_by": ["protocol"],
+        "metrics": [
+          { "type": "count", "field": "*", "as": "packets" }
+        ],
+        "sort": [
+          { "field": "packets", "direction": "desc" }
+        ],
+        "limit": 10
+      },
+      "visualization": {
+        "type": "bar",
+        "category_field": "protocol",
+        "value_field": "packets",
+        "show_legend": false,
+        "show_labels": true
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Top protocols by packet count",
+      "style": {
+        "display_mode": "chart"
+      }
+    }
+  ],
+  "global_filter": "tcp or udp",
+  "data_scope": "displayed_packets",
+  "tags": ["import", "example"]
+}</pre>
+      <p>You can also download the same idea as a reusable file here: <a href="examples/sample_dashboard_import.json" download>Download sample JSON</a>.</p>
+
+      <h3>How to build a JSON file from zero if you know nothing yet</h3>
+      <ol>
+        <li>Create a new plain text file.</li>
+        <li>Save it with a <code>.json</code> extension, for example <code>my_dashboard.json</code>.</li>
+        <li>If you prefer not to start from a blank file, download <a href="examples/sample_dashboard_import.json" download>sample_dashboard_import.json</a> and edit that instead.</li>
+        <li>Paste the minimal example above.</li>
+        <li>Change <code>name</code> to the dashboard title you want.</li>
+        <li>Change each ID string so your dashboard and widget IDs are unique. UUID-format strings are safest.</li>
+        <li>Keep <code>schema_version</code> at <code>1</code>.</li>
+        <li>Keep <code>layout.columns</code> at <code>12</code> unless you know you want another grid width.</li>
+        <li>Start with one widget first. Do not try to build ten widgets until one working widget imports correctly.</li>
+        <li>Choose a valid <code>data_source</code>.</li>
+        <li>Choose a visualization type that matches that source and query result.</li>
+        <li>Save the file.</li>
+        <li>Import it through the Dashboard page.</li>
+      </ol>
+
+      <h3>Recommended beginner workflow for creating larger imports</h3>
+      <ol>
+        <li>Create a dashboard in the UI.</li>
+        <li>Add one widget and configure it until it renders correctly.</li>
+        <li>Save the dashboard.</li>
+        <li>Export it as JSON.</li>
+        <li>Use that export as your schema reference.</li>
+        <li>Duplicate the widget block and only then start editing titles, positions, filters, metrics, and visualization fields.</li>
+        <li>Re-import the new file under a different dashboard name for testing.</li>
+      </ol>
+
+      <h3>How to place widgets in the grid</h3>
+      <ul>
+        <li><code>x</code>: starting column, usually from <code>0</code> to <code>11</code>.</li>
+        <li><code>y</code>: starting row, usually <code>0</code> for the first row.</li>
+        <li><code>w</code>: width in columns.</li>
+        <li><code>h</code>: height in rows.</li>
+      </ul>
+      <p>Example: a widget with <code>"x": 0, "y": 0, "w": 6, "h": 4</code> starts in the top-left corner and takes half the dashboard width when the dashboard uses 12 columns.</p>
+
+      <h3>Important compatibility rules</h3>
+      <ul>
+        <li>A table widget should usually provide <code>columns</code> in the query or at least return fields that make sense in a table.</li>
+        <li>A bar, pie, donut, radar, treemap, or sunburst chart usually needs category/value data.</li>
+        <li>A line, area, or scatter chart needs axis-compatible fields, especially a numeric value field.</li>
+        <li>If your chosen fields do not exist in the selected data source, the widget may import but show empty or non-plottable output.</li>
+        <li>Import validates the JSON structure, but it does not guarantee your chosen field names will produce useful data at runtime.</li>
+      </ul>
+
+      <h3>Common mistakes that cause confusion</h3>
+      <ul>
+        <li>The file is valid JSON but uses field names that the chosen data source never returns.</li>
+        <li>The widget imports but the chart says <b>No data</b> or <b>No plottable data</b> because the query result is empty.</li>
+        <li>The widget uses a chart type that does not match the query shape.</li>
+        <li>The dashboard imports with the same name as another dashboard, which is allowed, but can confuse users if you do not rename it clearly.</li>
+        <li>The JSON is edited manually and a comma, quote, or bracket is missing.</li>
+      </ul>
+
+      <h3>What happens after import</h3>
+      <ul>
+        <li>The imported dashboard is stored as a user dashboard.</li>
+        <li><code>is_template</code> is forced to <code>false</code> internally.</li>
+        <li>The dashboard is added to the user dashboard repository file.</li>
+        <li>You can then open it, rename it, duplicate it, export it again, or delete it like any other user dashboard.</li>
+      </ul>
+    </section>
+
     <section class="panel" id="limits">
-      <h2>8. What dashboards do not replace</h2>
+      <h2>9. What dashboards do not replace</h2>
       <ul>
         <li>Dashboards do not replace packet-level verification.</li>
         <li>Dashboards do not guarantee causal explanation; they show shape, concentration, and ranking.</li>

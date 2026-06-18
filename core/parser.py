@@ -29,6 +29,13 @@ bind_layers(Ether, ARP, type=0x8035)
 
 class PacketParser:
     MAX_CONTIGUOUS_RANGES = 101
+    FTP_COMMANDS = {
+        'ABOR', 'ACCT', 'ALLO', 'APPE', 'AUTH', 'CDUP', 'CLNT', 'CWD', 'DELE', 'EPRT', 'EPSV',
+        'FEAT', 'HELP', 'LANG', 'LIST', 'MDTM', 'MIC', 'MKD', 'MLSD', 'MLST', 'MODE', 'NLST',
+        'NOOP', 'OPTS', 'PASS', 'PASV', 'PBSZ', 'PORT', 'PROT', 'PWD', 'QUIT', 'REIN', 'REST',
+        'RETR', 'RMD', 'RNFR', 'RNTO', 'SITE', 'SIZE', 'SMNT', 'STAT', 'STOR', 'STOU', 'STRU',
+        'SYST', 'TYPE', 'USER', 'UTF8', 'XCUP', 'XCWD', 'XMKD', 'XPWD', 'XRMD',
+    }
     HTTP_REQUEST_METHODS = {
         b'GET', b'POST', b'PUT', b'DELETE', b'HEAD', b'OPTIONS', b'PATCH', b'TRACE', b'CONNECT', b'PRI',
         b'SUBSCRIBE', b'UNSUBSCRIBE', b'NOTIFY',
@@ -1551,13 +1558,18 @@ class PacketParser:
         raw = bytes(payload or b'')
         if not raw:
             return None
-        first = raw.split(b'\r\n', 1)[0].decode(errors='ignore').strip()
+        first = raw.split(b'\r\n', 1)[0].decode('utf-8', errors='replace').strip()
         if not first:
+            return None
+        if any(ord(ch) < 32 and ch not in '\t' for ch in first):
             return None
         if len(first) >= 3 and first[:3].isdigit():
             try:
                 code = int(first[:3])
             except Exception:
+                return None
+            separator = first[3] if len(first) > 3 else ''
+            if separator not in {'', ' ', '-'}:
                 return None
             arg = first[4:] if len(first) > 4 else ''
             return {
@@ -1565,16 +1577,13 @@ class PacketParser:
                 'line': first,
                 'code': code,
                 'arg': arg,
-            }
-        if sport == 21:
-            return {
-                'kind': 'response',
-                'line': first,
-                'arg': first,
+                'separator': separator,
             }
         parts = first.split(' ', 1)
         command = parts[0].upper().strip()
-        if not command or len(command) > 8 or not command.isalpha():
+        if dport != 21:
+            return None
+        if not command or len(command) > 8 or not command.isalpha() or command not in self.FTP_COMMANDS:
             return None
         arg = parts[1].strip() if len(parts) > 1 else ''
         return {

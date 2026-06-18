@@ -2992,7 +2992,11 @@ class ApplicationWindow(QMainWindow):
             filter_expression = ''
             first_packet = None
             if conversation is not None:
-                child_text = f'{conversation["label"]} | {flow_text}'
+                conversation_label = str(conversation.get('label', '') or '').strip()
+                if conversation_label:
+                    child_text = f'{conversation_label} | confidence {confidence:.2%}'
+                else:
+                    child_text = flow_text
                 filter_expression = str(conversation.get('filter_expression', '') or '')
                 first_packet = int(conversation.get('first_packet', 0) or 0)
             group['children'].append(
@@ -3583,6 +3587,13 @@ class ApplicationWindow(QMainWindow):
             stretch_column=0,
             resize_mode=QHeaderView.ResizeMode.ResizeToContents,
         )
+        result_header = result_tree.header()
+        result_header.setStretchLastSection(False)
+        result_header.setMinimumSectionSize(24)
+        result_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        result_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        result_tree.setColumnWidth(1, 40)
+        result_tree.setIndentation(12)
         root.addWidget(result_tree, 1)
 
         def _update_mode_ui():
@@ -3628,10 +3639,13 @@ class ApplicationWindow(QMainWindow):
                 parent = QTreeWidgetItem(result_tree)
                 parent.setText(0, parent_text)
                 parent.setText(1, str(int(group.get('count', 0) or 0)))
+                parent.setToolTip(0, parent_text)
                 for child_info in list(group.get('children', []) or []):
                     child = QTreeWidgetItem(parent)
-                    child.setText(0, str(child_info.get('text', '') or ''))
+                    child_text = str(child_info.get('text', '') or '')
+                    child.setText(0, child_text)
                     child.setText(1, '')
+                    child.setToolTip(0, child_text)
                     child.setData(0, Qt.UserRole, str(child_info.get('filter_expression', '') or ''))
                     child.setData(0, Qt.UserRole + 1, int(child_info.get('first_packet', 0) or 0))
             result_tree.collapseAll()
@@ -4051,8 +4065,13 @@ class ApplicationWindow(QMainWindow):
         result_tree.setHeaderLabels(['Action', 'Count'])
         result_tree.setRootIsDecorated(True)
         result_tree.setAlternatingRowColors(True)
-        result_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        result_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        result_header = result_tree.header()
+        result_header.setStretchLastSection(False)
+        result_header.setMinimumSectionSize(24)
+        result_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        result_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        result_tree.setColumnWidth(1, 40)
+        result_tree.setIndentation(12)
         root.addWidget(result_tree, 1)
 
         def apply_conversation_entry(entry):
@@ -4105,10 +4124,13 @@ class ApplicationWindow(QMainWindow):
                 parent = QTreeWidgetItem(result_tree)
                 parent.setText(0, parent_text)
                 parent.setText(1, str(int(group.get('count', 0) or 0)))
+                parent.setToolTip(0, parent_text)
                 for child_info in list(group.get('children', []) or []):
                     child = QTreeWidgetItem(parent)
-                    child.setText(0, str(child_info.get('text', '') or ''))
+                    child_text = str(child_info.get('text', '') or '')
+                    child.setText(0, child_text)
                     child.setText(1, '')
+                    child.setToolTip(0, child_text)
                     child.setData(0, Qt.UserRole, str(child_info.get('filter_expression', '') or ''))
                     child.setData(0, Qt.UserRole + 1, int(child_info.get('first_packet', 0) or 0))
             result_tree.collapseAll()

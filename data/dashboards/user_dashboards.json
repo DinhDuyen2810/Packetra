@@ -7,7 +7,7 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-01T10:50:34.984404",
-      "updated_at": "2026-06-03T14:44:00.326463",
+      "updated_at": "2026-06-17T02:49:19.222665",
       "layout": {
         "columns": 12,
         "row_height": 80
@@ -47,8 +47,8 @@
           "layout": {
             "x": 0,
             "y": 0,
-            "w": 3,
-            "h": 3
+            "w": 4,
+            "h": 4
           },
           "description": "Total number of packets in the current capture",
           "style": {
@@ -71,26 +71,31 @@
             ],
             "limit": 10,
             "time_bucket": null,
-            "columns": null
+            "columns": [
+              "ip",
+              "packets"
+            ]
           },
           "visualization": {
             "type": "pie",
-            "x_field": "protocol",
-            "y_field": "protocol",
+            "x_field": null,
+            "y_field": null,
             "category_field": "ip",
             "value_field": "packets",
-            "series_field": "protocol",
+            "series_field": null,
             "show_legend": true,
             "show_labels": false
           },
           "layout": {
-            "x": 3,
+            "x": 4,
             "y": 0,
-            "w": 3,
-            "h": 3
+            "w": 4,
+            "h": 4
           },
           "description": "Protocol mix across the displayed packets",
-          "style": null
+          "style": {
+            "display_mode": "chart"
+          }
         },
         {
           "id": "01992e2b-c9f3-49d4-a5ad-6815d57c280d",
@@ -124,10 +129,10 @@
             "show_labels": false
           },
           "layout": {
-            "x": 6,
+            "x": 8,
             "y": 0,
-            "w": 6,
-            "h": 7
+            "w": 4,
+            "h": 4
           },
           "description": null,
           "style": {
@@ -164,7 +169,7 @@
           },
           "layout": {
             "x": 0,
-            "y": 3,
+            "y": 4,
             "w": 6,
             "h": 4
           },
@@ -186,7 +191,7 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-03T16:57:50.521565",
-      "updated_at": "2026-06-04T02:01:36.779751",
+      "updated_at": "2026-06-17T03:08:59.005139",
       "layout": {
         "columns": 12,
         "row_height": 80
@@ -290,90 +295,6 @@
           }
         },
         {
-          "id": "5b3002fc-51d9-43f0-b8ff-8477f0b38b6b",
-          "title": "AVG DNS Req",
-          "data_source": "packets",
-          "query": {
-            "filter": null,
-            "group_by": null,
-            "metrics": [
-              {
-                "type": "avg",
-                "field": "dns_request_frame",
-                "as_": "dns_request_frame"
-              }
-            ],
-            "sort": null,
-            "limit": null,
-            "time_bucket": null,
-            "columns": [
-              "dns_request_frame"
-            ]
-          },
-          "visualization": {
-            "type": "metric",
-            "x_field": null,
-            "y_field": null,
-            "category_field": null,
-            "value_field": "dns_request_frame",
-            "series_field": null,
-            "show_legend": false,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 8,
-            "y": 0,
-            "w": 2,
-            "h": 2
-          },
-          "description": "Total number of packets in the current capture",
-          "style": {
-            "display_mode": "chart"
-          }
-        },
-        {
-          "id": "638d9710-4fc5-4ac0-a812-f5c94e05d217",
-          "title": "AVG DNS Res",
-          "data_source": "packets",
-          "query": {
-            "filter": null,
-            "group_by": null,
-            "metrics": [
-              {
-                "type": "avg",
-                "field": "dns_response_frame",
-                "as_": "dns_response_frame"
-              }
-            ],
-            "sort": null,
-            "limit": null,
-            "time_bucket": null,
-            "columns": [
-              "dns_response_frame"
-            ]
-          },
-          "visualization": {
-            "type": "metric",
-            "x_field": null,
-            "y_field": null,
-            "category_field": null,
-            "value_field": "dns_response_frame",
-            "series_field": null,
-            "show_legend": false,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 10,
-            "y": 0,
-            "w": 2,
-            "h": 2
-          },
-          "description": "Total number of packets in the current capture",
-          "style": {
-            "display_mode": "chart"
-          }
-        },
-        {
           "id": "478eeff1-2060-4cf6-b12e-6b123b1717f1",
           "title": "Top Protocols",
           "data_source": "packets",
@@ -414,7 +335,7 @@
           },
           "layout": {
             "x": 8,
-            "y": 2,
+            "y": 0,
             "w": 4,
             "h": 4
           },
@@ -467,51 +388,131 @@
           }
         },
         {
-          "id": "c1804a62-f6b1-4b8b-9e77-b051108d7a28",
-          "title": "Packets Over Time",
+          "id": "5b3002fc-51d9-43f0-b8ff-8477f0b38b6b",
+          "title": "AVG DNS Req",
           "data_source": "packets",
           "query": {
             "filter": null,
-            "group_by": [
-              "time",
-              "protocol"
-            ],
+            "group_by": null,
             "metrics": [
               {
-                "type": "sum",
-                "field": "bytes",
-                "as_": "bytes"
+                "type": "avg",
+                "field": "dns_request_frame",
+                "as_": "dns_request_frame"
               }
             ],
             "sort": null,
             "limit": null,
-            "time_bucket": "1s",
+            "time_bucket": null,
             "columns": [
-              "time",
-              "bytes",
-              "protocol"
+              "dns_request_frame"
             ]
           },
           "visualization": {
-            "type": "area",
-            "x_field": "time",
-            "y_field": "bytes",
+            "type": "metric",
+            "x_field": null,
+            "y_field": null,
             "category_field": null,
-            "value_field": "bytes",
-            "series_field": "protocol",
+            "value_field": "dns_request_frame",
+            "series_field": null,
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 6,
+            "y": 4,
+            "w": 2,
+            "h": 2
+          },
+          "description": "Total number of packets in the current capture",
+          "style": {
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "8a52b0d6-5036-4f21-a784-715e9ebc07a1",
+          "title": "New Widget",
+          "data_source": "packets",
+          "query": {
+            "filter": null,
+            "group_by": [
+              "dst_port"
+            ],
+            "metrics": [
+              {
+                "type": "count",
+                "field": "*",
+                "as_": "count"
+              }
+            ],
+            "sort": null,
+            "limit": null,
+            "time_bucket": null,
+            "columns": [
+              "dst_port",
+              "count"
+            ]
+          },
+          "visualization": {
+            "type": "donut",
+            "x_field": null,
+            "y_field": null,
+            "category_field": "dst_port",
+            "value_field": "count",
+            "series_field": null,
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 8,
+            "y": 4,
+            "w": 4,
+            "h": 4
+          },
+          "description": "New widget",
+          "style": {
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "638d9710-4fc5-4ac0-a812-f5c94e05d217",
+          "title": "AVG DNS Res",
+          "data_source": "packets",
+          "query": {
+            "filter": null,
+            "group_by": null,
+            "metrics": [
+              {
+                "type": "avg",
+                "field": "dns_response_frame",
+                "as_": "dns_response_frame"
+              }
+            ],
+            "sort": null,
+            "limit": null,
+            "time_bucket": null,
+            "columns": [
+              "dns_response_frame"
+            ]
+          },
+          "visualization": {
+            "type": "metric",
+            "x_field": null,
+            "y_field": null,
+            "category_field": null,
+            "value_field": "dns_response_frame",
+            "series_field": null,
             "show_legend": false,
             "show_labels": false
           },
           "layout": {
             "x": 6,
             "y": 6,
-            "w": 6,
-            "h": 4
+            "w": 2,
+            "h": 2
           },
-          "description": "Packet rate across the capture timeline",
+          "description": "Total number of packets in the current capture",
           "style": {
-            "x_data_source": "packets",
-            "y_data_source": "packets",
             "display_mode": "chart"
           }
         },
@@ -553,17 +554,20 @@
           "style": null
         },
         {
-          "id": "aa77e04e-9503-40af-9dd1-e5690401f37e",
+          "id": "c1804a62-f6b1-4b8b-9e77-b051108d7a28",
           "title": "Packets Over Time",
-          "data_source": "conversations",
+          "data_source": "packets",
           "query": {
             "filter": null,
-            "group_by": null,
+            "group_by": [
+              "time",
+              "protocol"
+            ],
             "metrics": [
               {
-                "type": "count",
-                "field": "*",
-                "as_": "count"
+                "type": "sum",
+                "field": "bytes",
+                "as_": "bytes"
               }
             ],
             "sort": null,
@@ -571,30 +575,30 @@
             "time_bucket": "1s",
             "columns": [
               "time",
-              "frame.len",
-              "packets"
+              "bytes",
+              "protocol"
             ]
           },
           "visualization": {
-            "type": "scatter",
-            "x_field": "frame.len",
-            "y_field": "packets",
+            "type": "area",
+            "x_field": "time",
+            "y_field": "bytes",
             "category_field": null,
-            "value_field": "packets",
-            "series_field": null,
+            "value_field": "bytes",
+            "series_field": "protocol",
             "show_legend": false,
             "show_labels": false
           },
           "layout": {
             "x": 6,
-            "y": 10,
+            "y": 8,
             "w": 6,
             "h": 4
           },
           "description": "Packet rate across the capture timeline",
           "style": {
             "x_data_source": "packets",
-            "y_data_source": "conversations",
+            "y_data_source": "packets",
             "display_mode": "chart"
           }
         },
@@ -638,6 +642,185 @@
           },
           "description": null,
           "style": {
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "aa77e04e-9503-40af-9dd1-e5690401f37e",
+          "title": "Packets Over Time",
+          "data_source": "conversations",
+          "query": {
+            "filter": null,
+            "group_by": null,
+            "metrics": [
+              {
+                "type": "count",
+                "field": "*",
+                "as_": "count"
+              }
+            ],
+            "sort": null,
+            "limit": null,
+            "time_bucket": "1s",
+            "columns": [
+              "time",
+              "frame.len",
+              "packets"
+            ]
+          },
+          "visualization": {
+            "type": "scatter",
+            "x_field": "frame.len",
+            "y_field": "packets",
+            "category_field": null,
+            "value_field": "packets",
+            "series_field": null,
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 6,
+            "y": 12,
+            "w": 6,
+            "h": 4
+          },
+          "description": "Packet rate across the capture timeline",
+          "style": {
+            "x_data_source": "packets",
+            "y_data_source": "conversations",
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "0e66bfed-cd95-4a54-a0bd-0ca3a0968495",
+          "title": "New Widget",
+          "data_source": "packets",
+          "query": {
+            "filter": null,
+            "group_by": null,
+            "metrics": null,
+            "sort": null,
+            "limit": null,
+            "time_bucket": null,
+            "columns": [
+              "frame.len"
+            ]
+          },
+          "visualization": {
+            "type": "histogram",
+            "x_field": null,
+            "y_field": null,
+            "category_field": null,
+            "value_field": "frame.len",
+            "series_field": null,
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 0,
+            "y": 16,
+            "w": 6,
+            "h": 4
+          },
+          "description": "New widget",
+          "style": {
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "533a6f95-4fbd-4228-86fb-776f970ea0c6",
+          "title": "New Widget",
+          "data_source": "packets",
+          "query": {
+            "filter": null,
+            "group_by": [
+              "bytes",
+              "protocol"
+            ],
+            "metrics": [
+              {
+                "type": "count",
+                "field": "*",
+                "as_": "count"
+              }
+            ],
+            "sort": null,
+            "limit": null,
+            "time_bucket": null,
+            "columns": [
+              "time",
+              "bytes",
+              "count",
+              "protocol"
+            ]
+          },
+          "visualization": {
+            "type": "line",
+            "x_field": "bytes",
+            "y_field": "count",
+            "category_field": null,
+            "value_field": "count",
+            "series_field": "protocol",
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 6,
+            "y": 16,
+            "w": 6,
+            "h": 4
+          },
+          "description": "New widget",
+          "style": {
+            "x_data_source": "packets",
+            "y_data_source": "packets",
+            "display_mode": "chart"
+          }
+        },
+        {
+          "id": "dceea57a-04dc-4d2a-8804-2aebfc4ec9e1",
+          "title": "New Widget",
+          "data_source": "packets",
+          "query": {
+            "filter": null,
+            "group_by": [
+              "protocol"
+            ],
+            "metrics": [
+              {
+                "type": "count",
+                "field": "*",
+                "as_": "count"
+              }
+            ],
+            "sort": null,
+            "limit": null,
+            "time_bucket": null,
+            "columns": [
+              "protocol",
+              "count"
+            ]
+          },
+          "visualization": {
+            "type": "heatmap",
+            "x_field": null,
+            "y_field": null,
+            "category_field": "protocol",
+            "value_field": "count",
+            "series_field": null,
+            "show_legend": false,
+            "show_labels": false
+          },
+          "layout": {
+            "x": 0,
+            "y": 20,
+            "w": 6,
+            "h": 4
+          },
+          "description": "New widget",
+          "style": {
+            "x_data_source": "packets",
+            "y_data_source": "packets",
             "display_mode": "chart"
           }
         }

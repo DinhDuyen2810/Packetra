@@ -25,6 +25,7 @@ from .models import (
     WidgetLayout, DashboardLayout, QueryMetric, QuerySort
 )
 from .repository import DashboardRepository
+from .ui import apply_dashboard_theme
 
 
 def _apply_fixed_screen_size(dialog: QDialog):
@@ -92,190 +93,6 @@ def _build_dual_source_xy_rows(
             row[series_field] = right.get(series_field, left.get(series_field, str(y_source)))
         merged.append(row)
     return merged
-
-
-class TemplatePreviewCard(QFrame):
-    """Selectable card used in the Add Widget chart picker."""
-
-    selected = Signal(str)
-
-    def __init__(self, dashboard: Dashboard, preview_widget: Optional[QWidget] = None, parent=None):
-        super().__init__(parent)
-        self.dashboard = dashboard
-        self.preview_widget = preview_widget
-        self.setup_ui()
-
-    def setup_ui(self):
-        self.setFrameShape(QFrame.Box)
-        self.setFrameShadow(QFrame.Raised)
-        self.setStyleSheet(
-            "TemplatePreviewCard {"
-            "background-color: #f8f8f8;"
-            "border: 1px solid #d9d9d9;"
-            "border-radius: 6px;"
-            "padding: 8px;"
-            "}"
-            "TemplatePreviewCard:hover {"
-            "border: 1px solid #0066cc;"
-            "background-color: #fbfdff;"
-            "}"
-        )
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        title_label = QLabel(self.dashboard.name)
-        title_font = QFont()
-        title_font.setBold(True)
-        title_font.setPointSize(11)
-        title_label.setFont(title_font)
-        layout.addWidget(title_label)
-
-        description_label = QLabel(self.dashboard.description or "")
-        description_label.setWordWrap(True)
-        description_label.setStyleSheet("color: #666; font-size: 9pt;")
-        layout.addWidget(description_label)
-
-        preview_frame = QFrame()
-        preview_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #ddd; border-radius: 4px;")
-        preview_layout = QVBoxLayout(preview_frame)
-        preview_layout.setContentsMargins(6, 6, 6, 6)
-        if self.preview_widget is not None:
-            self.preview_widget.setParent(preview_frame)
-            preview_layout.addWidget(self.preview_widget)
-        else:
-            placeholder = QLabel("Preview unavailable")
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setStyleSheet("color: #999; font-size: 10pt;")
-            preview_layout.addWidget(placeholder)
-        layout.addWidget(preview_frame)
-
-        type_label = QLabel(f"Type: {self.dashboard.widgets[0].visualization.type if self.dashboard.widgets else 'unknown'}")
-        type_label.setStyleSheet("color: #888; font-size: 9pt;")
-        layout.addWidget(type_label)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.selected.emit(self.dashboard.dashboard_id)
-        super().mousePressEvent(event)
-
-
-class ChartTemplatePickerDialog(QDialog):
-    """Dialog that lets users choose a chart template using live previews."""
-
-    def __init__(self, chart_templates: List[Dashboard], query_engine=None, viz_registry=None, parent=None):
-        super().__init__(parent)
-        self.chart_templates = chart_templates
-        self.query_engine = query_engine
-        self.viz_registry = viz_registry
-        self.selected_template_id: Optional[str] = None
-        self.blank_requested = False
-        self.setWindowTitle("Add Chart Widget")
-        self.setup_ui()
-        _apply_fixed_screen_size(self)
-
-    def _preview_config(self, widget_model) -> Dict[str, object]:
-        visualization = widget_model.visualization
-        return {
-            "type": visualization.type,
-            "xField": visualization.x_field,
-            "yField": visualization.y_field,
-            "categoryField": visualization.category_field,
-            "valueField": visualization.value_field,
-            "seriesField": visualization.series_field,
-            "showLegend": False,
-            "showLabels": False,
-            "compactMode": True,
-        }
-
-    def _make_preview_pass_through(self, widget: QWidget):
-        widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        for child in widget.findChildren(QWidget):
-            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-
-    def _create_preview_widget(self, dashboard: Dashboard) -> Optional[QWidget]:
-        if not dashboard.widgets or not self.query_engine or not self.viz_registry:
-            return None
-
-        widget_model = dashboard.widgets[0]
-        try:
-            data = self.query_engine.execute(
-                data_source=widget_model.data_source,
-                query=widget_model.query,
-                global_filter=None,
-            )
-            renderer = self.viz_registry.get_renderer(widget_model.visualization.type)
-            if renderer is None:
-                return None
-            preview = renderer(data, self._preview_config(widget_model), None)
-            preview.setMinimumHeight(180)
-            preview.setMaximumHeight(180)
-            preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self._make_preview_pass_through(preview)
-            return preview
-        except Exception:
-            return None
-
-    def setup_ui(self):
-        main_layout = QVBoxLayout(self)
-
-        header_layout = QHBoxLayout()
-        title_label = QLabel("Choose a chart to add")
-        title_font = QFont()
-        title_font.setPointSize(13)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        header_layout.addWidget(title_label)
-        header_layout.addStretch()
-
-        blank_button = QPushButton("Blank Widget")
-        blank_button.clicked.connect(self.on_blank_requested)
-        header_layout.addWidget(blank_button)
-
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        header_layout.addWidget(cancel_button)
-
-        main_layout.addLayout(header_layout)
-
-        info_label = QLabel("Click a chart to add it immediately to the dashboard.")
-        info_label.setStyleSheet("color: #666; font-size: 10pt;")
-        main_layout.addWidget(info_label)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-
-        content_widget = QWidget()
-        content_layout = QGridLayout(content_widget)
-        content_layout.setContentsMargins(8, 8, 8, 8)
-        content_layout.setHorizontalSpacing(12)
-        content_layout.setVerticalSpacing(12)
-
-        column_count = 3
-        for idx, dashboard in enumerate(self.chart_templates):
-            preview_widget = self._create_preview_widget(dashboard)
-            card = TemplatePreviewCard(dashboard, preview_widget, content_widget)
-            card.selected.connect(self.on_select_template)
-            row = idx // column_count
-            col = idx % column_count
-            content_layout.addWidget(card, row, col)
-
-        for col in range(column_count):
-            content_layout.setColumnStretch(col, 1)
-        content_layout.setRowStretch((len(self.chart_templates) // max(1, column_count)) + 1, 1)
-        scroll_area.setWidget(content_widget)
-        main_layout.addWidget(scroll_area, 1)
-
-    def on_select_template(self, template_id: str):
-        self.blank_requested = False
-        self.selected_template_id = template_id
-        self.accept()
-
-    def on_blank_requested(self):
-        self.blank_requested = True
-        self.selected_template_id = None
-        self.accept()
 
 
 class _NoWheelComboBox(QComboBox):
@@ -490,6 +307,7 @@ class WidgetEditorDialog(QDialog):
         self._preview_timer.timeout.connect(self._refresh_preview)
         self.setWindowTitle(f"Edit Chart - {widget_model.title}")
         self._build_ui()
+        apply_dashboard_theme(self)
         self._set_combo_to_text(self.x_data_source_combo, self._working_copy.data_source)
         self._set_combo_to_text(self.y_data_source_combo, self._working_copy.data_source)
         self._load_source(self._working_copy.data_source)
@@ -2737,6 +2555,10 @@ class GridWidget(QFrame):
                 child.setMaximumHeight(16777215)
             if hasattr(child, "setMaximumWidth"):
                 child.setMaximumWidth(16777215)
+            child_policy = child.sizePolicy()
+            child_policy.setHorizontalPolicy(QSizePolicy.Expanding)
+            child_policy.setVerticalPolicy(QSizePolicy.Expanding)
+            child.setSizePolicy(child_policy)
 
     def _create_drag_pixmap(self) -> QPixmap:
         """Build an opaque drag preview so the moving widget does not look washed out."""
@@ -2753,13 +2575,14 @@ class GridWidget(QFrame):
     
     def setup_ui(self):
         """Build widget UI"""
-        self.setFrameShape(QFrame.Box)
-        self.setFrameShadow(QFrame.Raised)
-        self.setLineWidth(1)
+        self.setObjectName("WidgetCard")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setCursor(QCursor(Qt.ArrowCursor))
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
         
         # Header
         header_frame = QFrame(self)
@@ -2768,8 +2591,10 @@ class GridWidget(QFrame):
             header_frame.setCursor(QCursor(Qt.OpenHandCursor))
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
         title = QLabel(self.widget.title)
         self.title_label = title
+        title.setObjectName("SectionTitle")
         title_font = QFont()
         title_font.setBold(True)
         title.setFont(title_font)
@@ -2778,19 +2603,18 @@ class GridWidget(QFrame):
         header_layout.addWidget(title)
         header_layout.addStretch()
 
+        actions_btn = QPushButton("...")
+        actions_btn.setFixedSize(28, 28)
+        actions_btn.setCursor(QCursor(Qt.ArrowCursor))
+        actions_menu = QMenu(actions_btn)
         if self.widget.visualization.type != "table":
-            toggle_btn = QPushButton("Table" if self._effective_display_mode() != "table" else "Chart")
-            toggle_btn.setMaximumWidth(52)
-            toggle_btn.setCursor(QCursor(Qt.ArrowCursor))
-            toggle_btn.clicked.connect(self._toggle_view_mode)
-            header_layout.addWidget(toggle_btn)
+            switch_label = "View as Table" if self._effective_display_mode() != "table" else "View as Chart"
+            actions_menu.addAction(switch_label, self._toggle_view_mode)
         
         if self.editable:
-            edit_btn = QPushButton("✎")
-            edit_btn.setMaximumWidth(24)
-            edit_btn.setCursor(QCursor(Qt.ArrowCursor))
-            edit_btn.clicked.connect(lambda: self.edit_requested.emit(self.widget.id))
-            header_layout.addWidget(edit_btn)
+            actions_menu.addAction("Configure Widget", lambda: self.edit_requested.emit(self.widget.id))
+        actions_btn.clicked.connect(lambda: actions_menu.popup(actions_btn.mapToGlobal(actions_btn.rect().bottomLeft())))
+        header_layout.addWidget(actions_btn)
         
         self._header_drag_targets = [header_frame, title]
         if self.editable:
@@ -2801,15 +2625,16 @@ class GridWidget(QFrame):
         
         # Content area - execute query and render visualization
         content = QFrame()
+        content.setObjectName("PreviewSurface")
         self.content_frame = content
-        content.setStyleSheet("background-color: #f9f9f9; border: none;")
         content.setCursor(QCursor(Qt.ArrowCursor))
         content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(0)
         compact_body = int(getattr(self.widget.layout, "h", 1) or 1) <= 2
         if compact_body:
-            content_layout.setContentsMargins(6, 6, 6, 6)
+            content_layout.setContentsMargins(4, 4, 4, 4)
         else:
-            content_layout.setContentsMargins(8, 8, 8, 8)
+            content_layout.setContentsMargins(6, 6, 6, 6)
         
         # Try to render widget data if we have query engine
         if self.query_engine and self.viz_registry and self.widget.query:
@@ -2821,15 +2646,15 @@ class GridWidget(QFrame):
                 if renderer:
                     viz_widget = renderer(data, self._visualization_config(), content)
                     self._make_visualization_flexible(viz_widget)
-                    content_layout.addWidget(viz_widget)
+                    content_layout.addWidget(viz_widget, 1)
                 else:
                     error_label = QLabel(f"Renderer '{viz_type}' not found")
                     error_label.setStyleSheet("color: #c00;")
-                    content_layout.addWidget(error_label)
+                    content_layout.addWidget(error_label, 1)
             except Exception as e:
                 error_label = QLabel(f"Error: {str(e)[:50]}...")
                 error_label.setStyleSheet("color: #c00;")
-                content_layout.addWidget(error_label)
+                content_layout.addWidget(error_label, 1)
         else:
             # Show placeholder
             if not self.query_engine:
@@ -2839,8 +2664,9 @@ class GridWidget(QFrame):
             else:
                 msg = "No query configured"
             placeholder = QLabel(msg)
-            placeholder.setStyleSheet("color: #999; font-size: 9pt;")
-            content_layout.addWidget(placeholder)
+            placeholder.setObjectName("MutedText")
+            placeholder.setAlignment(Qt.AlignCenter)
+            content_layout.addWidget(placeholder, 1)
         
         layout.addWidget(content, 1)
         
@@ -2849,7 +2675,7 @@ class GridWidget(QFrame):
         if footer_text:
             footer_label = QLabel(footer_text)
             footer_label.setWordWrap(True)
-            footer_label.setStyleSheet("font-size: 8pt; color: #666;")
+            footer_label.setObjectName("MutedText")
             layout.addWidget(footer_label)
 
     def _event_point_in_self(self, watched, event) -> QPoint:
@@ -2965,6 +2791,7 @@ class DashboardEditor(QDialog):
         self.setWindowTitle(f"Dashboard Editor - {dashboard.name}")
         
         self.setup_ui()
+        apply_dashboard_theme(self)
         _apply_fixed_screen_size(self)
         self._normalize_widget_layouts()
         self.render_grid()
@@ -2972,9 +2799,15 @@ class DashboardEditor(QDialog):
     def setup_ui(self):
         """Build main UI"""
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(16)
         
         # Toolbar
-        toolbar_layout = QHBoxLayout()
+        toolbar_frame = QFrame()
+        toolbar_frame.setObjectName("DashboardTopBar")
+        toolbar_layout = QHBoxLayout(toolbar_frame)
+        toolbar_layout.setContentsMargins(16, 14, 16, 14)
+        toolbar_layout.setSpacing(12)
 
         back_btn = QPushButton("Back")
         back_btn.clicked.connect(self.on_back)
@@ -2983,6 +2816,7 @@ class DashboardEditor(QDialog):
         toolbar_layout.addSpacing(12)
         
         title_label = QLabel(self.dashboard.name)
+        title_label.setObjectName("PageTitle")
         title_font = QFont()
         title_font.setPointSize(12)
         title_font.setBold(True)
@@ -3000,6 +2834,7 @@ class DashboardEditor(QDialog):
             toolbar_layout.addSpacing(20)
             
             add_widget_btn = QPushButton("Add Widget")
+            add_widget_btn.setObjectName("PrimaryButton")
             add_widget_btn.clicked.connect(self.on_add_widget)
             toolbar_layout.addWidget(add_widget_btn)
 
@@ -3028,33 +2863,23 @@ class DashboardEditor(QDialog):
         
         if self.edit_mode:
             save_btn = QPushButton("Save")
-            save_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #0066cc;
-                    color: white;
-                    padding: 5px 15px;
-                    border-radius: 3px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #0052a3;
-                }
-            """)
+            save_btn.setObjectName("PrimaryButton")
             save_btn.clicked.connect(self.on_save)
             toolbar_layout.addWidget(save_btn)
         
-        main_layout.addLayout(toolbar_layout)
+        main_layout.addWidget(toolbar_frame)
         
         # Grid area
         scroll_area = QScrollArea()
         self.scroll_area = scroll_area
         scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("QScrollArea { background-color: #fafafa; }")
         
         self.grid_container = DashboardGridSurface()
+        self.grid_container.setObjectName("DashboardSurface")
         self.grid_container.widget_dropped.connect(self.on_widget_drop_requested)
         self.grid_layout = QGridLayout(self.grid_container)
         self.grid_layout.setSpacing(self.GRID_SPACING)
+        self.grid_layout.setContentsMargins(12, 12, 12, 12)
         
         # Grid styling
         for row in range(200):
@@ -3098,10 +2923,21 @@ class DashboardEditor(QDialog):
                 item.widget().deleteLater()
 
         if not self.dashboard.widgets:
-            empty_label = QLabel("This dashboard has no widgets yet.")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("color: #999; font-size: 11pt; padding: 24px;")
-            self.grid_layout.addWidget(empty_label, 0, 0, 1, 12)
+            empty_frame = QFrame()
+            empty_frame.setObjectName("PreviewSurface")
+            empty_layout = QVBoxLayout(empty_frame)
+            empty_layout.setContentsMargins(24, 28, 24, 28)
+            empty_layout.setSpacing(10)
+            empty_title = QLabel("This dashboard has no widgets yet.")
+            empty_title.setObjectName("SectionTitle")
+            empty_title.setAlignment(Qt.AlignCenter)
+            empty_layout.addWidget(empty_title)
+            empty_body = QLabel("Add widgets to analyze packets, endpoints, protocols, DNS, HTTP, and conversations.")
+            empty_body.setObjectName("MutedText")
+            empty_body.setWordWrap(True)
+            empty_body.setAlignment(Qt.AlignCenter)
+            empty_layout.addWidget(empty_body)
+            self.grid_layout.addWidget(empty_frame, 0, 0, 1, 12)
             self.update_status()
             return
         
@@ -3253,48 +3089,50 @@ class DashboardEditor(QDialog):
             QMessageBox.warning(self, "Error", "Cannot edit templates")
             return
         
-        new_x, new_y = 0, 0
-        
-        chart_templates = self.template_repo.list_chart_template_dashboards() if self.template_repo else []
-        picker = ChartTemplatePickerDialog(
-            chart_templates,
+        width, height = 3, 2
+        new_widget = DashboardWidget(
+            id=str(uuid4()),
+            title="New Widget",
+            data_source="packets",
+            query=WidgetQuery(
+                metrics=[QueryMetric(type="count", field="*", as_="count")]
+            ),
+            visualization=VisualizationConfig(type="metric", value_field="count", show_legend=False),
+            layout=WidgetLayout(x=0, y=0, w=width, h=height),
+            description="New widget",
+        )
+        new_x, new_y = self._find_first_fit_position(width, height)
+        new_widget.layout = WidgetLayout(x=new_x, y=new_y, w=width, h=height)
+
+        available_sources = []
+        if self.query_engine and getattr(self.query_engine, 'registry', None):
+            try:
+                available_sources = list(self.query_engine.registry.list_sources())
+            except Exception:
+                available_sources = []
+
+        available_visualizations = []
+        if self.viz_registry:
+            try:
+                available_visualizations = [viz_type for viz_type in self.viz_registry.list_types() if viz_type != 'topology']
+            except Exception:
+                available_visualizations = []
+
+        editor = WidgetEditorDialog(
+            new_widget,
+            available_sources or [new_widget.data_source],
+            available_visualizations or [new_widget.visualization.type],
             query_engine=self.query_engine,
             viz_registry=self.viz_registry,
             parent=self,
         )
-        if picker.exec() != QDialog.Accepted:
+        if editor.exec() != QDialog.Accepted or editor.delete_requested:
             return
 
-        if not picker.blank_requested:
-            new_widget = self.template_repo.create_widget_from_chart_template(picker.selected_template_id)
-            if not new_widget:
-                QMessageBox.warning(self, "Error", "Failed to load chart template")
-                return
-            if new_widget.visualization.type == 'metric':
-                width, height = 3, 2
-            else:
-                width, height = 6, 4
-        else:
-            width, height = 3, 2
-            new_widget = DashboardWidget(
-                id=str(uuid4()),
-                title="New Widget",
-                data_source="packets",
-                query=WidgetQuery(
-                    metrics=[QueryMetric(type="count", field="*", as_="count")]
-                ),
-                visualization=VisualizationConfig(type="metric", value_field="count", show_legend=False),
-                layout=WidgetLayout(x=0, y=0, w=width, h=height),
-                description="New widget",
-            )
-
-        new_x, new_y = self._find_first_fit_position(width, height)
-        new_widget.layout = WidgetLayout(x=new_x, y=new_y, w=width, h=height)
-        
+        editor.apply_changes()
         self.dashboard.widgets.append(new_widget)
         self._normalize_widget_layouts()
         self.render_grid()
-        QMessageBox.information(self, "Success", "Widget added. Edit to customize.")
 
     def on_back(self):
         self._cancel_drag_preview()

@@ -9698,24 +9698,44 @@ def _ftp_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
             **_byte_mapping(offset, cursor, max(1, line_len), PACKET_BYTE_SOURCE),
             'children': [],
         }
-        if idx == 0 and isinstance(ftp_info, dict) and str(ftp_info.get('kind', '')) == 'response':
-            code = int(ftp_info.get('code', 0) or 0)
-            arg = str(ftp_info.get('arg', '') or '')
-            if code > 0:
-                line_node['children'].append({
-                    'title': f'Response code: {_ftp_response_code_text(code)} ({code})',
-                    **_byte_mapping(offset, cursor, 3, PACKET_BYTE_SOURCE),
-                })
-                if arg:
+        if idx == 0 and isinstance(ftp_info, dict):
+            kind = str(ftp_info.get('kind', '') or '')
+            if kind == 'response':
+                code = int(ftp_info.get('code', 0) or 0)
+                arg = str(ftp_info.get('arg', '') or '')
+                separator = str(ftp_info.get('separator', '') or '')
+                if code > 0:
+                    response_label = 'Response code'
+                    if separator == '-':
+                        response_label = 'Response code (multiline)'
                     line_node['children'].append({
-                        'title': f'Response arg: {arg}',
-                        **_byte_mapping(offset, cursor + 4, max(1, len(raw_line) - 4), PACKET_BYTE_SOURCE),
+                        'title': f'{response_label}: {_ftp_response_code_text(code)} ({code})',
+                        **_byte_mapping(offset, cursor, 3, PACKET_BYTE_SOURCE),
                     })
-            elif arg:
-                line_node['children'].append({
-                    'title': f'Response arg: {arg}',
-                    **_byte_mapping(offset, cursor, max(1, len(raw_line)), PACKET_BYTE_SOURCE),
-                })
+                    if arg:
+                        line_node['children'].append({
+                            'title': f'Response message: {arg}',
+                            **_byte_mapping(offset, cursor + 4, max(1, len(raw_line) - 4), PACKET_BYTE_SOURCE),
+                        })
+                elif arg:
+                    line_node['children'].append({
+                        'title': f'Response message: {arg}',
+                        **_byte_mapping(offset, cursor, max(1, len(raw_line)), PACKET_BYTE_SOURCE),
+                    })
+            elif kind == 'request':
+                command = str(ftp_info.get('command', '') or '')
+                arg = str(ftp_info.get('arg', '') or '')
+                if command:
+                    line_node['children'].append({
+                        'title': f'Request command: {command}',
+                        **_byte_mapping(offset, cursor, len(command), PACKET_BYTE_SOURCE),
+                    })
+                if arg:
+                    arg_offset = cursor + len(command) + 1 if command else cursor
+                    line_node['children'].append({
+                        'title': f'Request argument: {arg}',
+                        **_byte_mapping(offset, arg_offset, max(1, len(raw_line) - len(command) - 1), PACKET_BYTE_SOURCE),
+                    })
         children.append(line_node)
         cursor += line_len
 

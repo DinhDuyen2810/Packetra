@@ -10,7 +10,7 @@ import math
 from typing import List, Dict, Any, Optional, Callable
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QLabel,
-    QAbstractItemView, QFrame
+    QAbstractItemView, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QDateTime, QMargins, QPoint, QPointF, QRectF, QObject, QEvent
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen, QPolygonF
@@ -94,11 +94,38 @@ def _compact_category_label(value: Any, *, max_chars: int = 20) -> str:
 
 
 def _build_chart_view(chart: QChart, parent: QWidget = None) -> QChartView:
+    if chart is not None:
+        chart.setBackgroundRoundness(0)
+        try:
+            chart.layout().setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
     view = QChartView(chart, parent)
     view.setRenderHint(QPainter.Antialiasing)
     view.setStyleSheet("background: transparent;")
     view.setFrameShape(QFrame.NoFrame)
+    view.setContentsMargins(0, 0, 0, 0)
+    view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     return view
+
+
+def _edge_padding(length: int, *, ratio: float = 0.05, minimum: int = 6, maximum: Optional[int] = None) -> int:
+    padding = max(minimum, int(round(max(0, length) * ratio)))
+    if maximum is not None:
+        padding = min(padding, maximum)
+    return padding
+
+
+def _square_plot_rect(rect, *, ratio: float = 0.05, minimum: int = 6) -> QRectF:
+    outer = QRectF(rect)
+    inset = _edge_padding(int(min(outer.width(), outer.height())), ratio=ratio, minimum=minimum)
+    outer = outer.adjusted(inset, inset, -inset, -inset)
+    side = min(outer.width(), outer.height())
+    if side <= 0:
+        return outer
+    left = outer.left() + ((outer.width() - side) / 2.0)
+    top = outer.top() + ((outer.height() - side) / 2.0)
+    return QRectF(left, top, side, side)
 
 
 def _sanitize_font_scale(raw_scale: Any) -> float:
@@ -444,9 +471,9 @@ def _apply_series_label_font(series, config: Optional[Dict[str, Any]], *, compac
 def _set_chart_margins(chart: QChart, config: Optional[Dict[str, Any]], *, left: int, top: int, right: int, bottom: int):
     compact_mode = bool((config or {}).get("compactMode", False))
     if compact_mode:
-        chart.setMargins(QMargins(max(8, left - 6), max(4, top - 4), max(6, right - 4), max(8, bottom - 6)))
+        chart.setMargins(QMargins(max(4, left - 14), max(2, top - 8), max(4, right - 8), max(4, bottom - 14)))
     else:
-        chart.setMargins(QMargins(left, top, right, bottom))
+        chart.setMargins(QMargins(max(8, int(round(left * 0.55))), max(4, int(round(top * 0.6))), max(6, int(round(right * 0.55))), max(8, int(round(bottom * 0.55)))))
 
 
 def _format_number(value: float) -> str:
@@ -721,7 +748,7 @@ class _RadarCanvas(_InteractiveChartCanvas):
         self.show_axis_labels = show_axis_labels
         self.accent_color = QColor(accent_color or QColor("#0066cc"))
         self.preview_font_scale = _sanitize_font_scale(preview_font_scale)
-        self.setMinimumHeight(160 if compact_mode and show_axis_labels else (120 if compact_mode else 280))
+        self.setMinimumHeight(120 if compact_mode and show_axis_labels else (96 if compact_mode else 220))
         if not compact_mode or show_axis_labels:
             label_font = self.font()
             label_font.setPointSize(_scaled_size(max(label_font.pointSize(), 9), self.preview_font_scale, minimum=9))
@@ -743,9 +770,9 @@ class _RadarCanvas(_InteractiveChartCanvas):
             label_font.setBold(True)
             painter.setFont(label_font)
 
-        margin = 30 if self.compact_mode and self.show_axis_labels else (18 if self.compact_mode else 44)
-        center = self.rect().center()
-        radius = min(self.width(), self.height()) / 2 - margin
+        plot_rect = _square_plot_rect(self.rect(), ratio=0.05, minimum=6 if self.compact_mode else 10)
+        center = plot_rect.center()
+        radius = plot_rect.width() / 2.0
         if radius <= 0:
             return
 
@@ -825,7 +852,7 @@ class _TreemapCanvas(_InteractiveChartCanvas):
         self.compact_mode = compact_mode
         self.palette_config = palette_config or {}
         self.preview_font_scale = _sanitize_font_scale(preview_font_scale)
-        self.setMinimumHeight(140 if compact_mode else 260)
+        self.setMinimumHeight(110 if compact_mode else 210)
 
     def paintEvent(self, event):
         if not self.groups:
@@ -839,7 +866,7 @@ class _TreemapCanvas(_InteractiveChartCanvas):
             font = painter.font()
             font.setPointSize(_scaled_size(max(font.pointSize(), 8), self.preview_font_scale, minimum=8))
             painter.setFont(font)
-        outer_rect = self.rect().adjusted(6, 6, -6, -6)
+        outer_rect = _square_plot_rect(self.rect(), ratio=0.05, minimum=6 if self.compact_mode else 8)
         total_value = sum(group['value'] for group in self.groups) or 1.0
         current_x = outer_rect.left()
 
@@ -898,7 +925,7 @@ class _SunburstCanvas(_InteractiveChartCanvas):
         self.palette_config = palette_config or {}
         self.show_segment_labels = show_segment_labels
         self.preview_font_scale = _sanitize_font_scale(preview_font_scale)
-        self.setMinimumHeight(180 if compact_mode and show_segment_labels else (140 if compact_mode else 280))
+        self.setMinimumHeight(130 if compact_mode and show_segment_labels else (110 if compact_mode else 220))
 
     def paintEvent(self, event):
         if not self.groups:
@@ -908,7 +935,7 @@ class _SunburstCanvas(_InteractiveChartCanvas):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        outer_rect = self.rect().adjusted(12, 12, -12, -12)
+        outer_rect = _square_plot_rect(self.rect(), ratio=0.05, minimum=8 if self.compact_mode else 10)
         size = min(outer_rect.width(), outer_rect.height())
         center = outer_rect.center()
         outer_radius = size / 2.0
@@ -1171,7 +1198,7 @@ class _AreaCanvas(_InteractiveChartCanvas):
         self.line_color = QColor(line_color or QColor("#0066cc"))
         self.fill_color = QColor(fill_color or _with_alpha(self.line_color, 90))
         self.preview_font_scale = _sanitize_font_scale(preview_font_scale)
-        self.setMinimumHeight(120 if compact_mode else 260)
+        self.setMinimumHeight(104 if compact_mode else 210)
 
     def paintEvent(self, event):
         if not self.points:
@@ -1186,10 +1213,10 @@ class _AreaCanvas(_InteractiveChartCanvas):
             font.setPointSize(_scaled_size(max(font.pointSize(), 8), self.preview_font_scale, minimum=8))
             painter.setFont(font)
 
-        left_margin = 10 if self.compact_mode else 46
-        top_margin = 10
-        right_margin = 10
-        bottom_margin = 12 if self.compact_mode else 34
+        left_margin = _edge_padding(self.width(), ratio=0.05, minimum=8 if self.compact_mode else 28, maximum=34 if self.compact_mode else 42)
+        top_margin = _edge_padding(self.height(), ratio=0.05, minimum=6, maximum=14)
+        right_margin = _edge_padding(self.width(), ratio=0.05, minimum=6, maximum=14)
+        bottom_margin = _edge_padding(self.height(), ratio=0.05, minimum=8 if self.compact_mode else 24, maximum=28 if self.compact_mode else 34)
         plot_rect = self.rect().adjusted(left_margin, top_margin, -right_margin, -bottom_margin)
         if plot_rect.width() <= 0 or plot_rect.height() <= 0:
             return
@@ -1295,7 +1322,7 @@ class _MultiAreaCanvas(_InteractiveChartCanvas):
         self.is_datetime = is_datetime
         self.compact_mode = compact_mode
         self.preview_font_scale = _sanitize_font_scale(preview_font_scale)
-        self.setMinimumHeight(120 if compact_mode else 260)
+        self.setMinimumHeight(104 if compact_mode else 210)
 
     def paintEvent(self, event):
         if not self.series_points:
@@ -1315,10 +1342,10 @@ class _MultiAreaCanvas(_InteractiveChartCanvas):
             font.setPointSize(_scaled_size(max(font.pointSize(), 8), self.preview_font_scale, minimum=8))
             painter.setFont(font)
 
-        left_margin = 10 if self.compact_mode else 46
-        top_margin = 10
-        right_margin = 10
-        bottom_margin = 12 if self.compact_mode else 34
+        left_margin = _edge_padding(self.width(), ratio=0.05, minimum=8 if self.compact_mode else 28, maximum=34 if self.compact_mode else 42)
+        top_margin = _edge_padding(self.height(), ratio=0.05, minimum=6, maximum=14)
+        right_margin = _edge_padding(self.width(), ratio=0.05, minimum=6, maximum=14)
+        bottom_margin = _edge_padding(self.height(), ratio=0.05, minimum=8 if self.compact_mode else 24, maximum=28 if self.compact_mode else 34)
         plot_rect = self.rect().adjusted(left_margin, top_margin, -right_margin, -bottom_margin)
         if plot_rect.width() <= 0 or plot_rect.height() <= 0:
             return
@@ -1617,7 +1644,7 @@ class BarChartRenderer:
         chart.legend().setVisible(bool((config or {}).get("showLegend", True)))
         _apply_chart_legend_font(chart, config)
         chart.setBackgroundVisible(False)
-        _set_chart_margins(chart, config, left=34, top=12, right=12, bottom=28)
+        _set_chart_margins(chart, config, left=24, top=8, right=8, bottom=18)
 
         axis_x = QBarCategoryAxis()
         axis_x.append(display_categories)
@@ -1682,7 +1709,7 @@ class HorizontalBarChartRenderer:
             if value is None or not category:
                 continue
             categories.append(category)
-            display_categories.append(_compact_category_label(category, max_chars=16))
+            display_categories.append(_compact_category_label(category, max_chars=14))
             values.append(value)
 
         if not values:
@@ -1707,7 +1734,7 @@ class HorizontalBarChartRenderer:
         chart.legend().setVisible(bool((config or {}).get("showLegend", True)))
         _apply_chart_legend_font(chart, config)
         chart.setBackgroundVisible(False)
-        _set_chart_margins(chart, config, left=46, top=12, right=18, bottom=24)
+        _set_chart_margins(chart, config, left=28, top=8, right=10, bottom=18)
 
         axis_y = QBarCategoryAxis()
         axis_y.append(display_categories)
@@ -1991,7 +2018,7 @@ class ScatterChartRenderer:
         chart.addSeries(series)
         chart.legend().setVisible(False)
         chart.setBackgroundVisible(False)
-        chart.setMargins(QMargins(12, 24, 12, 12))
+        chart.setMargins(QMargins(6, 8, 6, 6))
 
         if hasattr(series, "setName"):
             series.setName(_humanize_field_name(y_field, fallback="Value"))

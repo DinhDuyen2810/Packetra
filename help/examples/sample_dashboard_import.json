@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "dashboard_id": "11111111-2222-3333-4444-555555555555",
+  "name": "Sample Imported Dashboard",
+  "description": "Reference dashboard JSON for import and customization.",
+  "is_template": false,
+  "created_at": "2026-06-17T08:00:00",
+  "updated_at": "2026-06-17T08:00:00",
+  "layout": {
+    "columns": 12,
+    "row_height": 80
+  },
+  "widgets": [
+    {
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "title": "Top Protocols",
+      "data_source": "protocol_stats",
+      "query": {
+        "group_by": [
+          "protocol"
+        ],
+        "metrics": [
+          {
+            "type": "count",
+            "field": "*",
+            "as": "packets"
+          }
+        ],
+        "sort": [
+          {
+            "field": "packets",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "visualization": {
+        "type": "bar",
+        "category_field": "protocol",
+        "value_field": "packets",
+        "show_legend": false,
+        "show_labels": true
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Top protocols by packet count",
+      "style": {
+        "display_mode": "chart"
+      }
+    },
+    {
+      "id": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      "title": "DNS Query Table",
+      "data_source": "dns_queries",
+      "query": {
+        "sort": [
+          {
+            "field": "count",
+            "direction": "desc"
+          }
+        ],
+        "limit": 15,
+        "columns": [
+          "query",
+          "count",
+          "responses",
+          "avg_time_ms"
+        ]
+      },
+      "visualization": {
+        "type": "table",
+        "show_legend": false,
+        "show_labels": false
+      },
+      "layout": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "description": "Top DNS rows in table form"
+    }
+  ],
+  "global_filter": "tcp or udp or dns",
+  "data_scope": "displayed_packets",
+  "tags": [
+    "sample",
+    "import",
+    "reference"
+  ]
+}

@@ -1,7 +1,7 @@
 """
 Dashboard Overview Gallery UI.
 
-Displays dashboard templates and user dashboards as card grid with search/filter/sort.
+Displays user dashboards as a card grid with search/sort.
 """
 
 from PySide6.QtWidgets import (
@@ -15,8 +15,9 @@ from PySide6.QtGui import QIcon, QPixmap, QColor, QFont, QPainter
 from typing import List, Callable, Optional
 import json
 
-from .models import Dashboard, DashboardSummary, DashboardLayout, dashboard_to_summary
+from .models import Dashboard, DashboardSummary, DashboardLayout
 from .repository import DashboardRepository, DashboardTemplateRepository
+from .ui import apply_dashboard_theme
 
 
 class _ScaledPixmapWidget(QWidget):
@@ -58,7 +59,7 @@ class _ScaledPixmapWidget(QWidget):
         draw_height = source_height * scale
         target_rect = QRectF(
             (target_width - draw_width) / 2.0,
-            (target_height - draw_height) / 2.0,
+            0.0,
             draw_width,
             draw_height,
         )
@@ -69,6 +70,10 @@ class _ScaledPixmapWidget(QWidget):
 
 class DashboardCard(QFrame):
     """A card widget displaying a dashboard summary"""
+
+    USER_CARD_HEIGHT = 500
+    USER_FOOTER_HEIGHT = 22
+    USER_PREVIEW_HEIGHT = 440
 
     clicked = Signal(str)
     double_clicked = Signal(str)  # dashboard ID - emitted on double-click
@@ -85,48 +90,48 @@ class DashboardCard(QFrame):
         self.subtitle = subtitle
         self.single_click_enabled = single_click_enabled
         self.thumbnail_interactive = thumbnail_interactive
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setup_ui()
     
     def setup_ui(self):
         """Build card UI"""
-        self.setFrameShape(QFrame.Box)
-        self.setFrameShadow(QFrame.Raised)
-        self.setLineWidth(1)
-        self.setStyleSheet("""
-            DashboardCard {
-                background-color: #f5f5f5;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                padding: 12px;
-            }
-            DashboardCard:hover {
-                border: 1px solid #0066cc;
-                background-color: #fafafa;
-            }
-        """)
+        self.setObjectName("GalleryCard")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(4)
         
         # Header: title + more button
         header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
         title_label = QLabel(self.summary.name)
+        title_label.setWordWrap(False)
+        title_label.setToolTip(self.summary.name)
         title_font = QFont()
         title_font.setBold(True)
         title_font.setPointSize(11)
+        title_label.setObjectName("SectionTitle")
         title_label.setFont(title_font)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
 
         if self.is_template:
             use_btn = QPushButton("Use Template")
+            use_btn.setObjectName("PrimaryButton")
             use_btn.setMinimumHeight(28)
             use_btn.clicked.connect(lambda: self.use_template_clicked.emit(self.summary.id))
             header_layout.addWidget(use_btn)
         else:
-            more_btn = QPushButton("⋮")
-            more_btn.setMaximumWidth(32)
+            more_btn = QPushButton("...")
+            more_btn.setFixedSize(18, 18)
+            more_btn.setObjectName("CardMoreButton")
+            more_btn.setFlat(True)
+            more_btn.setCursor(Qt.PointingHandCursor)
+            more_btn.setFocusPolicy(Qt.NoFocus)
+            more_btn.setToolTip("More actions")
             more_btn.clicked.connect(lambda: self.more_clicked.emit(self.summary.id, more_btn))
             header_layout.addWidget(more_btn)
         
@@ -136,78 +141,67 @@ class DashboardCard(QFrame):
         if self.summary.description and not self.is_template:
             desc_label = QLabel(self.summary.description)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: #666; font-size: 9pt;")
+            desc_label.setObjectName("MutedText")
             layout.addWidget(desc_label)
 
         if self.subtitle and not self.is_template:
             subtitle_label = QLabel(self.subtitle)
-            subtitle_label.setStyleSheet("color: #999; font-size: 8pt;")
+            subtitle_label.setObjectName("MutedText")
             subtitle_label.setWordWrap(True)
             layout.addWidget(subtitle_label)
         
         # Thumbnail / live preview
         thumbnail_frame = QFrame()
+        thumbnail_frame.setObjectName("PreviewSurface")
         self.thumbnail_frame = thumbnail_frame
+        thumbnail_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if self.is_template:
-            thumbnail_frame.setStyleSheet("background-color: transparent; border: none;")
             thumbnail_frame.setMinimumHeight(170)
         else:
-            thumbnail_frame.setStyleSheet("background-color: transparent; border: none;")
-            thumbnail_frame.setMinimumHeight(120)
+            thumbnail_frame.setMinimumHeight(220)
         thumbnail_layout = QVBoxLayout(thumbnail_frame)
         thumbnail_layout.setContentsMargins(4 if self.is_template else 0, 4 if self.is_template else 0, 4 if self.is_template else 0, 4 if self.is_template else 0)
+        thumbnail_layout.setSpacing(0)
         if self.preview_widget is not None:
             self.preview_widget.setParent(thumbnail_frame)
+            self.preview_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             thumbnail_layout.addWidget(self.preview_widget)
         else:
             placeholder_label = QLabel("Preview unavailable")
             placeholder_label.setAlignment(Qt.AlignCenter)
-            placeholder_label.setStyleSheet("color: #888; font-size: 9pt;")
+            placeholder_label.setObjectName("MutedText")
             thumbnail_layout.addWidget(placeholder_label)
-        layout.addWidget(thumbnail_frame, 1 if self.is_template else 0)
-        if not self.is_template:
-            layout.addStretch()
+        layout.addWidget(thumbnail_frame, 1)
         
         # Stats
         if not self.is_template:
-            stats_layout = QHBoxLayout()
+            self.setMinimumHeight(self.USER_CARD_HEIGHT)
+            self.setMaximumHeight(self.USER_CARD_HEIGHT)
+
+            footer_widget = QWidget()
+            footer_widget.setFixedHeight(self.USER_FOOTER_HEIGHT)
+            stats_layout = QHBoxLayout(footer_widget)
+            stats_layout.setContentsMargins(0, 0, 0, 0)
+            stats_layout.setSpacing(6)
 
             widgets_label = QLabel(f"Widgets: {self.summary.widget_count}")
-            widgets_label.setStyleSheet("font-size: 9pt; color: #333;")
+            widgets_label.setObjectName("MutedText")
             stats_layout.addWidget(widgets_label)
 
             stats_layout.addStretch()
 
             updated_label = QLabel(f"Updated: {self.summary.updated_at[:10]}")
-            updated_label.setStyleSheet("font-size: 8pt; color: #999;")
+            updated_label.setObjectName("MutedText")
             stats_layout.addWidget(updated_label)
 
-            layout.addLayout(stats_layout)
-
-        if self.is_template:
-            layout.addStretch()
+            layout.addWidget(footer_widget, 0, Qt.AlignBottom)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.is_template or not hasattr(self, "thumbnail_frame") or self.thumbnail_frame is None:
             return
-        available_width = max(260, self.width() - 16)
-        preview_ratio = 0.62
-        if self.preview_widget is not None:
-            property_ratio = self.preview_widget.property("previewAspectRatio")
-            if property_ratio is not None:
-                try:
-                    preview_ratio = max(0.42, min(float(property_ratio), 0.82))
-                except (TypeError, ValueError):
-                    preview_ratio = 0.62
-            else:
-                hint = self.preview_widget.sizeHint()
-                if hint.width() > 0:
-                    preview_ratio = max(0.42, min(hint.height() / hint.width(), 0.82))
-        target_height = int(available_width * preview_ratio * 0.95)
-        target_height = max(240, min(target_height, 520))
-        self.thumbnail_frame.setMinimumHeight(target_height)
-        self.thumbnail_frame.setMaximumHeight(target_height)
+        self.thumbnail_frame.setMinimumHeight(self.USER_PREVIEW_HEIGHT)
+        self.thumbnail_frame.setMaximumHeight(self.USER_PREVIEW_HEIGHT)
 
     def _event_targets_thumbnail(self, event) -> bool:
         if not self.thumbnail_interactive:
@@ -249,15 +243,20 @@ class DashboardOverviewDialog(QDialog):
         self.setWindowTitle("Dashboard")
         self.setGeometry(100, 100, 1200, 900)
         
-        # Filter and sort state
-        self.current_filter = "all"  # all, templates, my_dashboards
+        # Search/sort state
         self.current_sort = "recently_updated"
         self.search_text = ""
         self.detail_dashboard: Optional[Dashboard] = None
         self.detail_is_template = False
         self.detail_display_mode = "chart"
+        self._dashboard_preview_cache: dict[tuple[str, str], tuple[QPixmap, float]] = {}
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(80)
+        self._search_timer.timeout.connect(self.load_dashboards)
         
         self.setup_ui()
+        apply_dashboard_theme(self)
         self._apply_fixed_screen_size()
         self.load_dashboards()
 
@@ -277,79 +276,105 @@ class DashboardOverviewDialog(QDialog):
     def setup_ui(self):
         """Build main UI"""
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(18, 16, 18, 18)
+        main_layout.setSpacing(12)
 
         self.stack = QStackedWidget()
         main_layout.addWidget(self.stack)
 
         self.gallery_page = QWidget()
         gallery_layout = QVBoxLayout(self.gallery_page)
+        gallery_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_layout.setSpacing(12)
 
         # Header with title and create button
         header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(10)
+        title_block = QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(2)
+
         title_label = QLabel("Dashboard")
+        title_label.setObjectName("PageTitle")
         title_font = QFont()
-        title_font.setPointSize(14)
+        title_font.setPointSize(13)
         title_font.setBold(True)
         title_label.setFont(title_font)
-        header_layout.addWidget(title_label)
+        title_block.addWidget(title_label)
+
+        subtitle_label = QLabel("Analyze the current capture with saved views.")
+        subtitle_label.setObjectName("PageSubtitle")
+        title_block.addWidget(subtitle_label)
+
+        header_layout.addLayout(title_block)
         header_layout.addStretch()
         
         import_btn = QPushButton("Import Dashboard")
+        import_btn.setMinimumHeight(24)
+        import_btn.setAutoDefault(False)
+        import_btn.setDefault(False)
         import_btn.clicked.connect(self.on_import_dashboard)
         header_layout.addWidget(import_btn)
         
         create_btn = QPushButton("Create Dashboard")
+        create_btn.setObjectName("PrimaryButton")
+        create_btn.setMinimumHeight(24)
+        create_btn.setAutoDefault(False)
+        create_btn.setDefault(False)
         create_btn.clicked.connect(self.on_create_dashboard)
         header_layout.addWidget(create_btn)
         
         gallery_layout.addLayout(header_layout)
         
-        # Search/filter/sort toolbar
-        toolbar_layout = QHBoxLayout()
+        # Search/sort toolbar
+        toolbar_frame = QFrame()
+        toolbar_frame.setObjectName("DashboardTopBar")
+        toolbar_layout = QHBoxLayout(toolbar_frame)
+        toolbar_layout.setContentsMargins(14, 10, 14, 10)
+        toolbar_layout.setSpacing(10)
         
         search_label = QLabel("Search:")
+        search_label.setObjectName("MutedText")
         toolbar_layout.addWidget(search_label)
         
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search dashboards...")
-        self.search_input.setMaximumWidth(250)
+        self.search_input.setMinimumWidth(260)
+        self.search_input.setMaximumWidth(320)
+        self.search_input.setMinimumHeight(24)
         self.search_input.textChanged.connect(self.on_search_changed)
+        self.search_input.returnPressed.connect(self.on_search_submitted)
         toolbar_layout.addWidget(self.search_input)
         
-        toolbar_layout.addSpacing(20)
-        
-        filter_label = QLabel("View:")
-        toolbar_layout.addWidget(filter_label)
-        
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "Templates", "My Dashboards"])
-        self.filter_combo.currentTextChanged.connect(self.on_filter_changed)
-        self.filter_combo.setMaximumWidth(150)
-        toolbar_layout.addWidget(self.filter_combo)
-        
-        toolbar_layout.addSpacing(20)
-        
         sort_label = QLabel("Sort:")
+        sort_label.setObjectName("MutedText")
         toolbar_layout.addWidget(sort_label)
         
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["Recently Updated", "Name (A-Z)", "Name (Z-A)", "Created Date"])
         self.sort_combo.currentTextChanged.connect(self.on_sort_changed)
-        self.sort_combo.setMaximumWidth(150)
+        self.sort_combo.setMinimumWidth(188)
+        self.sort_combo.setMaximumWidth(210)
+        self.sort_combo.setMinimumHeight(24)
         toolbar_layout.addWidget(self.sort_combo)
         
         toolbar_layout.addStretch()
-        gallery_layout.addLayout(toolbar_layout)
+        gallery_layout.addWidget(toolbar_frame)
         
         # Scroll area with dashboards
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(0, 0, 0, 8)
+        self.content_layout.setSpacing(14)
         
         # User dashboards section
         self.user_label = QLabel("My Dashboards")
+        self.user_label.setObjectName("SectionTitle")
         user_font = QFont()
         user_font.setBold(True)
         user_font.setPointSize(11)
@@ -357,24 +382,13 @@ class DashboardOverviewDialog(QDialog):
         self.content_layout.addWidget(self.user_label)
         
         self.user_grid_widget = QWidget()
+        self.user_grid_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.user_grid = QGridLayout(self.user_grid_widget)
+        self.user_grid.setContentsMargins(0, 0, 0, 0)
         self.user_grid.setSpacing(12)
-        self.content_layout.addWidget(self.user_grid_widget)
-
-        # Templates section
-        self.templates_label = QLabel("Chart Templates")
-        templates_font = QFont()
-        templates_font.setBold(True)
-        templates_font.setPointSize(11)
-        self.templates_label.setFont(templates_font)
-        self.content_layout.addWidget(self.templates_label)
-
-        self.templates_grid_widget = QWidget()
-        self.templates_grid = QGridLayout(self.templates_grid_widget)
-        self.templates_grid.setSpacing(12)
-        self.content_layout.addWidget(self.templates_grid_widget)
-        
-        self.content_layout.addStretch()
+        self.user_grid.setAlignment(Qt.AlignTop)
+        self.content_layout.addWidget(self.user_grid_widget, 0, Qt.AlignTop)
+        self.content_layout.addStretch(1)
         scroll_area.setWidget(self.content_widget)
         gallery_layout.addWidget(scroll_area)
 
@@ -382,13 +396,18 @@ class DashboardOverviewDialog(QDialog):
 
         self.detail_page = QWidget()
         detail_layout = QVBoxLayout(self.detail_page)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(14)
 
         detail_header = QHBoxLayout()
         self.back_button = QPushButton("Back")
+        self.back_button.setAutoDefault(False)
+        self.back_button.setDefault(False)
         self.back_button.clicked.connect(self.show_gallery_page)
         detail_header.addWidget(self.back_button)
 
         self.detail_title_label = QLabel("")
+        self.detail_title_label.setObjectName("PageTitle")
         detail_title_font = QFont()
         detail_title_font.setPointSize(14)
         detail_title_font.setBold(True)
@@ -398,19 +417,21 @@ class DashboardOverviewDialog(QDialog):
         detail_header.addStretch()
 
         self.detail_action_button = QPushButton("")
+        self.detail_action_button.setAutoDefault(False)
+        self.detail_action_button.setDefault(False)
         self.detail_action_button.clicked.connect(self.on_detail_action)
         detail_header.addWidget(self.detail_action_button)
 
         detail_layout.addLayout(detail_header)
 
         self.detail_description_label = QLabel("")
+        self.detail_description_label.setObjectName("PageSubtitle")
         self.detail_description_label.setWordWrap(True)
-        self.detail_description_label.setStyleSheet("color: #666; font-size: 10pt;")
         detail_layout.addWidget(self.detail_description_label)
 
         detail_controls = QHBoxLayout()
         self.detail_source_label = QLabel("")
-        self.detail_source_label.setStyleSheet("color: #888; font-size: 9pt;")
+        self.detail_source_label.setObjectName("MutedText")
         detail_controls.addWidget(self.detail_source_label)
         detail_controls.addStretch()
 
@@ -422,7 +443,7 @@ class DashboardOverviewDialog(QDialog):
         detail_layout.addLayout(detail_controls)
 
         self.detail_preview_frame = QFrame()
-        self.detail_preview_frame.setStyleSheet("background-color: #f8f8f8; border: 1px solid #ddd; border-radius: 6px;")
+        self.detail_preview_frame.setObjectName("PreviewSurface")
         self.detail_preview_layout = QVBoxLayout(self.detail_preview_frame)
         self.detail_preview_layout.setContentsMargins(12, 12, 12, 12)
         detail_layout.addWidget(self.detail_preview_frame, 1)
@@ -434,15 +455,10 @@ class DashboardOverviewDialog(QDialog):
         """Load templates and user dashboards"""
         self.clear_grids()
         
-        # Load templates
-        templates = self.template_repo.list_chart_template_dashboards()
-        self.filtered_templates = self.filter_dashboards(templates, is_template=True)
-        
         # Load user dashboards
         user_dashboards = self.dashboard_repo.get_summaries()
         self.filtered_user_dashboards = self.filter_dashboards(user_dashboards, is_template=False)
         
-        self.render_templates()
         self.render_user_dashboards()
         self.update_section_visibility()
     
@@ -479,48 +495,15 @@ class DashboardOverviewDialog(QDialog):
     
     def clear_grids(self):
         """Clear all cards from grids"""
-        for i in reversed(range(self.templates_grid.count())):
-            item = self.templates_grid.takeAt(i)
-            if item and item.widget():
-                item.widget().deleteLater()
-        
         for i in reversed(range(self.user_grid.count())):
             item = self.user_grid.takeAt(i)
             if item and item.widget():
                 item.widget().deleteLater()
-    
-    def render_templates(self):
-        """Render template cards"""
-        templates = self.sort_dashboards(self.filtered_templates)
+        for row in range(self.user_grid.rowCount() + 2):
+            self.user_grid.setRowStretch(row, 0)
+        for col in range(self.user_grid.columnCount() + 2):
+            self.user_grid.setColumnStretch(col, 0)
         
-        if not templates:
-            no_templates_label = QLabel("No templates available")
-            no_templates_label.setStyleSheet("color: #999;")
-            self.templates_grid.addWidget(no_templates_label, 0, 0)
-            self.templates_grid_widget.setVisible(True)
-            return
-        
-        self.templates_grid_widget.setVisible(True)
-        
-        for idx, template_dashboard in enumerate(templates):
-            summary = dashboard_to_summary(template_dashboard)
-            card = DashboardCard(
-                summary,
-                is_template=True,
-                preview_widget=self._create_preview_widget(template_dashboard, pass_through=False),
-                single_click_enabled=True,
-                thumbnail_interactive=False,
-            )
-            card.clicked.connect(self.on_view_template)
-            card.use_template_clicked.connect(self.on_use_template)
-            card.double_clicked.connect(self.on_view_template)
-            
-            col = idx % 3
-            row = idx // 3
-            self.templates_grid.addWidget(card, row, col)
-        
-        for col in range(3):
-            self.templates_grid.setColumnStretch(col, 1)
     
     def render_user_dashboards(self):
         """Render user dashboard cards"""
@@ -529,8 +512,9 @@ class DashboardOverviewDialog(QDialog):
         user_columns = 1 if len(user_dashboards) == 1 else 2
         
         if not user_dashboards:
-            no_dash_label = QLabel("No custom dashboards yet.\nStart from a template or create a blank dashboard.")
-            no_dash_label.setStyleSheet("color: #999; qproperty-alignment: AlignCenter;")
+            no_dash_label = QLabel("No custom dashboards yet.\nCreate a blank dashboard to start building widgets.")
+            no_dash_label.setObjectName("MutedText")
+            no_dash_label.setAlignment(Qt.AlignCenter)
             self.user_grid.addWidget(no_dash_label, 0, 0)
             self.user_grid_widget.setVisible(True)
             return
@@ -553,20 +537,16 @@ class DashboardOverviewDialog(QDialog):
             col = idx % user_columns
             row = idx // user_columns
             self.user_grid.addWidget(card, row, col)
+            self.user_grid.setRowStretch(row, 1)
         
         # Fill remaining columns with stretch
         for col in range(user_columns):
             self.user_grid.setColumnStretch(col, 1)
 
     def update_section_visibility(self):
-        """Toggle section visibility based on the current view filter."""
-        show_templates = self.current_filter in {"all", "templates"}
-        show_user_dashboards = self.current_filter in {"all", "my_dashboards"}
-
-        self.templates_label.setVisible(show_templates)
-        self.templates_grid_widget.setVisible(show_templates)
-        self.user_label.setVisible(show_user_dashboards)
-        self.user_grid_widget.setVisible(show_user_dashboards)
+        """Keep the user dashboard section visible."""
+        self.user_label.setVisible(True)
+        self.user_grid_widget.setVisible(True)
 
     def _open_editor(self, dashboard: Dashboard, dashboard_repo):
         """Open the dashboard editor after closing the overview to avoid Qt chart crashes."""
@@ -780,8 +760,40 @@ class DashboardOverviewDialog(QDialog):
         """Render a miniature of the whole dashboard as one scaled snapshot."""
         if dashboard is None or not dashboard.widgets:
             return None
+        dashboard_id = str(getattr(dashboard, "dashboard_id", "") or "")
+        dashboard_updated = str(getattr(dashboard, "updated_at", "") or "")
+        cache_key = (dashboard_id, dashboard_updated)
+        cached_preview = self._dashboard_preview_cache.get(cache_key)
+        if cached_preview is not None:
+            snapshot, snapshot_ratio = cached_preview
+            preview = _ScaledPixmapWidget(snapshot, cover=True)
+            preview.setProperty("smoothScaling", True)
+            preview.setProperty("previewAspectRatio", snapshot_ratio)
+            if pass_through:
+                self._make_preview_pass_through(preview)
+            return preview
         if len(dashboard.widgets) == 1:
-            return self._create_preview_widget(dashboard, pass_through=pass_through)
+            preview_widget = self._create_preview_widget(dashboard, pass_through=False)
+            if preview_widget is None:
+                return None
+            preview_widget.setAttribute(Qt.WA_DontShowOnScreen, True)
+            preview_widget.resize(max(520, preview_widget.sizeHint().width()), max(280, preview_widget.sizeHint().height()))
+            preview_widget.ensurePolished()
+            if preview_widget.layout() is not None:
+                preview_widget.layout().activate()
+            preview_widget.show()
+            QApplication.processEvents()
+            snapshot = preview_widget.grab()
+            snapshot_ratio = snapshot.height() / max(1, snapshot.width())
+            preview_widget.hide()
+            preview_widget.deleteLater()
+            self._dashboard_preview_cache[cache_key] = (snapshot, snapshot_ratio)
+            preview = _ScaledPixmapWidget(snapshot, cover=True)
+            preview.setProperty("smoothScaling", True)
+            preview.setProperty("previewAspectRatio", snapshot_ratio)
+            if pass_through:
+                self._make_preview_pass_through(preview)
+            return preview
 
         from .dashboard_editor import GridWidget
 
@@ -848,8 +860,9 @@ class DashboardOverviewDialog(QDialog):
 
         canvas.hide()
         canvas.deleteLater()
+        self._dashboard_preview_cache[cache_key] = (snapshot, snapshot_ratio)
 
-        preview = _ScaledPixmapWidget(snapshot, cover=False)
+        preview = _ScaledPixmapWidget(snapshot, cover=True)
         # Downsample with smoothing for clearer mini-dashboard text/edges.
         preview.setProperty("smoothScaling", True)
         preview.setProperty("previewAspectRatio", snapshot_ratio)
@@ -916,16 +929,12 @@ class DashboardOverviewDialog(QDialog):
     def on_search_changed(self, text: str):
         """Handle search input change"""
         self.search_text = text
-        QTimer.singleShot(300, self.load_dashboards)
-    
-    def on_filter_changed(self, text: str):
-        """Handle filter change"""
-        filters = {
-            "All": "all",
-            "Templates": "templates",
-            "My Dashboards": "my_dashboards"
-        }
-        self.current_filter = filters.get(text, "all")
+        self._search_timer.stop()
+        self._search_timer.start()
+
+    def on_search_submitted(self):
+        """Apply dashboard search immediately when Enter is pressed."""
+        self._search_timer.stop()
         self.load_dashboards()
     
     def on_sort_changed(self, text: str):
@@ -934,12 +943,12 @@ class DashboardOverviewDialog(QDialog):
     
     def on_use_template(self, template_id: str):
         """Create dashboard from template"""
-        template_dashboard = self.template_repo.get_chart_template_dashboard(template_id)
+        template_dashboard = self.template_repo.get(template_id)
         if not template_dashboard:
             QMessageBox.warning(self, "Error", "Template not found")
             return
 
-        new_dashboard = self.template_repo.create_dashboard_from_chart_template(template_id, template_dashboard.name)
+        new_dashboard = self.template_repo.create_from_template(template_id, template_dashboard.name)
         if not new_dashboard:
             QMessageBox.warning(self, "Error", "Failed to create dashboard from template")
             return
@@ -966,7 +975,7 @@ class DashboardOverviewDialog(QDialog):
     
     def on_view_template(self, template_id: str):
         """Preview a template inline inside the overview dialog."""
-        template = self.template_repo.get_chart_template_dashboard(template_id)
+        template = self.template_repo.get(template_id)
         if not template:
             QMessageBox.warning(self, "Error", "Template not found")
             return
