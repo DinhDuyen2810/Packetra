@@ -128,6 +128,12 @@ def _square_plot_rect(rect, *, ratio: float = 0.05, minimum: int = 6) -> QRectF:
     return QRectF(left, top, side, side)
 
 
+def _padded_plot_rect(rect, *, ratio: float = 0.05, minimum: int = 6) -> QRectF:
+    outer = QRectF(rect)
+    inset = _edge_padding(int(min(outer.width(), outer.height())), ratio=ratio, minimum=minimum)
+    return outer.adjusted(inset, inset, -inset, -inset)
+
+
 def _sanitize_font_scale(raw_scale: Any) -> float:
     try:
         scale = float(raw_scale or 1.0)
@@ -866,7 +872,7 @@ class _TreemapCanvas(_InteractiveChartCanvas):
             font = painter.font()
             font.setPointSize(_scaled_size(max(font.pointSize(), 8), self.preview_font_scale, minimum=8))
             painter.setFont(font)
-        outer_rect = _square_plot_rect(self.rect(), ratio=0.05, minimum=6 if self.compact_mode else 8)
+        outer_rect = _padded_plot_rect(self.rect(), ratio=0.04, minimum=6 if self.compact_mode else 8)
         total_value = sum(group['value'] for group in self.groups) or 1.0
         current_x = outer_rect.left()
 

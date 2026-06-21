@@ -2582,7 +2582,7 @@ class GridWidget(QFrame):
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
         
         # Header
         header_frame = QFrame(self)
@@ -2595,8 +2595,13 @@ class GridWidget(QFrame):
         title = QLabel(self.widget.title)
         self.title_label = title
         title.setObjectName("SectionTitle")
+        title.setWordWrap(False)
+        title.setToolTip(self.widget.title)
+        title.setMinimumHeight(18)
+        title.setMaximumHeight(18)
         title_font = QFont()
         title_font.setBold(True)
+        title_font.setPointSize(11)
         title.setFont(title_font)
         if self.editable:
             title.setCursor(QCursor(Qt.OpenHandCursor))
@@ -2604,7 +2609,11 @@ class GridWidget(QFrame):
         header_layout.addStretch()
 
         actions_btn = QPushButton("...")
-        actions_btn.setFixedSize(28, 28)
+        actions_btn.setFixedSize(18, 18)
+        actions_btn.setObjectName("CardMoreButton")
+        actions_btn.setFlat(True)
+        actions_btn.setFocusPolicy(Qt.NoFocus)
+        actions_btn.setToolTip("More actions")
         actions_btn.setCursor(QCursor(Qt.ArrowCursor))
         actions_menu = QMenu(actions_btn)
         if self.widget.visualization.type != "table":
