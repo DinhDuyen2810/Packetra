@@ -318,7 +318,6 @@ class DashboardOverviewDialog(QDialog):
         header_layout.addWidget(import_btn)
         
         create_btn = QPushButton("Create Dashboard")
-        create_btn.setObjectName("PrimaryButton")
         create_btn.setMinimumHeight(24)
         create_btn.setAutoDefault(False)
         create_btn.setDefault(False)

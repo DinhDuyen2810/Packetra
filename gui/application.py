@@ -780,10 +780,10 @@ class CaptureOptionsDialog(QDialog):
         
         # self.monitor_all_cb = QCheckBox('Enable monitor mode on all 802.11 interfaces')
         # cb_layout.addWidget(self.monitor_all_cb)
+        cb_layout.addStretch()
         self.manage_interfaces_btn = QPushButton('Manage Interfaces')
         self.manage_interfaces_btn.clicked.connect(self._on_manage_interfaces)
         cb_layout.addWidget(self.manage_interfaces_btn)
-        cb_layout.addStretch()
         bottom_layout.addLayout(cb_layout)
         
         # Capture filter for selected interfaces
@@ -3403,7 +3403,7 @@ class ApplicationWindow(QMainWindow):
 
         info = QTextEdit(dialog)
         info.setReadOnly(True)
-        info.setMinimumHeight(180)
+        info.setMinimumHeight(70)
         root.addWidget(info)
 
         button_row = QHBoxLayout()
@@ -3428,14 +3428,7 @@ class ApplicationWindow(QMainWindow):
             exists = os.path.exists(demo_path)
             open_btn.setEnabled(exists)
             display_name = self._demo_entry_display_name(entry)
-            lines = [
-                f"Action: {display_name}",
-                f"Category: {str(entry.get('category', '') or '-').strip() or '-'}",
-                f"Protocol: {str(entry.get('protocol', '') or '-').strip() or '-'}",
-                '',
-                f"Description: {str(entry.get('description', '') or '').strip()}",
-            ]
-            info.setPlainText("\n".join(lines))
+            info.setPlainText(f"Action: {display_name}")
 
         def _open_selected_demo():
             entry = _selected_entry()
@@ -3482,6 +3475,7 @@ class ApplicationWindow(QMainWindow):
             )
 
             self.capture_view.loaded_file_path = None
+            self.capture_view.iface_display_name = demo_name
             self.capture_view._configure_parser_capture_context(self.capture_view.parser, '')
             self.capture_view._set_dirty(True)
 
@@ -4424,6 +4418,9 @@ class ApplicationWindow(QMainWindow):
             self.action_start_btn.setEnabled(False)
             self.action_stop_btn.setEnabled(False)
             self.action_restart_btn.setEnabled(False)
+            self.action_start_btn.setVisible(True)
+            self.action_stop_btn.setVisible(True)
+            self.action_restart_btn.setVisible(True)
             self.action_save_btn.setEnabled(False)
             self.action_close_btn.setEnabled(False)
             self.action_reload_btn.setEnabled(False)
@@ -4583,9 +4580,17 @@ class ApplicationWindow(QMainWindow):
         is_running = bool(self.capture_view and self.capture_view.is_capturing())
         is_stopping = bool(self.capture_view and self.capture_view.is_stopping())
         has_capture = bool(self.capture_view)
-        self.action_start_btn.setEnabled(has_capture and not is_running and not is_stopping)
-        self.action_restart_btn.setEnabled(has_capture and is_running and not is_stopping)
-        self.action_stop_btn.setEnabled(has_capture and (is_running or is_stopping))
+        has_iface = bool(self.capture_view and str(getattr(self.capture_view, 'iface', '') or '').strip())
+        can_start = bool(has_capture and not is_running and not is_stopping)
+        can_stop = bool(has_capture and (is_running or is_stopping))
+        can_restart = bool(has_iface and not is_running and not is_stopping)
+
+        self.action_start_btn.setEnabled(can_start)
+        self.action_start_btn.setVisible(True)
+        self.action_restart_btn.setEnabled(can_restart)
+        self.action_restart_btn.setVisible(True)
+        self.action_stop_btn.setEnabled(can_stop)
+        self.action_stop_btn.setVisible(True)
         self._refresh_capture_menu_state()
 
     def _refresh_capture_menu_state(self):
@@ -4616,7 +4621,7 @@ class ApplicationWindow(QMainWindow):
         if hasattr(self, 'action_stop_capture'):
             self.action_stop_capture.setEnabled(active_capture and (is_running or is_stopping))
         if hasattr(self, 'action_restart_capture'):
-            self.action_restart_capture.setEnabled(active_capture and is_running and not is_stopping)
+            self.action_restart_capture.setEnabled(active_capture and has_iface and not is_running and not is_stopping)
         if hasattr(self, 'action_capture_filters'):
             self.action_capture_filters.setEnabled(active_capture)
         if hasattr(self, 'action_refresh_interfaces'):
@@ -4802,13 +4807,17 @@ class ApplicationWindow(QMainWindow):
         if not self.capture_view:
             return
 
-        if not self.capture_view.is_capturing():
+        if not str(getattr(self.capture_view, 'iface', '') or '').strip():
+            self._on_capture_options()
             return
+
+        self.capture_view.capture_filter = self._resolve_capture_filter_alias(getattr(self.capture_view, 'capture_filter', ''))
 
         proceed = self._prompt_save_before_destructive_action('Restarting capture will replace the current data. Do you want to save first?')
         if not proceed:
             return
 
+        self._apply_capture_defaults_to_view()
         self.capture_view.restart_capture()
         self._capture_started_monotonic = time.monotonic()
         self._last_capture_seconds = 0.0
@@ -10717,8 +10726,6 @@ class ApplicationWindow(QMainWindow):
                     if search_text in (f"{r.get('Address', '')} {r.get('Name', '')}").casefold()
                 ]
             return rows
-
-        _scene_state = {'row_area_width': left_margin + lane_w + 90}
 
         def _refresh():
             rows = _build_rows()
