@@ -1148,22 +1148,27 @@ class CaptureView(QWidget):
 
         # Filter row
         filter_row = QHBoxLayout()
-        filter_row.setContentsMargins(8, 4, 8, 4)
+        filter_row.setContentsMargins(8, 2, 8, 2)
+        filter_row.setSpacing(4)
         self.display_filter_input = PacketFilterLineEdit()
+        self.display_filter_input.setObjectName("FilterBarInput")
         self.display_filter_input.setPlaceholderText('Apply a display filter ... <Ctrl+/>')
-        self.apply_filter_btn = QToolButton()
-        self.apply_filter_btn.setText('→')
+        self.apply_filter_btn = QPushButton()
+        self.apply_filter_btn.setObjectName("FilterApplyButton")
+        self.apply_filter_btn.setText('➜')
         self.apply_filter_btn.setToolTip('Apply display filter')
         self.filter_history_menu = QMenu(self)
         self.filter_history_action = self.display_filter_input.addAction(
             self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
             QLineEdit.ActionPosition.TrailingPosition,
         )
-        self.clear_filter_btn = QToolButton()
-        self.clear_filter_btn.setText('x')
+        self.clear_filter_btn = QPushButton()
+        self.clear_filter_btn.setObjectName("FilterClearButton")
+        self.clear_filter_btn.setText('X')
         self.clear_filter_btn.setToolTip('Clear display filter')
-        self.apply_filter_btn.setFixedWidth(28)
-        self.clear_filter_btn.setFixedWidth(28)
+        for btn in (self.apply_filter_btn, self.clear_filter_btn):
+            btn.setMinimumSize(40, 26)
+            btn.setMaximumSize(40, 26)
         filter_row.addWidget(self.display_filter_input)
         filter_row.addWidget(self.apply_filter_btn)
         filter_row.addWidget(self.clear_filter_btn)

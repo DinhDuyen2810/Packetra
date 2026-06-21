@@ -298,6 +298,7 @@ class WidgetEditorDialog(QDialog):
         self._style_controls: Dict[str, Any] = {}
         self._preview_click_targets: List[QWidget] = []
         self._color_editor_active = False
+        self._applying_size_preset = False
         self._preview_refresh_suspend_count = 0
         self._preview_refresh_pending = False
         self._preview_timer = QTimer(self)
@@ -847,18 +848,25 @@ class WidgetEditorDialog(QDialog):
 
     def _on_size_preset_changed(self, preset_name: str):
         with self._preview_refresh_batch():
-            self._apply_size_preset(preset_name)
+            self._applying_size_preset = True
+            try:
+                self._apply_size_preset(preset_name)
+            finally:
+                self._applying_size_preset = False
+            self._sync_size_preset(prefer_custom=False)
             self._sync_size_preset_editability()
         self._schedule_preview_refresh()
 
     def _on_size_dimension_changed(self, _value: int):
-        self._sync_size_preset()
+        if self._applying_size_preset:
+            return
+        self._sync_size_preset(prefer_custom=self.size_preset_combo.currentText().strip() == "Custom")
         self._sync_size_preset_editability()
 
     def _sync_size_preset_editability(self):
-        is_custom = self.size_preset_combo.currentText().strip() == "Custom"
-        self.width_spin.setEnabled(is_custom)
-        self.height_spin.setEnabled(is_custom)
+        # Presets act as quick-fill shortcuts; keep dimensions editable for fine tuning.
+        self.width_spin.setEnabled(True)
+        self.height_spin.setEnabled(True)
 
     def _source_behavior(self, chart_type: str) -> Dict[str, Any]:
         normalized = (chart_type or "").strip().lower()
@@ -1655,13 +1663,14 @@ class WidgetEditorDialog(QDialog):
         self.width_spin.setValue(width)
         self.height_spin.setValue(height)
 
-    def _sync_size_preset(self):
+    def _sync_size_preset(self, *, prefer_custom: bool = False):
         current = (self.width_spin.value(), self.height_spin.value())
         target_label = "Custom"
-        for label, preset in self.SIZE_PRESETS.items():
-            if preset == current:
-                target_label = label
-                break
+        if not prefer_custom:
+            for label, preset in self.SIZE_PRESETS.items():
+                if preset == current:
+                    target_label = label
+                    break
         self.size_preset_combo.blockSignals(True)
         self.size_preset_combo.setCurrentText(target_label)
         self.size_preset_combo.blockSignals(False)
@@ -3139,8 +3148,10 @@ class DashboardEditor(QDialog):
             return
 
         editor.apply_changes()
+        final_layout = self._sanitize_layout(new_widget.layout)
+        new_x, new_y = self._find_first_fit_position(final_layout.w, final_layout.h)
+        new_widget.layout = WidgetLayout(x=new_x, y=new_y, w=final_layout.w, h=final_layout.h)
         self.dashboard.widgets.append(new_widget)
-        self._normalize_widget_layouts()
         self.render_grid()
 
     def on_back(self):

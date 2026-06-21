@@ -62,7 +62,7 @@ class ConversationsDialog(QDialog):
         layout.setSpacing(10)
 
         self.title = QLabel("Analyzing conversations...")
-        self.title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self.title.setObjectName("SectionHeading")
         layout.addWidget(self.title)
 
         self.tabs = QTabWidget()

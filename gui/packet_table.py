@@ -70,15 +70,24 @@ class PacketTable(QTableWidget):
         )
         vheader = self.verticalHeader()
         vheader.setVisible(True)
-        vheader.setFixedWidth(38)
+        vheader.setFixedWidth(44)
         vheader.setDefaultAlignment(Qt.AlignCenter)
         vheader.setDefaultSectionSize(20)
-        vheader.setMinimumSectionSize(18)
-        vheader.setStyleSheet('QHeaderView::section { font-size: 20px; font-weight: 700; padding-left: 3px; padding-right: 3px; }')
+        vheader.setMinimumSectionSize(20)
+        vheader.setStyleSheet('QHeaderView::section { font-size: 18px; font-weight: 700; padding-left: 0px; padding-right: 0px; padding-top: 0px; padding-bottom: 0px; }')
         self.setShowGrid(True)
         header = self.horizontalHeader()
         header.setSectionsMovable(False)
         header.setStretchLastSection(True)
+        header.setFixedHeight(24)
+        header.setStyleSheet(
+            'QHeaderView::section { '
+            'background-color: #F9FAFB; '
+            'border-top: none; border-left: none; border-right: 1px solid #D0D7DE; border-bottom: 1px solid #D0D7DE; '
+            'padding: 3px 8px; '
+            'font-weight: 700; '
+            '}'
+        )
         self.setColumnWidth(0, 60)
         self.setColumnWidth(1, 130)
         self.setColumnWidth(2, 170)
@@ -519,7 +528,7 @@ class PacketTable(QTableWidget):
         self.apply_content_resize_layout()
 
     def sync_row_height_to_font(self):
-        row_height = max(16, self.fontMetrics().height() + 4)
+        row_height = max(18, self.fontMetrics().height())
         self.verticalHeader().setDefaultSectionSize(row_height)
 
     def scrollTo(self, index, hint=None):

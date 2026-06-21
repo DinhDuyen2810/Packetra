@@ -1,6 +1,6 @@
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QPoint
 from PySide6.QtGui import QFont, QTextCursor, QTextCharFormat, QColor
-from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QStackedWidget, QTabBar, QWidget, QStatusBar
 
 from core.formatters import hex_dump
 
@@ -51,6 +51,7 @@ class PacketHexView(QPlainTextEdit):
         self._hover_highlight_ranges = []
         self._last_hovered_byte = None
         self._raw_data = b''
+        self.setViewportMargins(0, 0, 0, 0)
 
     def _on_custom_context_menu(self, pos):
         self.context_menu_requested.emit(self.viewport().mapToGlobal(pos))
@@ -324,16 +325,18 @@ class PacketBytesView(QWidget):
             'zabbix_uncompressed': PacketHexView(),
         }
         self._tab_sources = []
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self._tabs = QTabWidget()
-        self._tabs.setTabPosition(QTabWidget.TabPosition.South)
-        layout.addWidget(self._tabs)
+        self._stack = QStackedWidget(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
+        self._tab_bar = QTabBar(self)
+        self._tab_bar.setObjectName("PacketBytesTabBar")
+        self._tab_bar.setShape(QTabBar.Shape.RoundedSouth)
+        self._tab_bar.setDrawBase(False)
+        self._tab_bar.setUsesScrollButtons(True)
+        self._tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tab_bar.currentChanged.connect(self._on_tab_changed)
 
         for source, view in self._views.items():
+            self._stack.addWidget(view)
             view.bytes_range_selected.connect(
                 lambda offset, length, key=source: self.bytes_range_selected.emit(offset, length, key)
             )
@@ -354,20 +357,22 @@ class PacketBytesView(QWidget):
 
     def setFont(self, font):
         super().setFont(font)
-        self._tabs.setFont(font)
-        self._tabs.tabBar().setFont(font)
+        self._stack.setFont(font)
+        self._tab_bar.setFont(font)
         for view in self._views.values():
             view.setFont(font)
 
     def _reset_tabs(self, sources):
-        while self._tabs.count() > 0:
-            self._tabs.removeTab(0)
+        while self._tab_bar.count() > 0:
+            self._tab_bar.removeTab(0)
         self._tab_sources = []
         for source, title, data in sources:
             view = self._views[source]
             view.show_bytes(data)
-            self._tabs.addTab(view, title)
+            self._tab_bar.addTab(title)
             self._tab_sources.append(source)
+        self._tab_bar.setVisible(bool(self._tab_sources))
+        self._layout_children()
 
     def show_packet(self, record):
         metadata = getattr(record, 'metadata', {}) if record else {}
@@ -463,18 +468,69 @@ class PacketBytesView(QWidget):
             )
 
         self._reset_tabs(sources)
-        if self._tabs.count() > 0:
-            self._tabs.setCurrentIndex(0)
+        if self._tab_bar.count() > 0:
+            self._tab_bar.setCurrentIndex(0)
+            self._on_tab_changed(0)
 
     def _active_source(self, requested_source: str | None = None) -> str:
         if requested_source in self._tab_sources:
             index = self._tab_sources.index(requested_source)
-            self._tabs.setCurrentIndex(index)
+            self._tab_bar.setCurrentIndex(index)
             return requested_source
-        current_index = self._tabs.currentIndex()
+        current_index = self._tab_bar.currentIndex()
         if 0 <= current_index < len(self._tab_sources):
             return self._tab_sources[current_index]
         return 'packet'
+
+    def _on_tab_changed(self, index: int):
+        if 0 <= index < len(self._tab_sources):
+            source = self._tab_sources[index]
+            view = self._views.get(source)
+            if view is not None:
+                self._stack.setCurrentWidget(view)
+
+    def _layout_children(self):
+        bounds = self.rect()
+        self._stack.setGeometry(bounds)
+        if self._tab_bar.count() > 0 and not self._tab_bar.isHidden():
+            host = self.window()
+            if isinstance(host, QWidget):
+                if self._tab_bar.parentWidget() is not host:
+                    self._tab_bar.setParent(host)
+                    self._tab_bar.show()
+                statusbar = host.statusBar() if hasattr(host, "statusBar") and callable(getattr(host, "statusBar")) else None
+                statusbar = statusbar if isinstance(statusbar, QStatusBar) else None
+                local_x = self.mapTo(host, QPoint(6, 0)).x()
+                top_y = self.mapTo(host, QPoint(0, self.height())).y()
+                bar_height = max(19, self._tab_bar.sizeHint().height())
+                bar_width = min(max(110, self._tab_bar.sizeHint().width() + 6), max(0, self.width() - 12))
+                if statusbar is not None:
+                    status_rect = statusbar.geometry()
+                    top_y = max(status_rect.top() - 3, top_y - 2)
+                self._tab_bar.setGeometry(local_x, max(0, top_y), bar_width, bar_height)
+                self._tab_bar.raise_()
+            else:
+                bar_height = max(19, self._tab_bar.sizeHint().height())
+                bar_width = min(max(110, self._tab_bar.sizeHint().width() + 6), max(0, bounds.width() - 12))
+                self._tab_bar.setParent(self)
+                self._tab_bar.setGeometry(6, max(0, bounds.height() - bar_height + 1), bar_width, bar_height)
+                self._tab_bar.raise_()
+        for source in self._tab_sources:
+            view = self._views.get(source)
+            if view is not None:
+                view.setViewportMargins(0, 0, 0, 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_children()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._layout_children()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._tab_bar.hide()
 
     def highlight_bytes(self, offset: int, length: int, byte_source: str = 'packet'):
         if offset < 0 or length <= 0:

@@ -53,6 +53,7 @@ from gui.capture_view import CaptureView
 from gui.packet_details import PacketDetailsTree
 from gui.hex_view import PacketBytesView
 from gui.manage_interfaces_dialog import ManageInterfacesDialog
+from gui.global_style import apply_application_theme
 from core.flow_engine import (
     analyze_flows,
     export_packets_to_csv,
@@ -1738,6 +1739,7 @@ class CaptureOptionsDialog(QDialog):
         layout = QVBoxLayout(self.options_tab)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(12)
+        layout.setAlignment(Qt.AlignTop)
 
         # --- Display Options ---
         disp_group = QGroupBox('Display Options')
@@ -1778,12 +1780,20 @@ class CaptureOptionsDialog(QDialog):
         # --- Stop capture automatically after... ---
         stop_group = QGroupBox('Stop capture automatically after...')
         stop_layout = QGridLayout()
+        stop_layout.setContentsMargins(10, 10, 10, 10)
+        stop_layout.setHorizontalSpacing(10)
+        stop_layout.setVerticalSpacing(8)
+        stop_layout.setColumnStretch(0, 0)
+        stop_layout.setColumnStretch(1, 0)
+        stop_layout.setColumnStretch(2, 0)
+        stop_layout.setColumnStretch(3, 1)
         # Row 1: packets
         self.stop_packets_cb = QCheckBox()
         self.stop_packets_spin = QSpinBox()
         self.stop_packets_spin.setMinimum(1)
         self.stop_packets_spin.setMaximum(100000000)
         self.stop_packets_spin.setValue(1)
+        self.stop_packets_spin.setFixedWidth(150)
         stop_layout.addWidget(self.stop_packets_cb, 0, 0)
         stop_layout.addWidget(self.stop_packets_spin, 0, 1)
         stop_layout.addWidget(QLabel('packets'), 0, 2)
@@ -1793,6 +1803,7 @@ class CaptureOptionsDialog(QDialog):
         self.stop_files_spin.setMinimum(1)
         self.stop_files_spin.setMaximum(1000000)
         self.stop_files_spin.setValue(1)
+        self.stop_files_spin.setFixedWidth(150)
         stop_layout.addWidget(self.stop_files_cb, 1, 0)
         stop_layout.addWidget(self.stop_files_spin, 1, 1)
         stop_layout.addWidget(QLabel('files'), 1, 2)
@@ -1802,8 +1813,10 @@ class CaptureOptionsDialog(QDialog):
         self.stop_size_spin.setMinimum(1)
         self.stop_size_spin.setMaximum(100000000)
         self.stop_size_spin.setValue(1)
+        self.stop_size_spin.setFixedWidth(150)
         self.stop_size_unit = QComboBox()
         self.stop_size_unit.addItems(['kilobytes', 'megabytes', 'gigabytes'])
+        self.stop_size_unit.setFixedWidth(180)
         stop_layout.addWidget(self.stop_size_cb, 2, 0)
         stop_layout.addWidget(self.stop_size_spin, 2, 1)
         stop_layout.addWidget(self.stop_size_unit, 2, 2)
@@ -1813,8 +1826,10 @@ class CaptureOptionsDialog(QDialog):
         self.stop_duration_spin.setMinimum(1)
         self.stop_duration_spin.setMaximum(100000000)
         self.stop_duration_spin.setValue(1)
+        self.stop_duration_spin.setFixedWidth(150)
         self.stop_duration_unit = QComboBox()
         self.stop_duration_unit.addItems(['seconds', 'minutes', 'hours'])
+        self.stop_duration_unit.setFixedWidth(180)
         stop_layout.addWidget(self.stop_duration_cb, 3, 0)
         stop_layout.addWidget(self.stop_duration_spin, 3, 1)
         stop_layout.addWidget(self.stop_duration_unit, 3, 2)
@@ -1914,6 +1929,9 @@ class ApplicationWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle('Packetra - Network Packet Analyzer')
         self.resize(1700, 930)
+        app = QApplication.instance()
+        if app is not None:
+            apply_application_theme(app)
         self._ai_model_bundle = None
         self._fw_acl_dialog = None
         self._demo_packet_entries = None
@@ -1949,7 +1967,6 @@ class ApplicationWindow(QMainWindow):
         # Build UI
         self._build_ui()
         self._connect_signals()
-        app = QApplication.instance()
         if app is not None:
             try:
                 app.focusWindowChanged.connect(self._on_application_focus_window_changed)
@@ -2012,7 +2029,6 @@ class ApplicationWindow(QMainWindow):
 
         # Status bar
         self.statusbar = self.statusBar()
-        self.statusbar.setStyleSheet("border-top: 1px solid #ddd;")
         status_icon_dir = Path(__file__).resolve().parent.parent / 'image' / 'statusbar'
 
         self.expert_btn = QToolButton(self)
@@ -7863,7 +7879,7 @@ class ApplicationWindow(QMainWindow):
         root = QVBoxLayout(dialog)
 
         summary_title = QLabel('Selected Packet Summary', dialog)
-        summary_title.setStyleSheet('font-weight: 600;')
+        summary_title.setObjectName("SectionHeading")
         root.addWidget(summary_title)
 
         def _fmt_endpoint(ip_value: str, port_value: int | None) -> str:
@@ -7927,11 +7943,11 @@ class ApplicationWindow(QMainWindow):
             dialog,
         )
         note.setWordWrap(True)
-        note.setStyleSheet('color: #555;')
+        note.setObjectName("MutedHint")
         root.addWidget(note)
 
         preview_title = QLabel('Generated Rule Preview', dialog)
-        preview_title.setStyleSheet('font-weight: 600;')
+        preview_title.setObjectName("SectionHeading")
         root.addWidget(preview_title)
         rule_preview = QTextEdit(dialog)
         rule_preview.setReadOnly(True)

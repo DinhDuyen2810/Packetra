@@ -163,7 +163,7 @@ class InterfaceSelectorView(QWidget):
 
     def _build_open_section(self):
         title = QLabel('Open')
-        title.setStyleSheet('font-size:24px; font-weight:700;')
+        title.setObjectName("PageTitle")
         self.main_layout.addWidget(title)
 
         row = QHBoxLayout()
@@ -195,10 +195,10 @@ class InterfaceSelectorView(QWidget):
 
     def _build_capture_header(self):
         title = QLabel('Capture')
-        title.setStyleSheet('font-size:34px; font-weight:700;')
+        title.setObjectName("HeroTitle")
         sub = QHBoxLayout()
         label = QLabel('...using this filter')
-        label.setStyleSheet('font-weight:600;')
+        label.setObjectName("SectionHeading")
         self.capture_filter_input = QLineEdit()
         self.capture_filter_input.setPlaceholderText('Example: tcp port 443 or udp port 53')
         self.interface_scope_combo = QComboBox()
