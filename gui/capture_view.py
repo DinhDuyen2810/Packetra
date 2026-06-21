@@ -428,6 +428,7 @@ class CaptureView(QWidget):
         self.realtime_update_enabled = True
         self.color_rules_enabled = True
         self._is_stopping = False
+        self._restart_after_stop = False
         self._last_live_status_count = 0
         self._capture_started_at = None
         self._capture_info_dialog = None
@@ -2171,7 +2172,13 @@ class CaptureView(QWidget):
             self._update_status('Capture stopped')
 
     def restart_capture(self):
-        self.stop_capture()
+        if self.sniffer and self.sniffer.isRunning():
+            self._restart_after_stop = True
+            self.stop_capture()
+            return
+        if self._is_stopping:
+            self._restart_after_stop = True
+            return
         self.clear_packets(reset_file_path=True)
         self.start_capture()
 
@@ -2690,6 +2697,10 @@ class CaptureView(QWidget):
         self.capture_state_changed.emit(False)
         self._update_status('Capture stopped')
         self._close_capture_info_dialog()
+        if self._restart_after_stop:
+            self._restart_after_stop = False
+            self.clear_packets(reset_file_path=True)
+            self.start_capture()
 
     def add_packet(self, packet):
         if self._is_stopping:

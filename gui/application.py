@@ -3449,11 +3449,6 @@ class ApplicationWindow(QMainWindow):
             if not proceed:
                 return
 
-            self.show_capture_view('', 'Offline', '')
-            if not self.capture_view:
-                QMessageBox.critical(dialog, 'Demo Packet', 'Could not create a capture view for the demo packet.')
-                return
-
             started = time.perf_counter()
             try:
                 packets = list(iter_pcap_packets(demo_path))
@@ -3463,6 +3458,11 @@ class ApplicationWindow(QMainWindow):
 
             if not packets:
                 QMessageBox.warning(dialog, 'Demo Packet', f'"{demo_name}" does not contain valid packets.')
+                return
+
+            self.show_capture_view('', demo_name, '')
+            if not self.capture_view:
+                QMessageBox.critical(dialog, 'Demo Packet', 'Could not create a capture view for the demo packet.')
                 return
 
             self._replace_capture_packets(
@@ -4581,7 +4581,7 @@ class ApplicationWindow(QMainWindow):
         is_stopping = bool(self.capture_view and self.capture_view.is_stopping())
         has_capture = bool(self.capture_view)
         has_iface = bool(self.capture_view and str(getattr(self.capture_view, 'iface', '') or '').strip())
-        can_start = bool(has_capture and not is_running and not is_stopping)
+        can_start = bool(has_capture and has_iface and not is_running and not is_stopping)
         can_stop = bool(has_capture and (is_running or is_stopping))
         can_restart = bool(has_iface and not is_running and not is_stopping)
 
@@ -4727,6 +4727,15 @@ class ApplicationWindow(QMainWindow):
         normalized_path = os.path.abspath(os.path.normpath(candidate))
         if not os.path.exists(normalized_path):
             QMessageBox.warning(self, 'Open', f'The file does not exist:\n{normalized_path}')
+            return
+        try:
+            probe_iter = iter_pcap_packets(normalized_path)
+            first_packet = next(probe_iter, None)
+        except Exception as exc:
+            QMessageBox.critical(self, 'Open', f'Could not open the file:\n{normalized_path}\n\n{exc}')
+            return
+        if first_packet is None:
+            QMessageBox.warning(self, 'Open', f'The selected file does not contain any packets:\n{normalized_path}')
             return
         proceed = self._prompt_save_before_destructive_action('Opening a new file will replace the current data. Do you want to save first?')
         if not proceed:
