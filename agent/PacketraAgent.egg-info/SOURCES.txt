@@ -1,4 +1,3 @@
-README.md
 build_agent_msi.py
 PacketraAgent.egg-info/PKG-INFO
 PacketraAgent.egg-info/SOURCES.txt

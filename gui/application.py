@@ -12,6 +12,7 @@ import time
 import sys
 import html
 import platform
+import subprocess
 from importlib import metadata as importlib_metadata
 from collections import Counter, defaultdict, deque
 from datetime import datetime
@@ -89,6 +90,7 @@ class InterfaceTreeWidget(QTreeWidget):
         self.tooltip_item = None
         self.parent_dialog = None
         self.setMouseTracking(True)
+        self.setUniformRowHeights(True)
     
     def mouseMoveEvent(self, event):
         """Show IP tooltip on hover"""
@@ -402,6 +404,7 @@ class CaptureOptionsDialog(QDialog):
     
     def __init__(self, parent, capture_view, read_only: bool = False):
         super().__init__(parent)
+        self._is_initializing = True
         self.setWindowTitle('Capture Options')
         self.capture_view = capture_view
         self._read_only_mode = bool(read_only)
@@ -497,6 +500,7 @@ class CaptureOptionsDialog(QDialog):
         self._update_start_button_state()
         if self._read_only_mode:
             self._apply_read_only_mode()
+        self._is_initializing = False
 
     def _apply_read_only_mode(self):
         self.start_btn.setEnabled(False)
@@ -971,6 +975,7 @@ class CaptureOptionsDialog(QDialog):
             chart_width = max(40, self.iface_tree.columnWidth(1) - 8)
             pix = self._get_sparkline_pixmap(iface_name, width=chart_width)
             traffic_label = QLabel()
+            traffic_label.setFixedHeight(24)
             traffic_label.setPixmap(pix)
             traffic_label._traffic_bytes = traffic.get(iface_name, 0)
             self.iface_tree.setItemWidget(iface_item, 1, traffic_label)
@@ -1413,9 +1418,59 @@ class CaptureOptionsDialog(QDialog):
         if current_iface and current_iface in self.iface_items:
             self.iface_tree.setCurrentItem(self.iface_items[current_iface])
 
+    def _save_current_state_to_prefs(self, *args, **kwargs):
+        """Immediately save the current UI state to global preferences upon any interaction."""
+        if getattr(self, '_is_initializing', False):
+            return
+        output_state = self.get_output_settings()
+        options_state = self.get_options_settings()
+        
+        from PySide6.QtCore import QSettings
+        settings = QSettings('Packetra', 'Packetra')
+        settings.setValue('output/format', output_state.get('format', 'pcapng'))
+        settings.setValue('output/compression', output_state.get('compression', 'none'))
+        settings.setValue('output/auto_create', bool(output_state.get('auto_create', False)))
+        settings.setValue('output/rollover_packets_enabled', bool(output_state.get('rollover_packets_enabled', False)))
+        settings.setValue('output/rollover_packets_value', int(output_state.get('rollover_packets_value', 1)))
+        settings.setValue('output/rollover_size_enabled', bool(output_state.get('rollover_size_enabled', False)))
+        settings.setValue('output/rollover_size_value', int(output_state.get('rollover_size_value', 1)))
+        settings.setValue('output/rollover_size_unit', str(output_state.get('rollover_size_unit', 'megabytes')))
+        settings.setValue('output/rollover_duration_enabled', bool(output_state.get('rollover_duration_enabled', False)))
+        settings.setValue('output/rollover_duration_value', int(output_state.get('rollover_duration_value', 1)))
+        settings.setValue('output/rollover_duration_unit', str(output_state.get('rollover_duration_unit', 'seconds')))
+        settings.setValue('output/rollover_wallclock_enabled', bool(output_state.get('rollover_wallclock_enabled', False)))
+        settings.setValue('output/rollover_wallclock_value', int(output_state.get('rollover_wallclock_value', 1)))
+        settings.setValue('output/rollover_wallclock_unit', str(output_state.get('rollover_wallclock_unit', 'minutes')))
+        settings.setValue('output/infix_pattern', str(output_state.get('infix_pattern', 'counter_first')))
+        settings.setValue('output/ring_buffer_enabled', bool(output_state.get('ring_buffer_enabled', False)))
+        settings.setValue('output/ring_buffer_files', int(output_state.get('ring_buffer_files', 2)))
+
+        settings.setValue('options/realtime', bool(options_state.get('realtime', True)))
+        settings.setValue('options/autoscroll', bool(options_state.get('autoscroll', True)))
+        settings.setValue('options/show_info', bool(options_state.get('show_info', False)))
+        settings.setValue('options/resolve_mac', bool(options_state.get('resolve_mac', True)))
+        settings.setValue('options/resolve_network', bool(options_state.get('resolve_network', False)))
+        settings.setValue('options/resolve_transport', bool(options_state.get('resolve_transport', False)))
+        settings.setValue('options/stop_packets_enabled', bool(options_state.get('stop_packets_enabled', False)))
+        settings.setValue('options/stop_packets_value', int(options_state.get('stop_packets_value', 1)))
+        settings.setValue('options/stop_files_enabled', bool(options_state.get('stop_files_enabled', False)))
+        settings.setValue('options/stop_files_value', int(options_state.get('stop_files_value', 1)))
+        settings.setValue('options/stop_size_enabled', bool(options_state.get('stop_size_enabled', False)))
+        settings.setValue('options/stop_size_value', int(options_state.get('stop_size_value', 1)))
+        settings.setValue('options/stop_size_unit', str(options_state.get('stop_size_unit', 'megabytes')))
+        settings.setValue('options/stop_duration_enabled', bool(options_state.get('stop_duration_enabled', False)))
+        settings.setValue('options/stop_duration_value', int(options_state.get('stop_duration_value', 1)))
+        settings.setValue('options/stop_duration_unit', str(options_state.get('stop_duration_unit', 'seconds')))
         main_window = self.parent()
         if main_window and hasattr(main_window, '_on_interface_preferences_changed'):
             main_window._on_interface_preferences_changed()
+
+        if self.capture_view:
+            self.capture_view.set_options_settings(options_state)
+            self.capture_view.set_output_settings(output_state)
+        elif main_window and getattr(main_window, 'capture_view', None):
+            main_window.capture_view.set_options_settings(options_state)
+            main_window.capture_view.set_output_settings(output_state)
     
     def _build_output_tab(self):
         """Build Output tab"""
@@ -1640,6 +1695,7 @@ class CaptureOptionsDialog(QDialog):
                     self.file_path_input.setText(normalized_path)
                     self.file_path_input.blockSignals(False)
                     self.output_state['file_path'] = normalized_path
+        self._save_current_state_to_prefs()
     
     def _on_compression_changed(self):
         """Handle Compression radio button change"""
@@ -1649,46 +1705,55 @@ class CaptureOptionsDialog(QDialog):
             self.output_state['compression'] = 'lz4'
         else:
             self.output_state['compression'] = 'none'
+        self._save_current_state_to_prefs()
     
     def _on_auto_create_changed(self, checked):
         """Handle Create new file automatically checkbox change"""
         self.output_state['auto_create'] = checked
+        self._save_current_state_to_prefs()
     
     def _on_file_path_changed(self, text):
         """Handle file path input change"""
         self.output_state['file_path'] = text
+        self._save_current_state_to_prefs()
     
     def _on_rollover_packets_changed(self):
         """Handle rollover packets checkbox/spinbox change"""
         self.output_state['rollover_packets_enabled'] = self.rollover_packets_cb.isChecked()
         self.output_state['rollover_packets_value'] = self.rollover_packets_spin.value()
+        self._save_current_state_to_prefs()
     
     def _on_rollover_size_changed(self):
         """Handle rollover size checkbox/spinbox/combo change"""
         self.output_state['rollover_size_enabled'] = self.rollover_size_cb.isChecked()
         self.output_state['rollover_size_value'] = self.rollover_size_spin.value()
         self.output_state['rollover_size_unit'] = self.rollover_size_unit.currentText()
+        self._save_current_state_to_prefs()
     
     def _on_rollover_duration_changed(self):
         """Handle rollover duration checkbox/spinbox/combo change"""
         self.output_state['rollover_duration_enabled'] = self.rollover_duration_cb.isChecked()
         self.output_state['rollover_duration_value'] = self.rollover_duration_spin.value()
         self.output_state['rollover_duration_unit'] = self.rollover_duration_unit.currentText()
+        self._save_current_state_to_prefs()
     
     def _on_rollover_wallclock_changed(self):
         """Handle rollover wallclock checkbox/spinbox/combo change"""
         self.output_state['rollover_wallclock_enabled'] = self.rollover_wallclock_cb.isChecked()
         self.output_state['rollover_wallclock_value'] = self.rollover_wallclock_spin.value()
         self.output_state['rollover_wallclock_unit'] = self.rollover_wallclock_unit.currentText()
+        self._save_current_state_to_prefs()
     
     def _on_infix_pattern_changed(self):
         """Handle infix pattern radio button change"""
         self.output_state['infix_pattern'] = 'timestamp_first' if self.infix_pattern_ts_first.isChecked() else 'counter_first'
+        self._save_current_state_to_prefs()
     
     def _on_ring_buffer_changed(self):
         """Handle ring buffer checkbox/spinbox change"""
         self.output_state['ring_buffer_enabled'] = self.ring_buffer_cb.isChecked()
         self.output_state['ring_buffer_files'] = self.ring_buffer_spin.value()
+        self._save_current_state_to_prefs()
     
     def get_output_settings(self):
         """Get current Output tab settings"""
@@ -1892,6 +1957,24 @@ class CaptureOptionsDialog(QDialog):
         self.stop_size_cb.toggled.connect(update_enable)
         self.stop_duration_cb.toggled.connect(update_enable)
         update_enable()
+
+        # Connect all state-changing signals to immediate save
+        self.opt_realtime.toggled.connect(self._save_current_state_to_prefs)
+        self.opt_autoscroll.toggled.connect(self._save_current_state_to_prefs)
+        self.opt_showinfo.toggled.connect(self._save_current_state_to_prefs)
+        self.opt_resolve_mac.toggled.connect(self._save_current_state_to_prefs)
+        self.opt_resolve_net.toggled.connect(self._save_current_state_to_prefs)
+        self.opt_resolve_trans.toggled.connect(self._save_current_state_to_prefs)
+        self.stop_packets_cb.toggled.connect(self._save_current_state_to_prefs)
+        self.stop_packets_spin.valueChanged.connect(self._save_current_state_to_prefs)
+        self.stop_files_cb.toggled.connect(self._save_current_state_to_prefs)
+        self.stop_files_spin.valueChanged.connect(self._save_current_state_to_prefs)
+        self.stop_size_cb.toggled.connect(self._save_current_state_to_prefs)
+        self.stop_size_spin.valueChanged.connect(self._save_current_state_to_prefs)
+        self.stop_size_unit.currentTextChanged.connect(self._save_current_state_to_prefs)
+        self.stop_duration_cb.toggled.connect(self._save_current_state_to_prefs)
+        self.stop_duration_spin.valueChanged.connect(self._save_current_state_to_prefs)
+        self.stop_duration_unit.currentTextChanged.connect(self._save_current_state_to_prefs)
 
 
 class ApplicationWindow(QMainWindow):
@@ -10386,7 +10469,13 @@ class ApplicationWindow(QMainWindow):
         if not self.capture_view:
             return
         self._close_firewall_acl_dialog('The capture file was reloaded. This ACL rule may no longer match the selected packet.')
+        
+        started = time.perf_counter()
         self.capture_view.reload_file()
+        self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
+        self._status_mode = 'activity'
+        self._status_activity_kind = 'load'
+        
         self._sync_capture_buttons()
         self._refresh_status_metrics()
         self._refresh_file_menu_state()
@@ -10656,6 +10745,229 @@ class ApplicationWindow(QMainWindow):
             return rows[row]
         return {}
 
+    def _load_hosts_resolution_map(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        if sys.platform != 'win32':
+            return mapping
+        hosts_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'etc' / 'hosts'
+        try:
+            for raw_line in hosts_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+                line = raw_line.split('#', 1)[0].strip()
+                if not line:
+                    continue
+                parts = [part for part in re.split(r'\s+', line) if part]
+                if len(parts) < 2:
+                    continue
+                ip_text = str(parts[0]).strip()
+                try:
+                    ip_text = str(ipaddress.ip_address(ip_text))
+                except Exception:
+                    continue
+                hostname = str(parts[1]).strip()
+                if hostname:
+                    mapping[ip_text] = hostname
+        except Exception:
+            return {}
+        return mapping
+
+    def _load_dns_cache_resolution_map(self) -> dict[str, list[str]]:
+        mapping: dict[str, set[str]] = {}
+        if sys.platform != 'win32':
+            return {}
+        try:
+            result = subprocess.run(
+                ['ipconfig', '/displaydns'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='ignore',
+                timeout=8,
+                check=False,
+            )
+        except Exception:
+            return {}
+        output = str(result.stdout or '').splitlines()
+        current_name = ''
+        for line in output:
+            text = str(line or '').strip()
+            if not text:
+                continue
+            if ':' not in text:
+                continue
+            key, value = [part.strip() for part in text.split(':', 1)]
+            key_norm = key.casefold()
+            if 'record name' in key_norm:
+                current_name = value.rstrip('.').strip()
+                continue
+            if not current_name:
+                continue
+            if 'a (host) record' in key_norm or 'aaaa record' in key_norm:
+                ip_text = value.strip()
+                try:
+                    ip_text = str(ipaddress.ip_address(ip_text))
+                except Exception:
+                    continue
+                mapping.setdefault(ip_text, set()).add(current_name)
+        return {ip_text: sorted(names) for ip_text, names in mapping.items() if names}
+
+    def _load_services_resolution_map(self) -> dict[tuple[int, str], str]:
+        mapping: dict[tuple[int, str], str] = {}
+        if sys.platform != 'win32':
+            return mapping
+        services_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'etc' / 'services'
+        try:
+            for raw_line in services_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+                line = raw_line.split('#', 1)[0].strip()
+                if not line:
+                    continue
+                parts = [part for part in re.split(r'\s+', line) if part]
+                if len(parts) < 2:
+                    continue
+                service_name = str(parts[0]).strip()
+                port_proto = str(parts[1]).strip().lower()
+                if '/' not in port_proto or not service_name:
+                    continue
+                port_text, proto = port_proto.split('/', 1)
+                try:
+                    port = int(port_text)
+                except Exception:
+                    continue
+                proto = proto.strip().lower()
+                if proto in {'tcp', 'udp'} and (port, proto) not in mapping:
+                    mapping[(port, proto)] = service_name
+        except Exception:
+            return {}
+        return mapping
+
+    def _resolved_hosts_rows(self, records: list, search_text: str) -> list[dict]:
+        by_oui = {}
+
+        def _ensure_vendor_bucket(mac_addr: str):
+            parts = [p for p in str(mac_addr or '').lower().split(':') if p]
+            if len(parts) < 6:
+                return
+            oui = ':'.join(parts[:3])
+            vendor = str(get_mac_vendor(mac_addr) or '').strip()
+            if not vendor:
+                return
+            bucket = by_oui.get(oui)
+            if bucket is None:
+                bucket = {'vendor': vendor, 'macs': set()}
+                by_oui[oui] = bucket
+            bucket['macs'].add(':'.join(parts[:6]))
+
+        for rec in records:
+            raw = getattr(rec, 'raw', None)
+            if raw is None or not raw.haslayer(Ether):
+                continue
+            eth = raw[Ether]
+            _ensure_vendor_bucket(str(getattr(eth, 'src', '') or '').lower())
+            _ensure_vendor_bucket(str(getattr(eth, 'dst', '') or '').lower())
+
+        rows = []
+        for oui in sorted(by_oui.keys()):
+            bucket = by_oui[oui]
+            vendor = str(bucket.get('vendor', '') or '').strip()
+            if not vendor:
+                continue
+            rows.append({'Address': oui, 'Name': vendor})
+            for mac_addr in sorted(bucket.get('macs', set())):
+                parts = mac_addr.split(':')
+                suffix = ':'.join(parts[3:6]) if len(parts) >= 6 else ''
+                rows.append({'Address': mac_addr, 'Name': f'{vendor}_{suffix}' if suffix else vendor})
+
+        if search_text:
+            rows = [
+                row for row in rows
+                if search_text in f"{row.get('Address', '')} {row.get('Name', '')}".casefold()
+            ]
+        return rows
+
+    def _resolved_network_rows(self, records: list, search_text: str) -> list[dict]:
+        hosts_map = self._load_hosts_resolution_map()
+        dns_map = self._load_dns_cache_resolution_map()
+        addresses: set[str] = set()
+
+        for rec in records:
+            raw = getattr(rec, 'raw', None)
+            if raw is None:
+                continue
+            try:
+                if raw.haslayer(IP):
+                    addresses.add(str(ipaddress.ip_address(str(getattr(raw[IP], 'src', '') or '').strip())))
+                    addresses.add(str(ipaddress.ip_address(str(getattr(raw[IP], 'dst', '') or '').strip())))
+            except Exception:
+                pass
+            try:
+                if raw.haslayer(IPv6):
+                    addresses.add(str(ipaddress.ip_address(str(getattr(raw[IPv6], 'src', '') or '').strip())))
+                    addresses.add(str(ipaddress.ip_address(str(getattr(raw[IPv6], 'dst', '') or '').strip())))
+            except Exception:
+                pass
+            try:
+                if raw.haslayer(ARP):
+                    psrc = str(getattr(raw[ARP], 'psrc', '') or '').strip()
+                    pdst = str(getattr(raw[ARP], 'pdst', '') or '').strip()
+                    if psrc:
+                        addresses.add(str(ipaddress.ip_address(psrc)))
+                    if pdst:
+                        addresses.add(str(ipaddress.ip_address(pdst)))
+            except Exception:
+                pass
+
+        rows = []
+        for ip_text in sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, ipaddress.ip_address(value))):
+            if ip_text in hosts_map:
+                rows.append({'Address': ip_text, 'Name': hosts_map[ip_text], 'Source': 'hosts'})
+                continue
+            dns_names = list(dns_map.get(ip_text, []) or [])
+            if dns_names:
+                rows.append({'Address': ip_text, 'Name': ', '.join(dns_names), 'Source': 'dns-cache'})
+
+        if search_text:
+            rows = [
+                row for row in rows
+                if search_text in f"{row.get('Address', '')} {row.get('Name', '')} {row.get('Source', '')}".casefold()
+            ]
+        return rows
+
+    def _resolved_port_rows(self, records: list, search_text: str) -> list[dict]:
+        services_map = self._load_services_resolution_map()
+        seen_ports: set[tuple[int, str]] = set()
+
+        for rec in records:
+            raw = getattr(rec, 'raw', None)
+            if raw is None:
+                continue
+            try:
+                if raw.haslayer(TCP):
+                    seen_ports.add((int(getattr(raw[TCP], 'sport', 0) or 0), 'tcp'))
+                    seen_ports.add((int(getattr(raw[TCP], 'dport', 0) or 0), 'tcp'))
+            except Exception:
+                pass
+            try:
+                if raw.haslayer(UDP):
+                    seen_ports.add((int(getattr(raw[UDP], 'sport', 0) or 0), 'udp'))
+                    seen_ports.add((int(getattr(raw[UDP], 'dport', 0) or 0), 'udp'))
+            except Exception:
+                pass
+
+        rows = []
+        for port, proto in sorted(seen_ports):
+            if port <= 0:
+                continue
+            service_name = str(services_map.get((port, proto), '') or '').strip()
+            if not service_name:
+                continue
+            rows.append({'Port': port, 'Protocol': proto.upper(), 'Name': service_name, 'Source': 'services'})
+
+        if search_text:
+            rows = [
+                row for row in rows
+                if search_text in f"{row.get('Port', '')} {row.get('Protocol', '')} {row.get('Name', '')} {row.get('Source', '')}".casefold()
+            ]
+        return rows
+
     def _protocol_filter_token(self, protocol_name: str) -> str:
         raw = str(protocol_name or '').strip().casefold()
         if not raw:
@@ -10704,91 +11016,87 @@ class ApplicationWindow(QMainWindow):
 
         top = QHBoxLayout()
         search_input = QLineEdit(dialog)
-        search_input.setPlaceholderText('Search MAC or vendor name')
+        search_input.setPlaceholderText('Search addresses, hostnames, services, or vendors')
         top.addWidget(search_input, 1)
         limit_check = QCheckBox('Limit to display filter', dialog)
         limit_check.setChecked(True)
         top.addWidget(limit_check)
         layout.addLayout(top)
 
-        columns = ['Address', 'Name']
-        table = self._statistics_make_table(columns, [])
-        self._style_standard_table(table, stretch_column=0)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(table, 1)
+        tabs = QTabWidget(dialog)
+        hosts_columns = ['Address', 'Name']
+        networks_columns = ['Address', 'Name', 'Source']
+        ports_columns = ['Port', 'Protocol', 'Name', 'Source']
+
+        hosts_table = self._statistics_make_table(hosts_columns, [])
+        self._style_standard_table(hosts_table, stretch_column=0)
+        hosts_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        networks_table = self._statistics_make_table(networks_columns, [])
+        self._style_standard_table(networks_table, stretch_column=1)
+        networks_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        networks_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+
+        ports_table = self._statistics_make_table(ports_columns, [])
+        self._style_standard_table(ports_table, stretch_column=2)
+        ports_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        ports_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        ports_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+
+        tabs.addTab(hosts_table, 'Hosts')
+        tabs.addTab(networks_table, 'Networks')
+        tabs.addTab(ports_table, 'Ports')
+        layout.addWidget(tabs, 1)
 
         refresh_btn = QPushButton('Refresh', dialog)
         copy_btn = QPushButton('Copy', dialog)
         export_btn = QPushButton('Export CSV', dialog)
         layout.addLayout(self._create_standard_button_row(dialog, refresh_btn, copy_btn, export_btn))
 
-        def _build_rows() -> list[dict]:
-            records = self._statistics_scope_records(limit_check.isChecked())
-            by_oui = {}
+        def _records_scope() -> list:
+            return self._statistics_scope_records(limit_check.isChecked())
 
-            def _ensure_vendor_bucket(mac_addr: str):
-                parts = [p for p in str(mac_addr or '').lower().split(':') if p]
-                if len(parts) < 6:
-                    return None, None, None
-                oui = ':'.join(parts[:3])
-                suffix = ':'.join(parts[3:])
-                vendor = str(get_mac_vendor(mac_addr) or '').strip()
-                if not vendor:
-                    return None, None, None
-                bucket = by_oui.get(oui)
-                if bucket is None:
-                    bucket = {'vendor': vendor, 'macs': set()}
-                    by_oui[oui] = bucket
-                bucket['macs'].add(':'.join(parts[:6]))
-                return oui, vendor, suffix
+        def _search_text() -> str:
+            return str(search_input.text() or '').strip().casefold()
 
-            for rec in records:
-                raw = getattr(rec, 'raw', None)
-                if raw is not None and raw.haslayer(Ether):
-                    eth = raw[Ether]
-                    src_mac = str(getattr(eth, 'src', '') or '').lower()
-                    dst_mac = str(getattr(eth, 'dst', '') or '').lower()
-                    _ensure_vendor_bucket(src_mac)
-                    _ensure_vendor_bucket(dst_mac)
+        def _active_table_and_columns():
+            index = int(tabs.currentIndex())
+            if index == 1:
+                return networks_table, networks_columns, 'Resolved Addresses - Networks'
+            if index == 2:
+                return ports_table, ports_columns, 'Resolved Addresses - Ports'
+            return hosts_table, hosts_columns, 'Resolved Addresses - Hosts'
 
-            rows = []
-            for oui in sorted(by_oui.keys()):
-                bucket = by_oui[oui]
-                vendor = str(bucket.get('vendor', '') or '').strip()
-                if not vendor:
-                    continue
-                rows.append({'Address': oui, 'Name': vendor})
-                for mac_addr in sorted(bucket.get('macs', set())):
-                    parts = mac_addr.split(':')
-                    suffix = ':'.join(parts[3:6]) if len(parts) >= 6 else ''
-                    rows.append({'Address': mac_addr, 'Name': f'{vendor}_{suffix}' if suffix else vendor})
+        def _build_host_rows() -> list[dict]:
+            return self._resolved_hosts_rows(_records_scope(), _search_text())
 
-            search_text = str(search_input.text() or '').strip().casefold()
-            if search_text:
-                rows = [
-                    r for r in rows
-                    if search_text in (f"{r.get('Address', '')} {r.get('Name', '')}").casefold()
-                ]
-            return rows
+        def _build_network_rows() -> list[dict]:
+            return self._resolved_network_rows(_records_scope(), _search_text())
+
+        def _build_port_rows() -> list[dict]:
+            return self._resolved_port_rows(_records_scope(), _search_text())
 
         def _refresh():
-            rows = _build_rows()
-            self._statistics_fill_table(table, columns, rows)
+            self._statistics_fill_table(hosts_table, hosts_columns, _build_host_rows())
+            self._statistics_fill_table(networks_table, networks_columns, _build_network_rows())
+            self._statistics_fill_table(ports_table, ports_columns, _build_port_rows())
 
         refresh_btn.clicked.connect(_refresh)
         search_input.textChanged.connect(lambda _v: _refresh())
         limit_check.toggled.connect(lambda _v: _refresh())
 
         def _copy_current():
+            table, columns, _title = _active_table_and_columns()
             self._statistics_copy_rows(columns, getattr(table, '_stats_rows', []))
 
         def _export_current():
-            self._statistics_export_rows_csv('Resolved Addresses', columns, getattr(table, '_stats_rows', []))
+            table, columns, title = _active_table_and_columns()
+            self._statistics_export_rows_csv(title, columns, getattr(table, '_stats_rows', []))
 
         copy_btn.clicked.connect(_copy_current)
         export_btn.clicked.connect(_export_current)
         _refresh()
-        dialog.resize(860, 620)
+        dialog.resize(980, 640)
         self._fit_widget_90(dialog)
         dialog.exec()
 
@@ -12565,6 +12873,8 @@ class ApplicationWindow(QMainWindow):
                 if self.capture_view and getattr(self.capture_view, '_file_load_start_time', None) is not None:
                     elapsed = max(0.0, time.perf_counter() - self.capture_view._file_load_start_time)
                     self._last_loaded_seconds = elapsed
+                elif self.capture_view and getattr(self.capture_view, '_last_file_load_duration', None) is not None:
+                    self._last_loaded_seconds = self.capture_view._last_file_load_duration
                 loaded_text = (
                     f'load in {float(self._last_loaded_seconds):.2f} s'
                     if self._last_loaded_seconds is not None

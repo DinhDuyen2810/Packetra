@@ -735,6 +735,27 @@ class CaptureView(QWidget):
             formatters.RESOLVE_TRANSPORT = bool(self.options_settings.get('resolve_transport', False))
         except Exception:
             pass
+        self._refresh_packet_list_name_resolution()
+
+    def _refresh_packet_list_name_resolution(self):
+        try:
+            if not getattr(self, 'table', None):
+                return
+            if not self.records:
+                return
+            if not self.visible_indices:
+                return
+            self.table.setUpdatesEnabled(False)
+            try:
+                visible_count = min(len(self.visible_indices), int(self.table.rowCount() or 0))
+                for row in range(visible_count):
+                    index = self.visible_indices[row]
+                    if 0 <= index < len(self.records):
+                        self._update_table_row_from_record(row, self.records[index])
+            finally:
+                self.table.setUpdatesEnabled(True)
+        except Exception:
+            pass
 
     def _capture_output_format(self) -> str:
         fmt = str((self.output_settings or {}).get('format', 'pcapng')).strip().lower()
@@ -2247,6 +2268,7 @@ class CaptureView(QWidget):
         self._configure_parser_capture_context(self.parser, '')
         self.capture_comments = ''
         self.capture_metadata = None
+        self._file_load_start_time = None
         self._packet_state_by_number = {}
         self._captured_bytes = 0
         self._capture_started_at = None
@@ -2437,6 +2459,10 @@ class CaptureView(QWidget):
         self._visible_append_timer.stop()
         self._file_load_thread = None
         self._is_bulk_loading = False
+        import time
+        if getattr(self, '_file_load_start_time', None) is not None:
+            self._last_file_load_duration = time.perf_counter() - self._file_load_start_time
+        self._file_load_start_time = None
         self._startup_priority_mode = False
         self._set_dirty(False)
         self._remember_recent_file(self.loaded_file_path)
@@ -2614,6 +2640,17 @@ class CaptureView(QWidget):
         saved_path = self._persist_capture_records(self.records, target_path, file_format, compression)
         self._auto_output_written_files.append(saved_path)
         self._apply_ring_buffer_limit()
+
+        # Check file limit immediately BEFORE clearing the UI so the last file remains visible
+        opts = self.options_settings or {}
+        if opts.get('stop_files_enabled'):
+            file_limit = int(opts.get('stop_files_value', 1) or 1)
+            if len(self._auto_output_written_files) >= file_limit:
+                self.loaded_file_path = saved_path
+                self._remember_recent_file(saved_path)
+                self._update_status(f'Capture stopped. Maximum file limit ({file_limit}) reached at {saved_path}')
+                self.stop_capture()
+                return
 
         # Switch GUI packet list to the new active file: clear old file packets from table.
         self.records.clear()
@@ -3260,11 +3297,13 @@ class CaptureView(QWidget):
         self.stop_capture()
         self._stop_file_load_thread()
         self._is_bulk_loading = True
+        self._is_bulk_loading = True
         self._startup_priority_mode = True
-        self._file_load_start_time = time.perf_counter()
         self._total_packets_to_load = get_pcap_packet_count(filename)
         try:
             self.clear_packets(reset_file_path=False)
+            import time
+            self._file_load_start_time = time.perf_counter()
             self._is_bulk_loading = True
             self.loaded_file_path = filename
             self._configure_parser_capture_context(self.parser, filename)
@@ -3377,13 +3416,17 @@ class CaptureView(QWidget):
         self._set_packet_panes_updates_enabled(False)
         try:
             self.clear_packets(reset_file_path=False)
-            for idx, packet in enumerate(packets, start=1):
-                record = self.parser.parse(packet, idx, self.iface)
-                self.records.append(self._apply_capture_metadata_to_record(record, idx))
-            self.apply_display_filter()
-            if self.visible_indices:
-                self.goto_first_packet()
-            self._update_status(f'Reloaded analysis for {len(self.records)} packets in current capture')
+            import time
+            self._file_load_start_time = time.perf_counter()
+            self._total_packets_to_load = len(packets)
+            display_expr = str(self.display_filter_input.text() or '')
+            no_filter = (display_expr == '')
+            self._start_background_file_load(
+                packet_iter=iter(packets),
+                start_index=1,
+                display_expr=display_expr,
+                no_filter=no_filter
+            )
         finally:
             self._set_packet_panes_updates_enabled(True)
             self._set_packet_panes_visible(True)

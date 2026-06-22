@@ -103,7 +103,10 @@ def _write_uncompressed_capture_with_metadata(filename: str, packets: List, file
                 comments, ifname = _packet_output_metadata(packet_number, metadata)
                 sec = float(getattr(pkt, 'time', 0.0) or 0.0)
                 wirelen = int(getattr(pkt, 'wirelen', len(raw_pkt)) or len(raw_pkt))
-                linktype = conf.l2types.layer2num[pkt.__class__]
+                try:
+                    linktype = conf.l2types.layer2num[pkt.__class__]
+                except KeyError:
+                    linktype = 1
                 writer._write_packet(
                     raw_pkt,
                     linktype=linktype,

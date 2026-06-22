@@ -7,6 +7,8 @@ import ipaddress
 import json
 import os
 import re
+import subprocess
+import sys
 from typing import Any, Dict, List
 
 
@@ -45,6 +47,7 @@ MAC_VENDORS = {
     '00:0c:29': 'VMware',
     '00:0a:8a': 'Cisco',
     '00:0f:4b': 'Virtual Iron Software',
+    '00:1e:7a': 'Cisco',
     '00:13:07': 'Parallels',
     '00:15:5d': 'Microsoft',
     '00:16:3e': 'Xensource',
@@ -75,6 +78,9 @@ MAC_VENDORS = {
 RESOLVE_MAC = True
 RESOLVE_NETWORK = False
 RESOLVE_TRANSPORT = False
+_HOSTS_RESOLUTION_CACHE: dict[str, str] | None = None
+_DNS_CACHE_RESOLUTION_CACHE: dict[str, list[str]] | None = None
+_SERVICES_RESOLUTION_CACHE: dict[tuple[int, str], str] | None = None
 
 def get_mac_vendor(mac: str) -> str:
     if not RESOLVE_MAC:
@@ -83,6 +89,182 @@ def get_mac_vendor(mac: str) -> str:
         return ''
     prefix = mac.lower()[:8]
     return MAC_VENDORS.get(prefix, '')
+
+
+def _load_hosts_resolution_map() -> dict[str, str]:
+    global _HOSTS_RESOLUTION_CACHE
+    if _HOSTS_RESOLUTION_CACHE is not None:
+        return dict(_HOSTS_RESOLUTION_CACHE)
+    mapping: dict[str, str] = {}
+    if sys.platform != 'win32':
+        _HOSTS_RESOLUTION_CACHE = mapping
+        return mapping
+    hosts_path = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'drivers', 'etc', 'hosts')
+    try:
+        with open(hosts_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for raw_line in f:
+                line = raw_line.split('#', 1)[0].strip()
+                if not line:
+                    continue
+                parts = [part for part in re.split(r'\s+', line) if part]
+                if len(parts) < 2:
+                    continue
+                try:
+                    ip_text = str(ipaddress.ip_address(parts[0].strip()))
+                except Exception:
+                    continue
+                host_name = str(parts[1]).strip()
+                if host_name:
+                    mapping[ip_text] = host_name
+    except Exception:
+        mapping = {}
+    _HOSTS_RESOLUTION_CACHE = dict(mapping)
+    return mapping
+
+
+def _load_dns_cache_resolution_map() -> dict[str, list[str]]:
+    global _DNS_CACHE_RESOLUTION_CACHE
+    if _DNS_CACHE_RESOLUTION_CACHE is not None:
+        return {key: list(value) for key, value in _DNS_CACHE_RESOLUTION_CACHE.items()}
+    mapping: dict[str, set[str]] = {}
+    if sys.platform != 'win32':
+        _DNS_CACHE_RESOLUTION_CACHE = {}
+        return {}
+    try:
+        result = subprocess.run(
+            ['ipconfig', '/displaydns'],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        _DNS_CACHE_RESOLUTION_CACHE = {}
+        return {}
+    current_name = ''
+    for line in str(result.stdout or '').splitlines():
+        text = str(line or '').strip()
+        if not text or ':' not in text:
+            continue
+        key, value = [part.strip() for part in text.split(':', 1)]
+        key_norm = key.casefold()
+        if 'record name' in key_norm:
+            current_name = value.rstrip('.').strip()
+            continue
+        if not current_name:
+            continue
+        if 'a (host) record' in key_norm or 'aaaa record' in key_norm:
+            try:
+                ip_text = str(ipaddress.ip_address(value.strip()))
+            except Exception:
+                continue
+            mapping.setdefault(ip_text, set()).add(current_name)
+    resolved = {key: sorted(value) for key, value in mapping.items() if value}
+    _DNS_CACHE_RESOLUTION_CACHE = {key: list(value) for key, value in resolved.items()}
+    return resolved
+
+
+def _load_services_resolution_map() -> dict[tuple[int, str], str]:
+    global _SERVICES_RESOLUTION_CACHE
+    if _SERVICES_RESOLUTION_CACHE is not None:
+        return dict(_SERVICES_RESOLUTION_CACHE)
+    mapping: dict[tuple[int, str], str] = {}
+    if sys.platform != 'win32':
+        _SERVICES_RESOLUTION_CACHE = mapping
+        return mapping
+    services_path = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'drivers', 'etc', 'services')
+    try:
+        with open(services_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for raw_line in f:
+                line = raw_line.split('#', 1)[0].strip()
+                if not line:
+                    continue
+                parts = [part for part in re.split(r'\s+', line) if part]
+                if len(parts) < 2:
+                    continue
+                service_name = str(parts[0]).strip()
+                port_proto = str(parts[1]).strip().lower()
+                if '/' not in port_proto or not service_name:
+                    continue
+                port_text, proto = port_proto.split('/', 1)
+                try:
+                    port = int(port_text)
+                except Exception:
+                    continue
+                proto = proto.strip().lower()
+                if proto in {'tcp', 'udp'} and (port, proto) not in mapping:
+                    mapping[(port, proto)] = service_name
+    except Exception:
+        mapping = {}
+    _SERVICES_RESOLUTION_CACHE = dict(mapping)
+    return mapping
+
+
+def resolve_network_name(address_text: str) -> str:
+    text = str(address_text or '').strip()
+    if not RESOLVE_NETWORK or not text:
+        return text
+    try:
+        ip_text = str(ipaddress.ip_address(text))
+    except Exception:
+        return text
+    hosts_map = _load_hosts_resolution_map()
+    if ip_text in hosts_map:
+        return str(hosts_map[ip_text] or text)
+    dns_map = _load_dns_cache_resolution_map()
+    names = list(dns_map.get(ip_text, []) or [])
+    if names:
+        return str(names[0] or text)
+    return text
+
+
+def format_port_with_service(port: int | str | None, proto: str) -> str:
+    if port in (None, '', 'None'):
+        return ''
+    try:
+        port_number = int(port)
+    except Exception:
+        return str(port)
+    if not RESOLVE_TRANSPORT:
+        return str(port_number)
+    service_name = str(_load_services_resolution_map().get((port_number, str(proto or '').strip().lower()), '') or '').strip()
+    if not service_name:
+        return str(port_number)
+    return f'{service_name}({port_number})'
+
+
+def format_endpoint_for_display(endpoint_text: str) -> str:
+    text = str(endpoint_text or '').strip()
+    if not text:
+        return text
+    return resolve_network_name(text)
+
+
+def format_info_with_transport_resolution(info_text: str, sport: int | None, dport: int | None, proto: str) -> str:
+    text = str(info_text or '')
+    if not RESOLVE_TRANSPORT or sport is None or dport is None:
+        return text
+    left = format_port_with_service(sport, proto)
+    right = format_port_with_service(dport, proto)
+    if not left or not right:
+        return text
+    pattern = r'^(?P<prefix>(?:\[[^\]]+\]\s*)*)(?P<left>\d+)\s*(?P<arrow>→|->)\s*(?P<right>\d+)(?P<rest>\b.*)$'
+    match = re.match(pattern, text)
+    if not match:
+        return text
+    try:
+        left_num = int(match.group('left'))
+        right_num = int(match.group('right'))
+    except Exception:
+        return text
+    if left_num != int(sport) or right_num != int(dport):
+        return text
+    prefix = str(match.group('prefix') or '')
+    arrow = str(match.group('arrow') or '->')
+    rest = str(match.group('rest') or '')
+    return f'{prefix}{left} {arrow} {right}{rest}'
 
 
 def hex_dump(packet) -> str:

@@ -24,7 +24,7 @@ setup(
     },
     executables=[
         Executable(
-            "core/agent_service.py",
+            "agent_service.py",
             base=None,
             target_name="RemoteCaptureAgent.exe",
         )

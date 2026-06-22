@@ -3,6 +3,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
 from gui.filter_drag import build_filter_drag, packet_filter_expression
+from core import formatters
 
 
 class PacketTable(QTableWidget):
@@ -356,10 +357,15 @@ class PacketTable(QTableWidget):
     @staticmethod
     def display_values(record):
         ignored = bool(getattr(record, 'ignored', False))
-        src = record.src
-        dst = record.dst
+        src = formatters.format_endpoint_for_display(getattr(record, 'src', ''))
+        dst = formatters.format_endpoint_for_display(getattr(record, 'dst', ''))
         proto = record.protocol
-        info = record.info
+        info = formatters.format_info_with_transport_resolution(
+            getattr(record, 'info', ''),
+            getattr(record, 'sport', None),
+            getattr(record, 'dport', None),
+            str(getattr(record, 'protocol', '') or ''),
+        )
         if ignored:
             src = ''
             dst = ''
