@@ -2326,7 +2326,7 @@ class CaptureView(QWidget):
                         break
                     index += 1
                     try:
-                        record = parser.parse_fast(packet, index)
+                        record = parser.parse(packet, index, self.iface)
                     except Exception:
                         continue
                     matched = bool(no_filter) or bool(matcher.matches(record, display_expr))
@@ -2506,56 +2506,7 @@ class CaptureView(QWidget):
                 self._visible_append_timer.start()
 
     def _start_refine_thread(self):
-        self._stop_refine_thread()
-        if not self.records:
-            return
-
-        snapshot = list(self.records)
-        index_by_frame = {int(getattr(rec, 'number', 0) or 0): idx for idx, rec in enumerate(snapshot)}
-        stop_event = self._refine_stop
-        out_q = self._refine_queue
-
-        def worker():
-            parser = PacketParser()
-            self._configure_parser_capture_context(parser, str(self.loaded_file_path or ''))
-            parsed_by_frame = {}
-
-            def _enqueue(item):
-                while not stop_event.is_set():
-                    try:
-                        out_q.put(item, timeout=0.05)
-                        return True
-                    except queue.Full:
-                        continue
-                return False
-
-            for idx, fast_record in enumerate(snapshot):
-                if stop_event.is_set():
-                    break
-                metadata = getattr(fast_record, 'metadata', {}) or {}
-                if bool(metadata.get('full_preloaded', False)):
-                    continue
-                try:
-                    full_record = parser.parse(fast_record.raw, int(fast_record.number), fast_record.iface)
-                except Exception:
-                    continue
-                parsed_by_frame[int(full_record.number)] = full_record
-                if not _enqueue((idx, full_record)):
-                    break
-                segments = list(full_record.metadata.get('tcp_reassembled_segments', []) or [])
-                if len(segments) > 1:
-                    for segment in segments[:-1]:
-                        seg_frame = int(segment.get('frame_number', 0) or 0)
-                        seg_idx = index_by_frame.get(seg_frame, -1)
-                        seg_record = parsed_by_frame.get(seg_frame)
-                        if seg_idx >= 0 and seg_record is not None:
-                            if not _enqueue((seg_idx, seg_record)):
-                                break
-            _enqueue((-1, None))
-
-        self._refine_thread = threading.Thread(target=worker, daemon=True)
-        self._refine_thread.start()
-        self._refine_timer.start()
+        return
 
     def _update_table_row_from_record(self, row: int, record):
         if hasattr(self.table, '_populate_row_from_record'):
@@ -3319,9 +3270,9 @@ class CaptureView(QWidget):
                     first_remaining_packet = packet
                     break
                 try:
-                    record = self.parser.parse_fast(packet, idx)
+                    record = self.parser.parse(packet, idx, self.iface)
                 except Exception:
-                    record = self.parser.parse(packet, idx)
+                    continue
                 record = self._apply_capture_metadata_to_record(record, idx)
                 self.records.append(record)
                 loaded = idx
