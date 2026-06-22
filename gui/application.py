@@ -12522,12 +12522,26 @@ class ApplicationWindow(QMainWindow):
             self.packet_label.setText(capture_text)
             return
 
-        loaded_text = (
-            f'Loaded in {float(self._last_loaded_seconds):.2f} seconds'
-            if self._last_loaded_seconds is not None
-            else 'Loaded in -'
-        )
-        self.packet_label.setText(loaded_text)
+        if self._status_activity_kind == 'load':
+            if self.capture_view and getattr(self.capture_view, '_is_bulk_loading', False):
+                loaded_count = len(self.capture_view.records)
+                total_count = getattr(self.capture_view, '_total_packets_to_load', 0)
+                percent = min(100, max(0, int((loaded_count * 100) / total_count))) if total_count > 0 else 0
+                if percent == 100:
+                    percent = 99
+                self.packet_label.setText(f'Load {percent}%')
+                return
+            else:
+                if self.capture_view and getattr(self.capture_view, '_file_load_start_time', None) is not None:
+                    elapsed = max(0.0, time.perf_counter() - self.capture_view._file_load_start_time)
+                    self._last_loaded_seconds = elapsed
+                loaded_text = (
+                    f'load in {float(self._last_loaded_seconds):.2f} s'
+                    if self._last_loaded_seconds is not None
+                    else 'load in -'
+                )
+                self.packet_label.setText(loaded_text)
+                return
 
     def _on_detail_status_changed(self, field_name: str, byte_count: int):
         if field_name and byte_count > 0:

@@ -233,8 +233,20 @@ QTabBar#PacketBytesTabBar {{
 }}
 
 QTabBar#PacketBytesTabBar::tab {{
-    padding: 1px 6px;
-    min-height: 15px;
+    padding: 3px 10px;
+    min-height: 18px;
+    background: {t.SURFACE};
+    border: 1px solid {t.BORDER};
+    border-radius: {t.RADIUS_SM}px;
+    margin-right: 4px;
+    color: {t.TEXT_MUTED};
+}}
+
+QTabBar#PacketBytesTabBar::tab:selected {{
+    color: {t.PRIMARY};
+    font-weight: bold;
+    background: {t.PRIMARY_SOFT};
+    border-color: {t.PRIMARY};
 }}
 
 QLineEdit,

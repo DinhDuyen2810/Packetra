@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import re
 import os
 import json
@@ -39,6 +39,7 @@ from utils.pcap_io import (
     save_capture_file_with_metadata,
     save_pcapng_file_comment,
     save_pcapng_packet_comments,
+    get_pcap_packet_count,
 )
 
 log = logging.getLogger('capture_view')
@@ -2490,7 +2491,9 @@ class CaptureView(QWidget):
                 break
 
         loaded = int(self._file_load_loaded_count or len(self.records))
-        if loaded - int(self._file_load_last_status_count or 0) >= 500:
+        total = getattr(self, '_total_packets_to_load', 0)
+        step = max(50, total // 50) if total > 0 else 500
+        if loaded - int(self._file_load_last_status_count or 0) >= step:
             self._file_load_last_status_count = loaded
             self._update_status(f'Loaded {loaded} packets...')
 
@@ -3292,6 +3295,8 @@ class CaptureView(QWidget):
         self._stop_file_load_thread()
         self._is_bulk_loading = True
         self._startup_priority_mode = True
+        self._file_load_start_time = time.perf_counter()
+        self._total_packets_to_load = get_pcap_packet_count(filename)
         try:
             self.clear_packets(reset_file_path=False)
             self._is_bulk_loading = True

@@ -323,3 +323,38 @@ def load_pcap(filename) -> Tuple:
     packets = rdpcap(filename)
     metadata = load_capture_metadata(filename)
     return packets, metadata
+
+
+def get_pcap_packet_count(filename: str) -> int:
+    """Quickly count the packets in a pcap or pcapng file without full parsing."""
+    try:
+        with open(filename, 'rb') as f:
+            magic = f.read(4)
+            if len(magic) < 4:
+                return 0
+            
+            # PCAPNG
+            if magic == b'\x0a\x0d\x0d\x0a' or magic == b'\x0a\x0d\x0d\x0a'[::-1]:
+                parser = PcapngParser(filename)
+                parser.parse()
+                return parser.packet_count
+            
+            # Classic PCAP
+            if magic in (b'\xa1\xb2\xc3\xd4', b'\xd4\xc3\xb2\xa1', b'\xa1\xb2\x3c\x4d', b'\x4d\x3c\xb2\xa1'):
+                f.seek(24)
+                count = 0
+                is_little = magic in (b'\xd4\xc3\xb2\xa1', b'\x4d\x3c\xb2\xa1')
+                endian = 'little' if is_little else 'big'
+                while True:
+                    header = f.read(16)
+                    if len(header) < 16:
+                        break
+                    incl_len = int.from_bytes(header[8:12], endian)
+                    if incl_len < 0:
+                        break
+                    f.seek(incl_len, 1)
+                    count += 1
+                return count
+    except Exception:
+        pass
+    return 0
