@@ -300,68 +300,7 @@ if __name__ == '__main__':
     main()
 '''
 
-    REMOTE_INSTALL_PS1_TEMPLATE = r'''param(
-  [string]$InstallDir = "C:\RemoteCaptureAgent"
-)
-
-$ErrorActionPreference = "Stop"
-
-Write-Host "Installing Packetra Remote Capture Agent into $InstallDir"
-New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
-
-$sourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$agentSource = Join-Path $sourceDir "remote_capture_agent.py"
-$agentTarget = Join-Path $InstallDir "remote_capture_agent.py"
-
-if (-not (Test-Path $agentSource)) {
-  throw "remote_capture_agent.py not found next to install-agent.ps1"
-}
-
-Copy-Item $agentSource $agentTarget -Force
-
-$cmdWrapper = "python `"$agentTarget`" $args"
-$cmdFile = Join-Path $InstallDir "RemoteCaptureAgent.cmd"
-Set-Content -Path $cmdFile -Value "@echo off`r`n$cmdWrapper" -Encoding ASCII
-
-$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-if ($machinePath -notlike "*$InstallDir*") {
-  [Environment]::SetEnvironmentVariable('Path', "$machinePath;$InstallDir", 'Machine')
-}
-
-Write-Host "Done. Use command: RemoteCaptureAgent.cmd --list"
-Write-Host "If PATH is not refreshed, open a new terminal session."
-'''
-
-    REMOTE_HOWTO_TEXT = '''Remote Capture How-To
-
-Linux remote host
-1) Ensure SSH server is running:
-    sudo systemctl enable ssh
-    sudo systemctl start ssh
-2) Ensure tcpdump exists:
-    which tcpdump
-3) In Packetra > Remote Interfaces:
-    - Add host, port 22, OS=linux, username/auth
-    - Select row and click Connect && Load Interfaces
-    - Tick interfaces to show
-4) Start capture from selected remote interface.
-
-Windows remote host
-1) Ensure OpenSSH Server is installed and running.
-2) In Packetra > Remote Interfaces click Download Agent.
-3) Copy generated files to remote host folder, e.g. C:\\Temp\\PacketraAgent
-4) Open PowerShell as Administrator and run:
-    Set-ExecutionPolicy -Scope Process Bypass
-    cd C:\\Temp\\PacketraAgent
-    .\\install-agent.ps1
-5) Verify command:
-    RemoteCaptureAgent.cmd --list
-6) Back in Packetra, set OS=windows, Connect && Load Interfaces.
-
-Notes
-- If command not found after install, open a new terminal session on remote host.
-- If auth is Password, ensure username/password are correctly set.
-'''
+    REMOTE_INSTALL_PS1_TEMPLATE = ""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -672,8 +611,8 @@ Notes
         self.remote_table.setColumnCount(7)
         self.remote_table.setHorizontalHeaderLabels(['Show', 'Host / Device URL', 'Port', 'OS', 'Username', 'Auth Type', 'Password'])
         self.remote_table.horizontalHeader().setStretchLastSection(True)
+        self.remote_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.remote_table.setColumnWidth(0, 50)
-        self.remote_table.setColumnWidth(1, 220)
         self.remote_table.setColumnWidth(2, 80)
         self.remote_table.setColumnWidth(3, 90)
         self.remote_table.setColumnWidth(4, 120)
@@ -702,10 +641,6 @@ Notes
         download_btn.clicked.connect(self._on_download_agent)
         btn_layout.addWidget(download_btn)
 
-        howto_btn = QPushButton('HowToRemote')
-        howto_btn.clicked.connect(self._show_remote_howto)
-        btn_layout.addWidget(howto_btn)
-        
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
@@ -713,7 +648,7 @@ Notes
         self._style_flat_tree(self.remote_iface_tree)
         self.remote_iface_tree.setColumnCount(2)
         self.remote_iface_tree.setHeaderLabels(['Remote Host / Interface', 'Show'])
-        self.remote_iface_tree.setColumnWidth(0, 430)
+        self.remote_iface_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.remote_iface_tree.setColumnWidth(1, 80)
         self.remote_iface_tree.header().setStretchLastSection(False)
         layout.addWidget(QLabel('Discovered Interfaces'))
@@ -970,43 +905,43 @@ Notes
         self._settings().setValue('remote_interfaces', json.dumps(remote_interfaces))
 
     def _on_download_agent(self):
-        target_dir = QFileDialog.getExistingDirectory(self, 'Select folder to save Remote Agent package')
-        if not target_dir:
+        # We now assume packetra-remote-agent.zip is bundled with the application.
+        # Check if the ZIP exists in the data dir.
+        zip_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'packetra-remote-agent.zip')
+        if not os.path.exists(zip_src):
+            QMessageBox.warning(
+                self, 
+                'Agent Not Found', 
+                f'The pre-compiled agent installer was not found at:\n{zip_src}\n\n'
+                'Please compile it using build_agent_msi.py and zip it first.'
+            )
             return
 
-        zip_path = os.path.join(target_dir, 'packetra-remote-agent.zip')
+        target_file, _ = QFileDialog.getSaveFileName(self, 'Save Remote Agent Installer Package', 'packetra-remote-agent.zip', 'ZIP Archive (*.zip)')
+        if not target_file:
+            return
 
-        # Embed agent content in install script so .ps1 works even when copied alone.
-        agent_b64 = base64.b64encode(self.REMOTE_AGENT_TEMPLATE.encode('utf-8')).decode('ascii')
-        ps1_content = self._build_install_agent_script(agent_b64)
-
+        import shutil
         try:
-            with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr('install-agent.ps1', ps1_content)
+            shutil.copy2(zip_src, target_file)
         except OSError as exc:
-            QMessageBox.critical(self, 'Download Agent', f'Cannot write agent files:\n{exc}')
+            QMessageBox.critical(self, 'Download Agent', f'Cannot write agent package:\n{exc}')
             return
 
         dialog = QDialog(self)
         dialog.setWindowTitle('Download Agent - Instructions')
-        dialog.resize(760, 520)
+        dialog.resize(600, 350)
         layout = QVBoxLayout(dialog)
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText(
             'Agent package saved successfully.\n\n'
-            f'Zip file: {zip_path}\n\n'
+            f'Package: {target_file}\n\n'
             'Windows remote setup:\n'
-            '1) Copy packetra-remote-agent.zip to remote host and extract it\n'
-            '2) You will get install-agent.ps1 and RemoteCaptureAgent.ps1/cmd after install\n'
-            '3) Run PowerShell as Administrator\n'
-            '3) Execute:\n'
-            '   Set-ExecutionPolicy -Scope Process Bypass\n'
-            '   cd <folder-containing-install-agent.ps1>\n'
-            '   .\\install-agent.ps1\n\n'
-            'The installer is self-contained: it recreates remote_capture_agent.py and installs scapy automatically.\n\n'
-            'Validation command:\n'
-            '   & "C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd" --list\n'
+            '1) Copy packetra-remote-agent.zip to the remote Windows host and extract it.\n'
+            '2) Run the extracted PacketraAgent.msi installer.\n'
+            '3) The installer will install the agent and start it as a Windows Service that automatically runs on boot.\n\n'
+            'That\'s it! You can now connect to this host from Packetra.'
         )
         layout.addWidget(text)
         btn_row = QHBoxLayout()
@@ -1015,82 +950,6 @@ Notes
         close_btn.clicked.connect(dialog.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
-        dialog.exec()
-
-    def _build_install_agent_script(self, embedded_agent_b64: str) -> str:
-        return f'''param(
-  [string]$InstallDir = "C:\\RemoteCaptureAgent"
-)
-
-$ErrorActionPreference = "Stop"
-
-Write-Host "Installing Packetra Remote Capture Agent into $InstallDir"
-New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
-
-$agentTarget = Join-Path $InstallDir "remote_capture_agent.py"
-$embeddedAgentB64 = "{embedded_agent_b64}"
-
-# Always deploy embedded agent to avoid stale side-by-side files.
-[System.IO.File]::WriteAllBytes($agentTarget, [Convert]::FromBase64String($embeddedAgentB64))
-
-# Resolve concrete Python executable path.
-$pythonResolved = $null
-if (Get-Command py -ErrorAction SilentlyContinue) {{
-    $candidate = (& py -3 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
-    if ($candidate) {{ $pythonResolved = $candidate.Trim() }}
-}}
-if (-not $pythonResolved -and (Get-Command python -ErrorAction SilentlyContinue)) {{
-    $candidate = (& python -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
-    if ($candidate) {{ $pythonResolved = $candidate.Trim() }}
-}}
-if (-not $pythonResolved) {{
-    throw "Python runtime not found. Install Python 3 first."
-}}
-if (-not (Test-Path $pythonResolved)) {{
-    throw "Resolved Python path does not exist: $pythonResolved"
-}}
-
-Write-Host "Using Python: $pythonResolved"
-
-$cmdWrapper = "`"$pythonResolved`" `"$agentTarget`" %*"
-$cmdFile = Join-Path $InstallDir "RemoteCaptureAgent.cmd"
-Set-Content -Path $cmdFile -Value "@echo off`r`n$cmdWrapper" -Encoding ASCII
-
-$ps1Wrapper = @"
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]`$Args)
-& "$pythonResolved" "$agentTarget" @Args
-"@
-$ps1File = Join-Path $InstallDir "RemoteCaptureAgent.ps1"
-Set-Content -Path $ps1File -Value $ps1Wrapper -Encoding ASCII
-
-# Remove any previous RemoteCaptureAgent installation from Machine PATH,
-# then prepend the new location to guarantee we find the updated agent.
-$cleanedParts = ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') |
-    Where-Object {{ $_.Trim() -ne '' -and $_ -notlike '*RemoteCaptureAgent*' }}
-$newMachinePath = (@($InstallDir) + $cleanedParts) -join ';'
-[Environment]::SetEnvironmentVariable('Path', $newMachinePath, 'Machine')
-
-Write-Host "Done. Use one of these commands:"
-Write-Host "  & `"$cmdFile`" --list"
-Write-Host "  & `"$ps1File`" --list"
-Write-Host "If PATH is not refreshed, open a new terminal session or use full path with & and quotes."
-'''
-
-    def _show_remote_howto(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle('HowToRemote')
-        dialog.resize(760, 560)
-        layout = QVBoxLayout(dialog)
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setPlainText(self.REMOTE_HOWTO_TEXT)
-        layout.addWidget(text)
-        row = QHBoxLayout()
-        row.addStretch()
-        close_btn = QPushButton('Close')
-        close_btn.clicked.connect(dialog.accept)
-        row.addWidget(close_btn)
-        layout.addLayout(row)
         dialog.exec()
     
     # ===== SAVE/LOAD =====

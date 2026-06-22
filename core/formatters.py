@@ -71,8 +71,14 @@ MAC_VENDORS = {
     '1c:69:7a': 'EliteGroupCo',
 }
 
+# Global name resolution settings configured by GUI
+RESOLVE_MAC = True
+RESOLVE_NETWORK = False
+RESOLVE_TRANSPORT = False
 
 def get_mac_vendor(mac: str) -> str:
+    if not RESOLVE_MAC:
+        return ''
     if not mac or len(mac) < 8:
         return ''
     prefix = mac.lower()[:8]
@@ -97,7 +103,7 @@ def hex_dump(packet) -> str:
         )
 
         lines.append(
-            f'{offset:04x}  {hex_part:<48}  {ascii_part}'
+            f'{offset:04x}    {hex_part:<48}    {ascii_part}'
         )
 
     return '\n'.join(lines)

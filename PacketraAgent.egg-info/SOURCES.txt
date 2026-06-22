@@ -1,0 +1,6 @@
+README.md
+build_agent_msi.py
+PacketraAgent.egg-info/PKG-INFO
+PacketraAgent.egg-info/SOURCES.txt
+PacketraAgent.egg-info/dependency_links.txt
+PacketraAgent.egg-info/top_level.txt

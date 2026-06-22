@@ -20,10 +20,12 @@ class _RoundedPopupFilter(QObject):
         }:
             _prepare_rounded_popup(obj)
         elif ev_type == QEvent.Type.Polish and isinstance(obj, QWidget):
-            # Clip QTipLabel corners with a pixel mask so border-radius is visible
-            # without using WA_TranslucentBackground (which causes black artifacts on Windows).
             try:
-                if obj.metaObject().className() == 'QTipLabel':
+                class_name = obj.metaObject().className()
+                if class_name == 'QTipLabel':
+                    _apply_tooltip_mask(obj)
+                elif class_name == 'QComboBoxPrivateContainer' or obj.inherits('QComboBoxPrivateContainer'):
+                    # ComboBox drop-down popup needs the same translucency fix to avoid black corners
                     _apply_tooltip_mask(obj)
             except Exception:
                 pass

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Packetra Find Packet Guide</title>
+  <link rel="stylesheet" href="help-theme.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="toc-title">Find Packet Guide</div>
+      <p class="toc-note">Master how to search through captured packets efficiently using Regex, Hex, and Display Filters.</p>
+      <ul class="toc">
+        <li><a href="#overview">1. Overview</a></li>
+        <li><a href="#methods">2. Search Methods</a></li>
+        <li><a href="#regex">3. Regular Expression (Regex)</a></li>
+        <li><a href="#regex-text">3.1 Searching Text Payloads</a></li>
+        <li><a href="#regex-data">3.2 Extracting Variable Data</a></li>
+        <li><a href="#regex-hex">3.3 Regex with Hex Bytes</a></li>
+        <li><a href="#case">4. Case Sensitivity</a></li>
+      </ul>
+    </aside>
+
+    <main class="content">
+      <div class="nav">
+        <a href="index.html">Help Center</a>
+        <a href="user_guide.html">User Guide</a>
+        <a href="capture_workflow.html">Capture Workflow</a>
+        <a href="capture_filter_guide.html">Capture Filter Guide</a>
+        <a href="filter_reference.html">Display Filter Reference</a>
+        <a href="dashboard_guide.html">Dashboard Guide</a>
+        <a href="find_guide.html">Find Packet Guide</a>
+        <a href="agent_guide.html">Remote Capture Guide</a>
+      </div>
+
+      <section class="card hero" id="overview">
+        <h1>Find Packet Guide</h1>
+        <p class="lead">The Find Packet feature (accessed via <code>Edit &gt; Find Packet...</code> or <kbd>Ctrl+F</kbd>) allows you to search through captured packets using different methods, with a strong emphasis on powerful Regular Expression (Regex) searching.</p>
+      </section>
+
+      <section class="card" id="methods">
+        <h2>2. Search Methods</h2>
+        <ul>
+          <li><b>Display filter:</b> Finds the next packet that matches a specific display filter expression (e.g., <code>tcp.port == 80</code>).</li>
+          <li><b>Hexadecimal Value:</b> Searches for an exact sequence of hex bytes (e.g., <code>00:11:22:33:44:55</code>).</li>
+          <li><b>String:</b> Performs a simple substring text search within the packet's decoded details or raw ASCII representation.</li>
+          <li><b>Regular Expression:</b> Powerful pattern matching across text or raw hex bytes.</li>
+        </ul>
+      </section>
+
+      <section class="card" id="regex">
+        <h2>3. Regular Expression (Regex) Search</h2>
+        <p>Regex searching is the most powerful way to find complex patterns in packet data. You can search within the Packet list, Packet details, or Packet bytes. When using Regex, Packetra evaluates the Perl-Compatible Regular Expression (PCRE) against the selected data source.</p>
+
+        <h3 id="regex-text">3.1 Searching Text Payloads</h3>
+        <p>Use regex to find specific text patterns regardless of case or spacing. For example, to find any HTTP GET or POST request, you can use:</p>
+        <pre><code>^(GET|POST)\s+/.*</code></pre>
+        <p>This searches the Packet bytes (in String/ASCII mode) for a line starting with GET or POST, followed by whitespace, a forward slash, and any characters.</p>
+
+        <h3 id="regex-data">3.2 Extracting Variable Data</h3>
+        <p>If you are looking for variable formats like an email address or a specific ID structure, Regex allows you to define the shape of the data. For example, to locate any packets containing emails:</p>
+        <pre><code>[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}</code></pre>
+        <p>This expression matches typical email address patterns within the packet details or raw payload.</p>
+
+        <h3 id="regex-hex">3.3 Regex with Hex Bytes</h3>
+        <p>When searching Packet bytes, you can use hex escape sequences to locate specific protocol signatures or byte patterns that are not printable text. For example:</p>
+        <pre><code>\x00\x11\x22</code></pre>
+        <p>This finds the exact byte sequence <code>00 11 22</code> anywhere in the packet.</p>
+        <p>You can also use regex quantifiers and wildcards with hex bytes. For example, to find an Ethernet frame indicating IPv4 (where the exact MAC addresses don't matter):</p>
+        <pre><code>\x08\x00.{2}\x45\x00</code></pre>
+        <p>Here, <code>.{2}</code> acts as a wildcard matching any two bytes between the specific hex values.</p>
+      </section>
+
+      <section class="card" id="case">
+        <h2>4. Case Sensitivity</h2>
+        <p>Ensure you check or uncheck the <b>"Case sensitive"</b> option based on whether your regex relies on exact casing (like <code>[A-Z]</code>) or should be case-insensitive (e.g., finding "http" or "HTTP").</p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

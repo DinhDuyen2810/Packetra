@@ -428,13 +428,19 @@ class CaptureOptionsDialog(QDialog):
             'ring_buffer_enabled': False,
             'ring_buffer_files': 2,
         }
+        prefs = {}
+        if hasattr(parent, '_load_edit_preferences'):
+            prefs = parent._load_edit_preferences()
+        name_cfg = prefs.get('name_resolution', {}) or {}
+        cap_cfg = prefs.get('capture', {}) or {}
+        
         self.options_state = {
-            'realtime': True,
-            'autoscroll': True,
-            'show_info': False,
-            'resolve_mac': True,
-            'resolve_network': False,
-            'resolve_transport': False,
+            'realtime': cap_cfg.get('realtime_update', True),
+            'autoscroll': cap_cfg.get('autoscroll', True),
+            'show_info': cap_cfg.get('show_info', False),
+            'resolve_mac': name_cfg.get('resolve_mac_addresses', True),
+            'resolve_network': name_cfg.get('resolve_network_ip_addresses', False),
+            'resolve_transport': name_cfg.get('resolve_transport_names', False),
             'stop_packets_enabled': False,
             'stop_packets_value': 1,
             'stop_files_enabled': False,
@@ -1731,7 +1737,33 @@ class CaptureOptionsDialog(QDialog):
             'stop_duration_value': self.stop_duration_spin.value(),
             'stop_duration_unit': self.stop_duration_unit.currentText(),
         })
-        return self.options_state.copy()
+        
+        state = self.options_state.copy()
+        
+        # Synchronize back to global preferences
+        parent = self.parent()
+        if hasattr(parent, '_load_edit_preferences') and hasattr(parent, '_save_edit_preferences'):
+            prefs = parent._load_edit_preferences()
+            name_cfg = prefs.get('name_resolution', {})
+            if not isinstance(name_cfg, dict):
+                name_cfg = {}
+            cap_cfg = prefs.get('capture', {})
+            if not isinstance(cap_cfg, dict):
+                cap_cfg = {}
+                
+            cap_cfg['realtime_update'] = state.get('realtime', True)
+            cap_cfg['autoscroll'] = state.get('autoscroll', True)
+            cap_cfg['show_info'] = state.get('show_info', False)
+            
+            name_cfg['resolve_mac_addresses'] = state.get('resolve_mac', True)
+            name_cfg['resolve_network_ip_addresses'] = state.get('resolve_network', False)
+            name_cfg['resolve_transport_names'] = state.get('resolve_transport', False)
+            
+            prefs['capture'] = cap_cfg
+            prefs['name_resolution'] = name_cfg
+            parent._save_edit_preferences(prefs)
+            
+        return state
     
     def _build_options_tab(self):
         """Build Options tab"""
@@ -1745,14 +1777,19 @@ class CaptureOptionsDialog(QDialog):
         disp_group = QGroupBox('Display Options')
         disp_layout = QVBoxLayout()
         self.opt_realtime = QCheckBox('Update list of packets in real-time')
-        self.opt_realtime.setChecked(True)
+        self.opt_realtime.setChecked(self.options_state.get('realtime', True))
         self.opt_realtime.setToolTip('Update packet list while capture is running.')
         self.opt_autoscroll = QCheckBox('Automatically scroll during live capture')
-        self.opt_autoscroll.setChecked(True)
+        self.opt_autoscroll.setChecked(self.options_state.get('autoscroll', True))
         self.opt_autoscroll.setToolTip('Automatically scroll to newest packets.')
         self.opt_showinfo = QCheckBox('Show capture information during live capture')
-        self.opt_showinfo.setChecked(False)
+        self.opt_showinfo.setChecked(self.options_state.get('show_info', False))
         self.opt_showinfo.setToolTip('Display live capture statistics dialog.')
+        
+        # Link realtime toggle to autoscroll enable/disable
+        self.opt_realtime.toggled.connect(self.opt_autoscroll.setEnabled)
+        self.opt_autoscroll.setEnabled(self.opt_realtime.isChecked())
+        
         disp_layout.addWidget(self.opt_realtime)
         disp_layout.addWidget(self.opt_autoscroll)
         disp_layout.addWidget(self.opt_showinfo)
@@ -1763,13 +1800,13 @@ class CaptureOptionsDialog(QDialog):
         name_group = QGroupBox('Name Resolution')
         name_layout = QVBoxLayout()
         self.opt_resolve_mac = QCheckBox('Resolve MAC addresses')
-        self.opt_resolve_mac.setChecked(True)
+        self.opt_resolve_mac.setChecked(self.options_state.get('resolve_mac', True))
         self.opt_resolve_mac.setToolTip('Translate MAC addresses into names.')
         self.opt_resolve_net = QCheckBox('Resolve network names')
-        self.opt_resolve_net.setChecked(False)
+        self.opt_resolve_net.setChecked(self.options_state.get('resolve_network', False))
         self.opt_resolve_net.setToolTip('Perform hostname resolution.')
         self.opt_resolve_trans = QCheckBox('Resolve transport names')
-        self.opt_resolve_trans.setChecked(False)
+        self.opt_resolve_trans.setChecked(self.options_state.get('resolve_transport', False))
         self.opt_resolve_trans.setToolTip('Translate TCP/UDP ports into names.')
         name_layout.addWidget(self.opt_resolve_mac)
         name_layout.addWidget(self.opt_resolve_net)

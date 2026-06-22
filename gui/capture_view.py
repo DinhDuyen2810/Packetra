@@ -727,6 +727,14 @@ class CaptureView(QWidget):
         self.options_settings = options_settings.copy() if options_settings else {}
         self.realtime_update_enabled = bool(self.options_settings.get('realtime', True))
         self.auto_scroll_enabled = bool(self.options_settings.get('autoscroll', True))
+        
+        try:
+            import core.formatters as formatters
+            formatters.RESOLVE_MAC = bool(self.options_settings.get('resolve_mac', True))
+            formatters.RESOLVE_NETWORK = bool(self.options_settings.get('resolve_network', False))
+            formatters.RESOLVE_TRANSPORT = bool(self.options_settings.get('resolve_transport', False))
+        except Exception:
+            pass
 
     def _capture_output_format(self) -> str:
         fmt = str((self.output_settings or {}).get('format', 'pcapng')).strip().lower()
@@ -2699,6 +2707,13 @@ class CaptureView(QWidget):
         if opts.get('stop_packets_enabled'):
             packet_limit = int(opts.get('stop_packets_value', 1) or 1)
             if len(self.records) >= packet_limit:
+                return True
+
+        if opts.get('stop_files_enabled'):
+            file_limit = int(opts.get('stop_files_value', 1) or 1)
+            # Check how many rollover files have been created so far
+            written_files = getattr(self, '_auto_output_written_files', [])
+            if len(written_files) >= file_limit:
                 return True
 
         if opts.get('stop_size_enabled'):

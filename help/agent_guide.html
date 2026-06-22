@@ -75,14 +75,21 @@
       </ul>
     </aside>
     <div class="wrap">
+      <div class="nav">
+        <a href="index.html">Help Center</a>
+        <a href="user_guide.html">User Guide</a>
+        <a href="capture_workflow.html">Capture Workflow</a>
+        <a href="capture_filter_guide.html">Capture Filter Guide</a>
+        <a href="filter_reference.html">Display Filter Reference</a>
+        <a href="dashboard_guide.html">Dashboard Guide</a>
+        <a href="find_guide.html">Find Packet Guide</a>
+        <a href="agent_guide.html">Remote Capture Guide</a>
+      </div>
     <section class="panel">
       <h1>Remote Capture Guide</h1>
       <p class="lead">This guide is intentionally Linux-first. It explains the actual remote capture workflow used by Packetra: SSH into the remote host, list interfaces, and stream packet data back via <code>tcpdump</code>.</p>
-      <div class="backlinks">
-        <a href="index.html">Back to Help Center</a>
-        <a href="capture_filter_guide.html">Open Capture Filter Guide</a>
-      </div>
     </section>
+
 
     <section class="panel" id="how-it-works">
       <h2>1. How Packetra remote capture works</h2>
@@ -288,8 +295,27 @@ sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
     </section>
 
     <section class="panel" id="windows-note">
-      <h2>13. Windows remote capture still exists, but is different</h2>
-      <p>For completeness: Windows remote capture in Packetra uses a downloadable remote agent package, not plain <code>tcpdump</code>. The Help menu now names this page <b>Remote Capture Guide</b> because the Linux workflow is usually the more universally useful one.</p>
+      <h2>13. Windows Remote Capture via Agent Service</h2>
+      <p>Windows does not natively provide a tool equivalent to <code>tcpdump</code> that can easily stream raw packets over an SSH connection without external dependencies. To solve this, Packetra includes a pre-packaged Windows Agent Installer.</p>
+      
+      <p><strong>Installation Steps:</strong></p>
+      <ol>
+        <li>On the Packetra Host: Open <strong>Capture > Manage Interfaces</strong>, go to the <strong>Remote Interfaces</strong> tab, and click <strong>Download Agent</strong>. Save the <code>packetra-remote-agent.zip</code> file.</li>
+        <li>Transfer <code>packetra-remote-agent.zip</code> to your target Windows machine.</li>
+        <li>Extract the ZIP and run the <code>PacketraAgent.msi</code> installer on the remote Windows host.</li>
+        <li>The installer will automatically unpack the agent, install it, and start a background Windows Service named <strong>Packetra Remote Capture Agent</strong>.</li>
+      </ol>
+
+      <p><strong>Validation & Checking the Service:</strong></p>
+      <p>Once installed, you do not need to manually run any command prompt or scripts. The service runs automatically in the background and starts on boot.</p>
+      <ul>
+        <li>To verify it is running, open <code>services.msc</code> (Windows Services) on the remote machine.</li>
+        <li>Locate <strong>Packetra Remote Capture Agent</strong> in the list.</li>
+        <li>Ensure its Status is <strong>Running</strong> and Startup Type is <strong>Automatic</strong>.</li>
+      </ul>
+
+      <p><strong>Connecting from Packetra:</strong></p>
+      <p>After verifying the service, return to Packetra, add the Windows Host IP/credentials in the Remote Interfaces tab, select OS as <code>windows</code>, and click <strong>Connect & Load Interfaces</strong>. Packetra will securely SSH into the Windows machine and communicate directly with the running Agent Service to capture packets seamlessly.</p>
     </section>
     </div>
   </div>

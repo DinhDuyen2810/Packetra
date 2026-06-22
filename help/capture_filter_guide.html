@@ -24,13 +24,19 @@
       </ul>
     </aside>
     <main class="content">
+      <div class="nav">
+        <a href="index.html">Help Center</a>
+        <a href="user_guide.html">User Guide</a>
+        <a href="capture_workflow.html">Capture Workflow</a>
+        <a href="capture_filter_guide.html">Capture Filter Guide</a>
+        <a href="filter_reference.html">Display Filter Reference</a>
+        <a href="dashboard_guide.html">Dashboard Guide</a>
+        <a href="find_guide.html">Find Packet Guide</a>
+        <a href="agent_guide.html">Remote Capture Guide</a>
+      </div>
       <section class="card hero" id="overview">
         <h1>Capture Filter Guide</h1>
         <p class="lead">This page covers capture filters only. These filters are applied before live packets are brought into Packetra. They use BPF/libpcap-style syntax, not Packetra display-filter syntax.</p>
-        <div class="backlinks">
-          <a href="index.html">Back to Help Center</a>
-          <a href="filter_reference.html">Open Display Filter Reference</a>
-        </div>
       </section>
 
       <section class="card">
@@ -68,13 +74,14 @@
       </section>
 
       <section class="card" id="presets">
-        <h2>4. Capture Filter Preset Manager</h2>
+        <h2>4. Capture Filter Templates (Presets)</h2>
+        <p>To avoid manually typing complex filters every time, you can create <strong>Capture Filter Templates</strong> (also known as Presets). This saves time and reduces syntax errors.</p>
         <ul>
-          <li>Open it using <code>Capture Filters...</code>.</li>
-          <li>Create named presets with expression and optional comment.</li>
-          <li>Packetra validates syntax through libpcap-compatible Scapy compilation backends when available.</li>
-          <li>After closing the dialog with a selected preset, the selected preset expression can be copied back into the current interface filter field.</li>
-          <li>Preset names can act as aliases, because Packetra resolves a preset name to its stored expression before starting capture.</li>
+          <li>Open the template manager by clicking <code>Capture Filters...</code> in the Capture Options window or via <code>Capture &gt; Capture Filters...</code> in the main menu.</li>
+          <li>Click the <b>+</b> button to create a new template with a descriptive name (e.g., "Web Traffic Only"), the BPF expression (e.g., <code>tcp port 80 or tcp port 443</code>), and an optional comment.</li>
+          <li>Packetra validates the syntax using libpcap-compatible compilation when you save the template.</li>
+          <li>To use a template instead of typing manually, simply open the Capture Filters dialog, select your desired template, and click <b>OK</b>. The expression will be automatically copied into the active interface's filter field.</li>
+          <li>Alternatively, you can just type the template's exact name into the Capture Filter input box. Packetra will automatically resolve the name to its saved expression before starting the capture.</li>
         </ul>
       </section>
 

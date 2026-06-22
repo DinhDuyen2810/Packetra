@@ -97,6 +97,22 @@ a {
   background: linear-gradient(135deg, #fffaf3 0%, #f7efe4 100%);
 }
 
+.nav {
+  background: linear-gradient(135deg, #fffaf3 0%, #f7efe4 100%);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.nav a {
+  margin-right: 14px;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
 code {
   font-family: Consolas, "Courier New", monospace;
   background: rgba(18, 91, 80, 0.08);

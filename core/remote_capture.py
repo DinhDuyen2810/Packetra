@@ -97,18 +97,24 @@ class SSHRemoteCapture:
             raise
 
     def _build_windows_agent_cmd(self, args: str) -> str:
+        import base64
         args = str(args or '').strip()
-        # Prefer explicit install paths to avoid stale PATH ordering in non-interactive SSH sessions.
-        inner = (
-            'if exist "C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd" '
-            f'("C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd" {args}) '
-            'else if exist "C:\\Program Files\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd" '
-            f'("C:\\Program Files\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd" {args}) '
-            f'else (RemoteCaptureAgent.cmd {args})'
-        )
-        # OpenSSH on Windows may use either cmd.exe or powershell as default shell.
-        # Always execute through cmd.exe so the IF/ELSE syntax above is interpreted reliably.
-        return f'cmd /d /s /c "{inner}"'
+        ps_script = f"""
+$p = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\PacketraAgent' -ErrorAction SilentlyContinue).ImagePath
+if ($p) {{
+    $p = $p -replace '"',''
+}} else {{
+    if (Test-Path 'C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd') {{ $p = 'C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd' }}
+    elseif (Test-Path 'C:\\Program Files\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd') {{ $p = 'C:\\Program Files\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd' }}
+    else {{ $p = 'RemoteCaptureAgent.cmd' }}
+}}
+& $p {args}
+"""
+        encoded = base64.b64encode(ps_script.encode('utf-16le')).decode('ascii')
+        # OpenSSH invokes this string. We use a base64 encoded powershell script to dynamically resolve 
+        # the exact service binary path from the Registry and execute it using the call operator (&).
+        # This completely bypasses all SSH quoting bugs and correctly streams binary stdout.
+        return f'powershell -NoProfile -NonInteractive -EncodedCommand {encoded}'
 
     def list_interfaces(self):
         if self.os_type == 'linux':
