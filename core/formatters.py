@@ -10361,16 +10361,28 @@ def _isis_lsp_section(payload: bytes, offset: int) -> Dict[str, Any]:
         title = f'TLV (t={tlv_type}, l={tlv_len})'
         if tlv_type == 2:
             title = f'IS Reachability (t={tlv_type}, l={tlv_len})'
-            entry_cursor = value_start
+            # First byte in value is the Virtual flag (IsVirtual)
+            if value_start < value_end:
+                is_virtual = int(raw[value_start])
+                tlv_children.append({
+                    'title': f'IsVirtual: {is_virtual}',
+                    **_byte_mapping(offset, value_start, 1, PACKET_BYTE_SOURCE),
+                })
+            entry_cursor = value_start + 1  # skip IsVirtual byte
             while entry_cursor + 11 <= value_end:
                 metric = int(raw[entry_cursor])
-                neighbor = _isis_lsp_id_text(raw[entry_cursor + 4:entry_cursor + 11] + b'\x00')[:-3] + '.00'
+                neighbor_bytes = raw[entry_cursor + 4:entry_cursor + 11]
+                neighbor = _isis_lsp_id_text(neighbor_bytes + b'\x00')[:-3] + '.00'
                 tlv_children.append({
                     'title': f'IS Neighbor: {neighbor}',
                     **_byte_mapping(offset, entry_cursor, 11, PACKET_BYTE_SOURCE),
                     'children': [
                         {'title': f'..{metric:06b} = Default Metric: {metric}', **_byte_mapping(offset, entry_cursor, 1, PACKET_BYTE_SOURCE)},
-                        {'title': 'IS Neighbor: ' + neighbor, **_byte_mapping(offset, entry_cursor + 4, 7, PACKET_BYTE_SOURCE)},
+                        {'title': f'Default Metric: {metric}', **_byte_mapping(offset, entry_cursor, 1, PACKET_BYTE_SOURCE)},
+                        {'title': f'Delay Metric: {int(raw[entry_cursor + 1])}', **_byte_mapping(offset, entry_cursor + 1, 1, PACKET_BYTE_SOURCE)},
+                        {'title': f'Expense Metric: {int(raw[entry_cursor + 2])}', **_byte_mapping(offset, entry_cursor + 2, 1, PACKET_BYTE_SOURCE)},
+                        {'title': f'Error Metric: {int(raw[entry_cursor + 3])}', **_byte_mapping(offset, entry_cursor + 3, 1, PACKET_BYTE_SOURCE)},
+                        {'title': f'Neighbor ID: {neighbor}', **_byte_mapping(offset, entry_cursor + 4, 7, PACKET_BYTE_SOURCE)},
                     ],
                 })
                 entry_cursor += 11
@@ -10380,25 +10392,32 @@ def _isis_lsp_section(payload: bytes, offset: int) -> Dict[str, Any]:
                     'title': f'short E/IS reachability ({short_len} vs 11)',
                     **_byte_mapping(offset, entry_cursor, short_len, PACKET_BYTE_SOURCE),
                     'children': [
-                        {'title': '[Expert Info (Error/Malformed): short E/IS reachability (%d vs 11)]' % short_len},
-                        {'title': '[short E/IS reachability (%d vs 11)]' % short_len},
-                        {'title': '[Severity level: Error]'},
-                        {'title': '[Group: Malformed]'},
+                        {'title': '[Expert Info (Note): Short CLV]'},
+                        {'title': '[Severity level: Note]'},
+                        {'title': '[Group: Protocol]'},
                     ],
                 })
         elif tlv_type == 3:
             title = f'ES Neighbor(s) (t={tlv_type}, l={tlv_len})'
-            short_len = tlv_len
-            tlv_children.append({
-                'title': f'short E/IS reachability ({short_len} vs 10)',
-                **_byte_mapping(offset, value_start, tlv_len, PACKET_BYTE_SOURCE),
-                'children': [
-                    {'title': '[Expert Info (Error/Malformed): short E/IS reachability (%d vs 10)]' % short_len},
-                    {'title': '[short E/IS reachability (%d vs 10)]' % short_len},
-                    {'title': '[Severity level: Error]'},
-                    {'title': '[Group: Malformed]'},
-                ],
-            })
+            entry_cursor = value_start
+            while entry_cursor + 6 <= value_end:
+                mac = ':'.join('%02x' % b for b in raw[entry_cursor:entry_cursor + 6])
+                tlv_children.append({
+                    'title': f'ES Neighbor: {mac}',
+                    **_byte_mapping(offset, entry_cursor, 6, PACKET_BYTE_SOURCE),
+                })
+                entry_cursor += 6
+            if entry_cursor != value_end:
+                short_len = value_end - entry_cursor
+                tlv_children.append({
+                    'title': f'short E/IS reachability ({short_len} vs 10)',
+                    **_byte_mapping(offset, entry_cursor, short_len, PACKET_BYTE_SOURCE),
+                    'children': [
+                        {'title': '[Expert Info (Note): Short CLV]'},
+                        {'title': '[Severity level: Note]'},
+                        {'title': '[Group: Protocol]'},
+                    ],
+                })
         children.append({
             'title': title,
             **_byte_mapping(offset, cursor, 2 + tlv_len, PACKET_BYTE_SOURCE),

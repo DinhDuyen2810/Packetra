@@ -10,16 +10,39 @@ from gui.dashboard.ui.theme import DashboardTheme
 
 class _RoundedPopupFilter(QObject):
     def eventFilter(self, obj, event):
-        if isinstance(obj, QMenu) and event is not None and event.type() in {
+        if event is None:
+            return super().eventFilter(obj, event)
+        ev_type = event.type()
+        if isinstance(obj, QMenu) and ev_type in {
             QEvent.Type.Polish,
             QEvent.Type.Show,
             QEvent.Type.Resize,
         }:
             _prepare_rounded_popup(obj)
+        elif ev_type == QEvent.Type.Polish and isinstance(obj, QWidget):
+            # Clip QTipLabel corners with a pixel mask so border-radius is visible
+            # without using WA_TranslucentBackground (which causes black artifacts on Windows).
+            try:
+                if obj.metaObject().className() == 'QTipLabel':
+                    _apply_tooltip_mask(obj)
+            except Exception:
+                pass
         return super().eventFilter(obj, event)
 
 
 _rounded_popup_filter: _RoundedPopupFilter | None = None
+
+
+def _apply_tooltip_mask(widget: QWidget) -> None:
+    """Apply rounded-corner styling to QTipLabel (Qt's internal tooltip widget).
+    Using WA_NoSystemBackground=True prevents Windows from painting an opaque
+    background before QSS, which was causing the black-corner artifact.
+    """
+    widget.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+    widget.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+    widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
 def _prepare_rounded_popup(widget: QWidget) -> None:
@@ -152,7 +175,7 @@ QToolButton:pressed {{
 
 QToolBar QToolButton {{
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     padding: 2px;
     margin: 0px;
     min-width: 26px;
@@ -161,7 +184,7 @@ QToolBar QToolButton {{
 }}
 
 QStatusBar QToolButton {{
-    border: none;
+    border: 1px solid transparent;
     background: transparent;
     padding: 1px;
     margin: 0px 1px;
@@ -170,24 +193,28 @@ QStatusBar QToolButton {{
     border-radius: {t.RADIUS_SM}px;
 }}
 
-QToolBar QToolButton:hover {{
-    background: #F3F4F6;
-    border: none;
-}}
-
+QToolBar QToolButton:hover,
 QStatusBar QToolButton:hover {{
     background: #F3F4F6;
-    border: none;
+    border: 1px solid {t.BORDER_STRONG};
 }}
 
-QToolBar QToolButton:pressed {{
-    background: #E5EEFf;
-    border: none;
-}}
-
+QToolBar QToolButton:pressed,
 QStatusBar QToolButton:pressed {{
     background: #E5EEFf;
-    border: none;
+    border: 1px solid {t.BORDER_STRONG};
+}}
+
+QToolBar QToolButton:checked,
+QStatusBar QToolButton:checked {{
+    background: #E5E7EB;
+    border: 1px solid {t.BORDER_STRONG};
+}}
+
+QToolBar QToolButton:checked:hover,
+QStatusBar QToolButton:checked:hover {{
+    background: #D1D5DB;
+    border: 1px solid {t.BORDER_STRONG};
 }}
 
 QToolBar::separator {{
@@ -431,7 +458,8 @@ QToolTip {{
     color: {t.TEXT};
     border: 1px solid {t.BORDER};
     border-radius: {t.RADIUS_SM}px;
-    padding: 4px 6px;
+    padding: 4px 8px;
+    font-size: 12px;
 }}
 """
 

@@ -2044,13 +2044,11 @@ class ApplicationWindow(QMainWindow):
         self.detail_field_label = QLabel('Field: - | Byte: 0')
         self.detail_field_label.setMinimumWidth(260)
         self.packet_label = QLabel('Loaded in -')
-        self.dropped_label = QLabel('Dropped: 0')
 
         self.statusbar.addWidget(self.expert_btn)
         self.statusbar.addWidget(self.properties_btn)
         self.statusbar.addWidget(self.detail_field_label)
         self.statusbar.addWidget(self.packet_label)
-        self.statusbar.addWidget(self.dropped_label)
 
         self.setCentralWidget(central)
 
@@ -4583,7 +4581,7 @@ class ApplicationWindow(QMainWindow):
         has_iface = bool(self.capture_view and str(getattr(self.capture_view, 'iface', '') or '').strip())
         can_start = bool(has_capture and has_iface and not is_running and not is_stopping)
         can_stop = bool(has_capture and (is_running or is_stopping))
-        can_restart = bool(has_iface and not is_running and not is_stopping)
+        can_restart = bool(has_capture and has_iface and is_running)
 
         self.action_start_btn.setEnabled(can_start)
         self.action_start_btn.setVisible(True)
@@ -4621,7 +4619,7 @@ class ApplicationWindow(QMainWindow):
         if hasattr(self, 'action_stop_capture'):
             self.action_stop_capture.setEnabled(active_capture and (is_running or is_stopping))
         if hasattr(self, 'action_restart_capture'):
-            self.action_restart_capture.setEnabled(active_capture and has_iface and not is_running and not is_stopping)
+            self.action_restart_capture.setEnabled(active_capture and has_iface and is_running)
         if hasattr(self, 'action_capture_filters'):
             self.action_capture_filters.setEnabled(active_capture)
         if hasattr(self, 'action_refresh_interfaces'):
@@ -12471,11 +12469,6 @@ class ApplicationWindow(QMainWindow):
             table.setUpdatesEnabled(True)
 
     def _refresh_status_metrics(self):
-        dropped = 0
-        if self.capture_view:
-            metrics = self.capture_view.get_status_metrics()
-            dropped = int(metrics.get('dropped', 0) or 0)
-        self.dropped_label.setText(f'Dropped: {dropped}')
         if self._status_mode == 'activity':
             self._update_packet_status_label()
 
@@ -12641,7 +12634,10 @@ class ApplicationWindow(QMainWindow):
 
         close_btn = QPushButton('Close', dialog)
         close_btn.clicked.connect(dialog.close)
-        layout.addWidget(close_btn)
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
         dialog.resize(960, 560)
         self._fit_widget_90(dialog)
         self._expert_info_dialog = dialog
