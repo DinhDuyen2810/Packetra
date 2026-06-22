@@ -1,5 +1,6 @@
-﻿import logging
 import os
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+import logging
 import sys
 
 # Reduce noisy Qt font-db warnings before Qt is imported.

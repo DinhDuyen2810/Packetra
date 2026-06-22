@@ -425,7 +425,7 @@ class PacketParser:
         effective_ip = self._effective_ip_layer(packet)
         if effective_ip is not None:
             try:
-                ip_proto = int(getattr(effective_ip, 'proto', 0) or 0)
+                ip_proto = self._ip_next_proto(effective_ip)
                 ip_payload = bytes(getattr(effective_ip, 'payload', b'') or b'')
                 pim_info = self._pim_payload_info(ip_payload, ip_proto)
                 if pim_info is not None:
@@ -3357,16 +3357,13 @@ class PacketParser:
                 'info': ', '.join(commands),
             }
 
-        if printable_bytes > 0:
+        if len(payload) > 0:
             return {
                 'commands': [],
                 'info': f'{len(payload)} bytes data',
             }
 
-        return {
-            'commands': [],
-            'info': 'Telnet',
-        }
+        return None
 
     def _cflow_payload_info(self, payload: bytes) -> dict | None:
         if len(payload) < 20:
@@ -4425,6 +4422,18 @@ class PacketParser:
                     except Exception:
                         pass
         return self._mpls_inner_ip(packet)
+
+    def _ip_next_proto(self, ip_layer) -> int:
+        """Return the next-protocol number for an IPv4 or IPv6 layer.
+
+        IPv4 uses the ``proto`` field; IPv6 uses the ``nh`` (next-header)
+        field.  Passing the wrong attribute on an IPv6 layer always yields 0,
+        which is why this helper must be used instead of a plain
+        ``getattr(layer, 'proto', 0)`` call.
+        """
+        if isinstance(ip_layer, IPv6):
+            return int(getattr(ip_layer, 'nh', 0) or 0)
+        return int(getattr(ip_layer, 'proto', 0) or 0)
 
     def _effective_tcp_layer(self, packet, ip_layer=None):
         if packet.haslayer(TCP):
@@ -6616,7 +6625,10 @@ class PacketParser:
 
     def _ospf_payload_bytes(self, packet) -> bytes:
         effective_ip = self._effective_ip_layer(packet)
-        if effective_ip is not None:
+        # For pure IPv4 packets, use the 'proto' field directly.
+        # For IPv6 (including IPv6-in-IPv4 tunnels), skip this branch so the
+        # correct IPv6 next-header logic below is used instead.
+        if effective_ip is not None and not isinstance(effective_ip, IPv6):
             ip_proto = int(getattr(effective_ip, 'proto', 0) or 0)
             if ip_proto == 89:
                 return bytes(getattr(effective_ip, 'payload', b''))
@@ -6735,7 +6747,7 @@ class PacketParser:
         if self._is_cdp_packet(packet):
             return 'CDP'
         if effective_ip is not None:
-            ip_proto = int(getattr(effective_ip, 'proto', 0) or 0)
+            ip_proto = self._ip_next_proto(effective_ip)
             ip_payload = bytes(getattr(effective_ip, 'payload', b'') or b'')
             pim_info = self._pim_payload_info(ip_payload, ip_proto)
             if pim_info is not None:

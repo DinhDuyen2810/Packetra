@@ -335,14 +335,21 @@ def _tcp_payload_bytes(packet, tcp_layer):
         try:
             raw_packet = bytes(packet)
             if packet.haslayer(IPv6):
-                ip_off = 14 + (4 if packet.haslayer(Dot1Q) else 0)
-                tcp_off = ip_off + 40
+                # Locate the TCP header position by computing how many bytes come
+                # before it in the raw packet.  Using the total size of the scapy
+                # TCP layer (header + payload) is robust across all encapsulations
+                # (bare IPv6, 6-in-4, GRE tunnels, etc.) and avoids the need for
+                # hardcoded offsets that would be wrong for tunnelled packets.
+                tcp_bytes = bytes(tcp_layer)
+                if not tcp_bytes or len(tcp_bytes) > len(raw_packet):
+                    return b''
+                tcp_start = len(raw_packet) - len(tcp_bytes)
                 tcp_header_len = int(getattr(tcp_layer, 'dataofs', 5) or 5) * 4
                 plen = int(getattr(packet[IPv6], 'plen', 0) or 0)
                 payload_len = max(0, plen - tcp_header_len)
                 if isinstance(expected_len, int) and expected_len > 0:
                     payload_len = min(payload_len, expected_len)
-                start = tcp_off + tcp_header_len
+                start = tcp_start + tcp_header_len
                 end = min(len(raw_packet), start + payload_len)
                 return raw_packet[start:end] if end > start else b''
             if packet.haslayer(IP):
@@ -717,13 +724,25 @@ def packet_summary_tree(packet, record) -> List[Dict[str, Any]]:
 
         offset += 28
 
-    if (
-        effective_ip_layer is not None
-        and not parsed_mpls_inner_ip
-        and int(getattr(effective_ip_layer, 'version', 4) or 4) != 6
-    ):
+    # Check if IP (IPv4) is the outer layer
+    has_ip = packet.haslayer(IP)
+    has_ipv6 = packet.haslayer(IPv6)
+    ip_is_outer = False
+    if has_ip:
+        if not has_ipv6:
+            ip_is_outer = True
+        else:
+            curr = packet
+            while curr:
+                if isinstance(curr, IP):
+                    ip_is_outer = True
+                    break
+                if isinstance(curr, IPv6):
+                    break
+                curr = curr.payload
 
-        ip_layer = effective_ip_layer
+    if ip_is_outer and not parsed_mpls_inner_ip:
+        ip_layer = packet[IP]
 
         ip_len = (
             int(getattr(ip_layer, 'ihl', 5) or 5) * 4
