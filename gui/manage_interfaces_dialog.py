@@ -613,8 +613,8 @@ if __name__ == '__main__':
         self.remote_table.horizontalHeader().setStretchLastSection(False)
         for column in range(7):
             self.remote_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Interactive)
-        self.remote_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
         self.remote_table.setColumnWidth(0, 50)
+        self.remote_table.setColumnWidth(1, 160)
         self.remote_table.setColumnWidth(2, 80)
         self.remote_table.setColumnWidth(3, 90)
         self.remote_table.setColumnWidth(4, 120)

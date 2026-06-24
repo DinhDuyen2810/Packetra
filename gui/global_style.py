@@ -112,6 +112,11 @@ QMenuBar::item:pressed {{
     background: {t.PRIMARY_SOFT};
 }}
 
+QMenuBar::item:disabled {{
+    color: {t.TEXT_MUTED};
+    background: transparent;
+}}
+
 QMenu {{
     background: {t.SURFACE};
     border: 1px solid {t.BORDER};
@@ -128,6 +133,11 @@ QMenu::item {{
 QMenu::item:selected {{
     background: {t.PRIMARY_SOFT};
     color: {t.TEXT};
+}}
+
+QMenu::item:disabled {{
+    color: {t.TEXT_MUTED};
+    background: transparent;
 }}
 
 QComboBox QAbstractItemView {{

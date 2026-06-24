@@ -2175,6 +2175,10 @@ class ApplicationWindow(QMainWindow):
         self.statusbar.addWidget(self.packet_label)
 
         self.setCentralWidget(central)
+        
+        # Sync initial menu states so they are grayed out when no capture is active
+        self._refresh_file_menu_state()
+        self._refresh_analyze_menu_state()
 
     def _build_menubar(self):
         """Xay dung menu bar theo nhom tab feature."""
@@ -2398,53 +2402,53 @@ class ApplicationWindow(QMainWindow):
         self.action_interfaces = QAction('&Interfaces...', self)
 
         # Analyze menu
-        analyze_menu = menubar.addMenu('&Analyze')
+        self.menu_analyze = menubar.addMenu('&Analyze')
         self.action_display_filter_macros = QAction('Display Filter &Macros...', self)
-        analyze_menu.addAction(self.action_display_filter_macros)
+        self.menu_analyze.addAction(self.action_display_filter_macros)
         self.action_display_filter_expression = QAction('Display Filter E&xpression...', self)
-        analyze_menu.addAction(self.action_display_filter_expression)
-        analyze_menu.addSeparator()
+        self.menu_analyze.addAction(self.action_display_filter_expression)
+        self.menu_analyze.addSeparator()
         self.action_apply_as_column = QAction('Apply as &Column', self)
-        analyze_menu.addAction(self.action_apply_as_column)
+        self.menu_analyze.addAction(self.action_apply_as_column)
         self.action_apply_as_filter = QAction('Apply as &Filter', self)
-        analyze_menu.addAction(self.action_apply_as_filter)
+        self.menu_analyze.addAction(self.action_apply_as_filter)
         self.action_conversation_filter = QAction('Conversation F&ilter', self)
-        analyze_menu.addAction(self.action_conversation_filter)
-        analyze_menu.addSeparator()
+        self.menu_analyze.addAction(self.action_conversation_filter)
+        self.menu_analyze.addSeparator()
         self.action_follow_stream = QAction('&Follow', self)
-        analyze_menu.addAction(self.action_follow_stream)
+        self.menu_analyze.addAction(self.action_follow_stream)
         self.action_expert_info = QAction('&Expert Info', self)
-        analyze_menu.addAction(self.action_expert_info)
+        self.menu_analyze.addAction(self.action_expert_info)
 
         # Hidden non-spec analyze actions
         self.action_decode_as = QAction('&Decode As...', self)
         self.action_display_filters = QAction('&Display Filters', self)
 
         # Statistics menu
-        statistics_menu = menubar.addMenu('&Statistics')
+        self.menu_statistics = menubar.addMenu('&Statistics')
         self.action_capture_file_properties = QAction('Capture File &Properties', self)
-        statistics_menu.addAction(self.action_capture_file_properties)
+        self.menu_statistics.addAction(self.action_capture_file_properties)
         self.action_resolved_addresses = QAction('&Resolved Addresses', self)
-        statistics_menu.addAction(self.action_resolved_addresses)
+        self.menu_statistics.addAction(self.action_resolved_addresses)
         self.action_protocol_hierarchy = QAction('Protocol &Hierarchy', self)
-        statistics_menu.addAction(self.action_protocol_hierarchy)
+        self.menu_statistics.addAction(self.action_protocol_hierarchy)
         self.action_conversations = QAction('&Conversations', self)
-        statistics_menu.addAction(self.action_conversations)
+        self.menu_statistics.addAction(self.action_conversations)
         self.action_endpoints = QAction('&Endpoints', self)
-        statistics_menu.addAction(self.action_endpoints)
+        self.menu_statistics.addAction(self.action_endpoints)
         self.action_packet_lengths = QAction('Packet &Lengths', self)
-        statistics_menu.addAction(self.action_packet_lengths)
+        self.menu_statistics.addAction(self.action_packet_lengths)
         self.action_flow_graph = QAction('&Flow Graph', self)
-        statistics_menu.addAction(self.action_flow_graph)
+        self.menu_statistics.addAction(self.action_flow_graph)
         self.action_http_statistics = QAction('&HTTP', self)
-        statistics_menu.addAction(self.action_http_statistics)
+        self.menu_statistics.addAction(self.action_http_statistics)
         self.action_ipv4_statistics = QAction('I&Pv4 Statistics', self)
-        statistics_menu.addAction(self.action_ipv4_statistics)
+        self.menu_statistics.addAction(self.action_ipv4_statistics)
         self.action_ipv6_statistics = QAction('IPv&6 Statistics', self)
-        statistics_menu.addAction(self.action_ipv6_statistics)
+        self.menu_statistics.addAction(self.action_ipv6_statistics)
 
         # Tools menu
-        tools_menu = menubar.addMenu('&Tools')
+        self.menu_tools = menubar.addMenu('&Tools')
 
         # Hidden non-spec statistics actions
         self.action_summary = QAction('&Summary', self)
@@ -2458,11 +2462,11 @@ class ApplicationWindow(QMainWindow):
         self.action_advanced_fwrule = QAction('&Firewall ACL Rules', self)
 
         # Keep original order expected by users
-        tools_menu.addAction(self.action_advanced_ai_analyst)
-        tools_menu.addAction(self.action_advanced_demo_packet)
-        tools_menu.addAction(self.action_advanced_draw_topo)
-        tools_menu.addAction(self.action_advanced_dashboard)
-        tools_menu.addAction(self.action_advanced_fwrule)
+        self.menu_tools.addAction(self.action_advanced_ai_analyst)
+        self.menu_tools.addAction(self.action_advanced_demo_packet)
+        self.menu_tools.addAction(self.action_advanced_draw_topo)
+        self.menu_tools.addAction(self.action_advanced_dashboard)
+        self.menu_tools.addAction(self.action_advanced_fwrule)
 
         self.action_contents = QAction('&Contents', self)
         self.action_contents.setShortcut(QKeySequence.HelpContents)
@@ -4726,6 +4730,13 @@ class ApplicationWindow(QMainWindow):
         is_stopping = bool(active_capture and self.capture_view.is_stopping())
         has_iface = bool(active_capture and str(getattr(self.capture_view, 'iface', '') or '').strip())
         has_packets = bool(active_capture and getattr(self.capture_view, 'records', None))
+        is_file_format = bool(active_capture and self.capture_view.is_file_format_view_mode())
+        selected_records = self._selected_records_from_packet_list() if active_capture else []
+        selected_count = len(selected_records)
+        has_selected_packet = selected_count > 0
+        has_single_selected_packet = selected_count == 1
+        has_current_record = bool(active_capture and self.capture_view.get_current_record() is not None)
+        has_detail_item = bool(active_capture and self._selected_detail_item() is not None)
 
         for attr in ['action_capture_options', 'action_capture_filters', 'action_refresh_interfaces', 'action_start_capture']:
             if hasattr(self, attr): getattr(self, attr).setEnabled(not is_running and not is_stopping)
@@ -4737,15 +4748,104 @@ class ApplicationWindow(QMainWindow):
         if hasattr(self, 'action_restart_capture'):
             self.action_restart_capture.setEnabled(has_iface and is_running)
 
-        # Statistics & Tools menus require packets
+        # Edit menu items depend on whether we are in capture mode and whether packets/rows are selected.
+        if hasattr(self, 'action_copy'):
+            self.action_copy.setEnabled(active_capture)
+        if hasattr(self, 'action_find'):
+            self.action_find.setEnabled(has_packets)
+        if hasattr(self, 'action_find_next'):
+            self.action_find_next.setEnabled(has_packets)
+        if hasattr(self, 'action_find_previous'):
+            self.action_find_previous.setEnabled(has_packets)
+        if hasattr(self, 'action_mark_unmark_selected'):
+            self.action_mark_unmark_selected.setEnabled(has_selected_packet)
+        if hasattr(self, 'action_mark_unmark_all_displayed'):
+            self.action_mark_unmark_all_displayed.setEnabled(has_packets)
+        if hasattr(self, 'action_next_mark'):
+            self.action_next_mark.setEnabled(has_packets)
+        if hasattr(self, 'action_previous_mark'):
+            self.action_previous_mark.setEnabled(has_packets)
+        if hasattr(self, 'action_ignore_unignore_selected'):
+            self.action_ignore_unignore_selected.setEnabled(has_selected_packet)
+        if hasattr(self, 'action_ignore_unignore_all_displayed'):
+            self.action_ignore_unignore_all_displayed.setEnabled(has_packets)
+        if hasattr(self, 'action_packet_comment'):
+            self.action_packet_comment.setEnabled(has_selected_packet)
+        if hasattr(self, 'action_delete_all_packet_comments'):
+            self.action_delete_all_packet_comments.setEnabled(has_packets)
+        if hasattr(self, 'action_preferences'):
+            self.action_preferences.setEnabled(True)
+
+        # View menu items that only make sense in capture mode.
+        for attr in [
+            'action_view_packet_list', 'action_view_packet_details', 'action_view_packet_bytes',
+            'action_view_packet_diagram', 'action_zoom_in', 'action_zoom_out', 'action_zoom_reset',
+            'action_view_colorize_packet_list', 'action_view_resize_all_columns', 'action_view_reload_as_format_capture',
+        ]:
+            if hasattr(self, attr):
+                getattr(self, attr).setEnabled(active_capture)
+
+        if hasattr(self, 'action_expand_subtrees'):
+            self.action_expand_subtrees.setEnabled(has_detail_item)
+        if hasattr(self, 'action_collapse_subtrees'):
+            self.action_collapse_subtrees.setEnabled(has_detail_item)
+        if hasattr(self, 'action_expand_all'):
+            self.action_expand_all.setEnabled(has_packets)
+        if hasattr(self, 'action_collapse_all'):
+            self.action_collapse_all.setEnabled(has_packets)
+        if hasattr(self, 'action_view_colorize_conversation'):
+            self.action_view_colorize_conversation.setEnabled(has_current_record)
+        if hasattr(self, 'action_view_coloring_rules'):
+            self.action_view_coloring_rules.setEnabled(active_capture)
+        if hasattr(self, 'action_view_show_packet_new_window'):
+            self.action_view_show_packet_new_window.setEnabled(has_current_record)
+        if hasattr(self, 'action_view_redissect_packets'):
+            self.action_view_redissect_packets.setEnabled(has_packets)
+        if hasattr(self, 'action_view_reload'):
+            self.action_view_reload.setEnabled(active_capture)
+
+        # Statistics & Tools menus require capture data, except Demo Packet.
         for attr in [
             'action_capture_file_properties', 'action_resolved_addresses', 
             'action_protocol_hierarchy', 'action_conversations', 'action_endpoints', 'action_packet_lengths', 
             'action_flow_graph', 'action_http_statistics', 'action_ipv4_statistics', 'action_ipv6_statistics',
-            'action_advanced_ai_analyst', 'action_advanced_draw_topo', 'action_advanced_dashboard', 'action_advanced_fwrule',
-            'action_summary', 'action_io_graph'
+            'action_advanced_ai_analyst', 'action_advanced_dashboard', 'action_advanced_fwrule',
+            'action_summary', 'action_io_graph', 'action_expert_info', 'action_decode_as',
+            'action_export_flow_csv', 'action_export_selected_flow_csv', 'action_view_redissect_packets',
+            'action_view_reload_as_format_capture', 'action_view_reload'
         ]:
             if hasattr(self, attr): getattr(self, attr).setEnabled(has_packets)
+
+        if hasattr(self, 'action_advanced_demo_packet'):
+            self.action_advanced_demo_packet.setEnabled(True)
+        if hasattr(self, 'action_advanced_draw_topo'):
+            self.action_advanced_draw_topo.setEnabled(bool(has_packets and not is_file_format))
+        if hasattr(self, 'action_advanced_fwrule'):
+            self.action_advanced_fwrule.setEnabled(bool(has_packets and not is_file_format and has_single_selected_packet))
+
+        # Keep toolbar/menu view toggles in sync with capture visibility.
+        if hasattr(self, 'action_view_main_toolbar'):
+            self.action_view_main_toolbar.setEnabled(True)
+        if hasattr(self, 'action_view_filter_toolbar'):
+            self.action_view_filter_toolbar.setEnabled(True)
+        if hasattr(self, 'action_view_statusbar'):
+            self.action_view_statusbar.setEnabled(True)
+        if hasattr(self, 'action_view_packet_list'):
+            self.action_view_packet_list.blockSignals(True)
+            self.action_view_packet_list.setChecked(bool(self.capture_view and self.capture_view.is_component_visible('packet_list')))
+            self.action_view_packet_list.blockSignals(False)
+        if hasattr(self, 'action_view_packet_details'):
+            self.action_view_packet_details.blockSignals(True)
+            self.action_view_packet_details.setChecked(bool(self.capture_view and self.capture_view.is_component_visible('packet_details')))
+            self.action_view_packet_details.blockSignals(False)
+        if hasattr(self, 'action_view_packet_bytes'):
+            self.action_view_packet_bytes.blockSignals(True)
+            self.action_view_packet_bytes.setChecked(bool(self.capture_view and self.capture_view.is_component_visible('packet_bytes')))
+            self.action_view_packet_bytes.blockSignals(False)
+        if hasattr(self, 'action_view_packet_diagram'):
+            self.action_view_packet_diagram.blockSignals(True)
+            self.action_view_packet_diagram.setChecked(bool(self.capture_view and self.capture_view.is_component_visible('packet_diagram')))
+            self.action_view_packet_diagram.blockSignals(False)
 
     def _load_capture_filter_presets(self) -> list[dict]:
         settings = QSettings('Packetra', 'Packetra')
@@ -7220,6 +7320,14 @@ class ApplicationWindow(QMainWindow):
         expert_btn_row.addStretch()
         expert_layout.addLayout(expert_btn_row)
 
+        expert_hint = QLabel(
+            'You can edit expert-item rules at any time. Open a capture file to test a rule against packets.',
+            expert_page,
+        )
+        expert_hint.setWordWrap(True)
+        expert_hint.setObjectName('MutedHint')
+        expert_layout.addWidget(expert_hint)
+
         severity_values = ['Error', 'Warning', 'Note', 'Chat']
 
         def _set_expert_row(row: int, enabled: bool, condition: str, message: str, severity: str):
@@ -7288,8 +7396,13 @@ class ApplicationWindow(QMainWindow):
             if not cond:
                 QMessageBox.information(dialog, "Check", "Condition is empty.")
                 return
-            if not self.capture_view:
-                QMessageBox.information(dialog, "Check", "No capture loaded.")
+            if not self._has_capture_document():
+                QMessageBox.information(
+                    dialog,
+                    "Check",
+                    "Open or load a capture file first to test this expert-item rule.\n"
+                    "You can still edit and save the rule now.",
+                )
                 return
             entries = self.capture_view.get_expert_information([data])
             count = sum(1 for e in entries if e.get('group') == 'Custom' and e.get('summary') == (data.get('message') or data.get('field')))
@@ -7792,6 +7905,7 @@ class ApplicationWindow(QMainWindow):
             self.action_view_reload_as_format_capture.blockSignals(True)
             self.action_view_reload_as_format_capture.setChecked(checked)
             self.action_view_reload_as_format_capture.blockSignals(False)
+        self._refresh_menu_state()
 
     def _on_refresh_interfaces(self):
         if self.capture_view and self.capture_view.is_capturing():
@@ -7933,10 +8047,6 @@ class ApplicationWindow(QMainWindow):
         current_record = self.capture_view.get_current_record() if self.capture_view else None
         has_current = has_capture and current_record is not None
 
-        if hasattr(self, 'action_display_filter_macros'):
-            self.action_display_filter_macros.setEnabled(True)
-        if hasattr(self, 'action_display_filter_expression'):
-            self.action_display_filter_expression.setEnabled(True)
         if hasattr(self, 'action_apply_as_column'):
             self.action_apply_as_column.setEnabled(bool(has_field))
         if hasattr(self, 'action_apply_as_filter'):
@@ -13006,6 +13116,8 @@ class ApplicationWindow(QMainWindow):
         tree.setHeaderLabels(['Severity', 'Summary', 'Group', 'Protocol', 'Count'])
         tree.header().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self._style_standard_tree(tree, stretch_column=1)
+        tree.header().setSectionResizeMode(0, QHeaderView.Interactive)
+        tree.setColumnWidth(0, 110)
 
         grouped = {}
         for item in entries:
