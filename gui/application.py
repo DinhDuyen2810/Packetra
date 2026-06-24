@@ -3611,7 +3611,7 @@ class ApplicationWindow(QMainWindow):
             self._update_packet_status_label()
             self.detail_field_label.setText('Field: - | Byte: 0')
             self._sync_capture_buttons()
-            self._refresh_capture_menu_state()
+            self._refresh_menu_state()
             self._refresh_status_metrics()
             self._refresh_file_menu_state()
             self._update_capture_window_title()
@@ -4369,7 +4369,7 @@ class ApplicationWindow(QMainWindow):
         self.setWindowTitle('Packetra - Select Interface')
         self._on_find_panel_visibility_changed(False)
         self._update_toolbar_state('selector')
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
         self._refresh_analyze_menu_state()
 
     def _on_interface_preferences_changed(self):
@@ -4424,7 +4424,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._refresh_status_metrics()
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
         self._refresh_go_menu_state()
         self._refresh_analyze_menu_state()
 
@@ -4614,6 +4614,7 @@ class ApplicationWindow(QMainWindow):
             self.action_exit.setEnabled(True)
         self._refresh_edit_menu_state()
         self._refresh_go_menu_state()
+        self._refresh_menu_state()
 
     def _refresh_edit_menu_state(self):
         active_capture = bool(
@@ -4717,41 +4718,34 @@ class ApplicationWindow(QMainWindow):
         self.action_restart_btn.setVisible(True)
         self.action_stop_btn.setEnabled(can_stop)
         self.action_stop_btn.setVisible(True)
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
 
-    def _refresh_capture_menu_state(self):
+    def _refresh_menu_state(self):
         active_capture = bool(self.capture_view and self.stacked_widget.currentWidget() is self.capture_view)
         is_running = bool(active_capture and self.capture_view.is_capturing())
         is_stopping = bool(active_capture and self.capture_view.is_stopping())
         has_iface = bool(active_capture and str(getattr(self.capture_view, 'iface', '') or '').strip())
+        has_packets = bool(active_capture and getattr(self.capture_view, 'records', None))
 
-        if not active_capture:
-            if hasattr(self, 'action_capture_options'):
-                self.action_capture_options.setEnabled(True)
-            if hasattr(self, 'action_start_capture'):
-                self.action_start_capture.setEnabled(True)
-            if hasattr(self, 'action_stop_capture'):
-                self.action_stop_capture.setEnabled(False)
-            if hasattr(self, 'action_restart_capture'):
-                self.action_restart_capture.setEnabled(False)
-            if hasattr(self, 'action_capture_filters'):
-                self.action_capture_filters.setEnabled(True)
-            if hasattr(self, 'action_refresh_interfaces'):
-                self.action_refresh_interfaces.setEnabled(True)
-            return
-
-        if hasattr(self, 'action_capture_options'):
-            self.action_capture_options.setEnabled(active_capture)
+        for attr in ['action_capture_options', 'action_capture_filters', 'action_refresh_interfaces', 'action_start_capture']:
+            if hasattr(self, attr): getattr(self, attr).setEnabled(not is_running and not is_stopping)
+        
         if hasattr(self, 'action_start_capture'):
-            self.action_start_capture.setEnabled(active_capture and has_iface and not is_running and not is_stopping)
+            self.action_start_capture.setEnabled(has_iface and not is_running and not is_stopping)
         if hasattr(self, 'action_stop_capture'):
-            self.action_stop_capture.setEnabled(active_capture and (is_running or is_stopping))
+            self.action_stop_capture.setEnabled(is_running or is_stopping)
         if hasattr(self, 'action_restart_capture'):
-            self.action_restart_capture.setEnabled(active_capture and has_iface and is_running)
-        if hasattr(self, 'action_capture_filters'):
-            self.action_capture_filters.setEnabled(active_capture)
-        if hasattr(self, 'action_refresh_interfaces'):
-            self.action_refresh_interfaces.setEnabled(not is_running and not is_stopping)
+            self.action_restart_capture.setEnabled(has_iface and is_running)
+
+        # Statistics & Tools menus require packets
+        for attr in [
+            'action_capture_file_properties', 'action_resolved_addresses', 
+            'action_protocol_hierarchy', 'action_conversations', 'action_endpoints', 'action_packet_lengths', 
+            'action_flow_graph', 'action_http_statistics', 'action_ipv4_statistics', 'action_ipv6_statistics',
+            'action_advanced_ai_analyst', 'action_advanced_draw_topo', 'action_advanced_dashboard', 'action_advanced_fwrule',
+            'action_summary', 'action_io_graph'
+        ]:
+            if hasattr(self, attr): getattr(self, attr).setEnabled(has_packets)
 
     def _load_capture_filter_presets(self) -> list[dict]:
         settings = QSettings('Packetra', 'Packetra')
@@ -4844,7 +4838,7 @@ class ApplicationWindow(QMainWindow):
         self.show_capture_view(iface, iface_display_name, capture_filter)
         self._apply_capture_defaults_to_view()
         self._on_start_capture()
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
 
     def _on_open_recent_file(self, path: str):
         candidate = str(path or '').strip()
@@ -4919,7 +4913,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._sync_capture_buttons()
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
         self._update_capture_window_title()
 
     def _on_stop_capture(self):
@@ -4935,7 +4929,7 @@ class ApplicationWindow(QMainWindow):
         self._selected_packet_number = None
         self._update_packet_status_label()
         self._sync_capture_buttons()
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
 
     def _on_restart_capture(self):
         """Restart capture."""
@@ -4962,7 +4956,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         self._sync_capture_buttons()
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
         self._update_capture_window_title()
 
     def _on_open_file(self):
@@ -7201,10 +7195,12 @@ class ApplicationWindow(QMainWindow):
         expert_page = QWidget(dialog)
         expert_layout = QVBoxLayout(expert_page)
         expert_table = QTableWidget(expert_page)
-        expert_table.setColumnCount(2)
-        expert_table.setHorizontalHeaderLabels(['Field Name', 'Severity'])
-        expert_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        expert_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        expert_table.setColumnCount(4)
+        expert_table.setHorizontalHeaderLabels(['Enabled', 'Condition', 'Message', 'Severity'])
+        expert_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        expert_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        expert_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        expert_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         expert_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         expert_layout.addWidget(expert_table, 1)
 
@@ -7214,59 +7210,92 @@ class ApplicationWindow(QMainWindow):
         expert_up_btn = QPushButton('Move up', expert_page)
         expert_down_btn = QPushButton('Move down', expert_page)
         expert_clear_btn = QPushButton('Clear', expert_page)
+        expert_check_btn = QPushButton('Check', expert_page)
         expert_btn_row.addWidget(expert_add_btn)
         expert_btn_row.addWidget(expert_remove_btn)
         expert_btn_row.addWidget(expert_up_btn)
         expert_btn_row.addWidget(expert_down_btn)
         expert_btn_row.addWidget(expert_clear_btn)
+        expert_btn_row.addWidget(expert_check_btn)
         expert_btn_row.addStretch()
         expert_layout.addLayout(expert_btn_row)
 
         severity_values = ['Error', 'Warning', 'Note', 'Chat']
 
-        def _set_expert_row(row: int, field_name: str, severity: str):
-            expert_table.setItem(row, 0, QTableWidgetItem(str(field_name or '').strip()))
+        def _set_expert_row(row: int, enabled: bool, condition: str, message: str, severity: str):
+            check_item = QTableWidgetItem()
+            check_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            check_item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+            expert_table.setItem(row, 0, check_item)
+            expert_table.setItem(row, 1, QTableWidgetItem(str(condition or '').strip()))
+            expert_table.setItem(row, 2, QTableWidgetItem(str(message or '').strip()))
             severity_combo = QComboBox(expert_table)
             severity_combo.addItems(severity_values)
             severity_text = str(severity or 'Warning').strip().title()
             if severity_text not in severity_values:
                 severity_text = 'Warning'
             severity_combo.setCurrentText(severity_text)
-            expert_table.setCellWidget(row, 1, severity_combo)
+            expert_table.setCellWidget(row, 3, severity_combo)
 
         def _load_expert_rows(items: list[dict]):
             expert_table.setRowCount(0)
             for row, item in enumerate(items):
                 expert_table.insertRow(row)
-                field_name = str(item.get('field', '') if isinstance(item, dict) else '')
+                enabled = bool(item.get('enabled', True)) if isinstance(item, dict) else True
+                condition = str(item.get('field', '') if isinstance(item, dict) else '')
+                message = str(item.get('message', '') if isinstance(item, dict) else '')
                 severity = str(item.get('severity', 'Warning') if isinstance(item, dict) else 'Warning')
-                _set_expert_row(row, field_name, severity)
+                _set_expert_row(row, enabled, condition, message, severity)
 
-        def _read_expert_row(row: int) -> tuple[str, str]:
-            field_item = expert_table.item(row, 0)
-            severity_combo = expert_table.cellWidget(row, 1)
-            field_name = str(field_item.text() if field_item is not None else '').strip()
+        def _read_expert_row(row: int) -> dict:
+            check_item = expert_table.item(row, 0)
+            enabled = check_item is not None and check_item.checkState() == Qt.CheckState.Checked
+            
+            condition_item = expert_table.item(row, 1)
+            message_item = expert_table.item(row, 2)
+            severity_combo = expert_table.cellWidget(row, 3)
+            
+            condition = str(condition_item.text() if condition_item is not None else '').strip()
+            message = str(message_item.text() if message_item is not None else '').strip()
             severity = str(severity_combo.currentText() if isinstance(severity_combo, QComboBox) else 'Warning').strip()
-            return field_name, severity or 'Warning'
+            return {'enabled': enabled, 'field': condition, 'message': message, 'severity': severity or 'Warning'}
 
         def _move_expert_row(delta: int):
             row = expert_table.currentRow()
-            if row < 0:
-                return
+            if row < 0: return
             target = row + delta
             if target < 0 or target >= expert_table.rowCount():
                 return
-            src_field, src_sev = _read_expert_row(row)
-            dst_field, dst_sev = _read_expert_row(target)
-            _set_expert_row(row, dst_field, dst_sev)
-            _set_expert_row(target, src_field, src_sev)
+            src_data = _read_expert_row(row)
+            dst_data = _read_expert_row(target)
+            _set_expert_row(row, dst_data['enabled'], dst_data['field'], dst_data['message'], dst_data['severity'])
+            _set_expert_row(target, src_data['enabled'], src_data['field'], src_data['message'], src_data['severity'])
             expert_table.setCurrentCell(target, 0)
 
-        expert_add_btn.clicked.connect(lambda: (expert_table.insertRow(expert_table.rowCount()), _set_expert_row(expert_table.rowCount() - 1, '', 'Warning')))
+        expert_add_btn.clicked.connect(lambda: (expert_table.insertRow(expert_table.rowCount()), _set_expert_row(expert_table.rowCount() - 1, True, '', '', 'Warning')))
         expert_remove_btn.clicked.connect(lambda: expert_table.removeRow(expert_table.currentRow()) if expert_table.currentRow() >= 0 else None)
         expert_up_btn.clicked.connect(lambda: _move_expert_row(-1))
         expert_down_btn.clicked.connect(lambda: _move_expert_row(1))
         expert_clear_btn.clicked.connect(lambda: expert_table.setRowCount(0))
+
+        def _check_expert_row():
+            row = expert_table.currentRow()
+            if row < 0:
+                QMessageBox.information(dialog, "Check", "Please select an item first.")
+                return
+            data = _read_expert_row(row)
+            cond = str(data.get('field', '')).strip().lower()
+            if not cond:
+                QMessageBox.information(dialog, "Check", "Condition is empty.")
+                return
+            if not self.capture_view:
+                QMessageBox.information(dialog, "Check", "No capture loaded.")
+                return
+            entries = self.capture_view.get_expert_information([data])
+            count = sum(1 for e in entries if e.get('group') == 'Custom' and e.get('summary') == (data.get('message') or data.get('field')))
+            QMessageBox.information(dialog, "Check Result", f"Found {count} packet(s) matching the condition.")
+
+        expert_check_btn.clicked.connect(_check_expert_row)
         _load_expert_rows(list(prefs.get('expert_items', []) or []))
 
         # --- Name Resolution ---
@@ -7331,9 +7360,9 @@ class ApplicationWindow(QMainWindow):
 
             collected_expert = []
             for row in range(expert_table.rowCount()):
-                field_name, severity = _read_expert_row(row)
-                if field_name:
-                    collected_expert.append({'field': field_name, 'severity': severity})
+                data = _read_expert_row(row)
+                if data.get('field') or data.get('message'):
+                    collected_expert.append(data)
 
             pane_values = [
                 _selected_pane_value('pane_1'),
@@ -7395,6 +7424,15 @@ class ApplicationWindow(QMainWindow):
             self._save_edit_preferences(new_prefs)
             self._apply_edit_preferences(new_prefs)
             prefs = new_prefs
+
+            if getattr(self, '_expert_info_dialog', None) is not None:
+                try:
+                    self._expert_info_dialog.close()
+                except Exception:
+                    pass
+                self._expert_info_dialog = None
+                self._on_open_expert_information()
+
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(dialog, "Apply Complete", "Apply Complete")
             return True
@@ -7764,7 +7802,7 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_list_structure()
                 if hasattr(self.iface_selector_view, 'refresh_recent_files'):
                     self.iface_selector_view.refresh_recent_files()
-                self._refresh_capture_menu_state()
+                self._refresh_menu_state()
                 return
             except Exception:
                 pass
@@ -7888,6 +7926,7 @@ class ApplicationWindow(QMainWindow):
         menu.exec(global_pos)
 
     def _refresh_analyze_menu_state(self):
+        self._refresh_menu_state()
         has_capture = self._has_capture_document()
         selected_item = self._selected_detail_item()
         has_field = has_capture and selected_item is not None
@@ -7906,10 +7945,6 @@ class ApplicationWindow(QMainWindow):
             self.action_conversation_filter.setEnabled(bool(has_current))
         if hasattr(self, 'action_follow_stream'):
             self.action_follow_stream.setEnabled(bool(has_current))
-        if hasattr(self, 'action_expert_info'):
-            self.action_expert_info.setEnabled(bool(has_capture))
-        if hasattr(self, 'action_advanced_fwrule'):
-            self.action_advanced_fwrule.setEnabled(self._can_open_firewall_acl_rules())
 
     def _selected_records_from_packet_list(self) -> list:
         cv = self.capture_view
@@ -12959,7 +12994,9 @@ class ApplicationWindow(QMainWindow):
             except Exception:
                 self._expert_info_dialog = None
 
-        entries = self.capture_view.get_expert_information()
+        prefs = self._load_edit_preferences()
+        custom_items = list((prefs or {}).get('expert_items', []) or [])
+        entries = self.capture_view.get_expert_information(custom_items)
         dialog = QDialog()
         self._configure_auxiliary_analysis_dialog(dialog, 'Expert Information')
         layout = QVBoxLayout(dialog)
@@ -12999,6 +13036,18 @@ class ApplicationWindow(QMainWindow):
             parent.setText(2, group)
             parent.setText(3, protocol)
             parent.setText(4, str(len(rows)))
+            
+            sev_lower = str(severity).lower()
+            bg_color = None
+            if 'error' in sev_lower: bg_color = QColor('#FFB3B3')
+            elif 'warn' in sev_lower: bg_color = QColor('#FFF3B0')
+            elif 'note' in sev_lower: bg_color = QColor('#B3D9FF')
+            elif 'chat' in sev_lower: bg_color = QColor('#E6E6E6')
+            
+            if bg_color:
+                for col in range(5):
+                    parent.setBackground(col, QBrush(bg_color))
+                    parent.setForeground(col, QBrush(Qt.GlobalColor.black))
 
             for row_item in sorted(rows, key=lambda x: int(x.get('packet', 0) or 0)):
                 child = QTreeWidgetItem(parent)
@@ -13260,7 +13309,7 @@ class ApplicationWindow(QMainWindow):
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
             self._apply_capture_defaults_to_view()
-        self._refresh_capture_menu_state()
+        self._refresh_menu_state()
 
     def event(self, event):
         if event is not None and event.type() == QEvent.Type.WindowActivate:

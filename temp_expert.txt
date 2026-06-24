@@ -1,0 +1,275 @@
+def get_expert_information(self):
+        entries = []
+
+        severity_map = {
+            'warn': 'Warning',
+            'warning': 'Warning',
+            'error': 'Error',
+            'note': 'Note',
+            'chat': 'Chat',
+        }
+        protocol_alias = {
+            'MDNS': 'mDNS',
+            'LLMNR': 'LLMNR',
+            'ICMPV6': 'ICMPv6',
+            'MPEG TS': 'MP2T',
+            'PIMV1': 'PIM',
+            'PIMV2': 'PIM',
+            'SRTCP': 'RTCP',
+            'RDTUDP': 'RDTUDP',
+            'H.264': 'H.264',
+            'KRB5': 'KRB5',
+            'POP/IMF': 'POP',
+            'IEEE 802.11': 'IEEE 802.11',
+            'IPV6': 'IPv6',
+            'IPV4': 'IPv4',
+            'DHCPV6': 'DHCPv6',
+        }
+
+        def _canon_protocol(protocol_name: str) -> str:
+            p = str(protocol_name or '').strip()
+            if not p:
+                return ''
+            upper = p.upper()
+            if upper.startswith('TLS'):
+                return 'TLS'
+            return protocol_alias.get(upper, p)
+
+        def _walk_nodes(node):
+            if isinstance(node, dict):
+                yield node
+                yield from _walk_nodes(node.get('children', []))
+            elif isinstance(node, (list, tuple)):
+                for child in node:
+                    yield from _walk_nodes(child)
+
+        def _contains_all(haystack: str, needles: list[str]) -> bool:
+            return all(str(needle).lower() in haystack for needle in needles)
+
+        def _contains_any(haystack: str, needles: list[str]) -> bool:
+            return any(str(needle).lower() in haystack for needle in needles)
+
+        def _canonical_summary(summary: str, protocol_value: str) -> str:
+            text = str(summary or '').strip()
+            while text.startswith('[') and text.endswith(']') and len(text) > 2:
+                text = text[1:-1].strip()
+
+            lowered = text.lower()
+            if lowered.startswith('connection establish request (syn)'):
+                return 'Connection establish request (SYN)'
+            if lowered.startswith('connection establish acknowledge (syn+ack)'):
+                return 'Connection establish acknowledge (SYN+ACK)'
+            if lowered.startswith('duplicate ack'):
+                return 'Duplicate ACK'
+            if lowered == 'tag length is longer than remaining payload':
+                return 'Bad tag length'
+            if lowered == 'no response seen to icmp request':
+                if protocol_value == 'ICMPv6':
+                    return 'Response not found'
+                return 'Response not found'
+            if lowered == '[not decoded yet]' or lowered == 'not decoded yet':
+                return '[Not decoded yet]'
+            if lowered == 'this frame undergoes the connection closing':
+                return 'This frame undergoes the connection closing'
+            if lowered == 'this frame initiates the connection closing':
+                return 'This frame initiates the connection closing'
+            return text
+
+        canonical_signatures = [
+            {'severity': 'Error', 'summary': 'This message type is not permitted to use OPTION_CLIENT_FQDN', 'group': 'Protocol', 'protocol': 'DHCPv6', 'all': ['option_client_fqdn', 'not permitted'], 'protocols': ['DHCPV6']},
+            {'severity': 'Error', 'summary': 'Bad tag length', 'group': 'Malformed', 'protocol': 'IEEE 802.11', 'all': ['tag length is longer than remaining payload']},
+            {'severity': 'Error', 'summary': 'Malformed Packet (Exception occurred)', 'group': 'Malformed', 'protocol': 'IEEE 802.11', 'all': ['malformed packet (exception occurred)'], 'any': ['802.11', 'wireless management']},
+            {'severity': 'Warning', 'summary': 'DNS query retransmission', 'group': 'Protocol', 'protocol': 'DNS', 'all': ['dns query retransmission'], 'protocols': ['DNS']},
+            {'severity': 'Warning', 'summary': 'No dissector for algorithm', 'group': 'Undecoded', 'protocol': 'DNS', 'all': ['no dissector for algorithm']},
+            {'severity': 'Warning', 'summary': 'DNS response missing', 'group': 'Protocol', 'protocol': 'DNS', 'all': ['dns response missing'], 'protocols': ['DNS']},
+            {'severity': 'Warning', 'summary': 'D-SACK Sequence', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['d-sack sequence']},
+            {'severity': 'Warning', 'summary': 'Previous segment(s) not captured (common at capture start)', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['previous segment(s) not captured']},
+            {'severity': 'Warning', 'summary': 'Response not found', 'group': 'Sequence', 'protocol': 'ICMP', 'any': ['no response seen to icmp request', '[no response seen]'], 'protocols': ['ICMP']},
+            {'severity': 'Note', 'summary': 'Message conforms to neither RFC 5424 nor RFC 3164; trailing data appended', 'group': 'Protocol', 'protocol': 'Syslog', 'all': ['rfc 5424', 'rfc 3164']},
+            {'severity': 'Note', 'summary': 'Time To Live', 'group': 'Sequence', 'protocol': 'IPv4', 'all': ['time to live'], 'protocols': ['IP', 'IPV4']},
+            {'severity': 'Note', 'summary': 'Undecoded option', 'group': 'Undecoded', 'protocol': 'DNS', 'all': ['undecoded option']},
+            {'severity': 'Note', 'summary': 'Partial Acknowledgement of a segment', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['partial acknowledgement of a segment']},
+            {'severity': 'Note', 'summary': "This packet's length exceeds MSS (common with TSO or incomplete conversations)", 'group': 'Protocol', 'protocol': 'TCP', 'all': ['length exceeds mss']},
+            {'severity': 'Note', 'summary': 'The SYN packet does not contain a SACK_PERM option', 'group': 'Protocol', 'protocol': 'TCP', 'all': ['syn packet does not contain a sack_perm option']},
+            {'severity': 'Note', 'summary': 'This frame undergoes the connection closing', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['undergoes the connection closing']},
+            {'severity': 'Note', 'summary': 'This frame initiates the connection closing', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['initiates the connection closing']},
+            {'severity': 'Note', 'summary': 'Duplicate ACK', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['duplicate ack']},
+            {'severity': 'Note', 'summary': "Ambiguous ACK following Karn's definition", 'group': 'Sequence', 'protocol': 'TCP', 'all': ["ambiguous ack following karn's definition"]},
+            {'severity': 'Note', 'summary': 'This frame is a (suspected) retransmission', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['(suspected) retransmission']},
+            {'severity': 'Chat', 'summary': 'Connection establish acknowledge (SYN+ACK)', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['connection establish acknowledge (syn+ack)']},
+            {'severity': 'Chat', 'summary': 'Connection establish request (SYN)', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['connection establish request (syn)']},
+            {'severity': 'Chat', 'summary': 'TCP window update', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['tcp window update']},
+            {'severity': 'Chat', 'summary': 'Connection finish (FIN)', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['connection finish (fin)']},
+            {'severity': 'Chat', 'summary': 'GTSM is not supported by the source', 'group': 'Protocol', 'protocol': 'LDP', 'all': ['gtsm is not supported by the source']},
+            {'severity': 'Warning', 'summary': 'This frame is a (suspected) out-of-order segment', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['out-of-order segment']},
+            {'severity': 'Warning', 'summary': 'DNS response missing', 'group': 'Protocol', 'protocol': 'mDNS', 'all': ['dns response missing'], 'protocols': ['MDNS']},
+            {'severity': 'Warning', 'summary': 'DNS response retransmission', 'group': 'Protocol', 'protocol': 'mDNS', 'all': ['dns response retransmission'], 'protocols': ['MDNS']},
+            {'severity': 'Warning', 'summary': 'DNS query retransmission', 'group': 'Protocol', 'protocol': 'mDNS', 'all': ['dns query retransmission'], 'protocols': ['MDNS']},
+            {'severity': 'Warning', 'summary': 'Connection reset (RST)', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['connection reset (rst)']},
+            {'severity': 'Note', 'summary': 'ACK to a TCP keep-alive segment', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['ack to a tcp keep-alive segment']},
+            {'severity': 'Note', 'summary': 'TCP keep-alive segment', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['tcp keep-alive segment']},
+            {'severity': 'Note', 'summary': 'This frame is a (suspected) fast retransmission', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['fast retransmission']},
+            {'severity': 'Note', 'summary': 'Time To Live too small', 'group': 'Sequence', 'protocol': 'IPv4', 'all': ['time to live', 'too small']},
+            {'severity': 'Note', 'summary': 'Type indicates an error', 'group': 'Response', 'protocol': 'ICMPv6', 'all': ['type indicates an error'], 'protocols': ['ICMPV6']},
+            {'severity': 'Note', 'summary': 'This frame is a (suspected) spurious retransmission', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['spurious retransmission']},
+            {'severity': 'Error', 'summary': 'Malformed Packet (Exception occurred)', 'group': 'Malformed', 'protocol': 'DNS', 'all': ['malformed packet', 'dns']},
+            {'severity': 'Warning', 'summary': 'Ignored Unknown Record', 'group': 'Protocol', 'protocol': 'TLS', 'all': ['ignored unknown record']},
+            {'severity': 'Warning', 'summary': "ACKed segment that wasn't captured (common at capture start)", 'group': 'Sequence', 'protocol': 'TCP', 'all': ["acked segment that wasn't captured"]},
+            {'severity': 'Note', 'summary': 'Extraneous data', 'group': 'Undecoded', 'protocol': 'DNS', 'all': ['extraneous data']},
+            {'severity': 'Note', 'summary': 'Padding identification may be inaccurate and impact trailer dissector', 'group': 'Protocol', 'protocol': 'Ethertype', 'all': ['padding identification may be inaccurate']},
+            {'severity': 'Chat', 'summary': 'This legacy_version field MUST be ignored. The supported_versions extension is present and MUST be used instead.', 'group': 'Deprecated', 'protocol': 'TLS', 'all': ['legacy_version field must be ignored', 'supported_versions extension is present']},
+            {'severity': 'Warning', 'summary': 'Response not found', 'group': 'Sequence', 'protocol': 'ICMPv6', 'any': ['no response seen to icmp request', '[no response seen]'], 'protocols': ['ICMPV6']},
+            {'severity': 'Note', 'summary': 'Type indicates an error', 'group': 'Response', 'protocol': 'ICMP', 'all': ['type indicates an error'], 'protocols': ['ICMP']},
+            {'severity': 'Note', 'summary': 'Unrecognized SIP header', 'group': 'Undecoded', 'protocol': 'SIP', 'all': ['unrecognized sip header']},
+            {'severity': 'Error', 'summary': 'Short CLV', 'group': 'Malformed', 'protocol': 'ISIS LSP', 'all': ['short e/is reachability']},
+            {'severity': 'Warning', 'summary': 'TCP window specified by the receiver is now completely full', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['window specified by the receiver is now completely full']},
+            {'severity': 'Note', 'summary': 'This session reuses previously negotiated keys (Session resumption)', 'group': 'Sequence', 'protocol': 'TLS', 'all': ['session resumption']},
+            {'severity': 'Warning', 'summary': 'Duplicate IP address configured', 'group': 'Sequence', 'protocol': 'ARP/ARP', 'all': ['duplicate ip address detected']},
+            {'severity': 'Error', 'summary': 'Length must be a string containing an integer', 'group': 'Malformed', 'protocol': 'POP', 'all': ['length must be a string containing an integer']},
+            {'severity': 'Warning', 'summary': 'DNS response retransmission', 'group': 'Protocol', 'protocol': 'DNS', 'all': ['dns response retransmission'], 'protocols': ['DNS']},
+            {'severity': 'Warning', 'summary': 'Missing keytype', 'group': 'Decryption', 'protocol': 'KRB5', 'all': ['missing keytype']},
+            {'severity': 'Warning', 'summary': 'DNS query retransmission', 'group': 'Protocol', 'protocol': 'LLMNR', 'all': ['dns query retransmission'], 'protocols': ['LLMNR']},
+            {'severity': 'Warning', 'summary': 'DNS response missing', 'group': 'Protocol', 'protocol': 'LLMNR', 'all': ['dns response missing'], 'protocols': ['LLMNR']},
+            {'severity': 'Warning', 'summary': 'Deprecated option', 'group': 'Deprecated', 'protocol': 'DHCPv6', 'all': ['deprecated option'], 'protocols': ['DHCPV6']},
+            {'severity': 'Warning', 'summary': 'Vulnerable to MITM attacks. If possible, change EAP type.', 'group': 'Security', 'protocol': 'EAP', 'all': ['vulnerable to mitm attacks']},
+            {'severity': 'Note', 'summary': 'Undecoded class', 'group': 'Undecoded', 'protocol': 'DNS', 'all': ['undecoded class']},
+            {'severity': 'Note', 'summary': 'A new tcp session is started with the same ports as an earlier session in this trace', 'group': 'Sequence', 'protocol': 'TCP', 'all': ['new tcp session is started with the same ports']},
+            {'severity': 'Chat', 'summary': 'Possible traceroute', 'group': 'Sequence', 'protocol': 'UDP', 'all': ['possible traceroute']},
+            {'severity': 'Warning', 'summary': 'Unknown header', 'group': 'Protocol', 'protocol': 'GSS-API', 'all': ['unknown header']},
+            {'severity': 'Note', 'summary': 'No bind info for interface Context ID', 'group': 'Undecoded', 'protocol': 'DCERPC', 'all': ['no bind info for interface context id']},
+            {'severity': 'Chat', 'summary': 'Authenticated NT HASH', 'group': 'Security', 'protocol': 'NTLMSSP', 'all': ['authenticated nt hash']},
+            {'severity': 'Chat', 'summary': 'SessionBaseKey', 'group': 'Security', 'protocol': 'NTLMSSP', 'all': ['sessionbasekey']},
+            {'severity': 'Chat', 'summary': 'SessionKey', 'group': 'Security', 'protocol': 'NTLMSSP', 'all': ['sessionkey']},
+            {'severity': 'Error', 'summary': 'IPv6 payload length equals 0 and Hop-By-Hop present and Jumbo Payload option missing', 'group': 'Malformed', 'protocol': 'IPv6', 'all': ['payload length: 0'], 'any': ['hop-by-hop', 'hop by hop']},
+            {'severity': 'Error', 'summary': 'Malformed Packet (Exception occurred)', 'group': 'Malformed', 'protocol': 'IPv6 Hop-by-Hop', 'all': ['malformed packet', 'ipv6 hop-by-hop']},
+            {'severity': 'Error', 'summary': 'Detected missing TS frames', 'group': 'Sequence', 'protocol': 'MP2T', 'all': ['missing ts frames']},
+            {'severity': 'Error', 'summary': 'Malformed Packet (Exception occurred)', 'group': 'Malformed', 'protocol': 'PIM', 'all': ['malformed packet', 'pim']},
+            {'severity': 'Error', 'summary': 'Malformed Packet (Exception occurred)', 'group': 'Malformed', 'protocol': 'RTCP', 'all': ['malformed packet', 'rtcp']},
+            {'severity': 'Error', 'summary': 'Malformed Packet (Exception occurred)', 'group': 'Malformed', 'protocol': 'RDTUDP', 'all': ['malformed packet', 'rdtudp']},
+            {'severity': 'Warning', 'summary': '[Not decoded yet]', 'group': 'Undecoded', 'protocol': 'H.264', 'all': ['not decoded yet'], 'protocols': ['H.264']},
+            {'severity': 'Warning', 'summary': 'Failed to decrypt handshake', 'group': 'Decryption', 'protocol': 'QUIC', 'any': ['failed to decrypt handshake', 'failed to create decryption context']},
+            {'severity': 'Warning', 'summary': 'Too many packet chunks (more than packet status count)', 'group': 'Malformed', 'protocol': 'RTCP', 'all': ['too many packet chunks']},
+            {'severity': 'Warning', 'summary': 'Padding flag set on not final packet (see RFC3550, section 6.4.1)', 'group': 'Protocol', 'protocol': 'RTCP', 'all': ['padding flag set on not final packet']},
+            {'severity': 'Warning', 'summary': 'Encrypted RTCP Payload - not dissected', 'group': 'Undecoded', 'protocol': 'RTCP', 'all': ['encrypted rtcp payload - not dissected']},
+            {'severity': 'Note', 'summary': 'Unknown QUIC connection. Missing Initial Packet or migrated connection?', 'group': 'Protocol', 'protocol': 'QUIC', 'all': ['unknown quic connection']},
+            {'severity': 'Note', 'summary': 'This QUIC frame has a reused stream offset (retransmission?)', 'group': 'Sequence', 'protocol': 'QUIC', 'all': ['reused stream offset']},
+            {'severity': 'Note', 'summary': 'Coalesced Padding Data', 'group': 'Protocol', 'protocol': 'QUIC', 'all': ['coalesced padding data', 'padding data appended']},
+        ]
+
+        for rec in self.get_effective_records(include_ignored=False):
+            seen = set()
+            title_lowers = []
+            protocol_text = _canon_protocol(str(rec.protocol or ''))
+            protocol_upper = str(rec.protocol or '').strip().upper()
+            info_text = str(rec.info or '')
+            md = rec.metadata if isinstance(rec.metadata, dict) else {}
+
+            try:
+                tree = packet_summary_tree(rec.raw, rec)
+            except Exception:
+                tree = None
+
+            nodes = list(_walk_nodes(tree))
+            for node in nodes:
+                title = str(node.get('title', '') or '').strip()
+                if title:
+                    title_lowers.append(title.lower())
+            blob = '\n'.join(title_lowers)
+
+            def _add_entry(severity: str, summary: str, group: str, protocol_value: str):
+                norm_severity = severity_map.get(str(severity or '').strip().lower(), str(severity or '').strip())
+                norm_protocol = _canon_protocol(protocol_value)
+                norm_summary = _canonical_summary(summary, norm_protocol)
+                key = (norm_severity, norm_summary, str(group or '').strip(), norm_protocol)
+                if key in seen:
+                    return
+                seen.add(key)
+                entries.append({
+                    'packet': rec.number,
+                    'info': info_text,
+                    'severity': norm_severity,
+                    'summary': norm_summary,
+                    'group': str(group or '').strip(),
+                    'protocol': norm_protocol,
+                })
+
+            # 1) Extract explicit [Expert Info (...)] nodes first.
+            for node in nodes:
+                title = str(node.get('title', '') or '')
+                match = re.match(r'^\[Expert Info \(([^/]+)/([^\)]+)\):\s*(.+)\]$', title)
+                if not match:
+                    continue
+
+                severity_raw = str(match.group(1) or '').strip()
+                group_raw = str(match.group(2) or '').strip()
+                summary_raw = str(match.group(3) or '').strip()
+                if not summary_raw:
+                    continue
+
+                detected_protocol = protocol_text
+                summary_l = summary_raw.lower()
+                if 'gtsm' in summary_l:
+                    detected_protocol = 'LDP'
+                elif 'dns ' in summary_l and protocol_upper not in {'MDNS', 'LLMNR'}:
+                    detected_protocol = 'DNS'
+                elif 'syslog' in summary_l or 'rfc 5424' in summary_l or 'rfc 3164' in summary_l:
+                    detected_protocol = 'Syslog'
+                elif 'quic' in summary_l:
+                    detected_protocol = 'QUIC'
+                elif 'icmp' in summary_l and protocol_upper == 'ICMPV6':
+                    detected_protocol = 'ICMPv6'
+                elif 'icmp' in summary_l:
+                    detected_protocol = 'ICMP'
+
+                _add_entry(severity_raw, summary_raw, group_raw, detected_protocol)
+
+            # 2) Add deterministic canonical signatures from all descendant titles.
+            for rule in canonical_signatures:
+                protocols = set(rule.get('protocols', []))
+                if protocols and protocol_upper not in protocols:
+                    continue
+
+                all_needles = [str(v).lower() for v in rule.get('all', [])]
+                any_needles = [str(v).lower() for v in rule.get('any', [])]
+
+                if all_needles and not _contains_all(blob, all_needles):
+                    continue
+                if any_needles and not _contains_any(blob, any_needles):
+                    continue
+
+                _add_entry(
+                    str(rule['severity']),
+                    str(rule['summary']),
+                    str(rule['group']),
+                    str(rule['protocol']),
+                )
+
+            # 3) Metadata fallback for key TCP signatures when formatter omits children.
+            tcp_layer = rec.raw[TCP] if rec.raw is not None and rec.raw.haslayer(TCP) else None
+            tcp_flags = int(getattr(tcp_layer, 'flags', 0) or 0) if tcp_layer is not None else 0
+
+            if bool(md.get('tcp_is_window_update', False)):
+                _add_entry('Chat', 'TCP window update', 'Sequence', 'TCP')
+            if bool(md.get('tcp_is_retransmission', False)):
+                if bool(md.get('tcp_is_spurious_retransmission', False)):
+                    _add_entry('Note', 'This frame is a (suspected) spurious retransmission', 'Sequence', 'TCP')
+                _add_entry('Note', 'This frame is a (suspected) retransmission', 'Sequence', 'TCP')
+            if bool(md.get('tcp_previous_segment_not_captured', False)):
+                _add_entry('Warning', 'Previous segment(s) not captured (common at capture start)', 'Sequence', 'TCP')
+            if bool(md.get('tcp_is_duplicate_ack', False)):
+                _add_entry('Note', 'Duplicate ACK', 'Sequence', 'TCP')
+            if bool(md.get('tcp_ack_ambiguous', False)):
+                _add_entry('Note', "Ambiguous ACK following Karn's definition", 'Sequence', 'TCP')
+            if bool(md.get('tcp_port_numbers_reused', False)):
+                _add_entry('Note', 'A new tcp session is started with the same ports as an earlier session in this trace', 'Sequence', 'TCP')
+
+            if (tcp_flags & 0x12) == 0x12:
+                _add_entry('Chat', 'Connection establish acknowledge (SYN+ACK)', 'Sequence', 'TCP')
+            elif (tcp_flags & 0x12) == 0x02:
+                _add_entry('Chat', 'Connection establish request (SYN)', 'Sequence', 'TCP')
+            if (tcp_flags & 0x01) != 0:
+                _add_entry('Chat', 'Connection finish (FIN)', 'Sequence', 'TCP')
+            if (tcp_flags & 0x04) != 0:
+                _add_entry('Warning', 'Connection reset (RST)', 'Sequence', 'TCP')
+
+        return entries

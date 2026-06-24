@@ -4921,7 +4921,7 @@ class CaptureView(QWidget):
             return list(self.records)
         return [record for record in self.records if not bool(getattr(record, 'ignored', False))]
 
-    def get_expert_information(self):
+    def get_expert_information(self, custom_items: list[dict] = None):
         entries = []
 
         severity_map = {
@@ -5166,6 +5166,24 @@ class CaptureView(QWidget):
                     str(rule['group']),
                     str(rule['protocol']),
                 )
+
+            # 2.5) Custom Expert Items
+            if custom_items:
+                for rule in custom_items:
+                    if not bool(rule.get('enabled', True)):
+                        continue
+                    cond = str(rule.get('field', '')).strip()
+                    if cond:
+                        matched = False
+                        try:
+                            matched = self.display_filter.matches(rec, cond)
+                        except Exception:
+                            matched = cond.lower() in blob
+                        
+                        if matched:
+                            msg = str(rule.get('message', '')).strip() or cond
+                            sev = str(rule.get('severity', 'Warning')).strip()
+                            _add_entry(sev, msg, 'Custom', protocol_text or 'Unknown')
 
             # 3) Metadata fallback for key TCP signatures when formatter omits children.
             tcp_layer = rec.raw[TCP] if rec.raw is not None and rec.raw.haslayer(TCP) else None
