@@ -360,11 +360,12 @@ class PacketTable(QTableWidget):
         src = formatters.format_endpoint_for_display(getattr(record, 'src', ''))
         dst = formatters.format_endpoint_for_display(getattr(record, 'dst', ''))
         proto = record.protocol
+        transport_proto = formatters.transport_proto_for_record(record)
         info = formatters.format_info_with_transport_resolution(
             getattr(record, 'info', ''),
             getattr(record, 'sport', None),
             getattr(record, 'dport', None),
-            str(getattr(record, 'protocol', '') or ''),
+            transport_proto,
         )
         if ignored:
             src = ''

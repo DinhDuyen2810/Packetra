@@ -6,7 +6,7 @@ build/
 dist/
 .vscode/
 *.exe
-docs/
+scrap/
 
 # Python
 __pycache__/

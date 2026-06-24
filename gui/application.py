@@ -5142,7 +5142,18 @@ class ApplicationWindow(QMainWindow):
         split_table = QTableWidget(0, 3, split_page)
         split_table.setHorizontalHeaderLabels(['File', 'From', 'To'])
         split_table.verticalHeader().setVisible(False)
-        split_table.horizontalHeader().setStretchLastSection(True)
+        split_table.setAlternatingRowColors(True)
+        split_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        split_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        split_table.setWordWrap(False)
+        split_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        split_header = split_table.horizontalHeader()
+        split_header.setStretchLastSection(False)
+        split_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        split_header.setSectionResizeMode(1, QHeaderView.Fixed)
+        split_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        split_table.setColumnWidth(1, 96)
+        split_table.setColumnWidth(2, 96)
         split_layout.addWidget(split_table)
 
         split_note = QLabel(
@@ -5235,8 +5246,7 @@ class ApplicationWindow(QMainWindow):
                     split_table.setItem(row - 1, 0, name_item)
                     split_table.setItem(row - 1, 1, from_item)
                     split_table.setItem(row - 1, 2, to_item)
-                split_count_label.setText(f'So file: {len(ranges)}')
-                split_table.resizeColumnsToContents()
+                split_count_label.setText(f'Files: {len(ranges)}')
             finally:
                 split_guard['busy'] = False
 
@@ -5250,24 +5260,24 @@ class ApplicationWindow(QMainWindow):
         def _collect_split_ranges_from_table():
             rows = split_table.rowCount()
             if rows < 2:
-                raise ValueError('Can it nhat 2 file de tach.')
+                raise ValueError('At least two output files are required for splitting.')
             ranges = []
             expected_from = 1
             for r in range(rows):
                 from_item = split_table.item(r, 1)
                 to_item = split_table.item(r, 2)
                 if from_item is None or to_item is None:
-                    raise ValueError('Bang tach file dang thieu du lieu.')
+                    raise ValueError('The split file table is missing required values.')
                 frm = int((from_item.text() or '0').strip())
                 to_ = int((to_item.text() or '0').strip())
                 if frm != expected_from:
-                    raise ValueError(f'From cua File {r+1} phai bang {expected_from}.')
+                    raise ValueError(f'The "From" value for File {r + 1} must be {expected_from}.')
                 if to_ < frm:
-                    raise ValueError(f'To cua File {r+1} phai >= From.')
+                    raise ValueError(f'The "To" value for File {r + 1} must be greater than or equal to "From".')
                 ranges.append((frm, to_))
                 expected_from = to_ + 1
             if ranges[-1][1] != total_packets:
-                raise ValueError(f'To cua file cuoi phai bang {total_packets}.')
+                raise ValueError(f'The final "To" value must be {total_packets}.')
             return ranges
 
         def _on_split_to_changed(item):
@@ -5344,8 +5354,7 @@ class ApplicationWindow(QMainWindow):
                 split_table.setItem(rows, 1, from_item)
                 split_table.setItem(rows, 2, to_item)
                 _renumber_split_rows()
-                split_count_label.setText(f'So file: {split_table.rowCount()}')
-                split_table.resizeColumnsToContents()
+                split_count_label.setText(f'Files: {split_table.rowCount()}')
             finally:
                 split_guard['busy'] = False
 
@@ -5374,7 +5383,7 @@ class ApplicationWindow(QMainWindow):
                     split_table.item(prev_row, 2).setText(str(last_to))
                     split_table.removeRow(last_row)
                     _renumber_split_rows()
-                    split_count_label.setText(f'So file: {split_table.rowCount()}')
+                    split_count_label.setText(f'Files: {split_table.rowCount()}')
                 finally:
                     split_guard['busy'] = False
                 split_state['file_count'] = split_table.rowCount()
@@ -5424,8 +5433,8 @@ class ApplicationWindow(QMainWindow):
             default_base = Path(cv.loaded_file_path).stem if cv.loaded_file_path else 'separated_capture'
             base_name, ok = QInputDialog.getText(
                 self,
-                'Ten file tach',
-                'Nhap tien to ten file:',
+                'Split File Name',
+                'Enter the base file name:',
                 text=str(default_base or 'separated_capture'),
             )
             if not ok:
@@ -5475,7 +5484,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 'Separate',
-                f'Da tach thanh {len(saved_paths)} file.\nThu muc: {output_dir}',
+                f'Successfully created {len(saved_paths)} files.\nFolder: {output_dir}',
             )
             return
 
@@ -5544,7 +5553,7 @@ class ApplicationWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel('Create a new capture file from packets that match one criterion:'))
 
-        export_selected_cb = QCheckBox('Packet dang chon (Selected packets)', dialog)
+        export_selected_cb = QCheckBox('Currently selected packets', dialog)
         layout.addWidget(export_selected_cb)
 
         export_protocol_cb = QCheckBox('By protocol', dialog)
@@ -5573,7 +5582,7 @@ class ApplicationWindow(QMainWindow):
             _toggle_export_fields()
 
         btn_row = QHBoxLayout()
-        ok_btn = QPushButton('Choose Output...', dialog)
+        ok_btn = QPushButton('Save...', dialog)
         cancel_btn = QPushButton('Cancel', dialog)
         btn_row.addStretch()
         btn_row.addWidget(ok_btn)
@@ -5612,7 +5621,7 @@ class ApplicationWindow(QMainWindow):
             export_indices.update(self._resolve_indices_by_ranges_text(export_ranges_input.toPlainText()))
 
         if not criteria_used:
-            QMessageBox.warning(self, 'Export Specified Packets', 'Hay chon it nhat 1 tieu chi export.')
+            QMessageBox.warning(self, 'Export Specified Packets', 'Choose at least one export criterion.')
             return
 
         if not export_indices:
@@ -5625,7 +5634,7 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.warning(self, 'Export Specified Packets', 'No valid packets are available to export.')
             return
 
-        filename, selected_format, selected_compression = cv._show_save_with_options_dialog()
+        filename, selected_format, selected_compression = cv._show_save_with_options_dialog(preselect_existing_file=False)
         if not filename:
             return
 
@@ -5641,10 +5650,10 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 'Export Specified Packets',
-                f'Export thanh cong {len(packets)} packet:\n{out_path}',
+                f'Successfully exported {len(packets)} packets:\n{out_path}',
             )
         except Exception as exc:
-            QMessageBox.critical(self, 'Export Specified Packets', f'Export that bai:\n{exc}')
+            QMessageBox.critical(self, 'Export Specified Packets', f'Export failed:\n{exc}')
 
     def _parse_packet_ranges_to_numbers(self, ranges_text: str):
         text = str(ranges_text or '').strip()
@@ -5744,7 +5753,7 @@ class ApplicationWindow(QMainWindow):
             return
 
         if not (summary_cb.isChecked() or detail_cb.isChecked() or bytes_cb.isChecked()):
-            QMessageBox.warning(self, 'Print', 'Can chon it nhat 1 noi dung de in.')
+            QMessageBox.warning(self, 'Print', 'Choose at least one section to print.')
             return
 
         scope = scope_combo.currentText()
@@ -5788,7 +5797,7 @@ class ApplicationWindow(QMainWindow):
         if print_dialog.exec() != QDialog.DialogCode.Accepted:
             return
         document.print(printer)
-        QMessageBox.information(self, 'Print', 'Da gui tai lieu den may in.')
+        QMessageBox.information(self, 'Print', 'The document was sent to the printer.')
 
     def _on_quit(self):
         self.close()
@@ -6092,14 +6101,14 @@ class ApplicationWindow(QMainWindow):
 
     def _render_flow_behavior_text(self, result: dict) -> str:
         flow_count = int(result.get("flow_count", 0) or 0)
-        lines = [f"Da trich xuat {flow_count} flows."]
+        lines = [f"Extracted {flow_count} flows."]
         lines.append(f"Model status: {str(result.get('model_status', 'ok') or 'ok')}")
         summaries = list(result.get("summaries", []) or [])
         if not summaries:
             lines.append("No flows are available for behavioral analysis.")
             return "\n".join(lines)
         lines.append("")
-        lines.append("Tom tat hanh vi:")
+        lines.append("Behavior summary:")
         for item in summaries[:30]:
             src = item.get("src_ip", "-")
             dst = item.get("dst_ip", "-")
@@ -6108,7 +6117,7 @@ class ApplicationWindow(QMainWindow):
             summary = item.get("summary", "")
             lines.append(f"- [{sev}] {src} -> {dst} ({proto}): {summary}")
         if len(summaries) > 30:
-            lines.append(f"... va {len(summaries) - 30} flows khac.")
+            lines.append(f"... and {len(summaries) - 30} more flows.")
         model_counts = Counter()
         for item in summaries:
             pred = item.get("model_prediction")
@@ -6116,7 +6125,7 @@ class ApplicationWindow(QMainWindow):
                 model_counts[str(pred)] += 1
         if model_counts:
             lines.append("")
-            lines.append("Phan bo nhan model:")
+            lines.append("Model label distribution:")
             for label, cnt in model_counts.most_common(10):
                 lines.append(f"- {label}: {cnt} flow(s)")
         return "\n".join(lines)
@@ -6168,10 +6177,10 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Export Flow CSV",
-                f"Export thanh cong:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
+                f"Export successful:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Export Flow CSV", f"Export that bai: {exc}")
+            QMessageBox.critical(self, "Export Flow CSV", f"Export failed: {exc}")
 
     def _on_export_flow_csv_selected(self):
         if not self.capture_view:
@@ -6207,10 +6216,10 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Export Selected Flow CSV",
-                f"{warning}Export thanh cong:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
+                f"{warning}Export successful:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Export Selected Flow CSV", f"Export that bai: {exc}")
+            QMessageBox.critical(self, "Export Selected Flow CSV", f"Export failed: {exc}")
 
     def _on_search(self):
         """Find"""
@@ -6294,7 +6303,7 @@ class ApplicationWindow(QMainWindow):
                 self.capture_view.toggle_find_panel()
             self.capture_view.find_input.setFocus()
             self.capture_view.find_input.selectAll()
-            QMessageBox.information(self, 'Find Next', 'Hay nhap noi dung tim kiem truoc.')
+            QMessageBox.information(self, 'Find Next', 'Enter a search term first.')
             return
         self.capture_view.find_next()
 
@@ -6306,7 +6315,7 @@ class ApplicationWindow(QMainWindow):
                 self.capture_view.toggle_find_panel()
             self.capture_view.find_input.setFocus()
             self.capture_view.find_input.selectAll()
-            QMessageBox.information(self, 'Find Previous', 'Hay nhap noi dung tim kiem truoc.')
+            QMessageBox.information(self, 'Find Previous', 'Enter a search term first.')
             return
         self.capture_view.find_previous()
 
@@ -6314,7 +6323,7 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.toggle_mark_selected():
-            QMessageBox.information(self, 'Mark/Unmark Selected', 'Hay chon it nhat mot packet.')
+            QMessageBox.information(self, 'Mark/Unmark Selected', 'Select at least one packet.')
             return
         self._update_capture_window_title()
 
@@ -6345,7 +6354,7 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.toggle_ignore_selected():
-            QMessageBox.information(self, 'Ignore/Unignore Selected', 'Hay chon it nhat mot packet.')
+            QMessageBox.information(self, 'Ignore/Unignore Selected', 'Select at least one packet.')
             return
         self._update_capture_window_title()
 
@@ -6899,7 +6908,7 @@ class ApplicationWindow(QMainWindow):
             if row < 0:
                 return
             if columns_table.rowCount() <= 1:
-                QMessageBox.warning(dialog, 'Columns', 'Phai giu it nhat 1 cot.')
+                QMessageBox.warning(dialog, 'Columns', 'At least one column must remain visible.')
                 return
             columns_table.removeRow(row)
             _toggle_columns_filter_rows()
@@ -7286,7 +7295,7 @@ class ApplicationWindow(QMainWindow):
                 QMessageBox.warning(dialog, 'Preferences', 'Warning: Columns cannot be left empty.')
                 return None
             if not any(bool(spec.get('displayed', True)) for spec in collected_columns):
-                QMessageBox.warning(dialog, 'Preferences', 'Canh bao: Phai hien thi it nhat 1 cot.')
+                QMessageBox.warning(dialog, 'Preferences', 'Warning: At least one column must remain visible.')
                 return None
 
             collected_expert = []

@@ -243,7 +243,8 @@ def load_capture_metadata(filename: str) -> CaptureMetadata:
 
     # Try to extract metadata from PCAPNG format
     try:
-        if filename.lower().endswith(('.pcapng', '.pcap')):
+        normalized = str(filename or '').strip().lower()
+        if normalized.endswith('.pcapng'):
             parser = PcapngParser(filename)
             pcapng_metadata = parser.parse()
 

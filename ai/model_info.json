@@ -40,5 +40,5 @@
         "scaler": "StandardScaler object saved from training RAM, not refitted"
     },
     "inference_device": "cpu",
-    "note": "Train có thể dùng GPU. Package này export TorchScript trên CPU. Load bằng torch.jit.load(..., map_location='cpu')."
+    "note": "Training may use GPU. This package exports TorchScript for CPU inference. Load it with torch.jit.load(..., map_location='cpu')."
 }

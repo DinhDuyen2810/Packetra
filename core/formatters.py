@@ -235,6 +235,37 @@ def format_port_with_service(port: int | str | None, proto: str) -> str:
     return f'{service_name}({port_number})'
 
 
+def transport_proto_for_record(record) -> str:
+    metadata = getattr(record, 'metadata', {}) if record is not None else {}
+    if isinstance(metadata, dict):
+        try:
+            if int(metadata.get('tcp_stream_index', -1) or -1) >= 0:
+                return 'tcp'
+        except Exception:
+            pass
+        try:
+            if int(metadata.get('udp_stream_index', -1) or -1) >= 0:
+                return 'udp'
+        except Exception:
+            pass
+    raw = getattr(record, 'raw', None)
+    try:
+        if raw is not None and raw.haslayer(TCP):
+            return 'tcp'
+    except Exception:
+        pass
+    try:
+        if raw is not None and raw.haslayer(UDP):
+            return 'udp'
+    except Exception:
+        pass
+    return str(getattr(record, 'protocol', '') or '')
+
+
+def format_port_title_with_service(label: str, port: int | str | None, proto: str) -> str:
+    return f'{str(label or "").strip()}: {format_port_with_service(port, proto)}'
+
+
 def format_endpoint_for_display(endpoint_text: str) -> str:
     text = str(endpoint_text or '').strip()
     if not text:
@@ -3978,8 +4009,8 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                         },
                     ]
                     tcp_children = [
-                        {'title': f'Source Port: {sport} ({sport})', 'offset': tcp_offset, 'length': 2},
-                        {'title': f'Destination Port: smtp (25)' if dport == 25 else f'Destination Port: {dport} ({dport})', 'offset': tcp_offset + 2, 'length': 2},
+                        {'title': format_port_title_with_service('Source Port', sport, 'tcp'), 'offset': tcp_offset, 'length': 2},
+                        {'title': format_port_title_with_service('Destination Port', dport, 'tcp'), 'offset': tcp_offset + 2, 'length': 2},
                         {'title': f'[Stream index: {inner_tcp_stream}]' if inner_tcp_stream >= 0 else '[Stream index: -1]'},
                         {'title': '[Stream Packet Number: 2]'},
                         {'title': '[Conversation completeness: Incomplete, SYN_SENT (1)]', 'children': [
@@ -4067,7 +4098,12 @@ def _icmpv6_section(payload: bytes, offset: int, record=None) -> Dict[str, Any]:
                         {'title': '[Server Contiguous Streams: 1]'},
                     ])
                     children.append({
-                        'title': f'Transmission Control Protocol, Src Port: {sport} ({sport}), Dst Port: smtp (25), Seq: {seq_raw}' if dport == 25 else f'Transmission Control Protocol, Src Port: {sport} ({sport}), Dst Port: {dport} ({dport}), Seq: {seq_raw}',
+                        'title': (
+                            f'Transmission Control Protocol, '
+                            f'Src Port: {format_port_with_service(sport, "tcp")}, '
+                            f'Dst Port: {format_port_with_service(dport, "tcp")}, '
+                            f'Seq: {seq_raw}'
+                        ),
                         'offset': tcp_offset,
                         'length': tcp_total_len,
                         'children': tcp_children,
@@ -7963,13 +7999,13 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     children = [
 
         {
-            'title': f'Source Port: {sport}',
+            'title': format_port_title_with_service('Source Port', sport, 'tcp'),
             'offset': offset,
             'length': 2,
         },
 
         {
-            'title': f'Destination Port: {dport}',
+            'title': format_port_title_with_service('Destination Port', dport, 'tcp'),
             'offset': offset + 2,
             'length': 2,
         },
@@ -8650,8 +8686,8 @@ def _tcp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
     tcp_title = (
         f'Transmission Control Protocol, '
-        f'Src Port: {sport}, '
-        f'Dst Port: {dport}, '
+        f'Src Port: {format_port_with_service(sport, "tcp")}, '
+        f'Dst Port: {format_port_with_service(dport, "tcp")}, '
         f'Seq: {relative_seq}, '
         + (f'Ack: {relative_ack}, ' if has_ack_flag else '')
         + f'Len: {payload_len}'
@@ -19431,14 +19467,14 @@ def _udp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
     children = [
 
         {
-            'title': f'Source Port: {sport}',
+            'title': format_port_title_with_service('Source Port', sport, 'udp'),
 
             'offset': offset,
             'length': 2,
         },
 
         {
-            'title': f'Destination Port: {dport}',
+            'title': format_port_title_with_service('Destination Port', dport, 'udp'),
 
             'offset': offset + 2,
             'length': 2,
@@ -19520,8 +19556,8 @@ def _udp_section(layer, offset: int, stream_index: int, record=None) -> Dict[str
 
         'title':
             f'User Datagram Protocol, '
-            f'Src Port: {sport}, '
-            f'Dst Port: {dport}',
+            f'Src Port: {format_port_with_service(sport, "udp")}, '
+            f'Dst Port: {format_port_with_service(dport, "udp")}',
 
         'offset': offset,
         'length': 8,

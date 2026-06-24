@@ -724,6 +724,7 @@ class CaptureView(QWidget):
 
     def set_options_settings(self, options_settings):
         """Set Options tab settings from Capture Options dialog"""
+        previous_settings = self.options_settings.copy() if isinstance(getattr(self, 'options_settings', None), dict) else {}
         self.options_settings = options_settings.copy() if options_settings else {}
         self.realtime_update_enabled = bool(self.options_settings.get('realtime', True))
         self.auto_scroll_enabled = bool(self.options_settings.get('autoscroll', True))
@@ -735,7 +736,38 @@ class CaptureView(QWidget):
             formatters.RESOLVE_TRANSPORT = bool(self.options_settings.get('resolve_transport', False))
         except Exception:
             pass
+        if any(
+            bool(previous_settings.get(key)) != bool(self.options_settings.get(key))
+            for key in ('resolve_mac', 'resolve_network', 'resolve_transport')
+        ):
+            self._clear_cached_name_resolution_views()
         self._refresh_packet_list_name_resolution()
+        self._refresh_selected_packet_views()
+
+    def _clear_cached_name_resolution_views(self):
+        for record in list(getattr(self, 'records', []) or []):
+            metadata = getattr(record, 'metadata', None)
+            if not isinstance(metadata, dict):
+                continue
+            metadata.pop('_detail_tree_cache', None)
+            metadata.pop('_detail_find_titles_cache', None)
+
+    def _refresh_selected_packet_views(self):
+        try:
+            if self._show_file_format_view and self._file_format_record is not None:
+                self.details_tree.show_packet(self._file_format_record)
+                self.hex_view.show_packet(self._file_format_record)
+                return
+            row = int(self.table.currentRow()) if getattr(self, 'table', None) is not None else -1
+            if row < 0 or row >= len(self.visible_indices):
+                return
+            record_index = self.visible_indices[row]
+            if 0 <= record_index < len(self.records):
+                record = self.records[record_index]
+                self.details_tree.show_packet(record)
+                self.hex_view.show_packet(record)
+        except Exception:
+            pass
 
     def _refresh_packet_list_name_resolution(self):
         try:
@@ -1109,7 +1141,7 @@ class CaptureView(QWidget):
 
         return False
 
-    def _show_save_with_options_dialog(self):
+    def _show_save_with_options_dialog(self, preselect_existing_file: bool = True):
         output = self.output_settings or {}
         default_format = self._capture_output_format()
         default_compression = self._capture_compression()
@@ -1131,7 +1163,15 @@ class CaptureView(QWidget):
         if not initial_path:
             initial_path = self.loaded_file_path or ''
         if initial_path:
-            dialog.selectFile(initial_path)
+            initial_directory = initial_path
+            if os.path.isfile(initial_path):
+                initial_directory = os.path.dirname(initial_path)
+            elif os.path.splitext(initial_path)[1]:
+                initial_directory = os.path.dirname(initial_path)
+            if initial_directory and os.path.isdir(initial_directory):
+                dialog.setDirectory(initial_directory)
+            if preselect_existing_file:
+                dialog.selectFile(initial_path)
 
         compression_combo = QComboBox(dialog)
         compression_combo.addItems([
