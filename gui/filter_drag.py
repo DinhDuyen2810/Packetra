@@ -23,10 +23,10 @@ def packet_filter_expression(record, column: int) -> str:
         return ''
     if col == 2:
         value = str(getattr(record, 'src', '') or '').strip()
-        return f'src == {_quote_filter_value(value)}' if value else ''
+        return f'ip.src == {_quote_filter_value(value)}' if value else ''
     if col == 3:
         value = str(getattr(record, 'dst', '') or '').strip()
-        return f'dst == {_quote_filter_value(value)}' if value else ''
+        return f'ip.dst == {_quote_filter_value(value)}' if value else ''
     if col == 4:
         value = str(getattr(record, 'protocol', '') or '').strip()
         return f'protocol == {_quote_filter_value(value)}' if value else ''

@@ -94,6 +94,8 @@ class ConversationsDialog(QDialog):
         grouped = {name: {} for name in tabs_order}
 
         for record in self.packets:
+            if bool(getattr(record, 'ignored', False)):
+                continue
             try:
                 packet = getattr(record, "raw", None)
                 pkt_len = int(getattr(record, "length", 0) or 0)

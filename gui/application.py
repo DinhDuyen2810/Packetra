@@ -756,6 +756,10 @@ class CaptureOptionsDialog(QDialog):
             'Snaplen (B)', 'Buffer (MB)', 'Capture Filter', 'Comment'
         ])
         self.iface_tree.header().setStretchLastSection(False)
+        self.iface_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.iface_tree.header().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        self.iface_tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.iface_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.iface_tree.setColumnWidth(0, 200)
         self.iface_tree.setColumnWidth(1, 100)
         self.iface_tree.setColumnWidth(2, 130)
@@ -3035,6 +3039,8 @@ class ApplicationWindow(QMainWindow):
             return []
         grouped = {}
         for record in list(records or []):
+            if bool(getattr(record, 'ignored', False)):
+                continue
             key = cv._conversation_key_for_record(record)
             if key is None:
                 continue
@@ -5228,6 +5234,8 @@ class ApplicationWindow(QMainWindow):
 
         def _renumber_split_rows():
             for r in range(split_table.rowCount()):
+                if bool(getattr(r, 'ignored', False)):
+                    continue
                 name_item = split_table.item(r, 0)
                 if name_item is None:
                     name_item = QTableWidgetItem()
@@ -5266,6 +5274,8 @@ class ApplicationWindow(QMainWindow):
             ranges = []
             expected_from = 1
             for r in range(rows):
+                if bool(getattr(r, 'ignored', False)):
+                    continue
                 from_item = split_table.item(r, 1)
                 to_item = split_table.item(r, 2)
                 if from_item is None or to_item is None:
@@ -6445,9 +6455,9 @@ class ApplicationWindow(QMainWindow):
             {'index': 1, 'displayed': True, 'title': 'Time', 'field': 'frame.time_relative', 'occurrence': 1, 'alignment': 'Right'},
             {'index': 2, 'displayed': True, 'title': 'Source', 'field': 'ip.src', 'occurrence': 1, 'alignment': 'Right'},
             {'index': 3, 'displayed': True, 'title': 'Destination', 'field': 'ip.dst', 'occurrence': 1, 'alignment': 'Right'},
-            {'index': 4, 'displayed': True, 'title': 'Protocol', 'field': '_ws.col.protocol', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 4, 'displayed': True, 'title': 'Protocol', 'field': 'protocol', 'occurrence': 1, 'alignment': 'Right'},
             {'index': 5, 'displayed': True, 'title': 'Length', 'field': 'frame.len', 'occurrence': 1, 'alignment': 'Right'},
-            {'index': 6, 'displayed': True, 'title': 'Info', 'field': '_ws.col.info', 'occurrence': 1, 'alignment': 'Right'},
+            {'index': 6, 'displayed': True, 'title': 'Info', 'field': 'info', 'occurrence': 1, 'alignment': 'Right'},
         ]
         return {
             'appearance': {
@@ -9370,7 +9380,7 @@ class ApplicationWindow(QMainWindow):
         prefs = self._load_edit_preferences()
         columns = list((prefs or {}).get('columns', []) or [])
         base_fields = {
-            'frame.number', 'frame.time_relative', 'ip.src', 'ip.dst', '_ws.col.protocol', 'frame.len', '_ws.col.info'
+            'frame.number', 'frame.time_relative', 'ip.src', 'ip.dst', 'protocol', 'frame.len', 'info', '_ws.col.protocol', '_ws.col.info'
         }
         result = []
         for item in columns:
@@ -9408,13 +9418,13 @@ class ApplicationWindow(QMainWindow):
             if not isinstance(item, dict):
                 continue
             field = str(item.get('field', '') or '').strip()
-            if field in {'frame.number', 'frame.time_relative', 'ip.src', 'ip.dst', '_ws.col.protocol', 'frame.len'}:
+            if field in {'frame.number', 'frame.time_relative', 'ip.src', 'ip.dst', 'protocol', 'frame.len', '_ws.col.protocol'}:
                 base_columns.append(item)
         info_col = {
             'index': 6,
             'displayed': True,
             'title': 'Info',
-            'field': '_ws.col.info',
+            'field': 'info',
             'occurrence': 1,
             'alignment': 'Left',
         }
@@ -11779,6 +11789,8 @@ class ApplicationWindow(QMainWindow):
                     return []
                 out = []
                 for r in records:
+                    if bool(getattr(r, 'ignored', False)):
+                        continue
                     if cv._conversation_key_for_record(r) == key:
                         out.append(r)
                 return out

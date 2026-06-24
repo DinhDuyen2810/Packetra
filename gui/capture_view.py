@@ -746,6 +746,8 @@ class CaptureView(QWidget):
 
     def _clear_cached_name_resolution_views(self):
         for record in list(getattr(self, 'records', []) or []):
+            if bool(getattr(record, 'ignored', False)):
+                continue
             metadata = getattr(record, 'metadata', None)
             if not isinstance(metadata, dict):
                 continue
@@ -2392,6 +2394,8 @@ class CaptureView(QWidget):
             batch_size = 80 if has_custom_columns else 400
             try:
                 for packet in packet_iter:
+                    if bool(getattr(packet, 'ignored', False)):
+                        continue
                     if stop_event.is_set():
                         break
                     index += 1
@@ -3151,6 +3155,8 @@ class CaptureView(QWidget):
     def get_selected_raw_packets(self):
         packets = []
         for record in self.get_selected_records():
+            if bool(getattr(record, 'ignored', False)):
+                continue
             raw = getattr(record, "raw", None)
             if raw is not None:
                 packets.append(raw)
@@ -4539,6 +4545,8 @@ class CaptureView(QWidget):
     def delete_all_packet_comments(self) -> int:
         changed = 0
         for record in self.records:
+            if bool(getattr(record, 'ignored', False)):
+                continue
             if str(getattr(record, 'packet_comment', '') or ''):
                 record.packet_comment = ''
                 self._sync_runtime_state_from_record(record)
@@ -4553,6 +4561,8 @@ class CaptureView(QWidget):
     def _collect_packet_comments_for_persistence(self) -> dict[int, str]:
         comments: dict[int, str] = {}
         for record in self.records:
+            if bool(getattr(record, 'ignored', False)):
+                continue
             try:
                 packet_no = int(getattr(record, 'number', 0) or 0)
             except Exception:
