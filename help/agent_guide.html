@@ -72,6 +72,7 @@
         <li><a href="#checks">11. Start and End Checks</a></li>
         <li><a href="#troubleshooting">12. Troubleshooting</a></li>
         <li><a href="#windows-note">13. Windows Remote Note</a></li>
+        <li><a href="#remove">14. Remove the Windows Agent</a></li>
       </ul>
     </aside>
     <div class="wrap">
@@ -316,6 +317,42 @@ sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
 
       <p><strong>Connecting from Packetra:</strong></p>
       <p>After verifying the service, return to Packetra, add the Windows Host IP/credentials in the Remote Interfaces tab, select OS as <code>windows</code>, and click <strong>Connect & Load Interfaces</strong>. Packetra will securely SSH into the Windows machine and communicate directly with the running Agent Service to capture packets seamlessly.</p>
+    </section>
+
+    <section class="panel" id="remove">
+      <h2>14. Remove the Windows Agent completely</h2>
+      <p>Depending on how the agent was installed (as Admin or standard User), it may be located in <code>C:\Program Files\RemoteCaptureAgent</code>, <code>C:\Program Files\PacketraAgent</code>, or <code>%LocalAppData%\Programs\PacketraAgent</code>. If it is running as a service, the service name is usually <code>PacketraAgent</code>.</p>
+      
+      <h3>Step 1: Find the exact Agent path</h3>
+      <p>Open <b>PowerShell (Run as Administrator)</b> and run this script to locate all agent files:</p>
+      <pre>$p = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\PacketraAgent' -ErrorAction SilentlyContinue).ImagePath
+if ($p) { Write-Host "[+] Found Service Path: $p" -ForegroundColor Green }
+$paths = @(
+    "C:\RemoteCaptureAgent",
+    "C:\Program Files\RemoteCaptureAgent",
+    "C:\Program Files\PacketraAgent",
+    "$env:LOCALAPPDATA\Programs\PacketraAgent"
+)
+foreach ($path in $paths) {
+    if (Test-Path $path) { Write-Host "[+] Found Directory: $path" -ForegroundColor Cyan }
+}</pre>
+
+      <h3>Step 2: Stop and remove the service (if any)</h3>
+      <p>If a service was found, stop and delete it:</p>
+      <pre>sc.exe stop PacketraAgent
+sc.exe delete PacketraAgent
+taskkill /f /im RemoteCaptureAgent.exe</pre>
+
+      <h3>Step 3: Delete the Agent files</h3>
+      <p>Delete the directory found in Step 1. <b>Note:</b> If the folder is inside <code>C:\Program Files\...</code>, you must use an Administrator prompt or File Explorer.</p>
+      <ul>
+        <li><b>Method A (File Explorer):</b> Navigate to <code>C:\Program Files</code>, right-click the Agent folder, and select Delete. Click <b>Continue</b> when prompted for Administrator permission.</li>
+        <li><b>Method B (PowerShell as Admin):</b> Replace <code>C:\path\to\AgentFolder</code> with the path you found:</li>
+      </ul>
+      <pre>Remove-Item -Recurse -Force "C:\path\to\AgentFolder"</pre>
+
+      <h3>Verify removal</h3>
+      <p>After cleanup, run the script from Step 1 again. It should return nothing.</p>
     </section>
     </div>
   </div>

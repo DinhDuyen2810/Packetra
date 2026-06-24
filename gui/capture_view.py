@@ -4560,6 +4560,11 @@ class CaptureView(QWidget):
             if packet_no <= 0:
                 continue
             comment = str(getattr(record, 'packet_comment', '') or '').strip()
+            if bool(getattr(record, 'marked', False)):
+                if not comment:
+                    comment = '[Marked]'
+                elif '[Marked]' not in comment:
+                    comment = comment + ' [Marked]'
             if comment:
                 comments[packet_no] = comment
         return comments

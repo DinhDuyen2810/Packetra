@@ -610,8 +610,9 @@ if __name__ == '__main__':
         self._style_flat_table(self.remote_table)
         self.remote_table.setColumnCount(7)
         self.remote_table.setHorizontalHeaderLabels(['Show', 'Host / Device URL', 'Port', 'OS', 'Username', 'Auth Type', 'Password'])
-        self.remote_table.horizontalHeader().setStretchLastSection(True)
-        self.remote_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.remote_table.horizontalHeader().setStretchLastSection(False)
+        for column in range(7):
+            self.remote_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.remote_table.setColumnWidth(0, 50)
         self.remote_table.setColumnWidth(2, 80)
         self.remote_table.setColumnWidth(3, 90)
@@ -649,10 +650,18 @@ if __name__ == '__main__':
         self.remote_iface_tree.setColumnCount(2)
         self.remote_iface_tree.setHeaderLabels(['Remote Host / Interface', 'Show'])
         self.remote_iface_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.remote_iface_tree.setColumnWidth(1, 80)
+        self.remote_iface_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.remote_iface_tree.header().setStretchLastSection(False)
-        layout.addWidget(QLabel('Discovered Interfaces'))
+        tree_header_layout = QHBoxLayout()
+        tree_header_layout.addWidget(QLabel('Discovered Interfaces'))
+        self.remote_select_all_btn = QPushButton('Select/Deselect All for Host')
+        self.remote_select_all_btn.setEnabled(False)
+        self.remote_select_all_btn.clicked.connect(self._on_remote_select_all_for_host)
+        tree_header_layout.addStretch()
+        tree_header_layout.addWidget(self.remote_select_all_btn)
+        layout.addLayout(tree_header_layout)
         layout.addWidget(self.remote_iface_tree)
+        self.remote_iface_tree.itemSelectionChanged.connect(lambda: self.remote_select_all_btn.setEnabled(len(self.remote_iface_tree.selectedItems()) > 0 and self.remote_iface_tree.selectedItems()[0].parent() is None))
         
         # Populate remote interfaces
         self._populate_remote_interfaces()
@@ -668,7 +677,7 @@ if __name__ == '__main__':
         for row, remote in enumerate(saved_remotes):
             # Show checkbox
             show_cb = QCheckBox()
-            show_cb.setChecked(remote.get('show', True))
+            show_cb.setChecked(remote.get('show', False))
             self.remote_table.setCellWidget(row, 0, show_cb)
             
             # Host / Device URL
@@ -827,7 +836,7 @@ if __name__ == '__main__':
             else:
                 display_name = raw_value
                 target_name = raw_value
-            interfaces.append({'name': display_name, 'target': target_name, 'show': True})
+            interfaces.append({'name': display_name, 'target': target_name, 'show': False})
 
         config['interfaces'] = interfaces
 
@@ -847,7 +856,7 @@ if __name__ == '__main__':
             if not host:
                 continue
             host_item = QTreeWidgetItem([self._remote_host_key(config), ''])
-            host_item.setFlags(host_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            # host_item.setFlags(host_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             self.remote_iface_tree.addTopLevelItem(host_item)
 
             for iface in config.get('interfaces', []):
@@ -857,10 +866,38 @@ if __name__ == '__main__':
                 child = QTreeWidgetItem([name, ''])
                 host_item.addChild(child)
                 cb = QCheckBox()
-                cb.setChecked(bool(iface.get('show', True)))
+                cb.setChecked(bool(iface.get('show', False)))
                 self.remote_iface_tree.setItemWidget(child, 1, cb)
                 cb.stateChanged.connect(self._on_remote_iface_show_changed)
             host_item.setExpanded(False)
+
+    def _on_remote_select_all_for_host(self):
+        selected = self.remote_iface_tree.selectedItems()
+        if not selected:
+            return
+        item = selected[0]
+        # If a child is selected, get its parent host
+        host_item = item.parent() if item.parent() else item
+        
+        # Check if all are currently checked
+        from PySide6.QtWidgets import QCheckBox
+        from PySide6.QtCore import Qt
+        all_checked = True
+        for j in range(host_item.childCount()):
+            child = host_item.child(j)
+            cb = self.remote_iface_tree.itemWidget(child, 1)
+            real_cb = (cb if hasattr(cb, 'isChecked') else (cb.findChild(QCheckBox) if cb else None))
+            if real_cb and not real_cb.isChecked():
+                all_checked = False
+                break
+                
+        target_state = Qt.Unchecked if all_checked else Qt.Checked
+        for j in range(host_item.childCount()):
+            child = host_item.child(j)
+            cb = self.remote_iface_tree.itemWidget(child, 1)
+            real_cb = (cb if hasattr(cb, 'isChecked') else (cb.findChild(QCheckBox) if cb else None))
+            if real_cb:
+                real_cb.setCheckState(target_state)
 
     def _on_remote_iface_show_changed(self, _state):
         remotes = self._collect_remote_interfaces_from_ui()
@@ -875,7 +912,8 @@ if __name__ == '__main__':
                     break
                 child = host_item.child(j)
                 cb = self.remote_iface_tree.itemWidget(child, 1)
-                iface_entries[j]['show'] = bool(cb and cb.isChecked())
+                real_cb = (cb if hasattr(cb, "isChecked") else (cb.findChild(QCheckBox) if cb else None))
+                iface_entries[j]['show'] = bool(real_cb and real_cb.isChecked())
             host_idx += 1
         self._apply_remote_interfaces_to_ui(remotes)
 

@@ -3710,6 +3710,7 @@ class ApplicationWindow(QMainWindow):
         result_tree = QTreeWidget(dialog)
         result_tree.setColumnCount(2)
         result_tree.setHeaderLabels(['Action', 'Count'])
+        result_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._style_standard_tree(
             result_tree,
             stretch_column=0,
@@ -3717,7 +3718,7 @@ class ApplicationWindow(QMainWindow):
         )
         result_header = result_tree.header()
         result_header.setStretchLastSection(False)
-        result_header.setMinimumSectionSize(24)
+        result_header.setMinimumSectionSize(80)
         result_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         result_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         result_tree.setColumnWidth(1, 40)
@@ -4191,11 +4192,12 @@ class ApplicationWindow(QMainWindow):
         result_tree = QTreeWidget(dialog)
         result_tree.setColumnCount(2)
         result_tree.setHeaderLabels(['Action', 'Count'])
+        result_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         result_tree.setRootIsDecorated(True)
         result_tree.setAlternatingRowColors(True)
         result_header = result_tree.header()
         result_header.setStretchLastSection(False)
-        result_header.setMinimumSectionSize(24)
+        result_header.setMinimumSectionSize(80)
         result_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         result_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         result_tree.setColumnWidth(1, 40)
@@ -7037,6 +7039,21 @@ class ApplicationWindow(QMainWindow):
             btn.setFixedSize(84, 84)
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setToolTip(spec['layout'])
+            btn.setStyleSheet("""
+                QToolButton {
+                    border: 1px solid #b9c2d0;
+                    border-radius: 8px;
+                    background: #f8fafc;
+                    padding: 4px;
+                }
+                QToolButton:hover {
+                    border-color: #7aa7ff;
+                }
+                QToolButton:checked {
+                    border: 2px solid #1e88ff;
+                    background: rgba(30, 136, 255, 0.16);
+                }
+            """)
             layout_btn_group.addButton(btn, int(spec['id']))
             layout_preview_row.addWidget(btn)
             preview_buttons.append(btn)
@@ -7103,11 +7120,13 @@ class ApplicationWindow(QMainWindow):
         show_separator_cb = QCheckBox('Show packet list separator', layout_page)
         show_separator_cb.setChecked(bool(layout_cfg.get('show_packet_list_separator', False)))
         restore_layout_btn = QPushButton('Restore Defaults', layout_page)
+        restore_layout_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        restore_layout_btn.setMaximumWidth(140)
         layout_layout.addWidget(QLabel('Pane layout:'), 0, 0, 1, 2)
         layout_layout.addLayout(layout_preview_row, 1, 0, 1, 2)
         layout_layout.addWidget(pane_group_box, 2, 0, 1, 2)
         layout_layout.addWidget(show_separator_cb, 3, 0, 1, 2)
-        layout_layout.addWidget(restore_layout_btn, 4, 0, 1, 2)
+        layout_layout.addWidget(restore_layout_btn, 4, 0, 1, 2, Qt.AlignLeft)
         layout_layout.setRowStretch(5, 1)
 
         def _restore_layout_defaults():
@@ -7133,14 +7152,16 @@ class ApplicationWindow(QMainWindow):
         capture_layout = QGridLayout(capture_page)
         capture_cfg = prefs.get('capture', {}) or {}
         default_interface_combo = QComboBox(capture_page)
-        default_interface_combo.setEditable(True)
+        default_interface_combo.setEditable(False)
         default_interface_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         default_interfaces = []
         if self.iface_selector_view and hasattr(self.iface_selector_view, 'interfaces'):
             interface_map = getattr(self.iface_selector_view, 'interfaces', {}) or {}
             default_interfaces = [str(name) for name in interface_map.keys()]
         default_interface_combo.addItems(sorted(default_interfaces))
-        default_interface_combo.setCurrentText(str(capture_cfg.get('default_interface', '') or ''))
+        default_interface = str(capture_cfg.get('default_interface', '') or '').strip()
+        default_index = default_interface_combo.findText(default_interface)
+        default_interface_combo.setCurrentIndex(default_index if default_index >= 0 else -1)
         promiscuous_cb = QCheckBox('Capture packets in promiscuous mode', capture_page)
         promiscuous_cb.setChecked(bool(capture_cfg.get('promiscuous_mode', True)))
         pcapng_cb = QCheckBox('Capture packets in pcapng format', capture_page)
@@ -7364,6 +7385,8 @@ class ApplicationWindow(QMainWindow):
             self._save_edit_preferences(new_prefs)
             self._apply_edit_preferences(new_prefs)
             prefs = new_prefs
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(dialog, "Apply Complete", "Apply Complete")
             return True
 
         def _restore_current_page_defaults():
@@ -7418,7 +7441,9 @@ class ApplicationWindow(QMainWindow):
                 return
             if key == 'capture':
                 default_cfg = defaults.get('capture', {}) or {}
-                default_interface_combo.setCurrentText(str(default_cfg.get('default_interface', '') or ''))
+                default_interface = str(default_cfg.get('default_interface', '') or '').strip()
+                default_index = default_interface_combo.findText(default_interface)
+                default_interface_combo.setCurrentIndex(default_index if default_index >= 0 else -1)
                 promiscuous_cb.setChecked(bool(default_cfg.get('promiscuous_mode', True)))
                 pcapng_cb.setChecked(bool(default_cfg.get('capture_format_pcapng', True)))
                 realtime_cb.setChecked(bool(default_cfg.get('realtime_update', True)))
@@ -10667,6 +10692,8 @@ class ApplicationWindow(QMainWindow):
         tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         header = tree.header()
+        header.setDefaultSectionSize(120)
+        header.setMinimumSectionSize(80)
         for column in range(int(tree.columnCount() or 0)):
             mode = QHeaderView.ResizeMode.Stretch if column == stretch_column else resize_mode
             header.setSectionResizeMode(column, mode)
@@ -12928,6 +12955,7 @@ class ApplicationWindow(QMainWindow):
         tree = QTreeWidget(dialog)
         tree.setColumnCount(5)
         tree.setHeaderLabels(['Severity', 'Summary', 'Group', 'Protocol', 'Count'])
+        tree.header().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self._style_standard_tree(tree, stretch_column=1)
 
         grouped = {}
