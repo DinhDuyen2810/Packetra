@@ -18,6 +18,7 @@
         <li><a href="#protocols">4. Full Protocol Aliases</a></li>
         <li><a href="#fields">5. Field Inventory</a></li>
         <li><a href="#examples">6. Example Patterns</a></li>
+        <li><a href="#macros">7. Macro Usage Guide</a></li>
       </ul>
     </aside>
     <main class="content">
@@ -62,9 +63,9 @@
           <tr><td>Packet-list right click -> Apply as a Filter</td><td>Creates a filter from the clicked packet-list cell and lets you merge it as Selected, Not Selected, AND, OR, AND NOT, or OR NOT.</td></tr>
           <tr><td>Packet-details right click -> Apply as a Filter</td><td>Creates a strict detail-based filter from the selected detail node.</td></tr>
           <tr><td>Analyze -> Apply as Filter</td><td>Creates a display filter from the currently selected detail field via a mode selection dialog.</td></tr>
-          <tr><td>Analyze -> Display Filter Expression...</td><td>Opens the expression builder with field, relation, value, and combination mode.</td></tr>
+          <tr><td>Analyze -> Display Filter Expression...</td><td>Opens the expression builder with field, relation, value, and chaining mode for building multi-part filters.</td></tr>
           <tr><td>Analyze -> Display Filter Macros...</td><td>Lets you define reusable named macros that expand inside display-filter expressions.</td></tr>
-          <tr><td>Analyze -> Conversation Filter</td><td>Builds a filter for TCP, UDP, IPv4, IPv6, or Ethernet conversation scope based on the current packet.</td></tr>
+          <tr><td>Analyze -> Conversation Filter</td><td>Builds a filter for TCP, UDP, IPv4, IPv6, or Ethernet conversation scope based on the current packet, using MAC source and destination fields for Ethernet.</td></tr>
           <tr><td>Follow dialog</td><td>Uses Filter This Stream or Filter Out This Stream from the Follow view.</td></tr>
           <tr><td>Statistics dialogs</td><td>Many statistics windows provide Apply as Filter buttons for selected protocol, endpoint, address, or row context.</td></tr>
           <tr><td>Topology graph dialog</td><td>Apply Filter and Copy Filter can generate host or edge-based display filters.</td></tr>
@@ -117,15 +118,26 @@
           <li>Choose a field.</li>
           <li>Choose a relation.</li>
           <li>Enter a value.</li>
-          <li>Choose whether to replace, AND, OR, AND NOT, or OR NOT with the current filter.</li>
+          <li>Choose whether the current fragment should end with <code>Done</code> or continue with AND, OR, AND NOT, or OR NOT.</li>
+          <li>Use <code>Insert</code> to append the current fragment to the running preview and clear the form for the next fragment.</li>
+          <li>Use <code>Apply</code> when the preview is complete and you want to push it to the main filter bar.</li>
         </ol>
 
         <h3>Macros, conversation filters, and Follow Stream</h3>
         <ol>
           <li>Use <code>Analyze &gt; Display Filter Macros...</code> for reusable named expressions.</li>
-          <li>Use <code>Analyze &gt; Conversation Filter</code> to build scoped expressions for TCP, UDP, IPv4, IPv6, or Ethernet conversations.</li>
+          <li>Use <code>Analyze &gt; Conversation Filter</code> to build scoped expressions for TCP, UDP, IPv4, IPv6, or Ethernet conversations, with Ethernet filters emitted as <code>eth.src</code> and <code>eth.dst</code>.</li>
           <li>In Follow views, use Filter This Stream or Filter Out This Stream.</li>
         </ol>
+
+        <h3 id="macros">7. Macro Usage Guide</h3>
+        <ol>
+          <li>Open <code>Analyze &gt; Display Filter Macros...</code> to create or edit reusable filter snippets.</li>
+          <li>Give each macro a short name with letters, digits, or underscores so it is easy to type and remember.</li>
+          <li>Reference the macro name directly in the display filter bar or expression builder, then combine it with other conditions such as <code>corp_dns && ip.addr == 10.0.0.5</code>.</li>
+          <li>Keep macros focused on one repeated check, such as a network segment, a service name, or a common host list, so the saved expressions stay easy to reuse.</li>
+        </ol>
+        <p>Macro expansion happens when the display filter is applied, so editing a macro updates every later use of that name without changing saved captures.</p>
       </section>
 
       <section class="card" id="protocols">

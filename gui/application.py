@@ -217,11 +217,12 @@ class TopologyEdgeItem(QGraphicsLineItem):
         super().mousePressEvent(event)
 
 class CaptureFiltersDialog(QDialog):
-    def __init__(self, parent, presets: list[dict], validator):
+    def __init__(self, parent, presets: list[dict], validator, *, show_validate: bool = True):
         super().__init__(parent)
         self.setWindowTitle('Capture Filters')
         self.resize(900, 520)
         self._validator = validator
+        self._show_validate = bool(show_validate)
         self._presets: list[dict] = [
             {
                 'name': str(item.get('name', '') or '').strip(),
@@ -269,7 +270,8 @@ class CaptureFiltersDialog(QDialog):
         row_actions.addWidget(self.new_btn)
         row_actions.addWidget(self.copy_btn)
         row_actions.addWidget(self.delete_btn)
-        row_actions.addWidget(self.validate_btn)
+        if self._show_validate:
+            row_actions.addWidget(self.validate_btn)
         row_actions.addWidget(self.apply_btn)
         row_actions.addStretch(1)
         root.addLayout(row_actions)
@@ -286,7 +288,10 @@ class CaptureFiltersDialog(QDialog):
         self.new_btn.clicked.connect(self._on_new)
         self.copy_btn.clicked.connect(self._on_copy)
         self.delete_btn.clicked.connect(self._on_delete)
-        self.validate_btn.clicked.connect(self._on_validate)
+        if self._show_validate:
+            self.validate_btn.clicked.connect(self._on_validate)
+        else:
+            self.validate_btn.setVisible(False)
         self.apply_btn.clicked.connect(self._on_apply)
         self.ok_btn.clicked.connect(self._on_ok)
         self.cancel_btn.clicked.connect(self.reject)
@@ -3018,7 +3023,12 @@ class ApplicationWindow(QMainWindow):
         if raw is not None and raw.haslayer(IP) and src and dst:
             return f'ip.addr == {src} && ip.addr == {dst}'
         if src and dst:
-            return f'eth.addr == {src} && eth.addr == {dst}'
+            if raw is not None and raw.haslayer(Ether):
+                eth_src = str(getattr(raw[Ether], 'src', '') or '').strip()
+                eth_dst = str(getattr(raw[Ether], 'dst', '') or '').strip()
+                if eth_src and eth_dst:
+                    return f'eth.src == {eth_src} && eth.dst == {eth_dst}'
+            return f'eth.src == {src} && eth.dst == {dst}'
         return ''
 
     def _format_ai_conversation_label(self, entry: dict) -> str:
@@ -4006,7 +4016,10 @@ class ApplicationWindow(QMainWindow):
         try:
             if force_topmost:
                 try:
+                    if dialog.isVisible():
+                        dialog.hide()
                     dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                    dialog.setWindowFlag(Qt.WindowType.Window, True)
                 except Exception:
                     pass
                 try:
@@ -4015,6 +4028,12 @@ class ApplicationWindow(QMainWindow):
                     pass
             self._center_widget_on_screen(dialog)
             dialog.show()
+            if force_topmost:
+                try:
+                    dialog.raise_()
+                    dialog.activateWindow()
+                except Exception:
+                    pass
             dialog.raise_()
             dialog.activateWindow()
             QApplication.processEvents()
@@ -10038,7 +10057,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_display_filter_macros(self):
         macros = self._load_display_filter_macros()
-        dialog = CaptureFiltersDialog(self, macros, lambda expr, iface=None: (True, ''))
+        dialog = CaptureFiltersDialog(self, macros, lambda expr, iface=None: (True, ''), show_validate=False)
         dialog.setWindowTitle('Display Filter Macros')
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -10117,7 +10136,7 @@ class ApplicationWindow(QMainWindow):
         form.addWidget(QLabel('Combine with next filter:'), 3, 0)
         combine_combo = QComboBox(dialog)
         combine_combo.addItems([
-            'Replace next filter',
+            'Done',
             'AND with next filter',
             'OR with next filter',
             'AND NOT with next filter',
@@ -10131,11 +10150,10 @@ class ApplicationWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         copy_btn = QPushButton('Copy', dialog)
-        insert_btn = QPushButton('Insert into Filter Bar', dialog)
+        insert_btn = QPushButton('Insert', dialog)
         apply_btn = QPushButton('Apply', dialog)
-        ok_btn = QPushButton('OK', dialog)
         cancel_btn = QPushButton('Cancel', dialog)
-        for btn in (copy_btn, insert_btn, apply_btn, ok_btn, cancel_btn):
+        for btn in (copy_btn, insert_btn, apply_btn, cancel_btn):
             button_row.addWidget(btn)
         layout.addLayout(button_row)
 
@@ -10160,21 +10178,46 @@ class ApplicationWindow(QMainWindow):
             right = f'"{value}"' if _needs_quotes(field, value) else value
             return f'{field} {relation} {right}'
 
-        def _combined_expression() -> str:
-            base = _expression()
+        def _next_suffix() -> str:
             mode = str(combine_combo.currentText() or '')
+            if mode == 'Done':
+                return ''
             if mode.startswith('AND NOT'):
-                return self._build_combined_filter(base, 'and_not_selected')
+                return ' && !('
             if mode.startswith('OR NOT'):
-                return self._build_combined_filter(base, 'or_not_selected')
+                return ' || !('
             if mode.startswith('AND'):
-                return self._build_combined_filter(base, 'and_selected')
+                return ' && '
             if mode.startswith('OR'):
-                return self._build_combined_filter(base, 'or_selected')
-            return self._build_combined_filter(base, 'selected')
+                return ' || '
+            return ''
+
+        committed_preview = ''
+
+        def _append_fragment(base_text: str, fragment: str, suffix: str) -> str:
+            text = str(base_text or '').rstrip()
+            fragment = str(fragment or '').strip()
+            suffix = str(suffix or '')
+            if not fragment:
+                return text
+            if text.endswith('!('):
+                text = f'{text}{fragment})'
+            elif text:
+                if not text.endswith(('&& ', '|| ', '!(', '&&', '||', '!', '(')):
+                    text += ' '
+                text = f'{text}{fragment}'
+            else:
+                text = fragment
+            if suffix:
+                text = f'{text}{suffix}'
+            return text.strip()
+
+        def _preview_text() -> str:
+            fragment = _expression()
+            return _append_fragment(committed_preview, fragment, _next_suffix()) or committed_preview or fragment
 
         def _refresh_preview():
-            preview_label.setText(f'Preview: {_combined_expression()}')
+            preview_label.setText(f'Preview: {_preview_text()}')
 
         field_combo.currentTextChanged.connect(lambda _text: _refresh_preview())
         relation_combo.currentTextChanged.connect(lambda _text: _refresh_preview())
@@ -10182,19 +10225,30 @@ class ApplicationWindow(QMainWindow):
         combine_combo.currentTextChanged.connect(lambda _text: _refresh_preview())
         _refresh_preview()
 
-        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(_combined_expression()))
-        insert_btn.clicked.connect(lambda: self._set_display_filter_text(_combined_expression(), apply_now=False))
-        def _apply_and_prepare_next():
-            self._set_display_filter_text(_combined_expression(), apply_now=True)
-            value_input.clear()
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(_preview_text()))
 
-        apply_btn.clicked.connect(_apply_and_prepare_next)
-
-        def _on_ok():
-            self._set_display_filter_text(_combined_expression(), apply_now=False)
+        def _apply_now():
+            text = _preview_text()
+            if not text:
+                return
+            self._set_display_filter_text(text, apply_now=True)
             dialog.accept()
 
-        ok_btn.clicked.connect(_on_ok)
+        apply_btn.clicked.connect(_apply_now)
+
+        def _insert_and_prepare_next():
+            nonlocal committed_preview
+            fragment = _expression()
+            if not fragment:
+                return
+            committed_preview = _append_fragment(committed_preview, fragment, _next_suffix())
+            value_input.clear()
+            field_combo.setCurrentText('')
+            relation_combo.setCurrentIndex(0)
+            combine_combo.setCurrentText('Done')
+            _refresh_preview()
+
+        insert_btn.clicked.connect(_insert_and_prepare_next)
         cancel_btn.clicked.connect(dialog.reject)
         dialog.resize(820, 280)
         self._fit_widget_90(dialog)
@@ -10309,7 +10363,7 @@ class ApplicationWindow(QMainWindow):
 
             # For Detail-driven custom columns, always extract displayed values from detail tree
             # instead of protocol boolean fields (e.g. ipv6 -> True/False).
-            field = ''
+            field = detail_query or detail_key or title or field
 
         if detail_query:
             title = detail_query
@@ -10351,6 +10405,7 @@ class ApplicationWindow(QMainWindow):
         metadata = getattr(record, 'metadata', {}) or {}
         src = str(getattr(record, 'src', '') or '')
         dst = str(getattr(record, 'dst', '') or '')
+        raw = getattr(record, 'raw', None)
 
         mode = str(mode or '').strip().lower()
         if mode == 'tcp':
@@ -10370,7 +10425,12 @@ class ApplicationWindow(QMainWindow):
         if mode == 'ipv6' and src and dst:
             return f'ipv6.addr == {src} && ipv6.addr == {dst}'
         if mode == 'ethernet':
-            return f'eth.addr == {src} && eth.addr == {dst}' if src and dst else ''
+            if raw is not None and raw.haslayer(Ether):
+                eth_src = str(getattr(raw[Ether], 'src', '') or '').strip()
+                eth_dst = str(getattr(raw[Ether], 'dst', '') or '').strip()
+                if eth_src and eth_dst:
+                    return f'eth.src == {eth_src} && eth.dst == {eth_dst}'
+            return f'eth.src == {src} && eth.dst == {dst}' if src and dst else ''
         return ''
 
     def _on_conversation_filter(self):
@@ -13107,10 +13167,12 @@ class ApplicationWindow(QMainWindow):
             QMessageBox.information(self, 'Expert Information', 'No capture is loaded.')
             return
 
+        self._auxiliary_analysis_opening = True
         existing_dialog = getattr(self, '_expert_info_dialog', None)
         if existing_dialog is not None:
             try:
-                self._restore_auxiliary_analysis_dialog(existing_dialog)
+                self._present_auxiliary_analysis_dialog(existing_dialog, force_topmost=True)
+                QTimer.singleShot(250, lambda: setattr(self, '_auxiliary_analysis_opening', False))
                 return
             except Exception:
                 self._expert_info_dialog = None
@@ -13210,7 +13272,8 @@ class ApplicationWindow(QMainWindow):
         self._fit_widget_90(dialog)
         self._expert_info_dialog = dialog
         dialog.destroyed.connect(lambda *_args: setattr(self, '_expert_info_dialog', None))
-        self._present_auxiliary_analysis_dialog(dialog)
+        self._present_auxiliary_analysis_dialog(dialog, force_topmost=True)
+        QTimer.singleShot(250, lambda: setattr(self, '_auxiliary_analysis_opening', False))
 
     def _on_open_capture_properties(self):
         if not self.capture_view:
