@@ -11235,13 +11235,65 @@ class ApplicationWindow(QMainWindow):
         if not raw:
             return ''
         mapping = {
+            'frame': 'frame',
+            'data': 'data',
+            'ieee 802.3br frame preemption protocol': 'fpp',
             'ipv4': 'ip',
             'ipv6': 'ipv6',
             'ethernet': 'eth',
-            'frame': 'frame',
+            'transmission control protocol': 'tcp',
+            'user datagram protocol': 'udp',
+            'logical-link control': 'llc',
+            'subnetwork access protocol': 'snap',
+            '802.1q virtual lan': 'vlan',
+            'ppp-over-ethernet discovery': 'pppoed',
+            'ppp-over-ethernet session': 'pppoe',
+            'point-to-point protocol': 'ppp',
+            'cisco netflow/ipfix': 'cflow',
+            'internet control message protocol': 'icmp',
+            'internet control message protocol v6': 'icmpv6',
+            'internet protocol version 4': 'ip',
+            'internet protocol version 6': 'ipv6',
+            'transport layer security': 'tls',
+            'hypertext transfer protocol': 'http',
+            'multicast domain name system': 'mdns',
+            'domain name system': 'dns',
+            'open shortest path first': 'ospf',
+            'simple network management protocol': 'snmp',
+            'online certificate status protocol': 'ocsp',
+            'network time protocol': 'ntp',
+            'file transfer protocol (ftp)': 'ftp',
+            'ftp data': 'data',
+            'line-based text data': 'data',
+            'line printer daemon protocol': 'lpd',
+            'internet printing protocol': 'ipp',
+            'telnet': 'telnet',
+            'whois': 'whois',
+            'ssh protocol': 'ssh',
+            'generic routing encapsulation': 'gre',
+            'spanning tree protocol': 'stp',
+            'link layer discovery protocol': 'lldp',
+            'cisco discovery protocol': 'cdp',
+            'configuration test protocol (loopback)': 'loop',
+            'address resolution protocol': 'arp',
+            'isis hello': 'isis',
+            'isis csnp': 'isis',
+            'isis lsp': 'isis',
+            'isis psnp': 'isis',
+            'bidirectional forwarding detection control message': 'bfd',
+            'bidirectional forwarding detection echo packet': 'bfd',
+            'simple network management protocol': 'snmp',
+            'network time protocol': 'ntp',
+            'multicast domain name system': 'mdns',
+            'server message block': 'smb',
+            'server message block 2': 'smb2',
+            'post office protocol': 'pop',
+            'internet message access protocol': 'imap',
         }
         if raw in mapping:
             return mapping[raw]
+        if raw.startswith('iso 10589 isis'):
+            return 'isis'
         token = raw.replace(' ', '').replace('/', '').replace('-', '')
         aliases = {str(v).casefold() for v in getattr(DisplayFilter, 'PROTOCOL_ALIASES', set())}
         return token if token in aliases else ''
@@ -11386,14 +11438,17 @@ class ApplicationWindow(QMainWindow):
         ])
         self._style_standard_tree(
             tree,
-            stretch_column=0,
+            stretch_column=9,
             resize_mode=QHeaderView.ResizeMode.Interactive,
         )
         header = tree.header()
         header.setStretchLastSection(False)
+        header.setCascadingSectionResizes(True)
         tree.setColumnWidth(0, 560)
-        for col in range(1, 10):
+        tree.setColumnWidth(1, 112)
+        for col in range(2, 9):
             tree.setColumnWidth(col, 88)
+        tree.setColumnWidth(9, 80)
         layout.addWidget(tree, 1)
 
         filter_label = QLabel('Display filter: (none)', dialog)
@@ -11404,39 +11459,176 @@ class ApplicationWindow(QMainWindow):
         export_btn = QPushButton('Export CSV', dialog)
         layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
-        canonical = {
-            'frame': ('Frame', 'frame'),
-            'ether': ('Ethernet', 'eth'),
-            'ethernet': ('Ethernet', 'eth'),
-            'arp': ('Address Resolution Protocol', 'arp'),
-            'ip': ('Internet Protocol Version 4', 'ip'),
-            'ipv4': ('Internet Protocol Version 4', 'ip'),
-            'ipv6': ('Internet Protocol Version 6', 'ipv6'),
-            'tcp': ('Transmission Control Protocol', 'tcp'),
-            'udp': ('User Datagram Protocol', 'udp'),
-            'dns': ('Domain Name System', 'dns'),
-            'icmp': ('Internet Control Message Protocol', 'icmp'),
-            'icmpv6': ('Internet Control Message Protocol v6', 'icmpv6'),
-            'tls': ('Transport Layer Security', 'tls'),
-            'ssl': ('Transport Layer Security', 'tls'),
-            'http': ('Hypertext Transfer Protocol', 'http'),
-            'quic': ('QUIC', 'quic'),
-            'dhcp': ('Dynamic Host Configuration Protocol', 'dhcp'),
-        }
-
-        def _normalize_layer(layer_name: str) -> tuple[str, str]:
+        def _hierarchy_layer_spec(layer_name: str, record=None) -> tuple[str, str]:
             raw = str(layer_name or '').strip()
             if not raw:
                 return 'Unknown', ''
             key = raw.casefold()
-            if key in canonical:
-                return canonical[key]
-            if key.startswith('dns'):
-                return canonical['dns']
-            if key.startswith('http'):
-                return canonical['http']
             token = re.sub(r'[^a-z0-9]+', '', key)
-            return raw, token
+            if key in {'frame'}:
+                return 'Frame', 'frame'
+            if key in {'mpacketpreamble', 'framepreemption', 'frame preemption protocol'}:
+                return 'IEEE 802.3br Frame Preemption Protocol', 'fpp'
+            if key in {'dot3', 'ether', 'ethernet'}:
+                return 'Ethernet', 'eth'
+            if key in {'llc'}:
+                return 'Logical-Link Control', 'llc'
+            if key in {'snap'}:
+                return 'Subnetwork Access Protocol', 'snap'
+            if key in {'dot1q', '8021q'}:
+                return '802.1Q Virtual LAN', 'vlan'
+            if key.startswith('pppoed') or 'pppoe discovery' in key:
+                return 'PPP-over-Ethernet Discovery', 'pppoed'
+            if key.startswith('pppoe'):
+                return 'PPP-over-Ethernet Session', 'pppoe'
+            if key.startswith('ppp'):
+                return 'Point-to-Point Protocol', 'ppp'
+            if key.startswith('netflow') or key.startswith('ipfix') or key.startswith('cflow'):
+                return 'Cisco NetFlow/IPFIX', 'cflow'
+            if key.startswith('icmpv6'):
+                return 'Internet Control Message Protocol v6', 'icmpv6'
+            if key == 'ipv6exthdrhopbyhop':
+                return '', ''
+            if key in {'raw', 'padding', '_tlsencryptedcontent', 'iperror', 'iperror6', 'udperror', 'icmperror'}:
+                return '', ''
+            if key == 'data':
+                return 'Data', 'data'
+            if key in {'arp'}:
+                return 'Address Resolution Protocol', 'arp'
+            if key in {'ip', 'ipv4'}:
+                return 'Internet Protocol Version 4', 'ip'
+            if key in {'ipv6'}:
+                return 'Internet Protocol Version 6', 'ipv6'
+            if key in {'tcp'}:
+                return 'Transmission Control Protocol', 'tcp'
+            if key in {'udp'}:
+                return 'User Datagram Protocol', 'udp'
+            if key in {'dns'}:
+                return 'Domain Name System', 'dns'
+            if key in {'mdns'}:
+                return 'Multicast Domain Name System', 'mdns'
+            if key in {'icmp'}:
+                return 'Internet Control Message Protocol', 'icmp'
+            if key in {'icmpv6'}:
+                return 'Internet Control Message Protocol v6', 'icmpv6'
+            if key in {'tls', 'ssl'}:
+                return 'Transport Layer Security', 'tls'
+            if key in {'http', 'httprequest', 'httpresponse'}:
+                return 'Hypertext Transfer Protocol', 'http'
+            if key in {'quic'}:
+                return 'QUIC', 'quic'
+            if key in {'dhcp'}:
+                return 'Dynamic Host Configuration Protocol', 'dhcp'
+            if key in {'stp'}:
+                return 'Spanning Tree Protocol', 'stp'
+            if key in {'loop'}:
+                return 'Configuration Test Protocol (loopback)', 'loop'
+            if key in {'ntp', 'ntpheader'}:
+                return 'Network Time Protocol', 'ntp'
+            if key in {'lldp'}:
+                return 'Link Layer Discovery Protocol', 'lldp'
+            if key in {'cdp'}:
+                return 'Cisco Discovery Protocol', 'cdp'
+            if key in {'isis'} or key.startswith('isis'):
+                return raw.replace('_', ' '), 'isis'
+            if key in {'ospf'}:
+                return 'Open Shortest Path First', 'ospf'
+            if key in {'gre'}:
+                return 'Generic Routing Encapsulation', 'gre'
+            if key in {'bfdcontrol'}:
+                return 'Bidirectional Forwarding Detection Control Message', 'bfd'
+            if key in {'bfdecho'}:
+                return 'Bidirectional Forwarding Detection Echo Packet', 'bfd'
+            if key in {'ssh', 'sshv2'}:
+                return 'SSH Protocol', 'ssh'
+            if key in {'smb'}:
+                return 'Server Message Block', 'smb'
+            if key in {'smb2'}:
+                return 'Server Message Block 2', 'smb2'
+            if key in {'smtp'}:
+                return 'SMTP', 'smtp'
+            if key in {'pop'}:
+                return 'Post Office Protocol', 'pop'
+            if key in {'imap'}:
+                return 'Internet Message Access Protocol', 'imap'
+            if key in {'whois'}:
+                return 'whois', 'whois'
+            if key in {'ocsp'}:
+                return 'Online Certificate Status Protocol', 'ocsp'
+            if key in {'telnet'}:
+                return 'Telnet', 'telnet'
+            if key in {'ipp'}:
+                return 'Internet Printing Protocol', 'ipp'
+            if key in {'lpd'}:
+                return 'Line Printer Daemon Protocol', 'lpd'
+            if key in {'ftp'}:
+                return 'File Transfer Protocol (FTP)', 'ftp'
+            if key in {'ftpdata'}:
+                return 'FTP Data', 'ftp'
+            if key in {'snmp'}:
+                return 'Simple Network Management Protocol', 'snmp'
+            if key in {'linebasedtextdata'}:
+                return 'Line-based text data', 'data'
+            if token == '_tlsencryptedcontent':
+                return '', ''
+            display = raw.replace('_', ' ')
+            return display, token
+
+        def _hierarchy_protocol_leaf(record) -> tuple[str, str]:
+            proto = str(getattr(record, 'protocol', '') or '').strip()
+            if not proto:
+                return '', ''
+            key = proto.casefold()
+            if key in {'tcp', 'udp', 'ip', 'ipv4', 'ipv6', 'arp', 'dns', 'mdns', 'icmp', 'icmpv6', 'tls', 'ssl', 'http'}:
+                return '', ''
+            mapping = {
+                'tlsv1.0': ('Transport Layer Security', 'tls'),
+                'tlsv1.2': ('Transport Layer Security', 'tls'),
+                'http': ('Hypertext Transfer Protocol', 'http'),
+                'httprequest': ('Hypertext Transfer Protocol', 'http'),
+                'httpresponse': ('Hypertext Transfer Protocol', 'http'),
+                'mdns': ('Multicast Domain Name System', 'mdns'),
+                'whois': ('whois', 'whois'),
+                'telnet': ('Telnet', 'telnet'),
+                'ipp': ('Internet Printing Protocol', 'ipp'),
+                'lpd': ('Line Printer Daemon Protocol', 'lpd'),
+                'ftp': ('File Transfer Protocol (FTP)', 'ftp'),
+                'ftp-data': ('FTP Data', 'ftp'),
+                'snmp': ('Simple Network Management Protocol', 'snmp'),
+                'ntp': ('Network Time Protocol', 'ntp'),
+                'lldp': ('Link Layer Discovery Protocol', 'lldp'),
+                'cdp': ('Cisco Discovery Protocol', 'cdp'),
+                'cflow': ('Cisco NetFlow/IPFIX', 'cflow'),
+                'bfd control': ('Bidirectional Forwarding Detection Control Message', 'bfd'),
+                'bfd echo': ('Bidirectional Forwarding Detection Echo Packet', 'bfd'),
+                'loop': ('Configuration Test Protocol (loopback)', 'loop'),
+                'ospf': ('Open Shortest Path First', 'ospf'),
+                'gre': ('Generic Routing Encapsulation', 'gre'),
+                'sshv2': ('SSH Protocol', 'ssh'),
+                'smtp': ('SMTP', 'smtp'),
+                'pop': ('Post Office Protocol', 'pop'),
+                'imap': ('Internet Message Access Protocol', 'imap'),
+                'ocsp': ('Online Certificate Status Protocol', 'ocsp'),
+                'line-based text data': ('Line-based text data', 'data'),
+                'data': ('Data', 'data'),
+                'isis hello': ('ISIS HELLO', 'isis'),
+                'isis csnp': ('ISO 10589 ISIS Complete Sequence Numbers Protocol Data Unit', 'isis'),
+                'isis lsp': ('ISO 10589 ISIS Link State Protocol Data Unit', 'isis'),
+                'isis psnp': ('ISO 10589 ISIS Partial Sequence Numbers Protocol Data Unit', 'isis'),
+            }
+            if key in mapping:
+                return mapping[key]
+            if key.startswith('isotp') or key.startswith('isis'):
+                return proto.replace('_', ' '), 'isis'
+            if key.startswith('netflow') or key.startswith('ipfix'):
+                return 'Cisco NetFlow/IPFIX', 'cflow'
+            if key.startswith('icmpv6'):
+                return 'Internet Control Message Protocol v6', 'icmpv6'
+            if key.startswith('icmp'):
+                return 'Internet Control Message Protocol', 'icmp'
+            if key in {'quic'}:
+                return 'QUIC', 'quic'
+            return '', ''
 
         def _packet_layers(rec) -> list[tuple[str, str]]:
             raw = getattr(rec, 'raw', None)
@@ -11449,24 +11641,41 @@ class ApplicationWindow(QMainWindow):
                     cls_name = str(layer.__class__.__name__ or '').strip()
                     if not cls_name or cls_name == 'NoPayload':
                         break
-                    out.append(_normalize_layer(cls_name))
+                    name, token = _hierarchy_layer_spec(cls_name, rec)
+                    if name:
+                        out.append((name, token))
                     nxt = getattr(layer, 'payload', None)
                     if nxt is None or nxt is layer:
                         break
                     layer = nxt
             if not out:
                 for name in list(getattr(rec, 'layers', []) or []):
-                    out.append(_normalize_layer(name))
+                    display_name, token = _hierarchy_layer_spec(name, rec)
+                    if display_name:
+                        out.append((display_name, token))
             if not out:
-                out.append(_normalize_layer(str(getattr(rec, 'protocol', '') or 'Unknown')))
-            return out
+                fallback_name, fallback_token = _hierarchy_layer_spec(str(getattr(rec, 'protocol', '') or 'Unknown'), rec)
+                if fallback_name:
+                    out.append((fallback_name, fallback_token))
+                else:
+                    out.append(('Unknown', ''))
+            leaf_name, leaf_token = _hierarchy_protocol_leaf(rec)
+            if leaf_name:
+                if not out or out[-1][0] != leaf_name:
+                    out.append((leaf_name, leaf_token))
+            compressed = []
+            for name, token in out:
+                pair = (str(name or '').strip(), str(token or '').strip())
+                if not compressed or compressed[-1] != pair:
+                    compressed.append(pair)
+            return compressed
 
         def _iter_rows(root_item: QTreeWidgetItem):
             rows = []
 
             def _walk(item: QTreeWidgetItem, depth: int):
                 rows.append({
-                    'Protocol': ('  ' * depth) + item.text(0),
+                    'Protocol': item.text(0).strip(),
                     'Percent Packets': item.text(1),
                     'Packets': item.text(2),
                     'Percent Bytes': item.text(3),
@@ -11505,6 +11714,7 @@ class ApplicationWindow(QMainWindow):
                 'end_packets': 0,
                 'end_bytes': 0,
                 'pdus': 0,
+                'packet_numbers': set(),
                 'name': 'Frame',
                 'token': 'frame',
             }
@@ -11516,6 +11726,7 @@ class ApplicationWindow(QMainWindow):
                 node['packets'] += 1
                 node['bytes'] += pkt_len
                 node['pdus'] += 1
+                node['packet_numbers'].add(int(getattr(rec, 'number', 0) or 0))
                 seen_nodes = {id(node)}
                 for name, token in path[1:]:
                     key = f'{name}|{token}'
@@ -11528,6 +11739,7 @@ class ApplicationWindow(QMainWindow):
                             'end_packets': 0,
                             'end_bytes': 0,
                             'pdus': 0,
+                            'packet_numbers': set(),
                             'name': name,
                             'token': token,
                         }
@@ -11536,6 +11748,7 @@ class ApplicationWindow(QMainWindow):
                     if id(child) not in seen_nodes:
                         child['packets'] += 1
                         child['bytes'] += pkt_len
+                        child['packet_numbers'].add(int(getattr(rec, 'number', 0) or 0))
                         seen_nodes.add(id(child))
                     node = child
 
@@ -11563,8 +11776,16 @@ class ApplicationWindow(QMainWindow):
                 item.setText(8, str(end_bits_s))
                 item.setText(9, str(int(node.get('pdus', 0) or 0)))
                 item.setData(0, Qt.UserRole, str(node.get('token', '') or ''))
-                for child_key in sorted(node.get('children', {}).keys(), key=lambda k: str(node['children'][k].get('name', '') or '')):
-                    _append(item, node['children'][child_key])
+                children = list(node.get('children', {}).values())
+                children.sort(
+                    key=lambda child: (
+                        -int(child.get('packets', 0) or 0),
+                        -int(child.get('bytes', 0) or 0),
+                        str(child.get('name', '') or ''),
+                    )
+                )
+                for child in children:
+                    _append(item, child)
 
             _append(tree, root)
             tree.expandToDepth(1)
@@ -11760,9 +11981,13 @@ class ApplicationWindow(QMainWindow):
             elif tab_name == 'IPv6':
                 expr = f'ipv6.addr == {address}'
             elif tab_name == 'TCP' and port is not None:
-                expr = f'ip.addr == {address} && tcp.port == {int(port)}'
+                src_field = 'ipv6.src' if ':' in address else 'ip.src'
+                dst_field = 'ipv6.dst' if ':' in address else 'ip.dst'
+                expr = f'({src_field} == {address} && tcp.srcport == {int(port)}) || ({dst_field} == {address} && tcp.dstport == {int(port)})'
             elif tab_name == 'UDP' and port is not None:
-                expr = f'ip.addr == {address} && udp.port == {int(port)}'
+                src_field = 'ipv6.src' if ':' in address else 'ip.src'
+                dst_field = 'ipv6.dst' if ':' in address else 'ip.dst'
+                expr = f'({src_field} == {address} && udp.srcport == {int(port)}) || ({dst_field} == {address} && udp.dstport == {int(port)})'
             if expr:
                 self._set_display_filter_text(expr, apply_now=True)
 
@@ -11982,13 +12207,10 @@ class ApplicationWindow(QMainWindow):
         addr_combo.addItems(['Any', 'IPv4 only', 'IPv6 only'])
         bottom.addWidget(addr_combo)
         refresh_btn = QPushButton('Refresh', dialog)
-        reset_btn = QPushButton('Reset Diagram', dialog)
-        go_btn = QPushButton('Go to Packet', dialog)
         apply_btn = QPushButton('Apply as Filter', dialog)
         export_btn = QPushButton('Export', dialog)
-        help_btn = QPushButton('Help', dialog)
         close_btn = QPushButton('Close', dialog)
-        for btn in (refresh_btn, reset_btn, go_btn, apply_btn, export_btn, help_btn, close_btn):
+        for btn in (refresh_btn, apply_btn, export_btn, close_btn):
             bottom.addWidget(btn)
         layout.addLayout(bottom)
 
@@ -12048,6 +12270,7 @@ class ApplicationWindow(QMainWindow):
 
         def _refresh():
             recs = sorted(_scope_records(), key=lambda r: int(getattr(r, 'number', 0) or 0))
+            _selection_rect['item'] = None
             scene.clear()
             _scene_state['header_items'] = []
             _scene_state['time_header'] = None
@@ -12265,6 +12488,9 @@ class ApplicationWindow(QMainWindow):
                         table.selectRow(row_idx)
                         break
 
+            if table.currentRow() < 0 and rows:
+                table.selectRow(0)
+
             table.verticalScrollBar().setValue(prev_scroll)
             _sync_scroll_from_table(table.verticalScrollBar().value())
             _update_scene_selection()
@@ -12274,7 +12500,10 @@ class ApplicationWindow(QMainWindow):
         def _update_scene_selection():
             prev = _selection_rect.get('item')
             if prev is not None:
-                scene.removeItem(prev)
+                try:
+                    scene.removeItem(prev)
+                except Exception:
+                    pass
                 _selection_rect['item'] = None
             row = int(table.currentRow())
             if row < 0:
@@ -12339,7 +12568,6 @@ class ApplicationWindow(QMainWindow):
                 row = int((y - tm) // row_h)
                 if 0 <= row < table.rowCount():
                     table.selectRow(row)
-                    _go_to_packet()
             except Exception:
                 pass
             original_mouse_press(event)
@@ -12347,15 +12575,6 @@ class ApplicationWindow(QMainWindow):
         def _resize_event(event):
             original_resize(event)
             QTimer.singleShot(0, _refresh)
-
-        def _go_to_packet():
-            row = self._statistics_current_row(table)
-            if not row:
-                return
-            try:
-                self.capture_view.goto_packet_number(int(row.get('__packet_no__', 0) or 0))
-            except Exception:
-                pass
 
         def _apply_filter():
             row = self._statistics_current_row(table)
@@ -12367,18 +12586,13 @@ class ApplicationWindow(QMainWindow):
         flow_combo.currentTextChanged.connect(lambda _v: _refresh())
         addr_combo.currentTextChanged.connect(lambda _v: _refresh())
         limit_check.toggled.connect(lambda _v: _refresh())
-        reset_btn.clicked.connect(lambda: _refresh())
-        go_btn.clicked.connect(_go_to_packet)
         apply_btn.clicked.connect(_apply_filter)
         export_btn.clicked.connect(lambda: self._statistics_export_rows_csv('Flow Graph', columns, getattr(table, '_stats_rows', [])))
-        help_btn.clicked.connect(lambda: QMessageBox.information(dialog, 'Flow Graph', 'Select a row then use Go to Packet.\nUse Flow type and Addresses to narrow the sequence diagram.'))
         table.verticalScrollBar().valueChanged.connect(_sync_scroll_from_table)
         view.mousePressEvent = _mouse_press
         view.wheelEvent = _wheel
         view.resizeEvent = _resize_event
         table.itemSelectionChanged.connect(_update_scene_selection)
-        table.cellClicked.connect(lambda _r, _c: _go_to_packet())
-        table.cellDoubleClicked.connect(lambda _r, _c: _go_to_packet())
         close_btn.clicked.connect(dialog.accept)
         _refresh()
         QTimer.singleShot(0, _refresh)
@@ -12419,6 +12633,13 @@ class ApplicationWindow(QMainWindow):
             return str(m.group(1)) if m else ''
 
         def _http_response_code(rec) -> str:
+            metadata = getattr(rec, 'metadata', {}) or {}
+            status_code = metadata.get('http_status_code', None)
+            if status_code is not None:
+                try:
+                    return str(int(status_code))
+                except Exception:
+                    pass
             info = str(getattr(rec, 'info', '') or '').strip()
             m = re.match(r'^HTTP/\d(?:\.\d)?\s+(\d{3})', info)
             return str(m.group(1)) if m else ''
@@ -12438,6 +12659,11 @@ class ApplicationWindow(QMainWindow):
             rsp_counter = Counter()
             broken = 0
             http_times = []
+            all_http_numbers = []
+            request_numbers = []
+            response_numbers = []
+            broken_numbers = []
+            status_number_map = defaultdict(list)
 
             for rec in records:
                 metadata = getattr(rec, 'metadata', {}) or {}
@@ -12447,16 +12673,23 @@ class ApplicationWindow(QMainWindow):
                     kind = 'response' if info.startswith('HTTP/') else 'request'
                 if kind not in {'request', 'response'}:
                     continue
+                frame_no = int(getattr(rec, 'number', 0) or 0)
+                if frame_no > 0:
+                    all_http_numbers.append(frame_no)
                 http_times.append(float(getattr(rec, 'epoch_time', 0.0) or 0.0))
                 if kind == 'request':
+                    request_numbers.append(frame_no)
                     method = _http_request_method(rec)
                     req_counter[method or 'Unknown'] += 1
                 else:
                     code = _http_response_code(rec)
                     if code:
                         rsp_counter[code] += 1
+                        response_numbers.append(frame_no)
+                        status_number_map[str(code)[0]].append(frame_no)
                     else:
                         broken += 1
+                        broken_numbers.append(frame_no)
 
             total_http = sum(req_counter.values()) + sum(rsp_counter.values()) + int(broken)
             duration = max(0.0, (max(http_times) - min(http_times))) if len(http_times) >= 2 else 0.0
@@ -12472,23 +12705,30 @@ class ApplicationWindow(QMainWindow):
                 item.setText(6, f'{percent:.0f}%' if percent in {0.0, 100.0} else f'{percent:.2f}%')
                 item.setText(7, f'{burst_rate:.4f}' if count > 0 else '-')
 
+            def _set_packet_numbers(item: QTreeWidgetItem, numbers: list[int]):
+                item.setData(0, Qt.UserRole, tuple(sorted({int(n) for n in numbers if int(n) > 0})))
+
             root = QTreeWidgetItem(tree)
             root.setText(0, 'Total HTTP Packets')
             _set_metrics(root, total_http, 100.0 if total_http > 0 else 0.0)
+            _set_packet_numbers(root, all_http_numbers)
 
             other_http = 0
             other = QTreeWidgetItem(root)
             other.setText(0, 'Other HTTP packets')
             _set_metrics(other, other_http, (other_http * 100.0 / total_http) if total_http else 0.0)
+            _set_packet_numbers(other, [])
 
             responses_total = sum(rsp_counter.values()) + int(broken)
             response_parent = QTreeWidgetItem(root)
             response_parent.setText(0, 'HTTP Response Packets')
             _set_metrics(response_parent, responses_total, (responses_total * 100.0 / total_http) if total_http else 0.0)
+            _set_packet_numbers(response_parent, response_numbers + broken_numbers)
 
             broken_item = QTreeWidgetItem(response_parent)
             broken_item.setText(0, '???: broken')
             _set_metrics(broken_item, int(broken), (int(broken) * 100.0 / total_http) if total_http else 0.0)
+            _set_packet_numbers(broken_item, broken_numbers)
 
             class_map = [('5xx: Server Error', '5'), ('4xx: Client Error', '4'), ('3xx: Redirection', '3'), ('2xx: Success', '2'), ('1xx: Informational', '1')]
             for label, prefix in class_map:
@@ -12496,11 +12736,13 @@ class ApplicationWindow(QMainWindow):
                 child = QTreeWidgetItem(response_parent)
                 child.setText(0, label)
                 _set_metrics(child, cnt, (cnt * 100.0 / total_http) if total_http else 0.0)
+                _set_packet_numbers(child, status_number_map.get(prefix, []))
 
             request_parent = QTreeWidgetItem(root)
             request_parent.setText(0, 'HTTP Request Packets')
             request_total = sum(req_counter.values())
             _set_metrics(request_parent, request_total, (request_total * 100.0 / total_http) if total_http else 0.0)
+            _set_packet_numbers(request_parent, request_numbers)
 
             tree.expandAll()
 
@@ -12510,20 +12752,28 @@ class ApplicationWindow(QMainWindow):
                 return
             title = str(item.text(0) or '')
             expr = ''
-            if title.startswith('1xx'):
-                expr = 'detail.pair contains "Status Code: 1"'
+            if title == 'Total HTTP Packets':
+                expr = 'http'
+            elif title == 'Other HTTP packets':
+                expr = 'http && not http.request && not http.response'
+            elif title == 'HTTP Response Packets':
+                expr = 'http.response'
+            elif title == '???: broken':
+                expr = 'http.response && not http.response.code'
+            elif title.startswith('1xx'):
+                expr = 'http.response.code >= 100 && http.response.code < 200'
             elif title.startswith('2xx'):
-                expr = 'detail.pair contains "Status Code: 2"'
+                expr = 'http.response.code >= 200 && http.response.code < 300'
             elif title.startswith('3xx'):
-                expr = 'detail.pair contains "Status Code: 3"'
+                expr = 'http.response.code >= 300 && http.response.code < 400'
             elif title.startswith('4xx'):
-                expr = 'detail.pair contains "Status Code: 4"'
+                expr = 'http.response.code >= 400 && http.response.code < 500'
             elif title.startswith('5xx'):
-                expr = 'detail.pair contains "Status Code: 5"'
+                expr = 'http.response.code >= 500 && http.response.code < 600'
             elif 'Request' in title:
-                expr = 'detail.key contains "request"'
+                expr = 'http.request'
             elif 'Response' in title:
-                expr = 'detail.key contains "response"'
+                expr = 'http.response'
             if expr:
                 self._set_display_filter_text(expr, apply_now=True)
 
@@ -12641,7 +12891,6 @@ class ApplicationWindow(QMainWindow):
             for addr, cnt in sorted(addr_packets.items(), key=lambda kv: (-kv[1], kv[0])):
                 child = QTreeWidgetItem(root)
                 child.setText(0, str(addr))
-                child.setData(0, Qt.UserRole, f'ip.addr == {addr}')
                 child.setText(1, str(cnt))
                 child.setText(2, '')
                 child.setText(3, '')
@@ -12658,7 +12907,11 @@ class ApplicationWindow(QMainWindow):
             item = tree.currentItem()
             if item is None:
                 return
-            expr = str(item.data(0, Qt.UserRole) or '').strip()
+            expr = str(item.text(0) or '').strip()
+            if item.parent() is None:
+                expr = 'ip'
+            elif expr:
+                expr = f'ip.addr == {expr}'
             if expr:
                 self._set_display_filter_text(expr, apply_now=True)
 
@@ -12775,7 +13028,6 @@ class ApplicationWindow(QMainWindow):
             for addr, cnt in sorted(addr_packets.items(), key=lambda kv: (-kv[1], kv[0])):
                 child = QTreeWidgetItem(root)
                 child.setText(0, str(addr))
-                child.setData(0, Qt.UserRole, f'ipv6.addr == {addr}')
                 child.setText(1, str(cnt))
                 child.setText(2, '')
                 child.setText(3, '')
@@ -12792,7 +13044,11 @@ class ApplicationWindow(QMainWindow):
             item = tree.currentItem()
             if item is None:
                 return
-            expr = str(item.data(0, Qt.UserRole) or '').strip()
+            expr = str(item.text(0) or '').strip()
+            if item.parent() is None:
+                expr = 'ipv6'
+            elif expr:
+                expr = f'ipv6.addr == {expr}'
             if expr:
                 self._set_display_filter_text(expr, apply_now=True)
 

@@ -18,7 +18,8 @@ class DisplayFilter:
         'dhcp', 'bootp', 'ripng', 'ripv2', 'stp', 'syslog', 'ntp', 'lacp', 'vtp', 'dtp', 'lldp', 'udld',
         'loop', 'hsrp', 'hsrpv2', 'ip', 'ipv6', 'eth', 'tftp', 'ssdp', 'esp', 'ssh', 'sshv2', 'isakmp', 'ike',
         'ftp', 'pop', 'imap', 'smb', 'smb2', 'llmnr', 'nbns', 'snmp', 'ah', 'ospf', 'eigrp', 'bgp', 'gre', 'vlan', 'ssl',
-        'ipv4', 'icmpv4'
+        'ipv4', 'icmpv4', 'frame', 'llc', 'dot3', 'dot1q', 'ppp', 'pppoe', 'pppoed', 'cdp', 'isis', 'telnet', 'whois',
+        'ipp', 'lpd', 'cflow', 'netflow', 'ipfix', 'bfd', 'snap', 'data', 'fpp'
     }
     HTTP_REQUEST_METHODS = {
         'GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS', 'PATCH', 'TRACE', 'CONNECT', 'PRI'
@@ -276,6 +277,17 @@ class DisplayFilter:
             return [self._http_payload_kind(record) == 'request']
         if low == 'http.response':
             return [self._http_payload_kind(record) == 'response']
+        if low in {'http.response.code', 'http.response.status_code', 'http.status_code'}:
+            status_code = metadata.get('http_status_code', None)
+            if status_code is None:
+                info = str(getattr(record, 'info', '') or '').strip()
+                m = re.match(r'^HTTP/\d(?:\.\d)?\s+(\d{3})', info)
+                if m:
+                    try:
+                        status_code = int(m.group(1))
+                    except Exception:
+                        status_code = None
+            return [int(status_code)] if status_code is not None else []
         if low == 'http.request.method':
             method = self._http_request_method(record)
             return [method] if method else []
@@ -429,6 +441,19 @@ class DisplayFilter:
         proto_low = str(record.protocol or '').strip().lower()
         layer_lows = self._layer_lows(record)
 
+        if name == 'frame':
+            return True
+        if name in {'data', 'raw', 'padding'}:
+            return name in layer_lows or 'data' in layer_lows
+        if name in {'cflow', 'netflow', 'ipfix'}:
+            proto_hit = proto_low in {'cflow', 'netflow', 'ipfix'} or any(tok in layer_lows for tok in {'cflow', 'netflow', 'ipfix'})
+            if proto_hit:
+                return True
+            return any('netflow' in tok or 'ipfix' in tok or 'cflow' in tok for tok in layer_lows)
+        if name == 'fpp':
+            return bool(getattr(record, 'metadata', {}) or {}).get('frame_has_fpp', False) or 'fpp' in layer_lows or 'frame' in layer_lows
+        if name == 'bfd':
+            return proto_low.startswith('bfd') or 'bfd' in layer_lows or any(tok.startswith('bfd') for tok in layer_lows)
         if name == 'bootp':
             return name in layer_lows or proto_low == 'dhcp' or (raw is not None and (raw.haslayer(BOOTP) or raw.haslayer(DHCP)))
         if name == 'dhcp':
@@ -873,6 +898,38 @@ class DisplayFilter:
             tokens.add('vlan')
         if 'ether' in tokens or 'ethernet' in tokens:
             tokens.add('eth')
+        if 'dot3' in tokens:
+            tokens.add('dot3')
+            tokens.add('eth')
+        if 'llc' in tokens:
+            tokens.add('llc')
+        if 'snap' in tokens:
+            tokens.add('snap')
+        if 'pppoe' in tokens or 'pppoed' in tokens:
+            tokens.add('pppoe')
+            tokens.add('pppoed')
+        if 'ppp' in tokens:
+            tokens.add('ppp')
+        if 'ftp-data' in tokens or 'ftpdata' in tokens:
+            tokens.add('ftp')
+        if 'cflow' in tokens or 'netflow' in tokens or 'ipfix' in tokens:
+            tokens.update({'cflow', 'netflow', 'ipfix'})
+        if 'cdp' in tokens:
+            tokens.add('cdp')
+        if 'isis' in tokens:
+            tokens.add('isis')
+        if 'telnet' in tokens:
+            tokens.add('telnet')
+        if 'whois' in tokens:
+            tokens.add('whois')
+        if 'ipp' in tokens:
+            tokens.add('ipp')
+        if 'lpd' in tokens:
+            tokens.add('lpd')
+        if 'bfd' in tokens:
+            tokens.add('bfd')
+        if 'data' in tokens or 'raw' in tokens or 'padding' in tokens:
+            tokens.add('data')
         if any(tok.startswith('icmpv6') for tok in list(tokens)):
             tokens.add('icmpv6')
             tokens.add('ipv6')
@@ -883,6 +940,8 @@ class DisplayFilter:
             tokens.add('ipv4')
         if 'ipv6exthdrhopbyhop' in tokens or 'ipv6exthdrfragment' in tokens:
             tokens.add('ipv6')
+        if 'raw' in tokens or 'padding' in tokens or 'iperror' in tokens or 'udperror' in tokens or 'icmperror' in tokens or '_tlsencryptedcontent' in tokens:
+            tokens.add('data')
 
         return tokens
 

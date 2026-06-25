@@ -123,21 +123,6 @@
           <li>Use <code>Apply</code> when the preview is complete and you want to push it to the main filter bar.</li>
         </ol>
 
-        <h3>Macros, conversation filters, and Follow Stream</h3>
-        <ol>
-          <li>Use <code>Analyze &gt; Display Filter Macros...</code> for reusable named expressions.</li>
-          <li>Use <code>Analyze &gt; Conversation Filter</code> to build scoped expressions for TCP, UDP, IPv4, IPv6, or Ethernet conversations, with Ethernet filters emitted as <code>eth.src</code> and <code>eth.dst</code>.</li>
-          <li>In Follow views, use Filter This Stream or Filter Out This Stream.</li>
-        </ol>
-
-        <h3 id="macros">7. Macro Usage Guide</h3>
-        <ol>
-          <li>Open <code>Analyze &gt; Display Filter Macros...</code> to create or edit reusable filter snippets.</li>
-          <li>Give each macro a short name with letters, digits, or underscores so it is easy to type and remember.</li>
-          <li>Reference the macro name directly in the display filter bar or expression builder, then combine it with other conditions such as <code>corp_dns && ip.addr == 10.0.0.5</code>.</li>
-          <li>Keep macros focused on one repeated check, such as a network segment, a service name, or a common host list, so the saved expressions stay easy to reuse.</li>
-        </ol>
-        <p>Macro expansion happens when the display filter is applied, so editing a macro updates every later use of that name without changing saved captures.</p>
       </section>
 
       <section class="card" id="protocols">
@@ -259,6 +244,30 @@ frame.len > 1000
 tcp.flags.syn and not tcp.flags.ack
 http or tls
 (tcp.port == 80 or tcp.port == 443) and ip.dst == "10.0.0.5"</code></pre>
+      </section>
+
+      <section class="card" id="macros">
+        <h2>7. Macro Usage Guide</h2>
+        <p>Display filter macros are named, reusable snippets that you define once and then reuse anywhere the display-filter engine accepts text. They are useful when you keep repeating the same address set, host group, service predicate, or a longer expression that should not be retyped each time.</p>
+        <p>A macro is best treated like a small building block. It should usually represent one idea, not an entire investigation. For example, a macro can stand for a trusted subnet, a list of DNS servers, or a common pair of endpoints you return to often.</p>
+        <h3>How to use macros</h3>
+        <ol>
+          <li>Open <code>Analyze &gt; Display Filter Macros...</code> to create, edit, copy, or delete macros.</li>
+          <li>Give the macro a short, stable name made from letters, numbers, and underscores, such as <code>corp_dns</code> or <code>vpn_hosts</code>.</li>
+          <li>Write the reusable expression in the macro editor using placeholders like <code>$1</code>, <code>$2</code>, and so on.</li>
+          <li>On the filter bar, call the macro with this form: <code>${macro_name:arg1;arg2}</code>.</li>
+          <li>Example template inside the macro editor: <code>ip.addr == $1 && ip.addr == $2</code>.</li>
+          <li>Example filter-bar usage: <code>${ip_pair:192.168.1.10;8.8.8.8}</code>.</li>
+          <li>That call expands to <code>ip.addr == 192.168.1.10 && ip.addr == 8.8.8.8</code> before the filter is applied.</li>
+          <li>You can then combine the macro call with other conditions, for example <code>(${ip_pair:192.168.1.10;8.8.8.8}) && tcp.port == 443</code>.</li>
+          <li>When you edit a macro, every later use of that name picks up the new definition the next time the filter is applied.</li>
+        </ol>
+        <p>Macro expansion happens when the display filter is applied, so editing a macro updates later uses without changing saved captures. This makes macros a good fit for recurring investigation patterns, especially when you want to keep the main filter bar short.</p>
+        <h3>Conversation filters and Follow Stream</h3>
+        <ol>
+          <li>Use <code>Analyze &gt; Conversation Filter</code> to build scoped expressions for TCP, UDP, IPv4, IPv6, or Ethernet conversations, with Ethernet filters emitted as <code>eth.src</code> and <code>eth.dst</code>.</li>
+          <li>In Follow views, use Filter This Stream or Filter Out This Stream.</li>
+        </ol>
       </section>
     </main>
   </div>

@@ -10662,6 +10662,24 @@ class PacketParser:
         metadata.pop('http_preliminary_payload', None)
         metadata.pop('http_preliminary_length', None)
         first_line = full_payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+
+        def _set_http_status_code_from_line(line_text: str) -> None:
+            status_code = ''
+            try:
+                parts = str(line_text or '').strip().split(' ', 2)
+                if len(parts) >= 2 and parts[0].startswith('HTTP/'):
+                    status_code = str(parts[1] or '').strip()
+            except Exception:
+                status_code = ''
+            if status_code.isdigit():
+                try:
+                    metadata['http_status_code'] = int(status_code)
+                    metadata['http.response.code'] = int(status_code)
+                    metadata['http.response.status_code'] = int(status_code)
+                except Exception:
+                    pass
+
+        _set_http_status_code_from_line(first_line)
         if kind == 'response' and first_line.startswith('HTTP/1.') and ' 100 ' in first_line and len(candidate) > total_len:
             remaining = candidate[total_len:]
             second_info = self._http_message_length(remaining)
@@ -10677,6 +10695,8 @@ class PacketParser:
                     header_len = int(second_header_len)
                     total_len = int(second_total_len)
                     headers = dict(second_headers)
+                    second_line = full_payload.split(b'\r\n', 1)[0].decode(errors='ignore')
+                    _set_http_status_code_from_line(second_line)
 
         content_length = self._http_content_length(headers)
         content_type = str(headers.get('content-type', '') or '').split(';', 1)[0].strip()
