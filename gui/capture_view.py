@@ -444,7 +444,6 @@ class CaptureView(QWidget):
             'packet_list': True,
             'packet_details': True,
             'packet_bytes': True,
-            'packet_diagram': True,
         }
         self._show_file_format_view = False
         self._file_format_record = None
@@ -1337,9 +1336,6 @@ class CaptureView(QWidget):
         self._layout_packet_minimap_overlay()
         self.details_tree = PacketDetailsTree()
         self.hex_view = PacketBytesView()
-        self.packet_diagram_view = QTextEdit()
-        self.packet_diagram_view.setReadOnly(True)
-        self.packet_diagram_view.setPlainText('Packet Diagram is not available yet.')
         self._empty_pane_widgets = [QWidget(), QWidget(), QWidget()]
         self._sync_fonts_to_hex_reference()
         self._base_fonts = {
@@ -1561,7 +1557,7 @@ class CaptureView(QWidget):
         return mode
 
     def _normalize_pane_assignments(self, pane_assignments) -> tuple[str, str, str]:
-        allowed = {'packet_list', 'packet_details', 'packet_bytes', 'packet_diagram', 'none'}
+        allowed = {'packet_list', 'packet_details', 'packet_bytes', 'none'}
         values = list(pane_assignments or self._pane_assignments or ('packet_list', 'packet_details', 'packet_bytes'))[:3]
         while len(values) < 3:
             values.append('none')
@@ -1591,8 +1587,6 @@ class CaptureView(QWidget):
             return self.details_tree
         if key == 'packet_bytes':
             return self.hex_view
-        if key == 'packet_diagram':
-            return self.packet_diagram_view
         return self._empty_pane_widgets[max(0, min(int(pane_index), len(self._empty_pane_widgets) - 1))]
 
     def is_filter_toolbar_visible(self) -> bool:
@@ -3479,6 +3473,8 @@ class CaptureView(QWidget):
 
     def set_auto_scroll_enabled(self, enabled: bool):
         self.auto_scroll_enabled = bool(enabled)
+        if isinstance(getattr(self, 'options_settings', None), dict):
+            self.options_settings['autoscroll'] = self.auto_scroll_enabled
         self._emit_go_state_changed()
 
     def set_color_rules_enabled(self, enabled: bool):

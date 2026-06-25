@@ -2288,10 +2288,6 @@ class ApplicationWindow(QMainWindow):
         self.action_view_packet_bytes.setCheckable(True)
         self.action_view_packet_bytes.setChecked(True)
         view_menu.addAction(self.action_view_packet_bytes)
-        self.action_view_packet_diagram = QAction('Packet &Diagram', self)
-        self.action_view_packet_diagram.setCheckable(True)
-        self.action_view_packet_diagram.setChecked(True)
-        view_menu.addAction(self.action_view_packet_diagram)
         view_menu.addSeparator()
         self.action_zoom_in = QAction('Zoom &In', self)
         self.action_zoom_in.setShortcut(QKeySequence.ZoomIn)
@@ -2659,7 +2655,6 @@ class ApplicationWindow(QMainWindow):
         self.action_view_packet_list.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_list', checked))
         self.action_view_packet_details.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_details', checked))
         self.action_view_packet_bytes.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_bytes', checked))
-        self.action_view_packet_diagram.triggered.connect(lambda checked: self._on_toggle_packet_pane('packet_diagram', checked))
         self.action_zoom_in.triggered.connect(self._on_zoom_in)
         self.action_zoom_out.triggered.connect(self._on_zoom_out)
         self.action_zoom_reset.triggered.connect(self._on_zoom_reset)
@@ -4460,7 +4455,6 @@ class ApplicationWindow(QMainWindow):
             (getattr(self, 'action_view_packet_list', None), self.capture_view.is_component_visible('packet_list')),
             (getattr(self, 'action_view_packet_details', None), self.capture_view.is_component_visible('packet_details')),
             (getattr(self, 'action_view_packet_bytes', None), self.capture_view.is_component_visible('packet_bytes')),
-            (getattr(self, 'action_view_packet_diagram', None), self.capture_view.is_component_visible('packet_diagram')),
             (getattr(self, 'action_view_resize_all_columns', None), self.capture_view.is_resize_all_columns_enabled()),
             (getattr(self, 'action_view_reload_as_format_capture', None), self.capture_view.is_file_format_view_mode()),
         ]
@@ -4779,7 +4773,7 @@ class ApplicationWindow(QMainWindow):
         # View menu items that only make sense in capture mode.
         for attr in [
             'action_view_packet_list', 'action_view_packet_details', 'action_view_packet_bytes',
-            'action_view_packet_diagram', 'action_zoom_in', 'action_zoom_out', 'action_zoom_reset',
+            'action_zoom_in', 'action_zoom_out', 'action_zoom_reset',
             'action_view_colorize_packet_list', 'action_view_resize_all_columns', 'action_view_reload_as_format_capture',
         ]:
             if hasattr(self, attr):
@@ -4842,10 +4836,6 @@ class ApplicationWindow(QMainWindow):
             self.action_view_packet_bytes.blockSignals(True)
             self.action_view_packet_bytes.setChecked(bool(self.capture_view and self.capture_view.is_component_visible('packet_bytes')))
             self.action_view_packet_bytes.blockSignals(False)
-        if hasattr(self, 'action_view_packet_diagram'):
-            self.action_view_packet_diagram.blockSignals(True)
-            self.action_view_packet_diagram.setChecked(bool(self.capture_view and self.capture_view.is_component_visible('packet_diagram')))
-            self.action_view_packet_diagram.blockSignals(False)
 
     def _load_capture_filter_presets(self) -> list[dict]:
         settings = QSettings('Packetra', 'Packetra')
@@ -7167,7 +7157,6 @@ class ApplicationWindow(QMainWindow):
             ('packet_list', 'Packet List'),
             ('packet_details', 'Packet Details'),
             ('packet_bytes', 'Packet Bytes'),
-            ('packet_diagram', 'Packet Diagram'),
             ('none', 'None'),
         ]
         pane_group_box = QGroupBox('Pane contents', layout_page)
@@ -7666,7 +7655,6 @@ class ApplicationWindow(QMainWindow):
             'packet_list': 'action_view_packet_list',
             'packet_details': 'action_view_packet_details',
             'packet_bytes': 'action_view_packet_bytes',
-            'packet_diagram': 'action_view_packet_diagram',
         }.get(str(pane_name or '').strip().lower())
         if action_name and hasattr(self, action_name):
             action = getattr(self, action_name)
@@ -7719,6 +7707,13 @@ class ApplicationWindow(QMainWindow):
 
         if not highlight_indexes:
             QMessageBox.information(self, 'Colorize Conversation', 'No matching packets found for this conversation.')
+            return
+
+        current_highlight = set(getattr(self.capture_view, '_conversation_highlight_indexes', set()) or set())
+        next_highlight = set(highlight_indexes)
+        if current_highlight == next_highlight:
+            self.capture_view.clear_conversation_highlight()
+            self.capture_view.status_changed.emit('Conversation highlight cleared')
             return
 
         settings = QSettings('Packetra', 'Packetra')
@@ -10732,6 +10727,22 @@ class ApplicationWindow(QMainWindow):
             self.action_go_auto_scroll_live_capture.blockSignals(False)
         if self.capture_view:
             self.capture_view.set_auto_scroll_enabled(checked)
+        try:
+            settings = QSettings('Packetra', 'Packetra')
+            settings.setValue('options/autoscroll', checked)
+            if self.capture_view and isinstance(getattr(self.capture_view, 'options_settings', None), dict):
+                self.capture_view.options_settings['autoscroll'] = checked
+            prefs_parent = self
+            if hasattr(prefs_parent, '_load_edit_preferences') and hasattr(prefs_parent, '_save_edit_preferences'):
+                prefs = prefs_parent._load_edit_preferences()
+                capture_cfg = prefs.get('capture', {})
+                if not isinstance(capture_cfg, dict):
+                    capture_cfg = {}
+                capture_cfg['autoscroll'] = checked
+                prefs['capture'] = capture_cfg
+                prefs_parent._save_edit_preferences(prefs)
+        except Exception:
+            pass
         self._refresh_go_menu_state()
 
     def _on_toggle_color_rules(self, enabled: bool):
