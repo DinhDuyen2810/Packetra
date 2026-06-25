@@ -451,7 +451,8 @@ class DisplayFilter:
                 return True
             return any('netflow' in tok or 'ipfix' in tok or 'cflow' in tok for tok in layer_lows)
         if name == 'fpp':
-            return bool(getattr(record, 'metadata', {}) or {}).get('frame_has_fpp', False) or 'fpp' in layer_lows or 'frame' in layer_lows
+            metadata = getattr(record, 'metadata', {}) or {}
+            return bool(metadata.get('frame_has_fpp', False)) or 'fpp' in layer_lows or 'frame' in layer_lows
         if name == 'bfd':
             return proto_low.startswith('bfd') or 'bfd' in layer_lows or any(tok.startswith('bfd') for tok in layer_lows)
         if name == 'bootp':

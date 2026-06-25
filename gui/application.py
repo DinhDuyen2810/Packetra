@@ -11888,10 +11888,12 @@ class ApplicationWindow(QMainWindow):
         def _accumulate(stats_map, key, pkt_len, direction):
             item = stats_map.get(key)
             if item is None:
-                item = {'Packets': 0, 'Bytes': 0, 'Tx Packets': 0, 'Tx Bytes': 0, 'Rx Packets': 0, 'Rx Bytes': 0}
+                item = {'Packets': 0, 'Bytes': 0, 'Tx Packets': 0, 'Tx Bytes': 0, 'Rx Packets': 0, 'Rx Bytes': 0, 'packet_numbers': set()}
                 stats_map[key] = item
-            item['Packets'] += 1
             item['Bytes'] += pkt_len
+            frame_no = stats_map.get('__frame_no__', 0)
+            if frame_no > 0:
+                item['packet_numbers'].add(int(frame_no))
             if direction == 'tx':
                 item['Tx Packets'] += 1
                 item['Tx Bytes'] += pkt_len
@@ -11905,20 +11907,24 @@ class ApplicationWindow(QMainWindow):
             for rec in records:
                 raw = getattr(rec, 'raw', None)
                 pkt_len = int(getattr(rec, 'length', 0) or 0)
+                frame_no = int(getattr(rec, 'number', 0) or 0)
 
                 if raw is not None and raw.haslayer(Ether):
                     src = str(raw[Ether].src).lower()
                     dst = str(raw[Ether].dst).lower()
+                    maps['Ethernet']['__frame_no__'] = frame_no
                     _accumulate(maps['Ethernet'], (src,), pkt_len, 'tx')
                     _accumulate(maps['Ethernet'], (dst,), pkt_len, 'rx')
                 if raw is not None and raw.haslayer(IP):
                     src = str(raw[IP].src)
                     dst = str(raw[IP].dst)
+                    maps['IPv4']['__frame_no__'] = frame_no
                     _accumulate(maps['IPv4'], (src,), pkt_len, 'tx')
                     _accumulate(maps['IPv4'], (dst,), pkt_len, 'rx')
                 if raw is not None and raw.haslayer(IPv6):
                     src = str(raw[IPv6].src)
                     dst = str(raw[IPv6].dst)
+                    maps['IPv6']['__frame_no__'] = frame_no
                     _accumulate(maps['IPv6'], (src,), pkt_len, 'tx')
                     _accumulate(maps['IPv6'], (dst,), pkt_len, 'rx')
 
@@ -11934,6 +11940,7 @@ class ApplicationWindow(QMainWindow):
                         dst = str(getattr(rec, 'dst', '') or '')
                     sport = int(getattr(raw[TCP], 'sport', 0) or 0)
                     dport = int(getattr(raw[TCP], 'dport', 0) or 0)
+                    maps['TCP']['__frame_no__'] = frame_no
                     _accumulate(maps['TCP'], (src, sport), pkt_len, 'tx')
                     _accumulate(maps['TCP'], (dst, dport), pkt_len, 'rx')
 
@@ -11949,16 +11956,22 @@ class ApplicationWindow(QMainWindow):
                         dst = str(getattr(rec, 'dst', '') or '')
                     sport = int(getattr(raw[UDP], 'sport', 0) or 0)
                     dport = int(getattr(raw[UDP], 'dport', 0) or 0)
+                    maps['UDP']['__frame_no__'] = frame_no
                     _accumulate(maps['UDP'], (src, sport), pkt_len, 'tx')
                     _accumulate(maps['UDP'], (dst, dport), pkt_len, 'rx')
 
             for tab_name, cols in table_defs.items():
                 rows = []
                 for key, vals in maps[tab_name].items():
+                    if key == '__frame_no__':
+                        continue
+                    packet_count = len(vals.get('packet_numbers', set()))
                     if tab_name in {'TCP', 'UDP'}:
-                        rows.append({'Address': key[0], 'Port': key[1], **vals})
+                        row = {'Address': key[0], 'Port': key[1], **vals}
                     else:
-                        rows.append({'Address': key[0], **vals})
+                        row = {'Address': key[0], **vals}
+                    row['Packets'] = packet_count
+                    rows.append(row)
                 rows.sort(key=lambda r: (str(r.get('Address', '')), int(r.get('Port', 0) or 0)))
                 self._statistics_fill_table(tables[tab_name], cols, rows)
 
@@ -12856,6 +12869,7 @@ class ApplicationWindow(QMainWindow):
             addr_packets = Counter()
             addr_bytes = Counter()
             addr_times = defaultdict(list)
+            addr_numbers = defaultdict(set)
             ip_packet_count = 0
             all_times = []
             for rec in records:
@@ -12864,6 +12878,7 @@ class ApplicationWindow(QMainWindow):
                     continue
                 ip = raw[IP]
                 ip_packet_count += 1
+                frame_no = int(getattr(rec, 'number', 0) or 0)
                 ts = float(getattr(rec, 'epoch_time', 0.0) or 0.0)
                 all_times.append(ts)
                 pkt_len = int(getattr(rec, 'length', 0) or 0)
@@ -12873,6 +12888,8 @@ class ApplicationWindow(QMainWindow):
                     addr_packets[addr] += 1
                     addr_bytes[addr] += pkt_len
                     addr_times[addr].append(ts)
+                    if frame_no > 0:
+                        addr_numbers[addr].add(frame_no)
 
             duration = max(0.0, (max(all_times) - min(all_times))) if len(all_times) >= 2 else 0.0
             root = QTreeWidgetItem(tree)
@@ -12889,14 +12906,15 @@ class ApplicationWindow(QMainWindow):
 
             denom = max(1, ip_packet_count)
             for addr, cnt in sorted(addr_packets.items(), key=lambda kv: (-kv[1], kv[0])):
+                unique_cnt = len(addr_numbers.get(addr, set()))
                 child = QTreeWidgetItem(root)
                 child.setText(0, str(addr))
-                child.setText(1, str(cnt))
+                child.setText(1, str(unique_cnt))
                 child.setText(2, '')
                 child.setText(3, '')
                 child.setText(4, '')
                 child.setText(5, f'{self._stats_rate_ms(cnt, duration):.4f}')
-                child.setText(6, f'{(cnt * 100.0 / denom):.2f}%')
+                child.setText(6, f'{(unique_cnt * 100.0 / denom):.2f}%')
                 b_rate, b_start = self._stats_burst_rate(addr_times.get(addr, []))
                 child.setText(7, f'{b_rate:.4f}')
                 child.setText(8, f'{b_start:.3f}')
@@ -12993,6 +13011,7 @@ class ApplicationWindow(QMainWindow):
             addr_packets = Counter()
             addr_bytes = Counter()
             addr_times = defaultdict(list)
+            addr_numbers = defaultdict(set)
             ip_packet_count = 0
             all_times = []
             for rec in records:
@@ -13001,6 +13020,7 @@ class ApplicationWindow(QMainWindow):
                     continue
                 ip6 = raw[IPv6]
                 ip_packet_count += 1
+                frame_no = int(getattr(rec, 'number', 0) or 0)
                 ts = float(getattr(rec, 'epoch_time', 0.0) or 0.0)
                 all_times.append(ts)
                 pkt_len = int(getattr(rec, 'length', 0) or 0)
@@ -13010,6 +13030,8 @@ class ApplicationWindow(QMainWindow):
                     addr_packets[addr] += 1
                     addr_bytes[addr] += pkt_len
                     addr_times[addr].append(ts)
+                    if frame_no > 0:
+                        addr_numbers[addr].add(frame_no)
 
             duration = max(0.0, (max(all_times) - min(all_times))) if len(all_times) >= 2 else 0.0
             root = QTreeWidgetItem(tree)
@@ -13026,14 +13048,15 @@ class ApplicationWindow(QMainWindow):
 
             denom = max(1, ip_packet_count)
             for addr, cnt in sorted(addr_packets.items(), key=lambda kv: (-kv[1], kv[0])):
+                unique_cnt = len(addr_numbers.get(addr, set()))
                 child = QTreeWidgetItem(root)
                 child.setText(0, str(addr))
-                child.setText(1, str(cnt))
+                child.setText(1, str(unique_cnt))
                 child.setText(2, '')
                 child.setText(3, '')
                 child.setText(4, '')
                 child.setText(5, f'{self._stats_rate_ms(cnt, duration):.4f}')
-                child.setText(6, f'{(cnt * 100.0 / denom):.2f}%')
+                child.setText(6, f'{(unique_cnt * 100.0 / denom):.2f}%')
                 b_rate, b_start = self._stats_burst_rate(addr_times.get(addr, []))
                 child.setText(7, f'{b_rate:.4f}')
                 child.setText(8, f'{b_start:.3f}')
