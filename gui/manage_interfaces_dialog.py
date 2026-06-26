@@ -11,6 +11,13 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QHeaderView, QAbstractItemView, QFrame
 )
 from PySide6.QtGui import QIcon
+from gui.table_editor_helpers import (
+    LineEditDelegate,
+    PasswordLineEditDelegate,
+    SpinBoxDelegate,
+    apply_input_like_table_style,
+    show_overlay_combo_editor,
+)
 
 
 class ManageInterfacesDialog(QDialog):
@@ -607,7 +614,7 @@ if __name__ == '__main__':
         
         # Table for remote interfaces
         self.remote_table = QTableWidget()
-        self._style_flat_table(self.remote_table)
+        apply_input_like_table_style(self.remote_table, editable=True)
         self.remote_table.setColumnCount(7)
         self.remote_table.setHorizontalHeaderLabels(['Show', 'Host / Device URL', 'Port', 'OS', 'Username', 'Auth Type', 'Password'])
         self.remote_table.horizontalHeader().setStretchLastSection(False)
@@ -619,6 +626,10 @@ if __name__ == '__main__':
         self.remote_table.setColumnWidth(3, 90)
         self.remote_table.setColumnWidth(4, 120)
         self.remote_table.setColumnWidth(5, 100)
+        self.remote_table.setItemDelegateForColumn(1, LineEditDelegate(self.remote_table))
+        self.remote_table.setItemDelegateForColumn(2, SpinBoxDelegate(1, 65535, parent=self.remote_table))
+        self.remote_table.setItemDelegateForColumn(4, LineEditDelegate(self.remote_table))
+        self.remote_table.setItemDelegateForColumn(6, PasswordLineEditDelegate(self.remote_table))
         
         layout.addWidget(self.remote_table)
         
@@ -663,102 +674,79 @@ if __name__ == '__main__':
         layout.addLayout(tree_header_layout)
         layout.addWidget(self.remote_iface_tree)
         self.remote_iface_tree.itemSelectionChanged.connect(lambda: self.remote_select_all_btn.setEnabled(len(self.remote_iface_tree.selectedItems()) > 0 and self.remote_iface_tree.selectedItems()[0].parent() is None))
+        self.remote_table.itemChanged.connect(self._on_remote_table_item_changed)
+        self.remote_table.cellDoubleClicked.connect(self._on_remote_table_cell_double_clicked)
         
         # Populate remote interfaces
         self._populate_remote_interfaces()
         self._refresh_remote_interface_tree()
     
+    def _make_remote_check_item(self, checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem('')
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        return item
+
+    def _set_remote_password_item_state(self, row: int) -> None:
+        auth_item = self.remote_table.item(row, 5)
+        password_item = self.remote_table.item(row, 6)
+        if password_item is None:
+            password_item = QTableWidgetItem('')
+            self.remote_table.setItem(row, 6, password_item)
+        auth_type = str(auth_item.text() if auth_item is not None else 'Null').strip() or 'Null'
+        actual_password = str(password_item.data(Qt.ItemDataRole.UserRole) or '')
+        if auth_type == 'Password':
+            password_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable)
+            password_item.setText('*' * len(actual_password))
+        else:
+            password_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            password_item.setData(Qt.ItemDataRole.UserRole, '')
+            password_item.setText('')
+
+    def _set_remote_row(self, row: int, remote: dict | None = None) -> None:
+        remote = remote or {}
+        self.remote_table.setItem(row, 0, self._make_remote_check_item(bool(remote.get('show', False))))
+        self.remote_table.setItem(row, 1, QTableWidgetItem(str(remote.get('host', '') or '')))
+
+        port_value = int(remote.get('port', 22) or 22)
+        port_item = QTableWidgetItem(str(port_value))
+        port_item.setData(Qt.ItemDataRole.UserRole, port_value)
+        self.remote_table.setItem(row, 2, port_item)
+
+        os_type = str(remote.get('os_type', 'linux') or 'linux').lower()
+        os_item = QTableWidgetItem(os_type)
+        os_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        self.remote_table.setItem(row, 3, os_item)
+        self.remote_table.setItem(row, 4, QTableWidgetItem(str(remote.get('username', '') or '')))
+
+        auth_type = str(remote.get('auth_type', 'Null') or 'Null')
+        auth_item = QTableWidgetItem(auth_type)
+        auth_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        self.remote_table.setItem(row, 5, auth_item)
+
+        password_value = str(remote.get('password', '') or '')
+        password_item = QTableWidgetItem('*' * len(password_value) if auth_type == 'Password' else '')
+        password_item.setData(Qt.ItemDataRole.UserRole, password_value if auth_type == 'Password' else '')
+        self.remote_table.setItem(row, 6, password_item)
+        self._set_remote_password_item_state(row)
+
     def _populate_remote_interfaces(self):
         """Populate remote interfaces table"""
         remotes_json = self._settings().value('remote_interfaces', '[]', str)
         saved_remotes = json.loads(remotes_json)
-        
-        self.remote_table.setRowCount(len(saved_remotes))
-        
-        for row, remote in enumerate(saved_remotes):
-            # Show checkbox
-            show_cb = QCheckBox()
-            show_cb.setChecked(remote.get('show', False))
-            self.remote_table.setCellWidget(row, 0, show_cb)
-            
-            # Host / Device URL
-            host = QLineEdit()
-            host.setText(remote.get('host', ''))
-            self.remote_table.setCellWidget(row, 1, host)
-            
-            # Port
-            port = QSpinBox()
-            port.setMinimum(1)
-            port.setMaximum(65535)
-            port.setValue(remote.get('port', 22))
-            self.remote_table.setCellWidget(row, 2, port)
-
-            # OS
-            os_combo = QComboBox()
-            os_combo.addItems(['linux', 'windows'])
-            os_combo.setCurrentText(str(remote.get('os_type', 'linux')).lower())
-            self.remote_table.setCellWidget(row, 3, os_combo)
-
-            # Username
-            username = QLineEdit()
-            username.setText(remote.get('username', ''))
-            self.remote_table.setCellWidget(row, 4, username)
-            
-            # Auth Type
-            auth_combo = QComboBox()
-            auth_combo.addItems(['Null', 'Password'])
-            auth_combo.setCurrentText(remote.get('auth_type', 'Null'))
-            self.remote_table.setCellWidget(row, 5, auth_combo)
-
-            # Password
-            password = QLineEdit()
-            password.setEchoMode(QLineEdit.EchoMode.Password)
-            password.setText(remote.get('password', ''))
-            password.setEnabled(auth_combo.currentText() == 'Password')
-            auth_combo.currentTextChanged.connect(lambda text, pw=password: pw.setEnabled(text == 'Password'))
-            self.remote_table.setCellWidget(row, 6, password)
+        was_blocked = self.remote_table.blockSignals(True)
+        try:
+            self.remote_table.setRowCount(len(saved_remotes))
+            for row, remote in enumerate(saved_remotes):
+                self._set_remote_row(row, remote)
+        finally:
+            self.remote_table.blockSignals(was_blocked)
     
     def _on_add_remote(self):
         """Add new remote interface row"""
         row = self.remote_table.rowCount()
         self.remote_table.insertRow(row)
-        
-        # Show checkbox
-        show_cb = QCheckBox()
-        show_cb.setChecked(True)
-        self.remote_table.setCellWidget(row, 0, show_cb)
-        
-        # Host
-        host = QLineEdit()
-        self.remote_table.setCellWidget(row, 1, host)
-        
-        # Port
-        port = QSpinBox()
-        port.setMinimum(1)
-        port.setMaximum(65535)
-        port.setValue(22)
-        self.remote_table.setCellWidget(row, 2, port)
-
-        # OS
-        os_combo = QComboBox()
-        os_combo.addItems(['linux', 'windows'])
-        self.remote_table.setCellWidget(row, 3, os_combo)
-
-        # Username
-        username = QLineEdit()
-        self.remote_table.setCellWidget(row, 4, username)
-        
-        # Auth Type
-        auth_combo = QComboBox()
-        auth_combo.addItems(['Null', 'Password'])
-        self.remote_table.setCellWidget(row, 5, auth_combo)
-
-        # Password
-        password = QLineEdit()
-        password.setEchoMode(QLineEdit.EchoMode.Password)
-        password.setEnabled(False)
-        auth_combo.currentTextChanged.connect(lambda text, pw=password: pw.setEnabled(text == 'Password'))
-        self.remote_table.setCellWidget(row, 6, password)
+        self._set_remote_row(row, {'show': True, 'port': 22, 'os_type': 'linux', 'auth_type': 'Null'})
     
     def _on_remove_remote(self):
         """Remove selected remote interface row"""
@@ -768,24 +756,71 @@ if __name__ == '__main__':
             self._refresh_remote_interface_tree()
 
     def _remote_row_to_config(self, row):
-        show_cb = self.remote_table.cellWidget(row, 0)
-        host_input = self.remote_table.cellWidget(row, 1)
-        port_spin = self.remote_table.cellWidget(row, 2)
-        os_combo = self.remote_table.cellWidget(row, 3)
-        username_input = self.remote_table.cellWidget(row, 4)
-        auth_combo = self.remote_table.cellWidget(row, 5)
-        password_input = self.remote_table.cellWidget(row, 6)
+        show_item = self.remote_table.item(row, 0)
+        host_item = self.remote_table.item(row, 1)
+        port_item = self.remote_table.item(row, 2)
+        os_item = self.remote_table.item(row, 3)
+        username_item = self.remote_table.item(row, 4)
+        auth_item = self.remote_table.item(row, 5)
+        password_item = self.remote_table.item(row, 6)
 
-        auth_type = auth_combo.currentText() if auth_combo else 'Null'
+        auth_type = str(auth_item.text() if auth_item is not None else 'Null').strip() or 'Null'
+        raw_password = str(password_item.data(Qt.ItemDataRole.UserRole) if password_item is not None else '')
+        try:
+            if port_item is not None and port_item.data(Qt.ItemDataRole.UserRole) is not None:
+                port_value = int(port_item.data(Qt.ItemDataRole.UserRole))
+            else:
+                port_value = int(str(port_item.text() if port_item is not None else '22').strip() or '22')
+        except Exception:
+            port_value = 22
         return {
-            'show': bool(show_cb and show_cb.isChecked()),
-            'host': host_input.text().strip() if host_input else '',
-            'port': int(port_spin.value()) if port_spin else 22,
-            'os_type': (os_combo.currentText() if os_combo else 'linux').lower(),
-            'username': username_input.text().strip() if username_input else '',
+            'show': bool(show_item is not None and show_item.checkState() == Qt.CheckState.Checked),
+            'host': str(host_item.text() if host_item is not None else '').strip(),
+            'port': port_value,
+            'os_type': str(os_item.text() if os_item is not None else 'linux').strip().lower(),
+            'username': str(username_item.text() if username_item is not None else '').strip(),
             'auth_type': auth_type,
-            'password': (password_input.text() if (password_input and auth_type == 'Password') else ''),
+            'password': (raw_password if auth_type == 'Password' else ''),
         }
+
+    def _on_remote_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item is None:
+            return
+        if item.column() == 2:
+            try:
+                port_value = max(1, min(65535, int((item.text() or '22').strip())))
+            except Exception:
+                port_value = 22
+            blocker = self.remote_table.blockSignals(True)
+            item.setData(Qt.ItemDataRole.UserRole, port_value)
+            item.setText(str(port_value))
+            self.remote_table.blockSignals(blocker)
+        elif item.column() == 5:
+            blocker = self.remote_table.blockSignals(True)
+            auth_text = str(item.text() or 'Null').strip()
+            if auth_text not in {'Null', 'Password'}:
+                item.setText('Null')
+            self._set_remote_password_item_state(item.row())
+            self.remote_table.blockSignals(blocker)
+
+    def _on_remote_table_cell_double_clicked(self, row: int, column: int) -> None:
+        if row < 0 or column not in {3, 5}:
+            return
+        item = self.remote_table.item(row, column)
+        if item is None:
+            return
+        values = ['linux', 'windows'] if column == 3 else ['Null', 'Password']
+        rect = self.remote_table.visualRect(self.remote_table.model().index(row, column))
+        show_overlay_combo_editor(
+            self.remote_table,
+            rect,
+            values,
+            item.text(),
+            lambda text, it=item, col=column: (
+                it.setText(text),
+                self._set_remote_password_item_state(row) if col == 5 else None,
+            ),
+        )
 
     def _remote_host_key(self, config):
         return f"{config.get('username', '').strip()}@{config.get('host', '').strip()}:{int(config.get('port', 22) or 22)}"

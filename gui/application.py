@@ -55,6 +55,13 @@ from gui.packet_details import PacketDetailsTree
 from gui.hex_view import PacketBytesView
 from gui.manage_interfaces_dialog import ManageInterfacesDialog
 from gui.global_style import apply_application_theme
+from gui.table_editor_helpers import (
+    ComboBoxDelegate,
+    LineEditDelegate,
+    SpinBoxDelegate,
+    apply_input_like_table_style,
+    show_overlay_combo_editor,
+)
 from core.flow_engine import (
     analyze_flows,
     export_packets_to_csv,
@@ -761,7 +768,6 @@ class CaptureOptionsDialog(QDialog):
         ])
         self.iface_tree.header().setStretchLastSection(False)
         self.iface_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.iface_tree.header().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         self.iface_tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.iface_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.iface_tree.setColumnWidth(0, 200)
@@ -771,9 +777,21 @@ class CaptureOptionsDialog(QDialog):
         self.iface_tree.setColumnWidth(4, 100)
         self.iface_tree.setColumnWidth(5, 100)
         self.iface_tree.setColumnWidth(6, 150)
+        self.iface_tree.setColumnWidth(7, 800)
         self.iface_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.iface_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.iface_tree.setUniformRowHeights(True)
+        self.iface_tree.setExpandsOnDoubleClick(False)
+        self.iface_tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.iface_tree.setStyleSheet(
+            'QTreeWidget { border: none; gridline-color: transparent; } '
+            'QTreeWidget::item { height: 24px; }'
+        )
+        self.iface_tree.setItemDelegateForColumn(2, ComboBoxDelegate(self._input_link_layer_options_for_index, self.iface_tree))
+        self.iface_tree.setItemDelegateForColumn(4, SpinBoxDelegate(0, 262144, special_text='default', parent=self.iface_tree))
+        self.iface_tree.setItemDelegateForColumn(5, SpinBoxDelegate(1, 512, parent=self.iface_tree))
+        self.iface_tree.setItemDelegateForColumn(6, LineEditDelegate(self.iface_tree))
+        self.iface_tree.setItemDelegateForColumn(7, LineEditDelegate(self.iface_tree))
         self.iface_tree.itemSelectionChanged.connect(self._update_start_button_state)
         self.iface_tree.itemSelectionChanged.connect(self._sync_filter_input_from_selection)
         
@@ -977,6 +995,10 @@ class CaptureOptionsDialog(QDialog):
             iface_item.setText(0, display_name)
             iface_item.setData(0, Qt.UserRole, iface_name)
             iface_item.setFirstColumnSpanned(False)
+            iface_item.setFlags(iface_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            row_height = self._input_row_height()
+            for column in range(self.iface_tree.columnCount()):
+                iface_item.setSizeHint(column, QSize(0, row_height))
             self.iface_tree.addTopLevelItem(iface_item)
             self.iface_items[iface_name] = iface_item
             # Column 1: Traffic (show sparkline)
@@ -1301,110 +1323,74 @@ class CaptureOptionsDialog(QDialog):
 
         # Column 2 (Link-layer Header) - Inline combo edit, only allow valid values for the interface type
         elif column == 2:
-            iface_name = item.data(0, Qt.UserRole) or item.text(0)
-            # Get interface type from network_utils if available
-            from utils.network_utils import get_interface_details
-            details = get_interface_details().get(iface_name, {})
-            iface_type = details.get('type', '').lower()
-            # Map interface type to the valid link-layer headers
-            if 'ethernet' in iface_type:
-                options = ['Ethernet', 'DOCSIS']
-            elif 'wifi' in iface_type or '802.11' in iface_type:
-                options = ['802.11']
-            elif 'ppp' in iface_type:
-                options = ['PPP over serial']
-            elif 'hdlc' in iface_type:
-                options = ['Cisco HDLC']
-            elif 'atm' in iface_type:
-                options = ['RFC 1483 IP-over-ATM', 'Sun raw ATM']
-            elif 'loopback' in iface_type:
-                options = ['BSD loopback']
-            elif 'raw' in iface_type:
-                options = ['Raw IP']
-            else:
-                # If unknown, allow all values
-                options = ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC',
-                           'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback']
-            self._edit_inline_combobox(item, column, options)
+            index = self.iface_tree.indexFromItem(item, column)
+            rect = self.iface_tree.visualRect(index)
+            values = self._input_link_layer_options_for_index(index)
+            show_overlay_combo_editor(
+                self.iface_tree,
+                rect,
+                values,
+                item.text(column),
+                lambda text, it=item, col=column: (
+                    it.setText(col, text),
+                    it.setData(col, Qt.UserRole, text),
+                ),
+            )
 
         # Column 4 (Snaplen) - Inline spinbox edit
         elif column == 4:
-            self._edit_inline_spinbox(item, column, 0, 262144)
+            self._begin_input_item_edit(item, column)
 
         # Column 5 (Buffer) - Inline spinbox edit
         elif column == 5:
-            self._edit_inline_spinbox(item, column, 1, 512)
+            self._begin_input_item_edit(item, column)
 
         # Column 6 (Capture Filter) - Inline text edit
         elif column == 6:
-            self._edit_inline_text(item, column)
+            self._begin_input_item_edit(item, column)
         # Column 7 (Comment) - Inline text edit
         elif column == 7:
-            self._edit_inline_text(item, column)
-    
-    def _edit_inline_combobox(self, item, column, options):
-        """Edit item inline with combobox"""
-        combo = QComboBox()
-        combo.addItems(options)
-        current_text = item.text(column)
-        if current_text in options:
-            combo.setCurrentText(current_text)
-        
-        self.iface_tree.setItemWidget(item, column, combo)
-        combo.setFocus()
-        combo.showPopup()
-        
-        def finish_edit():
-            item.setText(column, combo.currentText())
-            item.setData(column, Qt.UserRole, combo.currentText())
-            self.iface_tree.setItemWidget(item, column, None)
-        
-        combo.currentTextChanged.connect(finish_edit)
-    
-    def _edit_inline_spinbox(self, item, column, min_val, max_val):
-        """Edit item inline with spinbox"""
-        spin = QSpinBox()
-        spin.setMinimum(min_val)
-        spin.setMaximum(max_val)
-        current_value = item.data(column, Qt.UserRole)
-        if current_value is None:
-            current_text = item.text(column).strip().lower()
-            if column == 4 and current_text == 'default':
-                current_value = 262144
-            else:
-                current_value = min_val
-        spin.setValue(int(current_value))
-        
-        self.iface_tree.setItemWidget(item, column, spin)
-        spin.setFocus()
-        spin.selectAll()
-        
-        def finish_edit():
-            value = spin.value()
-            if column == 4 and value == 262144:
-                item.setText(column, "default")
-            else:
-                item.setText(column, str(value))
-            item.setData(column, Qt.UserRole, value)
-            self.iface_tree.setItemWidget(item, column, None)
-        
-        spin.editingFinished.connect(finish_edit)
-    
-    def _edit_inline_text(self, item, column):
-        """Edit item inline with text input"""
-        line_edit = QLineEdit()
-        line_edit.setText(item.text(column))
-        
-        self.iface_tree.setItemWidget(item, column, line_edit)
-        line_edit.setFocus()
-        line_edit.selectAll()
-        
-        def finish_edit():
-            item.setText(column, line_edit.text())
-            item.setData(column, Qt.UserRole, line_edit.text())
-            self.iface_tree.setItemWidget(item, column, None)
-        
-        line_edit.editingFinished.connect(finish_edit)
+            self._begin_input_item_edit(item, column)
+
+    def _input_link_layer_options_for_index(self, index) -> list[str]:
+        item = self.iface_tree.itemFromIndex(index)
+        if item is None:
+            return ['Ethernet']
+        iface_name = item.data(0, Qt.UserRole) or item.text(0)
+        if str(iface_name).startswith('\\\\.\\pipe\\'):
+            return ['Named pipe']
+        if str(iface_name).startswith('remote://'):
+            return ['Ethernet']
+        from utils.network_utils import get_interface_details
+        details = get_interface_details().get(iface_name, {})
+        iface_type = str(details.get('type', '') or '').lower()
+        if 'ethernet' in iface_type:
+            return ['Ethernet', 'DOCSIS']
+        if 'wifi' in iface_type or '802.11' in iface_type:
+            return ['802.11']
+        if 'ppp' in iface_type:
+            return ['PPP over serial']
+        if 'hdlc' in iface_type:
+            return ['Cisco HDLC']
+        if 'atm' in iface_type:
+            return ['RFC 1483 IP-over-ATM', 'Sun raw ATM']
+        if 'loopback' in iface_type:
+            return ['BSD loopback']
+        if 'raw' in iface_type:
+            return ['Raw IP']
+        return ['Ethernet', 'DOCSIS', '802.11', 'PPP over serial', 'Cisco HDLC',
+                'RFC 1483 IP-over-ATM', 'Sun raw ATM', 'Raw IP', 'BSD loopback']
+
+    def _begin_input_item_edit(self, item: QTreeWidgetItem, column: int) -> None:
+        self.iface_tree.setCurrentItem(item, column)
+        self.iface_tree.editItem(item, column)
+
+    def _input_row_height(self, item: QTreeWidgetItem | None = None) -> int:
+        if item is not None:
+            rect = self.iface_tree.visualItemRect(item)
+            if rect.isValid() and rect.height() > 0:
+                return int(rect.height())
+        return max(24, int(self.iface_tree.fontMetrics().height()) + 10)
     
     def _on_manage_interfaces(self):
         """Open Manage Interfaces dialog"""
@@ -5251,11 +5237,7 @@ class ApplicationWindow(QMainWindow):
 
         split_table = QTableWidget(0, 3, split_page)
         split_table.setHorizontalHeaderLabels(['File', 'From', 'To'])
-        split_table.verticalHeader().setVisible(False)
-        split_table.setAlternatingRowColors(True)
-        split_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        split_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        split_table.setWordWrap(False)
+        apply_input_like_table_style(split_table, stretch_column=0, editable=True)
         split_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         split_header = split_table.horizontalHeader()
         split_header.setStretchLastSection(False)
@@ -5264,10 +5246,11 @@ class ApplicationWindow(QMainWindow):
         split_header.setSectionResizeMode(2, QHeaderView.Fixed)
         split_table.setColumnWidth(1, 96)
         split_table.setColumnWidth(2, 96)
+        split_table.setItemDelegate(LineEditDelegate(split_table))
         split_layout.addWidget(split_table)
 
         split_note = QLabel(
-            'You can edit the "To" column. The next "From" value is updated automatically to previous "To" + 1.',
+            'The first "From" and final "To" stay locked. Edit the middle "From"/"To" values and adjacent ranges update automatically.',
             split_page,
         )
         split_note.setWordWrap(True)
@@ -5341,9 +5324,28 @@ class ApplicationWindow(QMainWindow):
                 name_item = split_table.item(r, 0)
                 if name_item is None:
                     name_item = QTableWidgetItem()
-                    name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
                     split_table.setItem(r, 0, name_item)
+                name_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 name_item.setText(f'File {r + 1}')
+
+        def _refresh_split_editable_flags():
+            rows = split_table.rowCount()
+            for r in range(rows):
+                file_item = split_table.item(r, 0)
+                from_item = split_table.item(r, 1)
+                to_item = split_table.item(r, 2)
+                if file_item is not None:
+                    file_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                if from_item is not None:
+                    flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                    if r != 0:
+                        flags |= Qt.ItemFlag.ItemIsEditable
+                    from_item.setFlags(flags)
+                if to_item is not None:
+                    flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                    if r != rows - 1:
+                        flags |= Qt.ItemFlag.ItemIsEditable
+                    to_item.setFlags(flags)
 
         def _render_split_ranges(ranges):
             split_guard['busy'] = True
@@ -5353,11 +5355,10 @@ class ApplicationWindow(QMainWindow):
                     name_item = QTableWidgetItem(f'File {row}')
                     from_item = QTableWidgetItem(str(frm))
                     to_item = QTableWidgetItem(str(to_))
-                    name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-                    from_item.setFlags(from_item.flags() & ~Qt.ItemIsEditable)
                     split_table.setItem(row - 1, 0, name_item)
                     split_table.setItem(row - 1, 1, from_item)
                     split_table.setItem(row - 1, 2, to_item)
+                _refresh_split_editable_flags()
                 split_count_label.setText(f'Files: {len(ranges)}')
             finally:
                 split_guard['busy'] = False
@@ -5394,44 +5395,52 @@ class ApplicationWindow(QMainWindow):
                 raise ValueError(f'The final "To" value must be {total_packets}.')
             return ranges
 
-        def _on_split_to_changed(item):
-            if split_guard['busy'] or item is None or item.column() != 2:
+        def _on_split_table_changed(item):
+            if split_guard['busy'] or item is None or item.column() not in {1, 2}:
                 return
             row = int(item.row())
             rows = split_table.rowCount()
             if row < 0 or row >= rows:
                 return
-            if row == rows - 1:
-                split_guard['busy'] = True
-                try:
-                    split_table.item(row, 2).setText(str(total_packets))
-                finally:
-                    split_guard['busy'] = False
-                return
-
-            try:
-                frm = int((split_table.item(row, 1).text() or '1').strip())
-            except Exception:
-                frm = 1
-            min_to = frm
-            try:
-                next_to = int((split_table.item(row + 1, 2).text() or str(total_packets)).strip())
-            except Exception:
-                next_to = total_packets
-            max_to = max(min_to, next_to - 1)
-            try:
-                new_to = int((item.text() or '').strip())
-            except Exception:
-                new_to = min_to
-            new_to = max(min_to, min(max_to, new_to))
-
             split_guard['busy'] = True
             try:
-                split_table.item(row, 2).setText(str(new_to))
-                for rr in range(row + 1, rows):
-                    prev_to = int((split_table.item(rr - 1, 2).text() or '0').strip())
-                    new_from = prev_to + 1
-                    split_table.item(rr, 1).setText(str(new_from))
+                if item.column() == 1:
+                    if row == 0:
+                        split_table.item(row, 1).setText('1')
+                    else:
+                        prev_from = int((split_table.item(row - 1, 1).text() or '1').strip())
+                        current_to = int((split_table.item(row, 2).text() or str(total_packets)).strip())
+                        try:
+                            new_from = int((item.text() or '').strip())
+                        except Exception:
+                            new_from = prev_from + 1
+                        new_from = max(prev_from + 1, min(current_to, new_from))
+                        split_table.item(row, 1).setText(str(new_from))
+                        split_table.item(row - 1, 2).setText(str(new_from - 1))
+                else:
+                    if row == rows - 1:
+                        split_table.item(row, 2).setText(str(total_packets))
+                    else:
+                        frm = int((split_table.item(row, 1).text() or '1').strip())
+                        try:
+                            next_to = int((split_table.item(row + 1, 2).text() or str(total_packets)).strip())
+                        except Exception:
+                            next_to = total_packets
+                        min_to = frm
+                        max_to = max(min_to, next_to - 1)
+                        try:
+                            new_to = int((item.text() or '').strip())
+                        except Exception:
+                            new_to = min_to
+                        new_to = max(min_to, min(max_to, new_to))
+                        split_table.item(row, 2).setText(str(new_to))
+                        for rr in range(row + 1, rows):
+                            prev_to = int((split_table.item(rr - 1, 2).text() or '0').strip())
+                            new_from = prev_to + 1
+                            split_table.item(rr, 1).setText(str(new_from))
+                split_table.item(rows - 1, 2).setText(str(total_packets))
+                split_table.item(0, 1).setText('1')
+                _refresh_split_editable_flags()
             finally:
                 split_guard['busy'] = False
             split_state['manual_edit'] = True
@@ -5459,15 +5468,14 @@ class ApplicationWindow(QMainWindow):
                 split_table.insertRow(rows)
 
                 name_item = QTableWidgetItem('')
-                name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
                 from_item = QTableWidgetItem(str(right_from))
-                from_item.setFlags(from_item.flags() & ~Qt.ItemIsEditable)
                 to_item = QTableWidgetItem(str(right_to))
 
                 split_table.setItem(rows, 0, name_item)
                 split_table.setItem(rows, 1, from_item)
                 split_table.setItem(rows, 2, to_item)
                 _renumber_split_rows()
+                _refresh_split_editable_flags()
                 split_count_label.setText(f'Files: {split_table.rowCount()}')
             finally:
                 split_guard['busy'] = False
@@ -5497,6 +5505,7 @@ class ApplicationWindow(QMainWindow):
                     split_table.item(prev_row, 2).setText(str(last_to))
                     split_table.removeRow(last_row)
                     _renumber_split_rows()
+                    _refresh_split_editable_flags()
                     split_count_label.setText(f'Files: {split_table.rowCount()}')
                 finally:
                     split_guard['busy'] = False
@@ -5507,7 +5516,7 @@ class ApplicationWindow(QMainWindow):
 
         split_add_btn.clicked.connect(_on_split_add)
         split_remove_btn.clicked.connect(_on_split_remove)
-        split_table.itemChanged.connect(_on_split_to_changed)
+        split_table.itemChanged.connect(_on_split_table_changed)
 
         def _toggle_delete_fields():
             delete_protocol_input.setEnabled(delete_protocol_cb.isChecked())
@@ -6897,12 +6906,15 @@ class ApplicationWindow(QMainWindow):
         columns_table = QTableWidget(columns_page)
         columns_table.setColumnCount(5)
         columns_table.setHorizontalHeaderLabels(['Displayed', 'Title', 'Fields', 'Field Occurrence', 'Alignment'])
-        columns_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        apply_input_like_table_style(columns_table, stretch_column=2, editable=True)
         columns_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         columns_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         columns_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         columns_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         columns_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        columns_table.setItemDelegateForColumn(1, LineEditDelegate(columns_table))
+        columns_table.setItemDelegateForColumn(2, LineEditDelegate(columns_table))
+        columns_table.setItemDelegateForColumn(3, LineEditDelegate(columns_table))
         columns_layout.addWidget(columns_table, 1)
 
         col_btn_row = QHBoxLayout()
@@ -6944,17 +6956,15 @@ class ApplicationWindow(QMainWindow):
             columns_table.setItem(row, 1, QTableWidgetItem(title))
             columns_table.setItem(row, 2, QTableWidgetItem(field))
             columns_table.setItem(row, 3, QTableWidgetItem(str(occurrence)))
-            align_combo = QComboBox(columns_table)
-            align_combo.addItems(['Left', 'Center', 'Right'])
-            align_combo.setCurrentText(alignment)
-            columns_table.setCellWidget(row, 4, align_combo)
+            alignment_item = QTableWidgetItem(alignment)
+            alignment_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            columns_table.setItem(row, 4, alignment_item)
 
         def _read_column_row(row: int) -> dict:
             displayed_item = columns_table.item(row, 0)
             title_item = columns_table.item(row, 1)
             field_item = columns_table.item(row, 2)
             occurrence_item = columns_table.item(row, 3)
-            alignment_combo = columns_table.cellWidget(row, 4)
             try:
                 occurrence = max(1, int(str(occurrence_item.text() if occurrence_item else '1').strip() or '1'))
             except Exception:
@@ -6965,7 +6975,7 @@ class ApplicationWindow(QMainWindow):
                 'title': str(title_item.text() if title_item is not None else '').strip(),
                 'field': str(field_item.text() if field_item is not None else '').strip(),
                 'occurrence': occurrence,
-                'alignment': _normalize_alignment(str(alignment_combo.currentText() if isinstance(alignment_combo, QComboBox) else 'Left')),
+                'alignment': _normalize_alignment(str(columns_table.item(row, 4).text() if columns_table.item(row, 4) is not None else 'Left')),
             }
 
         def _load_columns_rows(specs: list[dict]):
@@ -6983,6 +6993,21 @@ class ApplicationWindow(QMainWindow):
                 displayed_item = columns_table.item(row, 0)
                 is_displayed = bool(displayed_item and displayed_item.checkState() == Qt.Checked)
                 columns_table.setRowHidden(row, only_displayed and not is_displayed)
+
+        def _on_columns_cell_double_clicked(row: int, column: int):
+            if row < 0 or column != 4:
+                return
+            item = columns_table.item(row, column)
+            if item is None:
+                return
+            rect = columns_table.visualRect(columns_table.model().index(row, column))
+            show_overlay_combo_editor(
+                columns_table,
+                rect,
+                ['Left', 'Center', 'Right'],
+                item.text(),
+                lambda text, it=item: it.setText(_normalize_alignment(text)),
+            )
 
         def _move_column_row(delta: int):
             row = columns_table.currentRow()
@@ -7032,6 +7057,7 @@ class ApplicationWindow(QMainWindow):
         col_up_btn.clicked.connect(lambda: _move_column_row(-1))
         col_down_btn.clicked.connect(lambda: _move_column_row(1))
         show_displayed_only_cb.toggled.connect(_toggle_columns_filter_rows)
+        columns_table.cellDoubleClicked.connect(_on_columns_cell_double_clicked)
 
         _load_columns_rows(list(prefs.get('columns', []) or defaults.get('columns', [])))
 
@@ -7301,14 +7327,17 @@ class ApplicationWindow(QMainWindow):
         # --- Expert Items ---
         expert_page = QWidget(dialog)
         expert_layout = QVBoxLayout(expert_page)
+        severity_values = ['Error', 'Warning', 'Note', 'Chat']
         expert_table = QTableWidget(expert_page)
         expert_table.setColumnCount(4)
         expert_table.setHorizontalHeaderLabels(['Enabled', 'Condition', 'Message', 'Severity'])
+        apply_input_like_table_style(expert_table, stretch_column=2, editable=True)
         expert_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         expert_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         expert_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         expert_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        expert_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        expert_table.setItemDelegateForColumn(1, LineEditDelegate(expert_table))
+        expert_table.setItemDelegateForColumn(2, LineEditDelegate(expert_table))
         expert_layout.addWidget(expert_table, 1)
 
         expert_btn_row = QHBoxLayout()
@@ -7335,8 +7364,6 @@ class ApplicationWindow(QMainWindow):
         expert_hint.setObjectName('MutedHint')
         expert_layout.addWidget(expert_hint)
 
-        severity_values = ['Error', 'Warning', 'Note', 'Chat']
-
         def _set_expert_row(row: int, enabled: bool, condition: str, message: str, severity: str):
             check_item = QTableWidgetItem()
             check_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
@@ -7344,13 +7371,12 @@ class ApplicationWindow(QMainWindow):
             expert_table.setItem(row, 0, check_item)
             expert_table.setItem(row, 1, QTableWidgetItem(str(condition or '').strip()))
             expert_table.setItem(row, 2, QTableWidgetItem(str(message or '').strip()))
-            severity_combo = QComboBox(expert_table)
-            severity_combo.addItems(severity_values)
             severity_text = str(severity or 'Warning').strip().title()
             if severity_text not in severity_values:
                 severity_text = 'Warning'
-            severity_combo.setCurrentText(severity_text)
-            expert_table.setCellWidget(row, 3, severity_combo)
+            severity_item = QTableWidgetItem(severity_text)
+            severity_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            expert_table.setItem(row, 3, severity_item)
 
         def _load_expert_rows(items: list[dict]):
             expert_table.setRowCount(0)
@@ -7368,11 +7394,10 @@ class ApplicationWindow(QMainWindow):
             
             condition_item = expert_table.item(row, 1)
             message_item = expert_table.item(row, 2)
-            severity_combo = expert_table.cellWidget(row, 3)
-            
             condition = str(condition_item.text() if condition_item is not None else '').strip()
             message = str(message_item.text() if message_item is not None else '').strip()
-            severity = str(severity_combo.currentText() if isinstance(severity_combo, QComboBox) else 'Warning').strip()
+            severity_item = expert_table.item(row, 3)
+            severity = str(severity_item.text() if severity_item is not None else 'Warning').strip()
             return {'enabled': enabled, 'field': condition, 'message': message, 'severity': severity or 'Warning'}
 
         def _move_expert_row(delta: int):
@@ -7387,11 +7412,27 @@ class ApplicationWindow(QMainWindow):
             _set_expert_row(target, src_data['enabled'], src_data['field'], src_data['message'], src_data['severity'])
             expert_table.setCurrentCell(target, 0)
 
+        def _on_expert_cell_double_clicked(row: int, column: int):
+            if row < 0 or column != 3:
+                return
+            item = expert_table.item(row, column)
+            if item is None:
+                return
+            rect = expert_table.visualRect(expert_table.model().index(row, column))
+            show_overlay_combo_editor(
+                expert_table,
+                rect,
+                severity_values,
+                item.text(),
+                lambda text, it=item: it.setText(text.strip().title() or 'Warning'),
+            )
+
         expert_add_btn.clicked.connect(lambda: (expert_table.insertRow(expert_table.rowCount()), _set_expert_row(expert_table.rowCount() - 1, True, '', '', 'Warning')))
         expert_remove_btn.clicked.connect(lambda: expert_table.removeRow(expert_table.currentRow()) if expert_table.currentRow() >= 0 else None)
         expert_up_btn.clicked.connect(lambda: _move_expert_row(-1))
         expert_down_btn.clicked.connect(lambda: _move_expert_row(1))
         expert_clear_btn.clicked.connect(lambda: expert_table.setRowCount(0))
+        expert_table.cellDoubleClicked.connect(_on_expert_cell_double_clicked)
 
         def _check_expert_row():
             row = expert_table.currentRow()
