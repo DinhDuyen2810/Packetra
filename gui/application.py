@@ -777,7 +777,7 @@ class CaptureOptionsDialog(QDialog):
         self.iface_tree.setColumnWidth(4, 100)
         self.iface_tree.setColumnWidth(5, 100)
         self.iface_tree.setColumnWidth(6, 150)
-        self.iface_tree.setColumnWidth(7, 800)
+        self.iface_tree.setColumnWidth(7, 260)
         self.iface_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.iface_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.iface_tree.setUniformRowHeights(True)
@@ -924,6 +924,24 @@ class CaptureOptionsDialog(QDialog):
         for iface_name, label in self.traffic_widgets.items():
             if label:
                 label.setPixmap(self._get_sparkline_pixmap(iface_name, width=chart_width))
+
+    def _fit_input_comment_column_width(self) -> None:
+        if not hasattr(self, 'iface_tree'):
+            return
+        tree = self.iface_tree
+        metrics = tree.fontMetrics()
+        header_width = metrics.horizontalAdvance('Comment') + 28
+        content_width = header_width
+        for row in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(row)
+            if item is None:
+                continue
+            text = str(item.text(7) or '').strip()
+            if not text:
+                continue
+            content_width = max(content_width, metrics.horizontalAdvance(text) + 28)
+        target_width = max(180, min(int(content_width), 360))
+        tree.setColumnWidth(7, target_width)
     
     def _populate_interfaces(self):
         """Populate interface tree with available interfaces"""
@@ -1052,6 +1070,7 @@ class CaptureOptionsDialog(QDialog):
             else:
                 self.promisc_all_cb.setCheckState(Qt.CheckState.PartiallyChecked)
             self.promisc_all_cb.blockSignals(False)
+        self._fit_input_comment_column_width()
 
     def _refresh_interface_traffic(self):
         """Refresh traffic sparkline for each interface row."""
@@ -4410,9 +4429,15 @@ class ApplicationWindow(QMainWindow):
             overrides = json.loads(raw_overrides) if raw_overrides else {}
             if not isinstance(overrides, dict):
                 overrides = {}
+            raw_custom_rules = str(settings.value('view/custom_coloring_rules', '', str) or '').strip()
+            custom_rules = json.loads(raw_custom_rules) if raw_custom_rules else []
+            if not isinstance(custom_rules, list):
+                custom_rules = []
         except Exception:
             overrides = {}
+            custom_rules = []
         self.capture_view.table.set_rule_background_overrides(overrides)
+        self.capture_view.table.set_custom_coloring_rules(custom_rules)
         self.capture_view.set_color_rules_enabled(self.action_color_btn.isChecked())
         self._analyze_custom_columns = self._load_analyze_custom_columns()
         self._ensure_analyze_custom_columns_applied()
@@ -7781,34 +7806,75 @@ class ApplicationWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle('Coloring Rules')
-        dialog.resize(1020, 640)
+        dialog.resize(1100, 760)
         layout = QVBoxLayout(dialog)
 
-        layout.addWidget(QLabel('Select a rule row, then choose color to edit that rule:'))
+        layout.addWidget(QLabel('Select a rule row to adjust its color. Use the Add Rule section to create a new custom rule.'))
         rules_table = QTableWidget(dialog)
-        rules_table.setColumnCount(3)
-        rules_table.setHorizontalHeaderLabels(['Color', 'Name', 'Filter'])
+        rules_table.setColumnCount(4)
+        rules_table.setHorizontalHeaderLabels(['Type', 'Color', 'Name', 'Filter'])
         rules_table.verticalHeader().setVisible(False)
         rules_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         rules_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         rules_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        rules_table.setAlternatingRowColors(True)
 
         settings = QSettings('Packetra', 'Packetra')
         conversation_color = QColor(str(settings.value('view/conversation_color', '#FFF2A8', str) or '#FFF2A8'))
         rule_overrides = self.capture_view.table.get_rule_background_overrides()
+        default_rules = self.capture_view.table.wireshark_coloring_rules()
+        custom_rules = self.capture_view.table.get_custom_coloring_rules()
+        rules = []
 
-        rules = [
-            {
-                'name': 'Colorize Conversation',
-                'filter': 'temporary conversation highlight',
-                'background': QColor(conversation_color),
-                'foreground': QColor('#111111'),
-            }
-        ] + self.capture_view.table.wireshark_coloring_rules()
+        def _combined_rules() -> list[dict]:
+            rows = [
+                {
+                    'kind': 'conversation',
+                    'ref': 0,
+                    'type_label': 'Conversation',
+                    'name': 'Colorize Conversation',
+                    'filter': 'temporary conversation highlight',
+                    'background': QColor(conversation_color),
+                    'foreground': QColor('#111111'),
+                }
+            ]
+            rows.extend(
+                {
+                    'kind': 'custom',
+                    'ref': idx,
+                    'type_label': 'Custom',
+                    'name': str(rule['name']),
+                    'filter': str(rule['filter']),
+                    'background': QColor(rule['background']),
+                    'foreground': QColor(rule.get('foreground', '#111111')),
+                }
+                for idx, rule in enumerate(custom_rules)
+            )
+            rows.extend(
+                {
+                    'kind': 'default',
+                    'ref': idx,
+                    'type_label': 'Built-in',
+                    'name': str(rule['name']),
+                    'filter': str(rule['filter']),
+                    'background': QColor(rule['background']),
+                    'foreground': QColor(rule['foreground']),
+                }
+                for idx, rule in enumerate(default_rules)
+            )
+            return rows
+
+        def _selected_row() -> int:
+            row = int(rules_table.currentRow())
+            return row if 0 <= row < len(rules) else 0
+
+        def _selected_rule() -> dict:
+            return rules[_selected_row()]
 
         def _paint_row(row: int):
             rule = rules[row]
-            for col, text in enumerate(['', str(rule['name']), str(rule['filter'])]):
+            columns = [str(rule['type_label']), '', str(rule['name']), str(rule['filter'])]
+            for col, text in enumerate(columns):
                 item = rules_table.item(row, col)
                 if item is None:
                     item = QTableWidgetItem()
@@ -7817,13 +7883,23 @@ class ApplicationWindow(QMainWindow):
                 item.setBackground(QColor(rule['background']))
                 item.setForeground(QColor(rule['foreground']))
 
-        rules_table.setRowCount(len(rules))
-        for row in range(len(rules)):
-            _paint_row(row)
+        def _rebuild_rules_table(select_row: int | None = None):
+            nonlocal rules
+            rules = _combined_rules()
+            rules_table.setRowCount(len(rules))
+            for row in range(len(rules)):
+                _paint_row(row)
+            if not rules:
+                return
+            if select_row is None:
+                select_row = min(_selected_row(), len(rules) - 1)
+            select_row = max(0, min(int(select_row), len(rules) - 1))
+            rules_table.selectRow(select_row)
 
         rules_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         rules_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        rules_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        rules_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        rules_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         layout.addWidget(rules_table, 1)
 
         edit_row = QHBoxLayout()
@@ -7840,35 +7916,128 @@ class ApplicationWindow(QMainWindow):
         edit_row.addStretch(1)
         layout.addLayout(edit_row)
 
-        def _selected_row() -> int:
-            row = int(rules_table.currentRow())
-            return row if 0 <= row < len(rules) else 0
-
         def _refresh_selected_preview():
-            row = _selected_row()
-            rule = rules[row]
-            selected_rule_label.setText(f'Rule: {rule["name"]}')
+            rule = _selected_rule()
+            selected_rule_label.setText(f'Rule: {rule["name"]} ({rule["type_label"]})')
             color_preview.setStyleSheet(f'background-color: {QColor(rule["background"]).name()}; border: 1px solid #808080;')
 
         def _choose_color_for_selected():
-            row = _selected_row()
-            current = QColor(rules[row]['background'])
-            picked = QColorDialog.getColor(current, self, f'Rule Color - {rules[row]["name"]}')
+            rule = _selected_rule()
+            current = QColor(rule['background'])
+            picked = QColorDialog.getColor(current, self, f'Rule Color - {rule["name"]}')
             if not picked.isValid():
                 return
-            rules[row]['background'] = QColor(picked)
-            _paint_row(row)
+            if rule['kind'] == 'conversation':
+                conversation_color.setNamedColor(picked.name())
+            elif rule['kind'] == 'custom':
+                custom_rules[rule['ref']]['background'] = picked.name()
+            elif rule['kind'] == 'default':
+                default_rules[rule['ref']]['background'] = QColor(picked)
+            row = _selected_row()
+            _rebuild_rules_table(select_row=row)
             _refresh_selected_preview()
 
         buttons_row = QHBoxLayout()
         choose_btn.clicked.connect(_choose_color_for_selected)
-        buttons_row.addStretch(1)
         clear_btn = QPushButton('Clear highlight')
         clear_btn.setFixedWidth(120)
         clear_btn.setFixedHeight(24)
         clear_btn.clicked.connect(lambda: self.capture_view.clear_conversation_highlight())
         buttons_row.addWidget(clear_btn)
+        delete_btn = QPushButton('Delete Rule')
+        delete_btn.setFixedWidth(110)
+        delete_btn.clicked.connect(lambda: _delete_selected_rule())
+        buttons_row.addWidget(delete_btn)
+        buttons_row.addStretch(1)
         layout.addLayout(buttons_row)
+
+        add_group = QGroupBox('Add Rule', dialog)
+        add_layout = QGridLayout(add_group)
+        add_layout.addWidget(QLabel('Rule Name'), 0, 0)
+        new_rule_name = QLineEdit(add_group)
+        add_layout.addWidget(new_rule_name, 0, 1, 1, 3)
+        add_layout.addWidget(QLabel('Display Filter'), 1, 0)
+        new_rule_filter = QLineEdit(add_group)
+        add_layout.addWidget(new_rule_filter, 1, 1, 1, 3)
+        add_layout.addWidget(QLabel('Color'), 2, 0)
+        new_color_preview = QFrame(add_group)
+        new_color_preview.setFrameShape(QFrame.StyledPanel)
+        new_color_preview.setFixedSize(88, 24)
+        add_layout.addWidget(new_color_preview, 2, 1)
+        pick_new_color_btn = QPushButton('Choose...')
+        add_layout.addWidget(pick_new_color_btn, 2, 2)
+        match_result_label = QLabel('Check rule to see how many packets match in the current capture.')
+        add_layout.addWidget(match_result_label, 3, 0, 1, 4)
+        check_rule_btn = QPushButton('Check Rule')
+        add_rule_btn = QPushButton('Add Rule')
+        add_layout.addWidget(check_rule_btn, 4, 2)
+        add_layout.addWidget(add_rule_btn, 4, 3)
+        layout.addWidget(add_group)
+
+        new_rule_color = QColor('#FFF59D')
+
+        def _refresh_new_rule_preview():
+            new_color_preview.setStyleSheet(
+                f'background-color: {new_rule_color.name()}; border: 1px solid #808080;'
+            )
+
+        def _choose_new_rule_color():
+            nonlocal new_rule_color
+            picked = QColorDialog.getColor(new_rule_color, self, 'Rule Color - New Custom Rule')
+            if picked.isValid():
+                new_rule_color = QColor(picked)
+                _refresh_new_rule_preview()
+
+        def _check_new_rule():
+            expression = str(new_rule_filter.text() or '').strip()
+            if not expression:
+                QMessageBox.warning(dialog, 'ERROR', 'Please enter a display filter for the new rule.')
+                return
+            matcher = DisplayFilter()
+            match_count = 0
+            for record in list(getattr(self.capture_view, 'records', []) or []):
+                try:
+                    if matcher.matches(record, expression):
+                        match_count += 1
+                except Exception:
+                    continue
+            packet_word = 'packet' if match_count == 1 else 'packets'
+            match_result_label.setText(f'New rule matches {match_count} {packet_word} in the current capture.')
+
+        def _add_new_rule():
+            rule_name = str(new_rule_name.text() or '').strip()
+            expression = str(new_rule_filter.text() or '').strip()
+            if not rule_name:
+                QMessageBox.warning(dialog, 'ERROR', 'Please enter a rule name.')
+                return
+            if not expression:
+                QMessageBox.warning(dialog, 'ERROR', 'Please enter a display filter for the new rule.')
+                return
+            custom_rules.append(
+                {
+                    'name': rule_name,
+                    'filter': expression,
+                    'background': new_rule_color.name(),
+                    'foreground': '#111111',
+                }
+            )
+            new_rule_name.clear()
+            new_rule_filter.clear()
+            match_result_label.setText('Custom rule added. Apply to save and activate it.')
+            _rebuild_rules_table(select_row=len(custom_rules))
+
+        def _delete_selected_rule():
+            rule = _selected_rule()
+            if rule['kind'] != 'custom':
+                QMessageBox.warning(dialog, 'ERROR', 'Only custom rules can be deleted.')
+                return
+            del custom_rules[rule['ref']]
+            match_result_label.setText('Custom rule deleted. Apply to save the change.')
+            _rebuild_rules_table(select_row=max(0, _selected_row() - 1))
+
+        pick_new_color_btn.clicked.connect(_choose_new_rule_color)
+        check_rule_btn.clicked.connect(_check_new_rule)
+        add_rule_btn.clicked.connect(_add_new_rule)
 
         dialog_buttons = QHBoxLayout()
         apply_btn = QPushButton('Apply')
@@ -7879,11 +8048,11 @@ class ApplicationWindow(QMainWindow):
         layout.addLayout(dialog_buttons)
 
         def _apply_rules():
-            conv_bg = QColor(rules[0]['background']).name()
+            conv_bg = QColor(conversation_color).name()
             settings.setValue('view/conversation_color', conv_bg)
 
             updated_overrides = {}
-            for rule in rules[1:]:
+            for rule in default_rules:
                 name = str(rule['name'])
                 color_hex = QColor(rule['background']).name()
                 default_hex = '#ffffff'
@@ -7897,16 +8066,20 @@ class ApplicationWindow(QMainWindow):
             rule_overrides.clear()
             rule_overrides.update(updated_overrides)
             settings.setValue('view/rule_background_overrides', json.dumps(rule_overrides))
+            settings.setValue('view/custom_coloring_rules', json.dumps(custom_rules))
 
             self.capture_view.table.set_rule_background_overrides(rule_overrides)
+            self.capture_view.table.set_custom_coloring_rules(custom_rules)
             self.capture_view.set_conversation_highlight([], QColor(conv_bg))
             self.capture_view.set_color_rules_enabled(True)
+            match_result_label.setText('Coloring rules applied.')
 
         rules_table.currentCellChanged.connect(lambda *_: _refresh_selected_preview())
         apply_btn.clicked.connect(_apply_rules)
         close_btn.clicked.connect(dialog.accept)
 
-        rules_table.selectRow(0)
+        _refresh_new_rule_preview()
+        _rebuild_rules_table(select_row=0)
         _refresh_selected_preview()
         dialog.exec()
 

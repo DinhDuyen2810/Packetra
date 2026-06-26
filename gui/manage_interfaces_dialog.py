@@ -3,7 +3,7 @@ import json
 import base64
 import zipfile
 import psutil
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QSize
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QCheckBox, QLineEdit, QTextEdit, QFileDialog,
@@ -376,8 +376,12 @@ if __name__ == '__main__':
         tree.setAlternatingRowColors(True)
         tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tree.setUniformRowHeights(True)
         tree.setFrameShape(QFrame.Shape.NoFrame)
-        tree.setStyleSheet('QTreeWidget { border: none; gridline-color: transparent; }')
+        tree.setStyleSheet(
+            'QTreeWidget { border: none; gridline-color: transparent; } '
+            'QTreeWidget::item { height: 24px; }'
+        )
         return tree
     
     # ===== LOCAL INTERFACES TAB (QTreeWidget) =====
@@ -430,6 +434,7 @@ if __name__ == '__main__':
             # Create tree item
             item = QTreeWidgetItem()
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            item.setSizeHint(0, QSize(0, 24))
             
             # Column 0: Show checkbox
             show_cb = QCheckBox()

@@ -21,22 +21,24 @@ DEFAULT_EDITOR_MARGIN = 1
 COMPACT_EDITOR_STYLE = (
     'padding: 0px 2px; margin: 0px; border-radius: 0px;'
 )
-OVERLAY_COMBO_STYLE = (
-    'QComboBox {'
-    ' margin: 0px;'
-    ' padding: 0px 2px;'
-    ' border-radius: 0px;'
-    ' min-height: 24px;'
-    ' max-height: 24px;'
-    '}'
-    'QComboBox::drop-down {'
-    ' border: 0px;'
-    ' width: 18px;'
-    '}'
-    'QComboBox::down-arrow {'
-    ' subcontrol-origin: padding;'
-    '}'
-)
+def _overlay_combo_style(target_height: int) -> str:
+    content_height = max(16, int(target_height) - 2)
+    return (
+        'QComboBox {'
+        ' margin: 0px;'
+        ' padding: 0px 2px;'
+        ' border-radius: 0px;'
+        f' min-height: {content_height}px;'
+        f' max-height: {content_height}px;'
+        '}'
+        'QComboBox::drop-down {'
+        ' border: 0px;'
+        ' width: 18px;'
+        '}'
+        'QComboBox::down-arrow {'
+        ' subcontrol-origin: padding;'
+        '}'
+    )
 COMPACT_TABLE_STYLE = (
     'QTableWidget { border: none; gridline-color: transparent; } '
     'QTableWidget::item { height: 24px; }'
@@ -263,16 +265,19 @@ def show_overlay_combo_editor(
         except RuntimeError:
             pass
 
+    target_rect = cell_rect.adjusted(0, 0, -1, -1)
+    if target_rect.width() <= 0 or target_rect.height() <= 0:
+        target_rect = cell_rect
+
     combo = QComboBox(viewport)
     combo.addItems([str(value) for value in values])
     combo.setMaxVisibleItems(12)
-    combo.setGeometry(cell_rect)
-    combo.setMinimumSize(cell_rect.size())
-    combo.setMaximumSize(cell_rect.size())
-    combo.setStyleSheet(OVERLAY_COMBO_STYLE)
+    combo.setGeometry(target_rect)
+    combo.setFixedSize(target_rect.size())
+    combo.setStyleSheet(_overlay_combo_style(target_rect.height()))
     combo.setCurrentText(str(current_text or ''))
     popup_view = combo.view()
-    popup_view.setMinimumWidth(max(combo.width(), int(cell_rect.width())))
+    popup_view.setMinimumWidth(max(combo.width(), int(target_rect.width())))
     row_hint = max(22, popup_view.sizeHintForRow(0) if combo.count() > 0 else 22)
     popup_view.setMinimumHeight(min(max(120, row_hint * min(combo.count(), 6)), 260))
     viewport.setProperty('_overlay_combo_editor', combo)

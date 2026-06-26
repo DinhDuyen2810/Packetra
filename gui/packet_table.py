@@ -2,6 +2,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
+from core.filtering import DisplayFilter
 from gui.filter_drag import build_filter_drag, packet_filter_expression
 from core import formatters
 
@@ -46,6 +47,8 @@ class PacketTable(QTableWidget):
         self._marked_color = QColor(self.DEFAULT_MARKED_COLOR)
         self._ignored_color = QColor(self.DEFAULT_IGNORED_COLOR)
         self._rule_background_overrides = {}
+        self._custom_coloring_rules = []
+        self._custom_rule_matcher = DisplayFilter()
         self._column_alignment_map = {}
         self._related_indicators = {}
         self._immediate_indicator_row = None
@@ -188,6 +191,44 @@ class PacketTable(QTableWidget):
             for rule in self.WIRESHARK_DEFAULT_RULES
         ]
 
+    def get_custom_coloring_rules(self) -> list[dict[str, str]]:
+        return [
+            {
+                'name': str(rule['name']),
+                'filter': str(rule['filter']),
+                'background': QColor(rule['background']).name(),
+                'foreground': QColor(rule['foreground']).name(),
+            }
+            for rule in self._custom_coloring_rules
+        ]
+
+    def set_custom_coloring_rules(self, rules: list | None):
+        normalized = []
+        for rule in list(rules or []):
+            if not isinstance(rule, dict):
+                continue
+            name = str(rule.get('name', '') or '').strip()
+            expression = str(rule.get('filter', '') or '').strip()
+            if not name or not expression:
+                continue
+            background = QColor(str(rule.get('background') or rule.get('bg') or '').strip())
+            if not background.isValid():
+                continue
+            foreground = QColor(str(rule.get('foreground') or rule.get('fg') or '#111111').strip())
+            if not foreground.isValid():
+                foreground = QColor('#111111')
+            normalized.append(
+                {
+                    'name': name,
+                    'filter': expression,
+                    'background': QColor(background),
+                    'foreground': QColor(foreground),
+                }
+            )
+        self._custom_coloring_rules = normalized
+        self._protocol_color_cache.clear()
+        self.set_color_rules_enabled(self._color_rules_enabled)
+
     def _effective_rule_background(self, rule_name: str) -> QColor:
         name = str(rule_name or '').strip()
         override = self._rule_background_overrides.get(name)
@@ -209,6 +250,7 @@ class PacketTable(QTableWidget):
                 if color.isValid():
                     normalized[name] = color
         self._rule_background_overrides = normalized
+        self._protocol_color_cache.clear()
         self.set_color_rules_enabled(self._color_rules_enabled)
 
     def get_rule_background_overrides(self) -> dict[str, str]:
@@ -354,6 +396,20 @@ class PacketTable(QTableWidget):
 
         return None, None
 
+    def _match_custom_coloring_rule(self, record) -> tuple[QColor | None, QColor | None]:
+        if isinstance(record, str):
+            return None, None
+        for rule in self._custom_coloring_rules:
+            expression = str(rule.get('filter', '') or '').strip()
+            if not expression:
+                continue
+            try:
+                if self._custom_rule_matcher.matches(record, expression):
+                    return QColor(rule['background']), QColor(rule['foreground'])
+            except Exception:
+                continue
+        return None, None
+
     @staticmethod
     def display_values(record):
         ignored = bool(getattr(record, 'ignored', False))
@@ -481,15 +537,17 @@ class PacketTable(QTableWidget):
             color = self._marked_color
             text_color = QColor(0, 0, 0)
         else:
-            cache_key = str(proto or '').upper()
-            if cache_key in self._protocol_color_cache:
-                color, text_color = self._protocol_color_cache[cache_key]
-            else:
-                color, text_color = self._match_wireshark_style(record_or_proto)
-                if text_color is None:
-                    text_color = QColor(0, 0, 0)
-                if len(self._protocol_color_cache) < self._color_cache_max_size:
-                    self._protocol_color_cache[cache_key] = (color, text_color)
+            color, text_color = self._match_custom_coloring_rule(record_or_proto)
+            if text_color is None:
+                cache_key = str(proto or '').upper()
+                if cache_key in self._protocol_color_cache:
+                    color, text_color = self._protocol_color_cache[cache_key]
+                else:
+                    color, text_color = self._match_wireshark_style(record_or_proto)
+                    if text_color is None:
+                        text_color = QColor(0, 0, 0)
+                    if len(self._protocol_color_cache) < self._color_cache_max_size:
+                        self._protocol_color_cache[cache_key] = (color, text_color)
 
         background_color = color if color else QColor(255, 255, 255)
         for col in range(self.columnCount()):
