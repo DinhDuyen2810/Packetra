@@ -11459,216 +11459,8 @@ class ApplicationWindow(QMainWindow):
         export_btn = QPushButton('Export CSV', dialog)
         layout.addLayout(self._create_standard_button_row(dialog, apply_btn, copy_btn, export_btn))
 
-        def _hierarchy_layer_spec(layer_name: str, record=None) -> tuple[str, str]:
-            raw = str(layer_name or '').strip()
-            if not raw:
-                return 'Unknown', ''
-            key = raw.casefold()
-            token = re.sub(r'[^a-z0-9]+', '', key)
-            if key in {'frame'}:
-                return 'Frame', 'frame'
-            if key in {'mpacketpreamble', 'framepreemption', 'frame preemption protocol'}:
-                return 'IEEE 802.3br Frame Preemption Protocol', 'fpp'
-            if key in {'dot3', 'ether', 'ethernet'}:
-                return 'Ethernet', 'eth'
-            if key in {'llc'}:
-                return 'Logical-Link Control', 'llc'
-            if key in {'snap'}:
-                return 'Subnetwork Access Protocol', 'snap'
-            if key in {'dot1q', '8021q'}:
-                return '802.1Q Virtual LAN', 'vlan'
-            if key.startswith('pppoed') or 'pppoe discovery' in key:
-                return 'PPP-over-Ethernet Discovery', 'pppoed'
-            if key.startswith('pppoe'):
-                return 'PPP-over-Ethernet Session', 'pppoe'
-            if key.startswith('ppp'):
-                return 'Point-to-Point Protocol', 'ppp'
-            if key.startswith('netflow') or key.startswith('ipfix') or key.startswith('cflow'):
-                return 'Cisco NetFlow/IPFIX', 'cflow'
-            if key.startswith('icmpv6'):
-                return 'Internet Control Message Protocol v6', 'icmpv6'
-            if key == 'ipv6exthdrhopbyhop':
-                return '', ''
-            if key in {'raw', 'padding', '_tlsencryptedcontent', 'iperror', 'iperror6', 'udperror', 'icmperror'}:
-                return '', ''
-            if key == 'data':
-                return 'Data', 'data'
-            if key in {'arp'}:
-                return 'Address Resolution Protocol', 'arp'
-            if key in {'ip', 'ipv4'}:
-                return 'Internet Protocol Version 4', 'ip'
-            if key in {'ipv6'}:
-                return 'Internet Protocol Version 6', 'ipv6'
-            if key in {'tcp'}:
-                return 'Transmission Control Protocol', 'tcp'
-            if key in {'udp'}:
-                return 'User Datagram Protocol', 'udp'
-            if key in {'dns'}:
-                return 'Domain Name System', 'dns'
-            if key in {'mdns'}:
-                return 'Multicast Domain Name System', 'mdns'
-            if key in {'icmp'}:
-                return 'Internet Control Message Protocol', 'icmp'
-            if key in {'icmpv6'}:
-                return 'Internet Control Message Protocol v6', 'icmpv6'
-            if key in {'tls', 'ssl'}:
-                return 'Transport Layer Security', 'tls'
-            if key in {'http', 'httprequest', 'httpresponse'}:
-                return 'Hypertext Transfer Protocol', 'http'
-            if key in {'quic'}:
-                return 'QUIC', 'quic'
-            if key in {'dhcp'}:
-                return 'Dynamic Host Configuration Protocol', 'dhcp'
-            if key in {'stp'}:
-                return 'Spanning Tree Protocol', 'stp'
-            if key in {'loop'}:
-                return 'Configuration Test Protocol (loopback)', 'loop'
-            if key in {'ntp', 'ntpheader'}:
-                return 'Network Time Protocol', 'ntp'
-            if key in {'lldp'}:
-                return 'Link Layer Discovery Protocol', 'lldp'
-            if key in {'cdp'}:
-                return 'Cisco Discovery Protocol', 'cdp'
-            if key in {'isis'} or key.startswith('isis'):
-                return raw.replace('_', ' '), 'isis'
-            if key in {'ospf'}:
-                return 'Open Shortest Path First', 'ospf'
-            if key in {'gre'}:
-                return 'Generic Routing Encapsulation', 'gre'
-            if key in {'bfdcontrol'}:
-                return 'Bidirectional Forwarding Detection Control Message', 'bfd'
-            if key in {'bfdecho'}:
-                return 'Bidirectional Forwarding Detection Echo Packet', 'bfd'
-            if key in {'ssh', 'sshv2'}:
-                return 'SSH Protocol', 'ssh'
-            if key in {'smb'}:
-                return 'Server Message Block', 'smb'
-            if key in {'smb2'}:
-                return 'Server Message Block 2', 'smb2'
-            if key in {'smtp'}:
-                return 'SMTP', 'smtp'
-            if key in {'pop'}:
-                return 'Post Office Protocol', 'pop'
-            if key in {'imap'}:
-                return 'Internet Message Access Protocol', 'imap'
-            if key in {'whois'}:
-                return 'whois', 'whois'
-            if key in {'ocsp'}:
-                return 'Online Certificate Status Protocol', 'ocsp'
-            if key in {'telnet'}:
-                return 'Telnet', 'telnet'
-            if key in {'ipp'}:
-                return 'Internet Printing Protocol', 'ipp'
-            if key in {'lpd'}:
-                return 'Line Printer Daemon Protocol', 'lpd'
-            if key in {'ftp'}:
-                return 'File Transfer Protocol (FTP)', 'ftp'
-            if key in {'ftpdata'}:
-                return 'FTP Data', 'ftp'
-            if key in {'snmp'}:
-                return 'Simple Network Management Protocol', 'snmp'
-            if key in {'linebasedtextdata'}:
-                return 'Line-based text data', 'data'
-            if token == '_tlsencryptedcontent':
-                return '', ''
-            display = raw.replace('_', ' ')
-            return display, token
-
-        def _hierarchy_protocol_leaf(record) -> tuple[str, str]:
-            proto = str(getattr(record, 'protocol', '') or '').strip()
-            if not proto:
-                return '', ''
-            key = proto.casefold()
-            if key in {'tcp', 'udp', 'ip', 'ipv4', 'ipv6', 'arp', 'dns', 'mdns', 'icmp', 'icmpv6', 'tls', 'ssl', 'http'}:
-                return '', ''
-            mapping = {
-                'tlsv1.0': ('Transport Layer Security', 'tls'),
-                'tlsv1.2': ('Transport Layer Security', 'tls'),
-                'http': ('Hypertext Transfer Protocol', 'http'),
-                'httprequest': ('Hypertext Transfer Protocol', 'http'),
-                'httpresponse': ('Hypertext Transfer Protocol', 'http'),
-                'mdns': ('Multicast Domain Name System', 'mdns'),
-                'whois': ('whois', 'whois'),
-                'telnet': ('Telnet', 'telnet'),
-                'ipp': ('Internet Printing Protocol', 'ipp'),
-                'lpd': ('Line Printer Daemon Protocol', 'lpd'),
-                'ftp': ('File Transfer Protocol (FTP)', 'ftp'),
-                'ftp-data': ('FTP Data', 'ftp'),
-                'snmp': ('Simple Network Management Protocol', 'snmp'),
-                'ntp': ('Network Time Protocol', 'ntp'),
-                'lldp': ('Link Layer Discovery Protocol', 'lldp'),
-                'cdp': ('Cisco Discovery Protocol', 'cdp'),
-                'cflow': ('Cisco NetFlow/IPFIX', 'cflow'),
-                'bfd control': ('Bidirectional Forwarding Detection Control Message', 'bfd'),
-                'bfd echo': ('Bidirectional Forwarding Detection Echo Packet', 'bfd'),
-                'loop': ('Configuration Test Protocol (loopback)', 'loop'),
-                'ospf': ('Open Shortest Path First', 'ospf'),
-                'gre': ('Generic Routing Encapsulation', 'gre'),
-                'sshv2': ('SSH Protocol', 'ssh'),
-                'smtp': ('SMTP', 'smtp'),
-                'pop': ('Post Office Protocol', 'pop'),
-                'imap': ('Internet Message Access Protocol', 'imap'),
-                'ocsp': ('Online Certificate Status Protocol', 'ocsp'),
-                'line-based text data': ('Line-based text data', 'data'),
-                'data': ('Data', 'data'),
-                'isis hello': ('ISIS HELLO', 'isis'),
-                'isis csnp': ('ISO 10589 ISIS Complete Sequence Numbers Protocol Data Unit', 'isis'),
-                'isis lsp': ('ISO 10589 ISIS Link State Protocol Data Unit', 'isis'),
-                'isis psnp': ('ISO 10589 ISIS Partial Sequence Numbers Protocol Data Unit', 'isis'),
-            }
-            if key in mapping:
-                return mapping[key]
-            if key.startswith('isotp') or key.startswith('isis'):
-                return proto.replace('_', ' '), 'isis'
-            if key.startswith('netflow') or key.startswith('ipfix'):
-                return 'Cisco NetFlow/IPFIX', 'cflow'
-            if key.startswith('icmpv6'):
-                return 'Internet Control Message Protocol v6', 'icmpv6'
-            if key.startswith('icmp'):
-                return 'Internet Control Message Protocol', 'icmp'
-            if key in {'quic'}:
-                return 'QUIC', 'quic'
-            return '', ''
-
         def _packet_layers(rec) -> list[tuple[str, str]]:
-            raw = getattr(rec, 'raw', None)
-            out = []
-            if raw is not None:
-                layer = raw
-                guard = 0
-                while layer is not None and guard < 64:
-                    guard += 1
-                    cls_name = str(layer.__class__.__name__ or '').strip()
-                    if not cls_name or cls_name == 'NoPayload':
-                        break
-                    name, token = _hierarchy_layer_spec(cls_name, rec)
-                    if name:
-                        out.append((name, token))
-                    nxt = getattr(layer, 'payload', None)
-                    if nxt is None or nxt is layer:
-                        break
-                    layer = nxt
-            if not out:
-                for name in list(getattr(rec, 'layers', []) or []):
-                    display_name, token = _hierarchy_layer_spec(name, rec)
-                    if display_name:
-                        out.append((display_name, token))
-            if not out:
-                fallback_name, fallback_token = _hierarchy_layer_spec(str(getattr(rec, 'protocol', '') or 'Unknown'), rec)
-                if fallback_name:
-                    out.append((fallback_name, fallback_token))
-                else:
-                    out.append(('Unknown', ''))
-            leaf_name, leaf_token = _hierarchy_protocol_leaf(rec)
-            if leaf_name:
-                if not out or out[-1][0] != leaf_name:
-                    out.append((leaf_name, leaf_token))
-            compressed = []
-            for name, token in out:
-                pair = (str(name or '').strip(), str(token or '').strip())
-                if not compressed or compressed[-1] != pair:
-                    compressed.append(pair)
-            return compressed
+            return DisplayFilter.hierarchy_packet_layers(rec)
 
         def _iter_rows(root_item: QTreeWidgetItem):
             rows = []
@@ -11715,6 +11507,7 @@ class ApplicationWindow(QMainWindow):
                 'end_bytes': 0,
                 'pdus': 0,
                 'packet_numbers': set(),
+                'path_text': 'Frame',
                 'name': 'Frame',
                 'token': 'frame',
             }
@@ -11740,6 +11533,7 @@ class ApplicationWindow(QMainWindow):
                             'end_bytes': 0,
                             'pdus': 0,
                             'packet_numbers': set(),
+                            'path_text': f"{str(node.get('path_text', 'Frame') or 'Frame')} > {name}",
                             'name': name,
                             'token': token,
                         }
@@ -11776,6 +11570,7 @@ class ApplicationWindow(QMainWindow):
                 item.setText(8, str(end_bits_s))
                 item.setText(9, str(int(node.get('pdus', 0) or 0)))
                 item.setData(0, Qt.UserRole, str(node.get('token', '') or ''))
+                item.setData(0, Qt.UserRole + 1, str(node.get('path_text', '') or ''))
                 children = list(node.get('children', {}).values())
                 children.sort(
                     key=lambda child: (
@@ -11794,11 +11589,12 @@ class ApplicationWindow(QMainWindow):
             item = tree.currentItem()
             if item is None:
                 return
-            token = str(item.data(0, Qt.UserRole) or '').strip() or self._protocol_filter_token(item.text(0))
-            if not token:
+            path_text = str(item.data(0, Qt.UserRole + 1) or '').strip()
+            if not path_text:
                 QMessageBox.information(dialog, 'Protocol Hierarchy', 'No display-filter token for selected protocol.')
                 return
-            self._set_display_filter_text(token, apply_now=True)
+            expr = f'hierarchy.path contains {json.dumps(path_text)}'
+            self._set_display_filter_text(expr, apply_now=True)
 
         def _copy_tree():
             root_item = tree.topLevelItem(0)
