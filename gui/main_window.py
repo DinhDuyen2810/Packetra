@@ -152,7 +152,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def on_sniffer_error(self, msg):
-        QMessageBox.critical(self, 'Capture error', msg)
+        QMessageBox.critical(self, 'ERROR', 'ERROR')
         self.stop_capture()
 
     def add_packet(self, packet):
@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
 
     def save_file(self):
         if not self.records:
-            QMessageBox.warning(self, 'Warning', 'No packets are available to save.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         filename, _ = QFileDialog.getSaveFileName(self, 'Save PCAP', '', 'PCAP Files (*.pcap)')
         if filename:

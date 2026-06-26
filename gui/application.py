@@ -349,7 +349,7 @@ class CaptureFiltersDialog(QDialog):
                 QMessageBox.information(self, 'Capture Filter', 'Valid capture filter.')
             return True
         self.status_label.setText(f'Invalid capture filter: {err}')
-        QMessageBox.warning(self, 'Invalid Capture Filter', f'Capture filter syntax error:\n{err}')
+        QMessageBox.warning(self, 'ERROR', 'ERROR')
         return False
 
     def _on_new(self):
@@ -381,7 +381,7 @@ class CaptureFiltersDialog(QDialog):
     def _on_apply(self):
         candidate = self._build_current_preset()
         if not candidate['name']:
-            QMessageBox.warning(self, 'Capture Filter', 'Filter name is required.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if not self._validate_current_expression(show_ok=False):
             return
@@ -721,11 +721,11 @@ class CaptureOptionsDialog(QDialog):
                     dir_path = '.'
                 
                 if not os.path.exists(dir_path):
-                    QMessageBox.warning(self, 'Invalid Path', f'Directory does not exist: {dir_path}')
+                    QMessageBox.warning(self, 'ERROR', 'ERROR')
                     return False
-                
+
                 if not os.access(dir_path, os.W_OK):
-                    QMessageBox.warning(self, 'Invalid Path', f'Directory is not writable: {dir_path}')
+                    QMessageBox.warning(self, 'ERROR', 'ERROR')
                     return False
         
         # Validate Create new file automatically conditions
@@ -736,8 +736,7 @@ class CaptureOptionsDialog(QDialog):
             wallclock_ok = self.rollover_wallclock_cb.isChecked()
             
             if not (packets_ok or size_ok or duration_ok or wallclock_ok):
-                QMessageBox.warning(self, 'No Rollover Condition', 
-                    'When "Create a new file automatically" is checked, at least one rollover condition must be enabled.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return False
         
         return True
@@ -1098,7 +1097,7 @@ class CaptureOptionsDialog(QDialog):
         self._apply_filter_to_selected_interface()
         item = self._get_selected_interface_item()
         if not item:
-            QMessageBox.warning(self, 'No Interface', 'Please select an interface in the Input tab.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._start_capture_with_item(item)
 
@@ -1224,7 +1223,7 @@ class CaptureOptionsDialog(QDialog):
         iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
         is_valid_filter, filter_error = self._validate_capture_filter_expression(capture_filter, iface_name=iface_name)
         if not is_valid_filter:
-            QMessageBox.warning(self, 'Invalid Capture Filter', f'Capture filter syntax error:\n{filter_error}')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         self._save_output_settings()
@@ -1277,7 +1276,7 @@ class CaptureOptionsDialog(QDialog):
                 return
 
         if self.capture_view is None:
-            QMessageBox.warning(self, 'Capture Unavailable', 'Cannot start capture: capture view is not initialized.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         self.capture_view.interface_config = iface_config
@@ -3295,7 +3294,7 @@ class ApplicationWindow(QMainWindow):
     def _on_open_analysis_dashboard(self):
         """Open Analysis Dashboard with current capture view"""
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.information(self, 'Analysis Dashboard', 'No capture is loaded. Please start or load a capture.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         
         # Import dashboard components
@@ -3518,7 +3517,7 @@ class ApplicationWindow(QMainWindow):
     def _on_open_demo_packet(self):
         entries = self._load_demo_packet_entries()
         if not entries:
-            QMessageBox.warning(self, 'Demo Packet', 'Could not load the demo packet list.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog(self)
@@ -3566,14 +3565,14 @@ class ApplicationWindow(QMainWindow):
         def _open_selected_demo():
             entry = _selected_entry()
             if not entry:
-                QMessageBox.warning(dialog, 'Demo Packet', 'The selected demo entry could not be found.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
 
             demo_id = int(entry.get('id', 0) or 0)
             demo_name = self._demo_entry_display_name(entry)
             demo_path = str(entry.get('path') or '')
             if not os.path.exists(demo_path):
-                QMessageBox.critical(dialog, 'Demo Packet', f'Could not find the demo file for "{demo_name}".')
+                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
                 return
 
             proceed = self._prompt_save_before_destructive_action(
@@ -3586,16 +3585,16 @@ class ApplicationWindow(QMainWindow):
             try:
                 packets = list(iter_pcap_packets(demo_path))
             except Exception as exc:
-                QMessageBox.critical(dialog, 'Demo Packet', f'Could not read the demo file for "{demo_name}".\n\n{exc}')
+                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
                 return
 
             if not packets:
-                QMessageBox.warning(dialog, 'Demo Packet', f'"{demo_name}" does not contain valid packets.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
 
             self.show_capture_view('', demo_name, '')
             if not self.capture_view:
-                QMessageBox.critical(dialog, 'Demo Packet', 'Could not create a capture view for the demo packet.')
+                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
                 return
 
             self._replace_capture_packets(
@@ -3647,12 +3646,12 @@ class ApplicationWindow(QMainWindow):
             except Exception:
                 self._ai_analyst_dialog = None
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.information(self, 'AI Analyst', 'No capture is available for analysis.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         records = list(self.capture_view.get_effective_records(include_ignored=False))
         if not records:
-            QMessageBox.information(self, 'AI Analyst', 'All current packets are ignored.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         packet_numbers = sorted(int(r.number) for r in records)
         record_by_number = {}
@@ -4119,12 +4118,12 @@ class ApplicationWindow(QMainWindow):
                 self._ai_analyst_dialog = None
 
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.information(self, 'AI Analyst', 'No capture is available for analysis.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         records = list(self.capture_view.get_effective_records(include_ignored=False))
         if not records:
-            QMessageBox.information(self, 'AI Analyst', 'All current packets are ignored.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog()
@@ -4955,29 +4954,29 @@ class ApplicationWindow(QMainWindow):
             return
         normalized_path = os.path.abspath(os.path.normpath(candidate))
         if not os.path.exists(normalized_path):
-            QMessageBox.warning(self, 'Open', f'The file does not exist:\n{normalized_path}')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         try:
             probe_iter = iter_pcap_packets(normalized_path)
             first_packet = next(probe_iter, None)
         except Exception as exc:
-            QMessageBox.critical(self, 'Open', f'Could not open the file:\n{normalized_path}\n\n{exc}')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
             return
         if first_packet is None:
-            QMessageBox.warning(self, 'Open', f'The selected file does not contain any packets:\n{normalized_path}')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         proceed = self._prompt_save_before_destructive_action('Opening a new file will replace the current data. Do you want to save first?')
         if not proceed:
             return
         self.show_capture_view('', 'Offline', '')
         if not self.capture_view:
-            QMessageBox.critical(self, 'Open', 'Could not create a capture view for the selected file.')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
             return
         started = time.perf_counter()
         try:
             self.capture_view.load_file(normalized_path)
         except Exception as exc:
-            QMessageBox.critical(self, 'Open', f'Could not open the file:\n{normalized_path}\n\n{exc}')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
             return
         self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
         self._status_mode = 'activity'
@@ -4987,7 +4986,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         if not getattr(self.capture_view, 'records', None):
-            QMessageBox.warning(self, 'Open', f'The file opened successfully but contains no packets:\n{normalized_path}')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._sync_capture_buttons()
         self._update_capture_window_title()
@@ -5104,7 +5103,7 @@ class ApplicationWindow(QMainWindow):
         """Save the PCAP file"""
         if self.capture_view:
             if self.capture_view.is_capturing():
-                QMessageBox.information(self, 'Save', 'Stop the live capture before saving.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
             self.capture_view.save_file()
             self._update_capture_window_title()
@@ -5112,13 +5111,13 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
             self._refresh_file_menu_state()
         else:
-            QMessageBox.information(self, 'Info', 'There is no data to save.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
 
     def _on_save_as_file(self):
         """Save the PCAP file as a new name"""
         if self.capture_view:
             if self.capture_view.is_capturing():
-                QMessageBox.information(self, 'Save As', 'Stop the live capture before using Save As.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
             self.capture_view.save_file(force_dialog=True)
             self._update_capture_window_title()
@@ -5126,15 +5125,15 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
             self._refresh_file_menu_state()
         else:
-            QMessageBox.information(self, 'Info', 'There is no data to save.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
 
     def _on_merge_file(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Merge', 'No active capture is available to merge. Open or start a capture first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'Merge', 'Stop the live capture before merging files.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QFileDialog(self, 'Merge Capture File')
@@ -5164,11 +5163,11 @@ class ApplicationWindow(QMainWindow):
             incoming_packets = list(iter_pcap_packets(merge_path))
             incoming_metadata = load_capture_metadata(merge_path)
         except Exception as exc:
-            QMessageBox.critical(self, 'Merge', f'Cannot read the capture file to merge:\n{exc}')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
             return
 
         if not incoming_packets:
-            QMessageBox.warning(self, 'Merge', 'The selected file does not contain valid packets to merge.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         merged_entries = [self._packet_entry_from_record(r) for r in cv.records if getattr(r, 'raw', None) is not None]
@@ -5213,10 +5212,10 @@ class ApplicationWindow(QMainWindow):
     def _on_separate_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Separate', 'No packets are available to separate.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'Separate', 'Stop the live capture before separating packets.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog(self)
@@ -5446,7 +5445,7 @@ class ApplicationWindow(QMainWindow):
             last_to = int((split_table.item(last_row, 2).text() or str(total_packets)).strip())
             last_len = last_to - last_from + 1
             if last_len < 2:
-                QMessageBox.warning(dialog, 'Separate', 'Cannot split again because the last file is too small to divide.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
 
             left_len = last_len // 2
@@ -5476,7 +5475,7 @@ class ApplicationWindow(QMainWindow):
         def _on_split_add():
             current_rows = split_table.rowCount()
             if current_rows >= total_packets:
-                QMessageBox.warning(dialog, 'Separate', 'The number of output files cannot exceed the total number of packets.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             if split_state['manual_edit']:
                 _split_last_file_in_half()
@@ -5537,7 +5536,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 ranges = _collect_split_ranges_from_table()
             except Exception as exc:
-                QMessageBox.warning(self, 'Separate', str(exc))
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
 
             default_dir = os.path.dirname(str(cv.loaded_file_path)) if cv.loaded_file_path else str(Path.cwd())
@@ -5556,7 +5555,7 @@ class ApplicationWindow(QMainWindow):
                 return
             base_name = str(base_name or '').strip()
             if not base_name:
-                QMessageBox.warning(self, 'Separate', 'The file name cannot be empty.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
 
             file_format = 'pcapng'
@@ -5593,7 +5592,7 @@ class ApplicationWindow(QMainWindow):
                     )
                     saved_paths.append(saved_path)
             except Exception as exc:
-                QMessageBox.critical(self, 'Separate', f'Failed to split the file into multiple files:\n{exc}')
+                QMessageBox.critical(self, 'ERROR', 'ERROR')
                 return
 
             QMessageBox.information(
@@ -5622,10 +5621,10 @@ class ApplicationWindow(QMainWindow):
             delete_indices.update(range_indices)
 
         if not criteria_used:
-            QMessageBox.warning(self, 'Separate', 'Choose at least one packet deletion criterion.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if not delete_indices:
-            QMessageBox.warning(self, 'Separate', 'No packets matched the delete criteria.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         confirm = QMessageBox.question(
@@ -5657,10 +5656,10 @@ class ApplicationWindow(QMainWindow):
     def _on_export_specified_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Export Specified Packets', 'No packets are available to export.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'Export Specified Packets', 'Stop the live capture before exporting packets.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog(self)
@@ -5736,17 +5735,17 @@ class ApplicationWindow(QMainWindow):
             export_indices.update(self._resolve_indices_by_ranges_text(export_ranges_input.toPlainText()))
 
         if not criteria_used:
-            QMessageBox.warning(self, 'Export Specified Packets', 'Choose at least one export criterion.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         if not export_indices:
-            QMessageBox.warning(self, 'Export Specified Packets', 'No packets matched the export criteria.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         export_records = [cv.records[i] for i in sorted(export_indices) if getattr(cv.records[i], 'raw', None) is not None]
         packets = [rec.raw for rec in export_records]
         if not packets:
-            QMessageBox.warning(self, 'Export Specified Packets', 'No valid packets are available to export.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         filename, selected_format, selected_compression = cv._show_save_with_options_dialog(preselect_existing_file=False)
@@ -5768,7 +5767,7 @@ class ApplicationWindow(QMainWindow):
                 f'Successfully exported {len(packets)} packets:\n{out_path}',
             )
         except Exception as exc:
-            QMessageBox.critical(self, 'Export Specified Packets', f'Export failed:\n{exc}')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
 
     def _parse_packet_ranges_to_numbers(self, ranges_text: str):
         text = str(ranges_text or '').strip()
@@ -5801,8 +5800,8 @@ class ApplicationWindow(QMainWindow):
             return set()
         try:
             numbers = self._parse_packet_ranges_to_numbers(ranges_text)
-        except Exception as exc:
-            QMessageBox.warning(self, 'Range', str(exc))
+        except Exception:
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return set()
         if not numbers:
             return set()
@@ -5817,11 +5816,11 @@ class ApplicationWindow(QMainWindow):
             return set()
         text = str(protocol_text or '').strip()
         if not text:
-            QMessageBox.warning(self, 'Protocol', 'Enter at least one protocol to filter or delete.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return set()
         tokens = [t.strip().lower() for t in re.split(r'[,\s;]+', text) if t.strip()]
         if not tokens:
-            QMessageBox.warning(self, 'Protocol', 'The protocol filter is not valid.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return set()
         token_set = set(tokens)
         return {
@@ -5832,7 +5831,7 @@ class ApplicationWindow(QMainWindow):
     def _on_print_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.information(self, 'Print', 'No packets are available to print.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog(self)
@@ -5868,13 +5867,13 @@ class ApplicationWindow(QMainWindow):
             return
 
         if not (summary_cb.isChecked() or detail_cb.isChecked() or bytes_cb.isChecked()):
-            QMessageBox.warning(self, 'Print', 'Choose at least one section to print.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         scope = scope_combo.currentText()
         indexes = self._resolve_record_indices(scope, from_no=None, to_no=None, filter_expr='')
         if not indexes:
-            QMessageBox.warning(self, 'Print', 'No packets matched the print criteria.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         lines = []
@@ -5948,11 +5947,11 @@ class ApplicationWindow(QMainWindow):
             expr = str(filter_expr or '').strip()
             if not expr:
                 return []
-            try:
-                return [i for i, rec in enumerate(cv.records) if cv.display_filter.matches(rec, expr)]
-            except Exception as exc:
-                QMessageBox.warning(self, 'Filter', f'The filter is not valid:\n{exc}')
-                return []
+        try:
+            return [i for i, rec in enumerate(cv.records) if cv.display_filter.matches(rec, expr)]
+        except Exception as exc:
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            return []
         return []
 
     def _replace_capture_packets(
@@ -6265,7 +6264,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_export_flow_csv_current(self):
         if not self.capture_view or not getattr(self.capture_view, "records", None):
-            QMessageBox.information(self, "Export Flow CSV", "No capture data is available to export.")
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -6284,7 +6283,7 @@ class ApplicationWindow(QMainWindow):
                 if getattr(r, "raw", None) is not None
             ]
             if not packets:
-                QMessageBox.information(self, "Export Flow CSV", "No valid packets are available to export. Some packets may be ignored.")
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
             csv_path, flows = export_packets_to_csv(packets, file_path)
             model_adapter = self._build_flow_model_adapter()
@@ -6295,11 +6294,11 @@ class ApplicationWindow(QMainWindow):
                 f"Export successful:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Export Flow CSV", f"Export failed: {exc}")
+            QMessageBox.critical(self, "ERROR", "ERROR")
 
     def _on_export_flow_csv_selected(self):
         if not self.capture_view:
-            QMessageBox.information(self, "Export Selected Flow CSV", "No capture data is available.")
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         selected_packets = []
         for record in self.capture_view.get_selected_records():
@@ -6309,7 +6308,7 @@ class ApplicationWindow(QMainWindow):
             if raw is not None:
                 selected_packets.append(raw)
         if not selected_packets:
-            QMessageBox.warning(self, "Export Selected Flow CSV", "No valid packets are available to export. Some packets may be ignored.")
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -6334,7 +6333,7 @@ class ApplicationWindow(QMainWindow):
                 f"{warning}Export successful:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Export Selected Flow CSV", f"Export failed: {exc}")
+            QMessageBox.critical(self, "ERROR", "ERROR")
 
     def _on_search(self):
         """Find"""
@@ -6402,12 +6401,12 @@ class ApplicationWindow(QMainWindow):
                     lines.append('\t'.join(values))
                 QApplication.clipboard().setText('\n'.join(lines))
                 return
-        QMessageBox.information(self, 'Copy', 'There is no data to copy.')
+        QMessageBox.warning(self, 'ERROR', 'ERROR')
 
     def _require_capture_for_edit_action(self) -> bool:
         if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view and self.capture_view.has_packets():
             return True
-        QMessageBox.information(self, 'Edit', 'There is no packet data available for this action.')
+        QMessageBox.warning(self, 'ERROR', 'ERROR')
         return False
 
     def _on_find_next(self):
@@ -6418,7 +6417,7 @@ class ApplicationWindow(QMainWindow):
                 self.capture_view.toggle_find_panel()
             self.capture_view.find_input.setFocus()
             self.capture_view.find_input.selectAll()
-            QMessageBox.information(self, 'Find Next', 'Enter a search term first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self.capture_view.find_next()
 
@@ -6430,7 +6429,7 @@ class ApplicationWindow(QMainWindow):
                 self.capture_view.toggle_find_panel()
             self.capture_view.find_input.setFocus()
             self.capture_view.find_input.selectAll()
-            QMessageBox.information(self, 'Find Previous', 'Enter a search term first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self.capture_view.find_previous()
 
@@ -6438,7 +6437,7 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.toggle_mark_selected():
-            QMessageBox.information(self, 'Mark/Unmark Selected', 'Select at least one packet.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._update_capture_window_title()
 
@@ -6446,10 +6445,10 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.visible_indices:
-            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'No displayed packets are available.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if not self.capture_view.toggle_mark_all_displayed():
-            QMessageBox.information(self, 'Mark/Unmark All Displayed', 'No packets were changed.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._update_capture_window_title()
 
@@ -6457,19 +6456,19 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.goto_next_mark():
-            QMessageBox.information(self, 'Next Mark', 'No next marked packet was found.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
 
     def _on_previous_mark(self):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.goto_previous_mark():
-            QMessageBox.information(self, 'Previous Mark', 'No previous marked packet was found.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
 
     def _on_ignore_unignore_selected(self):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.toggle_ignore_selected():
-            QMessageBox.information(self, 'Ignore/Unignore Selected', 'Select at least one packet.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._update_capture_window_title()
 
@@ -6477,10 +6476,10 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.visible_indices:
-            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'No displayed packets are available.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if not self.capture_view.toggle_ignore_all_displayed():
-            QMessageBox.information(self, 'Ignore/Unignore All Displayed', 'No packets were changed.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._update_capture_window_title()
 
@@ -6497,7 +6496,7 @@ class ApplicationWindow(QMainWindow):
         if not ok:
             return
         if not self.capture_view.set_comment_for_selected(text):
-            QMessageBox.information(self, 'Packet Comment', 'Select a packet before adding a comment.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         current_path = str(getattr(self.capture_view, 'loaded_file_path', '') or '').strip()
         if current_path and current_path.lower().endswith('.pcap'):
@@ -6520,7 +6519,7 @@ class ApplicationWindow(QMainWindow):
                     if not target_path.lower().endswith('.pcapng'):
                         target_path += '.pcapng'
                     if not self.capture_view.save_as_pcapng(target_path):
-                        QMessageBox.warning(self, 'Packet Comment', 'Could not save the comment to the pcapng file.')
+                        QMessageBox.warning(self, 'ERROR', 'ERROR')
                         self._update_capture_window_title()
                         return
                 else:
@@ -6529,7 +6528,7 @@ class ApplicationWindow(QMainWindow):
 
         persisted = self.capture_view.save_packet_comments_to_file()
         if not persisted:
-            QMessageBox.information(self, 'Packet Comment', 'The packet comment was updated in memory. Save the file as pcapng to persist it.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
         self._update_capture_window_title()
 
     def _on_delete_all_packet_comments(self):
@@ -6546,7 +6545,7 @@ class ApplicationWindow(QMainWindow):
             return
         count = int(self.capture_view.delete_all_packet_comments() or 0)
         if count <= 0:
-            QMessageBox.information(self, 'Delete All Packet Comments', 'There are no packet comments to delete.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self.capture_view.save_packet_comments_to_file()
         self._update_capture_window_title()
@@ -7023,7 +7022,7 @@ class ApplicationWindow(QMainWindow):
             if row < 0:
                 return
             if columns_table.rowCount() <= 1:
-                QMessageBox.warning(dialog, 'Columns', 'At least one column must remain visible.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             columns_table.removeRow(row)
             _toggle_columns_filter_rows()
@@ -7397,20 +7396,15 @@ class ApplicationWindow(QMainWindow):
         def _check_expert_row():
             row = expert_table.currentRow()
             if row < 0:
-                QMessageBox.information(dialog, "Check", "Please select an item first.")
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             data = _read_expert_row(row)
             cond = str(data.get('field', '')).strip().lower()
             if not cond:
-                QMessageBox.information(dialog, "Check", "Condition is empty.")
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             if not self._has_capture_document():
-                QMessageBox.information(
-                    dialog,
-                    "Check",
-                    "Open or load a capture file first to test this expert-item rule.\n"
-                    "You can still edit and save the rule now.",
-                )
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             entries = self.capture_view.get_expert_information([data])
             count = sum(1 for e in entries if e.get('group') == 'Custom' and e.get('summary') == (data.get('message') or data.get('field')))
@@ -7473,10 +7467,10 @@ class ApplicationWindow(QMainWindow):
                 collected_columns.append(spec)
 
             if not collected_columns:
-                QMessageBox.warning(dialog, 'Preferences', 'Warning: Columns cannot be left empty.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return None
             if not any(bool(spec.get('displayed', True)) for spec in collected_columns):
-                QMessageBox.warning(dialog, 'Preferences', 'Warning: At least one column must remain visible.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return None
 
             collected_expert = []
@@ -7492,7 +7486,7 @@ class ApplicationWindow(QMainWindow):
             ]
             non_empty_panes = [value for value in pane_values if value != 'none']
             if len(non_empty_panes) != len(set(non_empty_panes)):
-                QMessageBox.warning(dialog, 'Preferences', 'Pane 1, Pane 2, and Pane 3 must use different content.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return None
 
             new_prefs = dict(prefs)
@@ -7715,7 +7709,7 @@ class ApplicationWindow(QMainWindow):
             return
         current = self.capture_view.get_current_record()
         if current is None:
-            QMessageBox.information(self, 'Colorize Conversation', 'Select a packet first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         key = self._conversation_key_for_record(current)
@@ -7725,7 +7719,7 @@ class ApplicationWindow(QMainWindow):
                 highlight_indexes.append(idx)
 
         if not highlight_indexes:
-            QMessageBox.information(self, 'Colorize Conversation', 'No matching packets found for this conversation.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         current_highlight = set(getattr(self.capture_view, '_conversation_highlight_indexes', set()) or set())
@@ -7880,7 +7874,7 @@ class ApplicationWindow(QMainWindow):
             return
         record = self.capture_view.get_current_record()
         if record is None:
-            QMessageBox.information(self, 'Show Packet', 'Select a packet first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog(self)
@@ -7923,7 +7917,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_refresh_interfaces(self):
         if self.capture_view and self.capture_view.is_capturing():
-            QMessageBox.information(self, 'Refresh Interfaces', 'Cannot refresh interfaces while capture is running.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if self.iface_selector_view:
             try:
@@ -8181,18 +8175,18 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_firewall_acl_rules(self):
         if not self.capture_view or not self._has_capture_document():
-            QMessageBox.information(self, 'Firewall ACL Rules', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if bool(self.capture_view.is_file_format_view_mode()):
-            QMessageBox.information(self, 'Firewall ACL Rules', 'Firewall ACL Rules is not available in file format view mode.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         selected_records = self._selected_records_from_packet_list()
         if not selected_records:
-            QMessageBox.information(self, 'Firewall ACL Rules', 'Please select exactly one packet before creating firewall ACL rules.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if len(selected_records) > 1:
-            QMessageBox.information(self, 'Firewall ACL Rules', 'Firewall ACL Rules can only be generated from one selected packet.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         snapshot = self._build_acl_snapshot_from_record(selected_records[0])
@@ -8321,17 +8315,17 @@ class ApplicationWindow(QMainWindow):
         def _on_copy():
             text = str(rule_preview.toPlainText() or '').strip()
             if not text:
-                QMessageBox.information(dialog, 'Firewall ACL Rules', 'No generated rule to copy.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             try:
                 QApplication.clipboard().setText(text)
             except Exception:
-                QMessageBox.warning(dialog, 'Firewall ACL Rules', 'Unable to copy the generated rule to clipboard.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
 
         def _on_save():
             text = str(rule_preview.toPlainText() or '').strip()
             if not text:
-                QMessageBox.information(dialog, 'Firewall ACL Rules', 'No generated rule to save.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             file_path, _ = QFileDialog.getSaveFileName(
                 dialog,
@@ -8344,11 +8338,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(file_path).write_text(text + '\n', encoding='utf-8')
             except Exception:
-                QMessageBox.warning(
-                    dialog,
-                    'Firewall ACL Rules',
-                    'Unable to save the generated rule file. Please check file permissions.',
-                )
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
 
         product_combo.currentIndexChanged.connect(lambda _idx: _render_rule())
         action_allow.toggled.connect(lambda _checked: _render_rule())
@@ -8373,7 +8363,7 @@ class ApplicationWindow(QMainWindow):
             return
         if reason:
             try:
-                QMessageBox.information(self, 'Firewall ACL Rules', reason)
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
             except Exception:
                 pass
         try:
@@ -8507,14 +8497,10 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_network_topology_graph(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Network Topology Graph', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         if bool(self.capture_view.is_file_format_view_mode()):
-            QMessageBox.information(
-                self,
-                'Network Topology Graph',
-                'Topology Graph is unavailable in File Format Mode.\nReload as Capture to view network topology.',
-            )
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog = QDialog(self)
@@ -9454,7 +9440,7 @@ class ApplicationWindow(QMainWindow):
             if expr:
                 self._set_display_filter_text(expr, apply_now=True)
             else:
-                QMessageBox.information(dialog, 'Network Topology Graph', 'Select a node or edge first.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
 
         def _goto_selected_first_packet():
             sel = state['selected']
@@ -9475,14 +9461,14 @@ class ApplicationWindow(QMainWindow):
                 except Exception:
                     pass
             else:
-                QMessageBox.information(dialog, 'Network Topology Graph', 'No packet is associated with the current selection.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
 
         def _copy_selected_filter():
             expr = _selected_filter_expr()
             if expr:
                 QApplication.clipboard().setText(expr)
             else:
-                QMessageBox.information(dialog, 'Network Topology Graph', 'No filter expression available for current selection.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
 
         refresh_btn.clicked.connect(_refresh_topology)
         layout_combo.currentTextChanged.connect(lambda _v: _render_graph(fit_view=True))
@@ -10069,14 +10055,14 @@ class ApplicationWindow(QMainWindow):
             expression = str(item.get('expression', '') or '').strip()
             comment = str(item.get('comment', '') or '').strip()
             if not name or not expression:
-                QMessageBox.warning(self, 'Display Filter Macros', 'Macro name and expression are required.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
-                QMessageBox.warning(self, 'Display Filter Macros', f'Invalid macro name: {name}')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
             key = name.casefold()
             if key in seen:
-                QMessageBox.warning(self, 'Display Filter Macros', f'Duplicate macro name: {name}')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
             seen.add(key)
             normalized.append({'name': name, 'expression': expression, 'comment': comment})
@@ -10308,11 +10294,11 @@ class ApplicationWindow(QMainWindow):
 
     def _on_apply_as_filter(self):
         if not self._has_capture_document():
-            QMessageBox.information(self, 'Apply as Filter', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         base_expr, _field_name = self._selected_field_filter_expression()
         if not base_expr:
-            QMessageBox.information(self, 'Apply as Filter', 'Cannot create display filter from selected field.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         options = [
@@ -10339,7 +10325,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_apply_as_column(self):
         if not self._has_capture_document():
-            QMessageBox.information(self, 'Apply as Column', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         item = self._selected_detail_item()
         expr, field_name = self._selected_field_filter_expression()
@@ -10376,7 +10362,7 @@ class ApplicationWindow(QMainWindow):
             cfg_detail = str(cfg.get('detail_query', '') or '').strip().casefold()
             cfg_path = [str(v).strip().casefold() for v in (cfg.get('detail_path', []) or []) if str(v).strip()]
             if (field and cfg_field == field.casefold()) or (detail_query and cfg_detail == detail_query and cfg_path == [str(v).casefold() for v in self._stable_detail_path(detail_path)]):
-                QMessageBox.information(self, 'Apply as Column', 'This field is already added as a custom column.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
                 return
 
         if not field:
@@ -10435,12 +10421,12 @@ class ApplicationWindow(QMainWindow):
 
     def _on_conversation_filter(self):
         if not self._has_capture_document():
-            QMessageBox.information(self, 'Conversation Filter', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         cv = self.capture_view
         record = cv.get_current_record()
         if record is None:
-            QMessageBox.information(self, 'Conversation Filter', 'Select a packet first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         candidates = []
@@ -10463,7 +10449,7 @@ class ApplicationWindow(QMainWindow):
             return
         expr = self._conversation_filter_expression_for_mode(str(choice))
         if not expr:
-            QMessageBox.information(self, 'Conversation Filter', 'Cannot determine conversation for selected packet.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._set_display_filter_text(expr, apply_now=True)
 
@@ -10565,7 +10551,7 @@ class ApplicationWindow(QMainWindow):
             return
         records, stream_filter = self._follow_stream_records(mode, record_override=record)
         if not records:
-            QMessageBox.information(self, 'Follow', 'No stream data found for selected packet.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         first = records[0]
@@ -10660,7 +10646,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(path).write_text(text.toPlainText(), encoding='utf-8')
             except Exception as exc:
-                QMessageBox.critical(self, 'Follow', f'Cannot save file:\n{exc}')
+                QMessageBox.critical(self, 'ERROR', 'ERROR')
 
         save_btn.clicked.connect(_save_text)
         close_btn.clicked.connect(dialog.accept)
@@ -10670,16 +10656,16 @@ class ApplicationWindow(QMainWindow):
 
     def _on_follow_stream(self):
         if not self._has_capture_document():
-            QMessageBox.information(self, 'Follow', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         record = self.capture_view.get_current_record() if self.capture_view else None
         if record is None:
-            QMessageBox.information(self, 'Follow', 'Select a packet first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         choices = self._follow_mode_choices_for_record(record)
         if not choices:
-            QMessageBox.information(self, 'Follow', 'No stream data found for selected packet.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         labels = [label for label, _mode in choices]
         stream_choice, ok = QInputDialog.getItem(self, 'Follow', 'Follow type:', labels, 0, False)
@@ -10998,7 +10984,7 @@ class ApplicationWindow(QMainWindow):
                 for row in rows:
                     writer.writerow({col: row.get(col, '') for col in columns})
         except Exception as exc:
-            QMessageBox.critical(self, title, f'Cannot export CSV:\n{exc}')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
 
     def _statistics_current_row(self, table: QTableWidget) -> dict:
         row = int(table.currentRow())
@@ -11323,7 +11309,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_resolved_addresses(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Resolved Addresses', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('Resolved Addresses')
@@ -11416,7 +11402,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_protocol_hierarchy(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Protocol Hierarchy', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('Protocol Hierarchy')
@@ -11591,7 +11577,7 @@ class ApplicationWindow(QMainWindow):
                 return
             path_text = str(item.data(0, Qt.UserRole + 1) or '').strip()
             if not path_text:
-                QMessageBox.information(dialog, 'Protocol Hierarchy', 'No display-filter token for selected protocol.')
+                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 return
             expr = f'hierarchy.path contains {json.dumps(path_text)}'
             self._set_display_filter_text(expr, apply_now=True)
@@ -11645,7 +11631,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_endpoints(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Endpoints', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('Endpoints')
@@ -11820,7 +11806,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_packet_lengths(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Packet Lengths', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('Packet Lengths')
@@ -11962,7 +11948,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_flow_graph(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Flow Graph', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('Flow Graph')
@@ -12411,7 +12397,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_http(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'HTTP Statistics', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('HTTP Packet Counter')
@@ -12634,7 +12620,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_ipv4(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'IPv4 Statistics', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('IPv4 Statistics')
@@ -12776,7 +12762,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_ipv6(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'IPv6 Statistics', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, layout = self._create_standard_dialog('IPv6 Statistics')
@@ -13037,11 +13023,7 @@ class ApplicationWindow(QMainWindow):
     def _open_help_document(self, filename):
         doc_path = self.HELP_DOC_DIR / filename
         if not doc_path.exists():
-            QMessageBox.warning(
-                self,
-                'Help file not found',
-                f'Cannot find help document:\n{doc_path}'
-            )
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(doc_path)))
 
@@ -13239,7 +13221,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_expert_information(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Expert Information', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         self._auxiliary_analysis_opening = True
@@ -13352,7 +13334,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_capture_properties(self):
         if not self.capture_view:
-            QMessageBox.information(self, 'Capture File Properties', 'No capture is loaded.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         dialog, main_layout = self._create_standard_dialog('Capture File Properties')
@@ -13526,7 +13508,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(path).write_text(content_browser.toPlainText(), encoding='utf-8')
             except Exception as exc:
-                QMessageBox.critical(dialog, 'Save as Text', f'Cannot save file:\n{exc}')
+                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
 
         def edit_comment():
             props = self.capture_view.get_capture_properties()
@@ -13538,11 +13520,7 @@ class ApplicationWindow(QMainWindow):
                 if self.capture_view.save_capture_comment_to_file():
                     QMessageBox.information(dialog, 'Comment Saved', 'Comment updated and saved to file successfully.')
                 else:
-                    QMessageBox.warning(
-                        dialog,
-                        'Save Failed',
-                        'Comment updated in memory but could not be saved to file.\nOnly PCAPNG files support direct comment persistence.'
-                    )
+                    QMessageBox.warning(dialog, 'ERROR', 'ERROR')
                 fill_values()
 
         def show_help():

@@ -1983,7 +1983,7 @@ class CaptureView(QWidget):
             self._file_format_record = self._build_file_format_mode_record()
             if self._file_format_record is None:
                 self._show_file_format_view = False
-                QMessageBox.information(None, 'Reload as File Format/Capture', 'File Format mode is available only when a capture file is open from disk.')
+                QMessageBox.warning(None, 'ERROR', 'ERROR')
                 return
             self.packet_panes_stack.setCurrentWidget(self.main_splitter)
             self.table.replace_records([self._file_format_record])
@@ -2712,7 +2712,7 @@ class CaptureView(QWidget):
         self._update_status(f'Rollover completed. New file segment started after {saved_path}')
 
     def on_sniffer_error(self, msg):
-        QMessageBox.critical(None, 'Capture error', msg)
+        QMessageBox.critical(None, 'ERROR', 'ERROR')
         self.stop_capture()
 
     def _on_sniffer_finished(self):
@@ -3257,7 +3257,7 @@ class CaptureView(QWidget):
 
     def save_file(self, force_dialog: bool = False):
         if not self.records:
-            QMessageBox.warning(None, 'Warning', 'No packets are available to save.')
+            QMessageBox.warning(None, 'ERROR', 'ERROR')
             return False
         if self.loaded_file_path and not force_dialog:
             if not self._is_dirty:
@@ -3447,7 +3447,7 @@ class CaptureView(QWidget):
 
     def reload_file(self):
         if not self.records:
-            QMessageBox.information(None, 'Reload', 'No active capture is available to reload.')
+            QMessageBox.warning(None, 'ERROR', 'ERROR')
             return
 
         packets = [r.raw for r in self.records]
@@ -4348,7 +4348,7 @@ class CaptureView(QWidget):
                     self._last_find_row = row
                     self._last_find_offset = None
                     return
-            QMessageBox.information(self, 'Find', 'No matching results were found.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         for row in self._iter_search_rows(backwards, include_current=False):
@@ -4399,7 +4399,7 @@ class CaptureView(QWidget):
 
             return
 
-        QMessageBox.information(self, 'Find', 'No matching results were found.')
+        QMessageBox.warning(self, 'ERROR', 'ERROR')
 
     def find_next(self) -> bool:
         query = self.find_input.text().strip()
@@ -4637,14 +4637,14 @@ class CaptureView(QWidget):
     def _on_go_to_packet_row_submit(self):
         text = self.goto_packet_input.text().strip()
         if not text.isdigit():
-            QMessageBox.warning(self, 'Invalid packet', 'Please enter a valid packet number.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         target = int(text)
         if not self.goto_packet_number(target):
             if self._record_exists_by_number(target):
-                QMessageBox.information(self, 'Hidden by Filter', f'Packet {text} exists but is hidden by the current display filter.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
             else:
-                QMessageBox.information(self, 'Not Found', f'Packet number {text} was not found.')
+                QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self.goto_packet_widget.setVisible(False)
 
@@ -5220,7 +5220,7 @@ class CaptureView(QWidget):
         """Xem tong quan capture."""
         effective_records = self.get_effective_records(include_ignored=False)
         if not effective_records:
-            QMessageBox.information(None, 'Summary', 'No packets are available.')
+            QMessageBox.warning(None, 'ERROR', 'ERROR')
             return
 
         proto_counts = Counter(r.protocol for r in effective_records)
@@ -5255,7 +5255,7 @@ class CaptureView(QWidget):
         """Xem conversations."""
         effective_records = self.get_effective_records(include_ignored=False)
         if not effective_records:
-            QMessageBox.information(None, 'Conversations', 'No conversations are available.')
+            QMessageBox.warning(None, 'ERROR', 'ERROR')
             return
 
         from gui.conversations_dialog import ConversationsDialog

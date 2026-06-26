@@ -2365,7 +2365,7 @@ class WidgetEditorDialog(QDialog):
     def _validate_and_accept(self):
         title = self.title_input.text().strip() or self._auto_title().strip()
         if not title:
-            QMessageBox.warning(self, "Validation", "Chart title cannot be empty.")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             self.tabs.setCurrentIndex(0)
             return
         self._working_copy = self._collect_working_copy()
@@ -3104,7 +3104,7 @@ class DashboardEditor(QDialog):
     def on_add_widget(self):
         """Add new widget to dashboard"""
         if not self.edit_mode:
-            QMessageBox.warning(self, "Error", "Cannot edit templates")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             return
         
         width, height = 3, 2

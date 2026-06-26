@@ -394,11 +394,11 @@ class InterfaceSelectorView(QWidget):
     def _on_open_selected_recent(self):
         item = self.recent_list.currentItem()
         if not item:
-            QMessageBox.information(self, 'Open', 'Please select a recent capture file.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         path = item.text().strip()
         if not path or not os.path.exists(path):
-            QMessageBox.warning(self, 'Open', 'Selected file does not exist anymore.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
         self._remember_recent_path(path)
         self.refresh_recent_files()
@@ -422,7 +422,7 @@ class InterfaceSelectorView(QWidget):
         display_name = self.get_selected_display_name()
         capture_filter = self.get_capture_filter()
         if not iface:
-            QMessageBox.warning(None, 'Error', 'Please select an interface.')
+            QMessageBox.warning(None, 'ERROR', 'ERROR')
             return
         self.capture_started.emit(iface, display_name or iface, capture_filter)
 

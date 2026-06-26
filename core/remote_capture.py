@@ -4,6 +4,31 @@ import re
 
 log = logging.getLogger('remote_capture')
 
+
+def _normalize_remote_error_text(text: str) -> str:
+    raw = str(text or '').strip()
+    if not raw:
+        return 'Cannot connect to remote agent.'
+
+    normalized = raw.replace('_x000D__x000A_', '\n')
+    error_lines = re.findall(r'<S S="Error">(.*?)</S>', normalized, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = []
+    for line in error_lines:
+        item = re.sub(r'<[^>]+>', '', line).strip()
+        if item:
+            cleaned.append(item)
+    if cleaned:
+        joined = ' '.join(cleaned).strip()
+        lowered = joined.lower()
+        if 'packetra remote agent executable was not found' in lowered:
+            return 'Cannot connect to remote agent.'
+        return joined
+
+    lowered = normalized.lower()
+    if 'packetra remote agent executable was not found' in lowered:
+        return 'Cannot connect to remote agent.'
+    return normalized
+
 class SSHRemoteCapture:
     _shared_clients = {}
 
@@ -92,6 +117,13 @@ class SSHRemoteCapture:
             if transport is not None:
                 transport.set_keepalive(30)
             self._shared_clients[cache_key] = self.client
+        except paramiko.AuthenticationException:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+            log.warning('SSH authentication failed for %s@%s:%s', self.username, self.host, self.port)
+            raise RuntimeError('SSH authentication failed.')
         except Exception as exc:
             log.error(f'SSH connection failed: {exc}')
             raise
@@ -100,19 +132,60 @@ class SSHRemoteCapture:
         import base64
         args = str(args or '').strip()
         ps_script = f"""
-$p = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\PacketraAgent' -ErrorAction SilentlyContinue).ImagePath
-if ($p) {{
-    $p = $p -replace '"',''
-}} else {{
-    if (Test-Path 'C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd') {{ $p = 'C:\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd' }}
-    elseif (Test-Path 'C:\\Program Files\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd') {{ $p = 'C:\\Program Files\\RemoteCaptureAgent\\RemoteCaptureAgent.cmd' }}
-    else {{ $p = 'RemoteCaptureAgent.cmd' }}
+$ProgressPreference = 'SilentlyContinue'
+$candidates = @()
+$service = Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\PacketraAgent' -ErrorAction SilentlyContinue
+if ($service -and $service.ImagePath) {{
+    $image = [string]$service.ImagePath
+    if ($image.StartsWith('"')) {{
+        if ($image -match '^"([^"]+)"') {{
+            $image = $Matches[1]
+        }} else {{
+            $image = $image.Trim('"')
+        }}
+    }} elseif ($image -match '^[^ ]+') {{
+        $image = $Matches[0]
+    }}
+    if ($image) {{
+        $candidates += $image
+    }}
 }}
-& $p {args}
+$localPrograms = Join-Path $env:LOCALAPPDATA 'Programs\\PacketraAgent'
+$candidates += @(
+    (Join-Path $localPrograms 'RemoteCaptureAgent.exe'),
+    (Join-Path $localPrograms 'PacketraAgent.exe')
+)
+$candidates += @(
+    'C:\\Program Files\\PacketraAgent\\RemoteCaptureAgent.exe',
+    'C:\\Program Files\\PacketraAgent\\PacketraAgent.exe',
+    'C:\\Program Files (x86)\\PacketraAgent\\RemoteCaptureAgent.exe',
+    'C:\\Program Files (x86)\\PacketraAgent\\PacketraAgent.exe',
+    'C:\\RemoteCaptureAgent\\RemoteCaptureAgent.exe',
+    'C:\\RemoteCaptureAgent\\PacketraAgent.exe',
+    'RemoteCaptureAgent.exe',
+    'PacketraAgent.exe'
+)
+$commandHits = @(Get-Command RemoteCaptureAgent.exe, PacketraAgent.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+foreach ($hit in $commandHits) {{
+    if ($hit) {{
+        $candidates += [string]$hit
+    }}
+}}
+$exe = $null
+foreach ($candidate in $candidates) {{
+    if ($candidate -and (Test-Path $candidate)) {{
+        $exe = $candidate
+        break
+    }}
+}}
+if (-not $exe) {{
+    throw 'Packetra remote agent executable was not found. Please install the agent MSI first.'
+}}
+& $exe {args}
 """
         encoded = base64.b64encode(ps_script.encode('utf-16le')).decode('ascii')
         # OpenSSH invokes this string. We use a base64 encoded powershell script to dynamically resolve 
-        # the exact service binary path from the Registry and execute it using the call operator (&).
+        # the exact installed agent executable from the Registry and execute it using the call operator (&).
         # This completely bypasses all SSH quoting bugs and correctly streams binary stdout.
         return f'powershell -NoProfile -NonInteractive -EncodedCommand {encoded}'
 
@@ -125,7 +198,7 @@ if ($p) {{
         output = stdout.read().decode(errors='ignore')
         err = stderr.read().decode(errors='ignore').strip()
         if err and not output:
-            raise RuntimeError(err)
+            raise RuntimeError(_normalize_remote_error_text(err))
         if self.os_type == 'linux':
             # Parse tcpdump -D output, keeping only the actual iface token.
             # Example line: "1. ens224 [Up, Running, Connected]" -> "ens224"

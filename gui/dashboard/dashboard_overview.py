@@ -944,12 +944,12 @@ class DashboardOverviewDialog(QDialog):
         """Create dashboard from template"""
         template_dashboard = self.template_repo.get(template_id)
         if not template_dashboard:
-            QMessageBox.warning(self, "Error", "Template not found")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             return
 
         new_dashboard = self.template_repo.create_from_template(template_id, template_dashboard.name)
         if not new_dashboard:
-            QMessageBox.warning(self, "Error", "Failed to create dashboard from template")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             return
 
         self._open_editor(new_dashboard, self.dashboard_repo)
@@ -958,7 +958,7 @@ class DashboardOverviewDialog(QDialog):
         """Open a user dashboard in the editor window."""
         dashboard = self.dashboard_repo.load(dashboard_id)
         if not dashboard:
-            QMessageBox.warning(self, "Error", "Dashboard not found")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             return
 
         self._open_editor(dashboard, self.dashboard_repo)
@@ -967,7 +967,7 @@ class DashboardOverviewDialog(QDialog):
         """Preview a user dashboard inline inside the overview dialog."""
         dashboard = self.dashboard_repo.load(dashboard_id)
         if not dashboard:
-            QMessageBox.warning(self, "Error", "Dashboard not found")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             return
 
         self._show_dashboard_detail(dashboard, is_template=False)
@@ -976,7 +976,7 @@ class DashboardOverviewDialog(QDialog):
         """Preview a template inline inside the overview dialog."""
         template = self.template_repo.get(template_id)
         if not template:
-            QMessageBox.warning(self, "Error", "Template not found")
+            QMessageBox.warning(self, "ERROR", "ERROR")
             return
 
         self._show_dashboard_detail(template, is_template=True)
@@ -1055,9 +1055,9 @@ class DashboardOverviewDialog(QDialog):
                 QMessageBox.information(self, "Success", f"Imported dashboard '{dashboard.name}'")
                 self.load_dashboards()
             else:
-                QMessageBox.warning(self, "Error", "Failed to import dashboard")
+                QMessageBox.warning(self, "ERROR", "ERROR")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+            QMessageBox.critical(self, "ERROR", "ERROR")
     
     def on_rename_dashboard(self, dashboard_id: str):
         """Rename a dashboard"""
@@ -1107,7 +1107,7 @@ class DashboardOverviewDialog(QDialog):
                     f.write(json_str)
                 QMessageBox.information(self, "Success", "Dashboard exported")
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
+                QMessageBox.critical(self, "ERROR", "ERROR")
     
     def on_delete_dashboard(self, dashboard_id: str):
         """Delete a dashboard with confirmation"""

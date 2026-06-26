@@ -177,6 +177,26 @@ def _decode_link_layer_packet(raw_bytes: bytes, linktype: int):
             pass
         return packet
 
+    if linktype_int == 228 and isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) >= 20:
+        packet = IP(bytes(raw_bytes))
+        try:
+            packet.frame_raw_bytes = bytes(raw_bytes)
+            packet.frame_wire_len = int(len(raw_bytes))
+            packet.frame_linktype = int(linktype_int)
+        except Exception:
+            pass
+        return packet
+
+    if linktype_int == 229 and isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) >= 40:
+        packet = IPv6(bytes(raw_bytes))
+        try:
+            packet.frame_raw_bytes = bytes(raw_bytes)
+            packet.frame_wire_len = int(len(raw_bytes))
+            packet.frame_linktype = int(linktype_int)
+        except Exception:
+            pass
+        return packet
+
     # Linux cooked capture v1 (DLT_LINUX_SLL / 113)
     if linktype_int == 113 and isinstance(raw_bytes, (bytes, bytearray)) and len(raw_bytes) >= 16:
         packet = CookedLinux(bytes(raw_bytes))

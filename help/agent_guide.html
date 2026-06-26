@@ -297,62 +297,84 @@ sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)</pre>
 
     <section class="panel" id="windows-note">
       <h2>13. Windows Remote Capture via Agent Service</h2>
-      <p>Windows does not natively provide a tool equivalent to <code>tcpdump</code> that can easily stream raw packets over an SSH connection without external dependencies. To solve this, Packetra includes a pre-packaged Windows Agent Installer.</p>
+      <p>Windows does not natively provide a tool equivalent to <code>tcpdump</code> that can easily stream raw packets over an SSH connection without external dependencies. Packetra therefore uses a Windows Agent MSI that prepares the machine and registers a service for remote capture.</p>
       
       <p><strong>Installation Steps:</strong></p>
       <ol>
-        <li>On the Packetra Host: Open <strong>Capture > Manage Interfaces</strong>, go to the <strong>Remote Interfaces</strong> tab, and click <strong>Download Agent</strong>. Save the <code>packetra-remote-agent.zip</code> file.</li>
+        <li>On the Packetra Host: Open <strong>Capture &gt; Manage Interfaces</strong>, go to the <strong>Remote Interfaces</strong> tab, and click <strong>Install Agent</strong>.</li>
+        <li>Save the <code>packetra-remote-agent.zip</code> file. It contains the <code>PacketraAgent.msi</code> installer.</li>
         <li>Transfer <code>packetra-remote-agent.zip</code> to your target Windows machine.</li>
-        <li>Extract the ZIP and run the <code>PacketraAgent.msi</code> installer on the remote Windows host.</li>
-        <li>The installer will automatically unpack the agent, install it, and start a background Windows Service named <strong>Packetra Remote Capture Agent</strong>.</li>
+        <li>Extract the ZIP and run the <code>PacketraAgent.msi</code> installer on that machine.</li>
+        <li>The MSI now checks required prerequisites first. If OpenSSH Client/Server are missing, it installs them. If they already exist, it reuses them.</li>
+        <li>The MSI then checks Npcap. If Npcap is missing, the installer downloads the official Npcap installer and runs it. If Npcap is already installed, it is skipped.</li>
+        <li>After prerequisites are ready, the MSI creates or updates the <code>PacketraAgent</code> Windows service and starts it automatically.</li>
+        <li>If the agent is already installed, running the MSI again enters standard Windows Installer maintenance mode so you can choose Repair or Remove.</li>
       </ol>
 
       <p><strong>Validation & Checking the Service:</strong></p>
-      <p>Once installed, you do not need to manually run any command prompt or scripts. The service runs automatically in the background and starts on boot.</p>
+      <p>Once installed, you do not need to manually run the capture agent executable. The service runs automatically in the background and starts on boot.</p>
       <ul>
-        <li>To verify it is running, open <code>services.msc</code> (Windows Services) on the remote machine.</li>
-        <li>Locate <strong>Packetra Remote Capture Agent</strong> in the list.</li>
-        <li>Ensure its Status is <strong>Running</strong> and Startup Type is <strong>Automatic</strong>.</li>
+        <li>Open <code>services.msc</code> and confirm <strong>PacketraAgent</strong> exists, is <strong>Running</strong>, and uses <strong>Automatic</strong> startup.</li>
+        <li>Run <code>Get-Service PacketraAgent</code> in PowerShell and confirm the service is present.</li>
+        <li>Run <code>where.exe RemoteCaptureAgent.exe</code> and confirm the executable resolves to the PacketraAgent install directory.</li>
+        <li>Run <code>Get-Service sshd</code> and confirm OpenSSH Server is present and running.</li>
+        <li>Run <code>Get-Service npcap -ErrorAction SilentlyContinue</code> and confirm Npcap is installed.</li>
       </ul>
 
+      <p><strong>Recommended PowerShell check block:</strong></p>
+      <pre>Get-Service PacketraAgent -ErrorAction SilentlyContinue
+Get-Service sshd -ErrorAction SilentlyContinue
+Get-Service npcap -ErrorAction SilentlyContinue
+where.exe RemoteCaptureAgent.exe
+where.exe ssh.exe</pre>
+
+      <p>If the MSI fails while preparing prerequisites or the service, check the bootstrap log too:</p>
+      <pre>Get-Content "$env:TEMP\PacketraAgent-bootstrap.log" -ErrorAction SilentlyContinue</pre>
+
       <p><strong>Connecting from Packetra:</strong></p>
-      <p>After verifying the service, return to Packetra, add the Windows Host IP/credentials in the Remote Interfaces tab, select OS as <code>windows</code>, and click <strong>Connect & Load Interfaces</strong>. Packetra will securely SSH into the Windows machine and communicate directly with the running Agent Service to capture packets seamlessly.</p>
+      <p>After verifying the service, return to Packetra, add the Windows Host IP/credentials in the Remote Interfaces tab, select OS as <code>windows</code>, and click <strong>Connect &amp; Load Interfaces</strong>. Packetra only needs SSH connectivity from the server side at this point; the client machine should already have everything else prepared by the MSI.</p>
     </section>
 
     <section class="panel" id="remove">
       <h2>14. Remove the Windows Agent completely</h2>
-      <p>Depending on how the agent was installed (as Admin or standard User), it may be located in <code>C:\Program Files\RemoteCaptureAgent</code>, <code>C:\Program Files\PacketraAgent</code>, or <code>%LocalAppData%\Programs\PacketraAgent</code>. If it is running as a service, the service name is usually <code>PacketraAgent</code>.</p>
+      <p>The installed service name is <code>PacketraAgent</code>. Depending on how it was installed, the executable may live under <code>C:\Program Files\PacketraAgent</code> or a user-local app directory.</p>
       
-      <h3>Step 1: Find the exact Agent path</h3>
-      <p>Open <b>PowerShell (Run as Administrator)</b> and run this script to locate all agent files:</p>
-      <pre>$p = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\PacketraAgent' -ErrorAction SilentlyContinue).ImagePath
-if ($p) { Write-Host "[+] Found Service Path: $p" -ForegroundColor Green }
-$paths = @(
-    "C:\RemoteCaptureAgent",
-    "C:\Program Files\RemoteCaptureAgent",
-    "C:\Program Files\PacketraAgent",
-    "$env:LOCALAPPDATA\Programs\PacketraAgent"
-)
-foreach ($path in $paths) {
-    if (Test-Path $path) { Write-Host "[+] Found Directory: $path" -ForegroundColor Cyan }
-}</pre>
+      <h3>Step 1: Find the exact Agent path and current service state</h3>
+      <p>Open <b>PowerShell (Run as Administrator)</b> and run:</p>
+      <pre>$svc = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\PacketraAgent' -ErrorAction SilentlyContinue
+$img = $svc.ImagePath
+if ($img) { Write-Host "[+] Service ImagePath: $img" -ForegroundColor Green }
+Get-Service PacketraAgent -ErrorAction SilentlyContinue
+where.exe RemoteCaptureAgent.exe</pre>
 
-      <h3>Step 2: Stop and remove the service (if any)</h3>
-      <p>If a service was found, stop and delete it:</p>
+      <h3>Step 2: Use MSI maintenance first</h3>
+      <p>If you still have the same <code>PacketraAgent.msi</code> installer, run it again first. Windows Installer should offer <strong>Repair</strong> or <strong>Remove</strong>. Choose <strong>Remove</strong> for the cleanest supported uninstall path.</p>
+
+      <h3>Step 3: Manual cleanup if the service or files remain</h3>
+      <p>If the MSI remove path leaves remnants behind, stop and remove the service manually:</p>
       <pre>sc.exe stop PacketraAgent
 sc.exe delete PacketraAgent
 taskkill /f /im RemoteCaptureAgent.exe</pre>
 
-      <h3>Step 3: Delete the Agent files</h3>
-      <p>Delete the directory found in Step 1. <b>Note:</b> If the folder is inside <code>C:\Program Files\...</code>, you must use an Administrator prompt or File Explorer.</p>
+      <p>Then delete the remaining install directory. If the folder is inside <code>C:\Program Files\...</code>, use an Administrator prompt or File Explorer:</p>
       <ul>
         <li><b>Method A (File Explorer):</b> Navigate to <code>C:\Program Files</code>, right-click the Agent folder, and select Delete. Click <b>Continue</b> when prompted for Administrator permission.</li>
-        <li><b>Method B (PowerShell as Admin):</b> Replace <code>C:\path\to\AgentFolder</code> with the path you found:</li>
+        <li><b>Method B (PowerShell as Admin):</b> Replace <code>C:\path\to\AgentFolder</code> with the real path you found:</li>
       </ul>
       <pre>Remove-Item -Recurse -Force "C:\path\to\AgentFolder"</pre>
 
+      <h3>Step 4: Optional prerequisite cleanup</h3>
+      <p>Normally you can leave OpenSSH and Npcap installed, especially if other tools use them. If you really want to remove them too, do so separately and only if you know they are not needed elsewhere:</p>
+      <pre>Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Remove-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0</pre>
+
+      <p>Npcap should usually be removed through Apps &amp; Features or the Npcap uninstaller instead of deleting files manually.</p>
+
       <h3>Verify removal</h3>
-      <p>After cleanup, run the script from Step 1 again. It should return nothing.</p>
+      <p>After cleanup, run the checks again:</p>
+      <pre>Get-Service PacketraAgent -ErrorAction SilentlyContinue
+where.exe RemoteCaptureAgent.exe</pre>
+      <p>The service should no longer appear and the executable path should no longer resolve.</p>
     </section>
     </div>
   </div>

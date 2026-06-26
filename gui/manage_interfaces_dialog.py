@@ -639,9 +639,9 @@ if __name__ == '__main__':
         load_btn.clicked.connect(self._on_load_remote_interfaces)
         btn_layout.addWidget(load_btn)
 
-        download_btn = QPushButton('Download Agent')
-        download_btn.clicked.connect(self._on_download_agent)
-        btn_layout.addWidget(download_btn)
+        install_btn = QPushButton('Install Agent')
+        install_btn.clicked.connect(self._on_install_agent)
+        btn_layout.addWidget(install_btn)
 
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -793,12 +793,12 @@ if __name__ == '__main__':
     def _on_load_remote_interfaces(self):
         row = self.remote_table.currentRow()
         if row < 0:
-            QMessageBox.information(self, 'Remote Interfaces', 'Please select a remote host row first.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         config = self._remote_row_to_config(row)
         if not config['host'] or not config['username']:
-            QMessageBox.warning(self, 'Missing Fields', 'Host and Username are required to connect.')
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
             return
 
         try:
@@ -815,7 +815,10 @@ if __name__ == '__main__':
             iface_names = client.list_interfaces()
             client.close()
         except Exception as exc:
-            QMessageBox.critical(self, 'Remote Connect Failed', f'Cannot load interfaces:\n{exc}')
+            import logging
+            message = str(exc or '').strip() or 'Cannot connect to remote agent.'
+            logging.getLogger(__name__).warning('Remote interface load failed: %s', message)
+            QMessageBox.critical(self, 'ERROR', message)
             return
 
         interfaces = []
@@ -943,46 +946,37 @@ if __name__ == '__main__':
     def _apply_remote_interfaces_to_ui(self, remote_interfaces):
         self._settings().setValue('remote_interfaces', json.dumps(remote_interfaces))
 
-    def _on_download_agent(self):
-        # We now assume packetra-remote-agent.zip is bundled with the application.
-        # Check if the ZIP exists in the data dir.
+    def _download_agent_package(self):
+        # Packetra bundles the remote agent zip that contains PacketraAgent.msi.
         zip_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'packetra-remote-agent.zip')
         if not os.path.exists(zip_src):
-            QMessageBox.warning(
-                self, 
-                'Agent Not Found', 
-                f'The pre-compiled agent installer was not found at:\n{zip_src}\n\n'
-                'Please compile it using build_agent_msi.py and zip it first.'
-            )
-            return
+            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            return None
 
         target_file, _ = QFileDialog.getSaveFileName(self, 'Save Remote Agent Installer Package', 'packetra-remote-agent.zip', 'ZIP Archive (*.zip)')
         if not target_file:
-            return
+            return None
 
         import shutil
         try:
             shutil.copy2(zip_src, target_file)
         except OSError as exc:
-            QMessageBox.critical(self, 'Download Agent', f'Cannot write agent package:\n{exc}')
-            return
+            import logging
+            logging.getLogger(__name__).exception('Cannot write agent package')
+            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            return None
 
+        return target_file
+
+    def _show_agent_text_dialog(self, title, text):
         dialog = QDialog(self)
-        dialog.setWindowTitle('Download Agent - Instructions')
+        dialog.setWindowTitle(title)
         dialog.resize(600, 350)
         layout = QVBoxLayout(dialog)
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setPlainText(
-            'Agent package saved successfully.\n\n'
-            f'Package: {target_file}\n\n'
-            'Windows remote setup:\n'
-            '1) Copy packetra-remote-agent.zip to the remote Windows host and extract it.\n'
-            '2) Run the extracted PacketraAgent.msi installer.\n'
-            '3) The installer will install the agent and start it as a Windows Service that automatically runs on boot.\n\n'
-            'That\'s it! You can now connect to this host from Packetra.'
-        )
-        layout.addWidget(text)
+        text_box = QTextEdit()
+        text_box.setReadOnly(True)
+        text_box.setPlainText(text)
+        layout.addWidget(text_box)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         close_btn = QPushButton('Close')
@@ -990,6 +984,19 @@ if __name__ == '__main__':
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
         dialog.exec()
+
+    def _on_install_agent(self):
+        target_file = self._download_agent_package()
+        if not target_file:
+            return
+
+        self._show_agent_text_dialog(
+            'Install Agent',
+            f'Packetra remote agent package downloaded successfully.\n\n'
+            f'Package: {target_file}\n\n'
+            'This button only downloads the ZIP file. It does not attach the package to any remote host.\n'
+            'You can move the ZIP wherever you need afterward.'
+        )
     
     # ===== SAVE/LOAD =====
     
