@@ -13,3 +13,21 @@ scrap/
 __pycache__/
 *.pyc
 .venv/
+
+# LaTeX project
+DATN-LATEX/.vscode/
+DATN-LATEX/build/
+DATN-LATEX/**/*.aux
+DATN-LATEX/**/*.bbl
+DATN-LATEX/**/*.bcf
+DATN-LATEX/**/*.blg
+DATN-LATEX/**/*.fdb_latexmk
+DATN-LATEX/**/*.fls
+DATN-LATEX/**/*.lof
+DATN-LATEX/**/*.log
+DATN-LATEX/**/*.lot
+DATN-LATEX/**/*.out
+DATN-LATEX/**/*.run.xml
+DATN-LATEX/**/*.synctex.gz
+DATN-LATEX/**/*.toc
+DATN-LATEX/**/*.xdv

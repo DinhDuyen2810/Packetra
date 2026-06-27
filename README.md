@@ -1,566 +1,1083 @@
 # DATN-Packetra
 
-## 1. Introduction
+## 1. Tổng quan
 
-`DATN-Packetra` is a desktop network analysis application built with Python and PySide6. It is designed for study, demonstrations, packet inspection, flow-based traffic analysis, and AI-assisted anomaly interpretation inside a single GUI.
+`DATN-Packetra` là đồ án xây dựng một phần mềm phân tích gói tin mạng bằng Python và PySide6. Hệ thống không chỉ dừng ở việc mở file PCAP/PCAPNG và xem từng gói tin, mà còn nối liền nhiều lớp chức năng trong cùng một ứng dụng:
 
-The project is aimed at:
+- bắt gói tin trực tiếp
+- mở và lưu file capture
+- phân tích gói tin theo từng giao thức
+- lọc, tìm kiếm, theo dõi stream
+- gom gói tin thành flow
+- xuất dữ liệu flow ra CSV
+- phân tích hành vi flow bằng mô hình AI
+- hiển thị dashboard
+- trực quan hóa topology
+- hỗ trợ remote capture qua SSH hoặc agent Windows
 
-- students learning packet analysis
-- users who need a simpler learning path than Wireshark for selected workflows
-- researchers working with PCAP-to-flow-to-CSV pipelines
-- demo and lab environments that need packet inspection, topology, dashboards, and AI analysis together
+Nói ngắn gọn, đây là một công cụ phân tích mạng thiên về học tập, thực hành, minh họa và khảo sát kỹ thuật, với ý tưởng chính là đưa các lớp quan sát từ thấp đến cao vào cùng một môi trường làm việc.
 
-Packetra is not only a capture viewer. It combines multiple analysis layers in one application:
+## 2. Mục tiêu đồ án
 
-- packet-level inspection
-- flow extraction
-- CSV export
-- dashboard visualization
-- topology visualization
-- demo capture workflows
-- remote capture
-- AI Analyst for flow-based behavioral analysis
+Đồ án hướng tới các mục tiêu chính sau:
 
-## 2. Project Goals
+- giúp người dùng quan sát lưu lượng mạng dễ hơn so với việc chỉ nhìn từng gói tin rời rạc
+- kết nối được hai góc nhìn: mức gói tin và mức flow
+- tạo ra pipeline rõ ràng từ `capture -> packet -> flow -> CSV -> AI -> dashboard/topology`
+- hỗ trợ đọc kết quả theo hướng trực quan hơn
+- dùng được trong bối cảnh học tập, demo, thực hành phân tích mạng và điều tra kỹ thuật quy mô nhỏ đến trung bình
 
-The project targets the following outcomes:
+## 3. Ứng dụng này làm gì từ đầu đến cuối
 
-- make packet capture analysis easier to approach for new users
-- combine packet-level and flow-level analysis in one GUI
-- support the pipeline `PCAP -> Flow -> CSV -> AI prediction`
-- provide visual summaries through dashboards and topology
-- support demo scenarios for teaching and presentations
-- provide a foundation for more explainable AI-assisted traffic analysis
-
-## 3. Problem Statement
-
-Many beginners can open a capture file but still struggle to answer practical questions such as:
-
-- what happened in this traffic?
-- which flows are normal and which are suspicious?
-- is this behavior an attack, and if so, what type?
-- how can the result be explained clearly to a non-expert?
-
-Packetra addresses that gap by:
-
-- showing packets in a familiar table-driven workflow
-- parsing packets into readable protocol trees
-- aggregating packets into flows
-- exporting AI-ready flow features
-- running model inference on extracted flows
-- presenting results through summaries, dashboards, and topology
-
-## 4. Main Features
-
-### 4.1 Packet Analysis
-
-- Open `.pcap` and `.pcapng` files.
-- Start and stop live capture.
-- View packet list, packet details, and packet bytes.
-- Search, filter, mark, ignore, comment, follow stream, and copy data.
-- Use transport, MAC, and network name resolution options.
-- Export or split packet subsets into new capture files.
-
-### 4.2 Flow Analysis
-
-- Group packets into flows through the internal flow engine.
-- Export flow features to CSV.
-- Support CIC-style feature extraction for downstream ML workflows.
-- Analyze selected packets, filtered packets, or entire captures.
-
-### 4.3 AI Analyst
-
-- Run behavioral analysis on extracted flows.
-- Display action summaries and model predictions.
-- Help correlate packet evidence with flow-level results.
-- Support demo workflows for malicious or benign traffic examples.
-
-### 4.4 Dashboard
-
-- Built-in dashboard templates.
-- User dashboards stored separately from templates.
-- Create, rename, edit, save, import, and export dashboards.
-- Multiple widget types for protocol mix, timelines, top talkers, conversations, and more.
-
-### 4.5 Topology
-
-- Visualize host-to-host relationships.
-- Show traffic edges and communication patterns.
-- Help explain who is talking to whom at a glance.
-
-### 4.6 Demo Packet
-
-- Load demo captures from `demo/`.
-- Select demos by action name instead of numeric ID only.
-- Use demo traffic for teaching, testing, and UI walkthroughs.
-
-### 4.7 Remote Capture
-
-- Remote Linux capture over SSH with `tcpdump`.
-- Remote Windows capture through the Packetra remote agent flow.
-- Remote interface management inside the GUI.
-
-### 4.8 Help and HTML Documentation
-
-The `help/` folder contains end-user documentation in HTML, including:
-
-- general user guide
-- capture workflow guide
-- capture filter guide
-- display filter reference
-- dashboard guide
-- remote capture guide
-
-## 5. High-Level Architecture
-
-Packetra can be understood as five layers:
-
-1. Input layer
-   - local live capture
-   - remote capture
-   - open saved PCAP/PCAPNG files
-   - demo capture loading
-
-2. Packet analysis layer
-   - packet parsing
-   - packet list rendering
-   - detail tree generation
-   - byte/hex rendering
-   - display filtering and search
-
-3. Flow analysis layer
-   - flow grouping
-   - feature extraction
-   - CSV export
-
-4. AI layer
-   - model loading
-   - preprocessing and scaling
-   - inference
-   - summary generation
-
-5. Presentation layer
-   - dashboards
-   - topology
-   - dialogs, reports, and summaries
-
-### Overall Workflow
+Luồng xử lý của hệ thống có thể tóm tắt như sau:
 
 ```text
-Capture or open file
--> Parse packets
--> Show packet list / details / bytes
--> Group packets into flows
--> Export or analyze features
--> Run AI prediction
--> Present results in tables, summaries, dashboards, and topology
+Nguồn dữ liệu
+-> bắt trực tiếp / mở file / nhận stream remote / dùng demo
+-> giải mã từng packet
+-> dựng danh sách packet + chi tiết + bytes
+-> áp dụng display filter / tìm kiếm / follow stream / thống kê
+-> gom packet thành flow
+-> tính đặc trưng flow
+-> xuất CSV hoặc đưa vào mô hình AI
+-> nhận nhãn dự đoán / tóm tắt hành vi
+-> trình bày lại qua bảng, topology, dashboard
 ```
 
-## 6. Folder Structure
+Chi tiết hơn:
 
-### 6.1 Top-Level Layout
+1. Người dùng chọn một interface cục bộ, interface remote, named pipe, file PCAP/PCAPNG hoặc file demo.
+2. Hệ thống thu packet thô và giải mã bằng Scapy.
+3. `PacketParser` chuyển packet thành `PacketRecord`, gắn thông tin thời gian, nguồn, đích, giao thức, cổng, info, metadata và quan hệ stream.
+4. Giao diện hiển thị packet list, packet details tree, byte/hex view.
+5. Người dùng có thể lọc, tìm, mark, ignore, comment, xem conversations, statistics, capture properties, topology, expert info, ...
+6. Khi cần phân tích hành vi, hệ thống gom packet thành các flow hai chiều.
+7. Từ flow, hệ thống trích xuất bộ đặc trưng kiểu CIC để xuất CSV hoặc chạy suy luận AI.
+8. AI trả về nhãn và độ tin cậy cho từng flow, đồng thời bộ `BehaviorAnalyzer` tạo ra mô tả hành vi ở mức dễ đọc.
+9. Dashboard và topology dùng dữ liệu packet hiện đang hiển thị để tạo góc nhìn tổng hợp.
 
-| Path | Purpose |
+## 4. Các nhóm chức năng chính
+
+## 4.1. Nhóm capture
+
+Hệ thống hỗ trợ nhiều nguồn capture khác nhau:
+
+- live capture cục bộ qua Npcap trên Windows
+- đọc stream PCAP/PCAPNG từ named pipe Windows
+- remote capture trên Linux qua SSH và `tcpdump`
+- remote capture trên Windows qua `PacketraAgent`
+- mở file `.pcap` và `.pcapng`
+- dùng bộ demo trong thư mục `demo/`
+
+Các thao tác liên quan:
+
+- start / stop / restart capture
+- cấu hình capture filter
+- chọn promiscuous mode
+- cập nhật realtime
+- tự cuộn khi đang bắt gói
+- tự lưu output theo file format và nén
+- rollover theo số packet, kích thước, thời lượng, thời điểm
+
+## 4.2. Nhóm phân tích packet
+
+Đây là phần cốt lõi của ứng dụng:
+
+- bảng packet list
+- cây packet details
+- cửa sổ byte/hex
+- hiển thị giao thức, thời gian, chiều dài, cổng, info
+- tính stream index cho Ethernet, IPv4, IPv6, TCP, UDP
+- gắn metadata cho request/response của nhiều giao thức
+- hỗ trợ follow luồng giao tiếp
+- giữ comment cho capture và cho từng packet
+- xử lý pcapng metadata như interface, file comment, packet comment
+
+## 4.3. Nhóm display filter và tìm kiếm
+
+Ứng dụng có engine display filter riêng trong `core/filtering.py`, không phụ thuộc Wireshark.
+
+Filter engine hỗ trợ:
+
+- toán tử logic `and`, `or`, `not`
+- so sánh `==`, `!=`, `<`, `>`, `<=`, `>=`
+- toán tử `contains`
+- protocol aliases cho nhiều giao thức
+- field filtering như:
+  - `frame.number`
+  - `frame.len`
+  - `protocol`
+  - `src`, `dst`
+  - `eth.src`, `eth.dst`
+  - `ip.src`, `ip.dst`, `ip.ttl`
+  - `tcp.port`, `tcp.srcport`, `tcp.dstport`, `tcp.stream`
+  - `udp.port`, `udp.srcport`, `udp.dstport`
+  - `dns.*`, `http.*`, `tls.*`, `smb2.*`, ...
+- protocol hierarchy path để phục vụ lọc sâu hơn
+
+Ngoài filter, hệ thống còn có:
+
+- tìm packet theo nhiều kiểu
+- regex search
+- case sensitivity
+- điều hướng next / previous / first / last
+
+## 4.4. Nhóm thống kê và phân tích hỗ trợ
+
+Trong giao diện có nhiều cửa sổ và công cụ phụ:
+
+- capture summary
+- conversations
+- protocol distribution
+- capture file properties
+- capture information theo thời gian thực
+- expert information
+- custom expert items
+- firewall ACL bundle generator
+
+Phần sinh luật tường lửa không chỉ là một hộp thoại phụ. Trong `core/firewall_acl.py`, hệ thống còn có thể lấy thông tin từ packet đang chọn để tạo rule mẫu cho nhiều hệ tường lửa khác nhau như:
+
+- Cisco IOS ACL
+- IP Filter
+- IPFirewall
+- Netfilter `iptables`
+- Packet Filter `pf`
+- Windows Firewall `netsh`
+
+Các rule này có thể được sinh theo nhiều kiểu khác nhau, ví dụ theo IP nguồn, IP đích, cổng TCP/UDP, cặp IP, hoặc cặp IP kèm cặp cổng.
+
+## 4.5. Nhóm flow và xuất CSV
+
+Flow engine nằm trong `core/flow_engine/`.
+
+Các khả năng chính:
+
+- gom packet thành flow hai chiều
+- dùng `FlowKey` và `PacketraFlow` để quản lý từng flow
+- hỗ trợ timeout flow
+- có chế độ tương thích kiểu CIC
+- xuất flow ra nhiều định dạng CSV
+
+Các đường xuất chính:
+
+- CSV header đầy đủ theo bộ đặc trưng nội bộ
+- CSV tương thích CIC
+- CSV CIC dạng legacy
+- CSV source-oriented
+- xuất từ packet list đang chọn
+- xuất trực tiếp từ file pcap
+
+## 4.6. Nhóm AI
+
+AI trong repo hiện tại là suy luận trên flow, không phải suy luận trực tiếp trên từng packet.
+
+Vai trò của lớp AI:
+
+- chuẩn hóa dữ liệu flow
+- scale đặc trưng
+- nạp label encoder
+- nạp model TorchScript
+- dự đoán nhãn cho từng flow
+- trả về `prediction`, `label`, `confidence`, `anomaly_score`
+
+Ngoài model, hệ thống còn có lớp `BehaviorAnalyzer` để diễn giải hành vi theo rule-based summary, ví dụ:
+
+- port scan
+- SYN scan / SYN flood
+- UDP scan / UDP flood
+- DNS anomaly
+- SSH suspicious activity
+- ICMP anomaly
+
+Nghĩa là AI không chỉ trả nhãn, mà ứng dụng còn cố gắng biến kết quả thành đoạn mô tả dễ hiểu hơn.
+
+## 4.7. Nhóm dashboard
+
+Dashboard là một hệ thống riêng khá hoàn chỉnh:
+
+- model dữ liệu dashboard
+- repository lưu template và dashboard người dùng
+- service layer quản lý tạo, sửa, lưu, nhân bản, import/export
+- query engine
+- advanced query helpers
+- visualization registry
+- editor dashboard
+- overview dashboard
+- thumbnail cache
+
+Về mặt truy vấn dữ liệu, dashboard không chỉ lấy dữ liệu rồi vẽ ngay, mà còn có một lớp xử lý trung gian:
+
+- ghép bộ lọc toàn cục và bộ lọc riêng của từng widget
+- lọc theo biểu thức
+- group theo một hay nhiều trường
+- tính metric như `count`, `distinct_count`, `sum`, `avg`, `min`, `max`, `first`, `last`
+- chia bucket thời gian như `1s`, `1m`, `1h`
+- sort, limit và chọn cột hiển thị
+
+Ngoài query engine chính, file `gui/dashboard/advanced_queries.py` còn có thêm các công cụ phân tích phụ như:
+
+- tạo pivot table
+- lấy top N / bottom N
+- tìm outlier theo độ lệch chuẩn
+- so sánh theo các khoảng thời gian
+- tạo drilldown filter từ dữ liệu người dùng vừa bấm trên biểu đồ
+
+Các visualization có trong build hiện tại:
+
+- `metric`
+- `table`
+- `bar`
+- `horizontal_bar`
+- `line`
+- `area`
+- `scatter`
+- `radar`
+- `treemap`
+- `sunburst`
+- `pie`
+- `donut`
+- `histogram`
+- `heatmap`
+- `topology`
+
+Các data source cho dashboard:
+
+- `packets`
+- `endpoints`
+- `conversations`
+- `protocol_stats`
+- `dns_queries`
+- `http_requests`
+
+Dashboard mặc định được seed trong `data/dashboard_templates/` gồm nhiều mẫu như:
+
+- Network Overview
+- Protocol Analysis
+- Security Investigation
+- Endpoint Activity
+- Timeline Analysis
+- Topology View
+- DNS Analysis
+- HTTP/TLS Analysis
+
+Ngoài các dashboard mẫu đầy đủ, repository dashboard còn tự dựng một nhóm chart template rút gọn từ các widget mẫu để người dùng có thể tạo nhanh từng biểu đồ lẻ.
+
+Dashboard người dùng được lưu ở:
+
+- `data/dashboards/user_dashboards.json`
+
+## 4.8. Nhóm topology
+
+Topology dùng `QGraphicsView/QGraphicsScene` để trực quan hóa quan hệ giao tiếp:
+
+- node đại diện cho host / endpoint
+- edge đại diện cho quan hệ truyền thông
+- zoom, pan, chọn node/edge
+- kết hợp với conversation stats để giải thích “ai đang nói chuyện với ai”
+
+## 4.9. Nhóm remote capture
+
+Có hai hướng remote capture:
+
+### Linux remote capture
+
+- dùng SSH qua `paramiko`
+- gọi `tcpdump -U -w -`
+- stream dữ liệu PCAP về ứng dụng
+- giao diện quản lý danh sách remote host và interface
+
+### Windows remote capture
+
+- dùng `PacketraAgent`
+- agent có thể:
+  - liệt kê interface
+  - stream packet ra stdout theo định dạng pcap
+  - chạy như Windows service
+  - bootstrap OpenSSH + Npcap + service
+
+File liên quan:
+
+- `agent/agent_service.py`
+- `agent/build_agent_msi.py`
+- `data/packetra-remote-agent.zip`
+
+## 4.10. Nhóm tài liệu và trợ giúp
+
+Repo có bộ tài liệu người dùng khá đầy đủ trong `help/`:
+
+- `help/index.html`
+- `help/user_guide.html`
+- `help/capture_workflow.html`
+- `help/capture_filter_guide.html`
+- `help/filter_reference.html`
+- `help/dashboard_guide.html`
+- `help/find_guide.html`
+- `help/agent_guide.html`
+- `help/agent_guide.md`
+
+Ngoài ra còn có phần báo cáo đồ án và tài liệu nghiên cứu trong `scrap/`:
+
+- `scrap/DATN/` chứa báo cáo LaTeX
+- `scrap/full train kaggle.md` chứa notebook / ghi chép huấn luyện rất dài
+- `scrap/huong_dan_viet_quyen_do_an_latex.md` là ghi chú viết báo cáo
+
+## 5. Cấu trúc thư mục thực tế của repo
+
+Lưu ý: repo hiện tại **không có** thư mục `docs/` ở root. Phần báo cáo và ghi chép đang nằm trong `scrap/`.
+
+| Đường dẫn | Vai trò |
 | --- | --- |
-| `ai/` | Model artifacts, scaler, metadata, label definitions |
-| `core/` | Parsing, formatting, filtering, flow engine, AI backend logic |
-| `data/` | Dashboard templates and user dashboard data |
-| `demo/` | Demo capture files and demo metadata |
-| `docs/` | Supporting project documents and research notes |
-| `gui/` | Full PySide6 user interface |
-| `help/` | HTML end-user documentation |
-| `image/` | Icons and UI assets |
-| `utils/` | Capture IO, system checks, helper utilities |
-| `agent/` | Remote capture agent packaging and related files |
-| `main.py` | Application entry point |
-| `README.html` | Quick-start HTML guide |
-| `README.md` | Project overview and technical documentation |
+| `main.py` | Entry point chạy ứng dụng |
+| `requirements.txt` | Danh sách dependency Python |
+| `core/` | Lõi bắt gói, parser, filter, stream, flow engine, remote capture |
+| `gui/` | Giao diện PySide6 và phần điều phối chức năng |
+| `utils/` | Hỗ trợ IO capture, kiểm tra Npcap, compile check, parser pcapng |
+| `ai/` | Artifact AI phục vụ suy luận |
+| `data/` | Dashboard template, dashboard người dùng, gói agent |
+| `demo/` | Bộ file demo `.pcapng` |
+| `help/` | Tài liệu HTML và hướng dẫn dùng hệ thống |
+| `image/` | Icon, hình topo, hình layout, toolbar asset |
+| `agent/` | Mã agent remote capture trên Windows |
+| `scrap/` | Báo cáo đồ án LaTeX và ghi chép nghiên cứu/huấn luyện |
 
-### 6.2 Important Source Files
+## 6. Các file và module quan trọng
 
-| File | Role |
-| --- | --- |
-| `main.py` | Starts the application, performs environment checks, opens the main window |
-| `gui/application.py` | Main application controller and menu/action wiring |
-| `gui/capture_view.py` | Packet table, packet details, bytes view, filter, save/load, capture flow |
-| `gui/dashboard/` | Dashboard overview, editor, services, visualization |
-| `core/parser.py` | Packet parsing and protocol inference |
-| `core/formatters.py` | Packet summary tree, detail formatting, display helpers |
-| `core/filtering.py` | Display-filter engine |
-| `core/flow_engine/feature_extractor.py` | Flow extraction and feature generation |
-| `core/flow_engine/model_adapter.py` | Model loading and inference |
-| `utils/pcap_io.py` | Capture read/write and metadata helpers |
-| `utils/system_check.py` | Npcap and environment diagnostics |
+## 6.1. Entry point
 
-## 7. Core Concepts
+### `main.py`
 
-### 7.1 Packet
+Nhiệm vụ:
 
-A packet is the smallest network unit Packetra works with directly when reading a capture or consuming live traffic.
+- thiết lập biến môi trường để giảm log thừa
+- khởi tạo `QApplication`
+- kiểm tra Npcap trên Windows
+- tạo `ApplicationWindow`
+- resize và canh giữa cửa sổ chính
 
-### 7.2 PCAP / PCAPNG
+## 6.2. Giao diện chính
 
-These are the raw capture file formats Packetra opens and saves.
+### `gui/application.py`
 
-- `PCAP` is the classic capture format.
-- `PCAPNG` supports richer metadata such as comments and interface information.
+Đây là file lớn nhất và cũng là trung tâm điều phối của toàn bộ ứng dụng. File này phụ trách:
 
-### 7.3 Flow
+- tạo main window
+- menu bar, toolbar, action
+- điều phối `CaptureView`
+- tích hợp dashboard
+- tích hợp AI export / AI analyze
+- quản lý remote interface
+- hiển thị topology
+- quản lý preferences và `QSettings`
+- mở các cửa sổ thống kê, conversation, expert info, capture properties, ...
 
-A flow is a logical communication unit built from packets that share transport and endpoint characteristics. Flow-based analysis provides better behavioral context than isolated packets.
+### `gui/capture_view.py`
 
-### 7.4 Flow CSV
+Đây là widget quan trọng nhất cho phần làm việc với capture:
 
-This is the exported tabular representation of extracted flows. Each row represents one flow, not one packet.
+- duy trì `records` và `visible_indices`
+- quản lý live capture và file load
+- packet table
+- details tree
+- bytes view
+- display filter
+- mark / ignore / comment
+- save / load capture
+- conversation highlight
+- protocol sparkline
+- packet minimap
+- file format view
+- file load thread và refine thread
 
-### 7.5 Label
+### Các file giao diện liên quan
 
-A label is the target class used by training or prediction, for example:
+- `gui/packet_table.py`: bảng packet
+- `gui/packet_details.py`: cây chi tiết packet
+- `gui/hex_view.py`: khung byte/hex
+- `gui/conversations_dialog.py`: thống kê conversation theo Ethernet / IPv4 / IPv6 / TCP / UDP
+- `gui/interface_selector.py`, `gui/interface_selector_view.py`: chọn interface
+- `gui/manage_interfaces_dialog.py`: quản lý interface local/remote
+- `gui/filter_drag.py`: ô nhập filter và các thao tác kéo/thả filter
+- `gui/global_style.py`: theme giao diện
 
+## 6.3. Capture backend
+
+### `core/capture.py`
+
+File này thực hiện:
+
+- local capture với `scapy.sniff`
+- remote capture đọc stream PCAP/PCAPNG
+- named pipe capture trên Windows
+- nhận biết interface identity để lọc packet khi không promiscuous
+- decode packet theo `linktype`
+- hỗ trợ Ether, IPv4, IPv6, Linux cooked capture, frame preemption / mPacket
+
+Hai lớp chính:
+
+- `PacketSniffer`
+- `RemotePacketSniffer`
+
+## 6.4. Parser
+
+### `core/parser.py`
+
+Đây là parser lớn và rất nặng chức năng. Nó chịu trách nhiệm:
+
+- chuyển packet Scapy thành `PacketRecord`
+- tính thời gian tương đối, delta thời gian
+- đoán giao thức
+- dựng `info` tương tự packet summary
+- quản lý state cho nhiều giao thức
+- quản lý request/response, stream và metadata
+
+Parser theo dõi nhiều ngữ cảnh như:
+
+- TCP stream
+- DNS request/response
+- HTTP
+- SMTP
+- IMAP
+- SIP
+- SNMP
+- WHOIS
+- ICMP echo
+- ICMPv6 echo
+- TLS
+- QUIC
+- SMB2
+- DCERPC
+- LDAP
+- FTP
+- TFTP
+- RADIUS
+- NTP
+- SSH
+- Kerberos
+- H.264 over TS
+
+Nói cách khác, parser không chỉ đọc field đơn giản, mà còn giữ trạng thái để tạo ra thông tin phân tích có ngữ cảnh hơn.
+
+## 6.5. Formatter cho packet details và byte mapping
+
+### `core/formatters.py`
+
+Đây là file rất lớn và rất quan trọng cho trải nghiệm phân tích packet. Nếu `core/parser.py` tạo ra `PacketRecord`, thì `core/formatters.py` chịu trách nhiệm dựng cây chi tiết để hiển thị trong panel packet details và liên kết từng node với vùng byte tương ứng.
+
+Vai trò chính:
+
+- dựng cây phân tích cho rất nhiều giao thức
+- ánh xạ node phân tích sang offset/length trong dữ liệu gốc
+- hỗ trợ nhiều nguồn byte khác nhau như packet gốc, TCP reassembled payload, payload đã giải mã UTF-8, payload sau giải nén, ...
+- hiển thị các đoạn reassembly và expert-style explanation theo dạng cây
+
+Phần này là lý do vì sao ứng dụng không chỉ có bảng packet, mà còn có thể mở rộng xuống mức bóc tách từng lớp giao thức khá sâu ngay trong giao diện.
+
+## 6.6. Filter engine
+
+### `core/filtering.py`
+
+Chứa lớp `DisplayFilter`:
+
+- tokenizer cho biểu thức
+- parser logic
+- evaluator trên `PacketRecord`
+- protocol alias map
+- hierarchy path support
+- field resolution cho nhiều lớp giao thức
+
+Đây là một thành phần quan trọng vì dashboard, tìm kiếm và điều hướng phân tích đều hưởng lợi từ packet scope đã lọc.
+
+## 6.7. Flow engine
+
+### `core/flow_engine/flow_key.py`
+
+- chuẩn hóa endpoint
+- tạo khóa flow hai chiều
+
+### `core/flow_engine/flow.py`
+
+- lưu thống kê của một flow
+- tính duration, IAT, packet length stats, flags, bulk stats, active/idle stats
+
+### `core/flow_engine/feature_extractor.py`
+
+- đọc packet list hoặc file pcap
+- gom packet thành flow
+- có `cic_compat_mode`
+- tạo feature row
+
+### `core/flow_engine/csv_exporter.py`
+
+- xuất ra nhiều schema CSV
+- hỗ trợ export từ packet list hoặc từ file pcap
+
+### `core/flow_engine/model_adapter.py`
+
+- nạp model
+- chuẩn hóa feature matrix
+- support TorchScript, XGBoost, sklearn-style model
+
+### `core/flow_engine/behavior_analyzer.py`
+
+- rule-based summary cho flow
+- kết hợp với dự đoán model
+
+## 6.8. Dashboard
+
+### `gui/dashboard/models.py`
+
+Định nghĩa toàn bộ model dữ liệu:
+
+- `Dashboard`
+- `DashboardWidget`
+- `WidgetQuery`
+- `VisualizationConfig`
+- `DashboardLayout`
+- `DashboardSummary`
+
+### `gui/dashboard/repository.py`
+
+- lưu / đọc dashboard người dùng
+- lưu / đọc template
+- seed template mặc định
+- import/export JSON
+
+### `gui/dashboard/query_engine.py`
+
+- registry data source
+- filter, group_by, metrics, sort, limit, time_bucket, columns
+
+### `gui/dashboard/advanced_queries.py`
+
+- filter parser cho biểu thức dashboard
+- pivot table
+- top N / bottom N
+- outlier detection
+- period comparison
+- drilldown filter
+
+### `gui/dashboard/capture_integration.py`
+
+- nối dữ liệu từ `CaptureView` sang dashboard
+- tạo các data source như `packets`, `endpoints`, `conversations`, `protocol_stats`, `dns_queries`, `http_requests`
+- flatten thêm metadata của packet thành field để query được trực tiếp trong dashboard
+
+### `gui/dashboard/visualization.py`
+
+- renderer cho metric, table, chart, topology
+- chart overlay, inspector, label/font/palette logic
+
+### `gui/dashboard/dashboard_overview.py`
+
+- gallery / overview dashboard
+
+### `gui/dashboard/dashboard_editor.py`
+
+- editor kéo-thả, cấu hình widget, đổi layout
+
+## 6.9. Lưu và đọc file capture
+
+### `utils/pcap_io.py`
+
+Chịu trách nhiệm:
+
+- lưu `pcap`
+- lưu `pcapng`
+- nén `gzip`
+- nén `lz4`
+- đọc metadata pcapng
+- lưu file comment
+- lưu packet comment
+- clone metadata
+- stream packet từ file bằng `iter_pcap_packets`
+- đếm packet nhanh với `get_pcap_packet_count`
+
+Ngoài phần IO mức cao, `utils/pcap_io.py` còn gọi xuống `utils/pcapng_parser.py` để:
+
+- đọc comment mức file
+- đọc comment theo từng packet
+- đọc danh sách interface trong file `pcapng`
+- cập nhật lại file comment
+- cập nhật lại packet comment ngay trong file `pcapng`
+
+## 6.10. Kiểm tra môi trường
+
+### `utils/system_check.py`
+
+Chức năng:
+
+- kiểm tra Npcap trên Windows
+- lấy version, dll path, driver path, service status
+- hỗ trợ logic warning lúc khởi động
+
+### `utils/compile_project.py`
+
+- compile check nhanh cho `main.py`, `core/`, `gui/`, `utils/`
+
+## 6.11. Agent Windows
+
+### `agent/agent_service.py`
+
+File này rất quan trọng cho remote capture Windows. Nó hỗ trợ:
+
+- bootstrap cài OpenSSH
+- bootstrap cài Npcap
+- cài service `PacketraAgent`
+- liệt kê interface
+- stream packet ra stdout
+- chạy như Windows service
+- uninstall service
+
+## 7. Mô hình dữ liệu packet trong hệ thống
+
+`core/models.py` định nghĩa `PacketRecord` với các trường:
+
+- `number`
+- `epoch_time`
+- `relative_time`
+- `length`
+- `src`
+- `dst`
+- `protocol`
+- `info`
+- `layers`
+- `sport`
+- `dport`
+- `stream_hint`
+- `metadata`
+- `raw`
+- `iface`
+- `interface_id`
+- `marked`
+- `ignored`
+- `packet_comment`
+
+`PacketRecord` là bản ghi trung gian quan trọng nhất của toàn ứng dụng. Gần như mọi thành phần đều làm việc với nó.
+
+## 8. Pipeline packet -> flow -> AI chi tiết
+
+## 8.1. Bước 1: nhận packet
+
+Nguồn có thể là:
+
+- live capture local
+- remote capture
+- named pipe
+- file pcap/pcapng
+- demo dataset
+
+## 8.2. Bước 2: parse thành `PacketRecord`
+
+Parser đưa packet vào các trường chuẩn:
+
+- thông tin khung thời gian
+- endpoint
+- cổng
+- giao thức
+- info string
+- metadata giao thức
+
+## 8.3. Bước 3: gom packet thành flow
+
+Flow engine dùng:
+
+- `FlowEndpoint`
+- `FlowKey`
+- `PacketraFlow`
+
+để gom packet cùng quan hệ truyền thông thành flow hai chiều.
+
+## 8.4. Bước 4: trích xuất đặc trưng
+
+`PacketraFlow.to_features()` tạo bộ đặc trưng kiểu IDS / CIC:
+
+- số packet
+- số byte
+- IAT
+- packet length stats
+- flag count
+- ratio
+- active / idle
+- window size
+- segment size
+
+## 8.5. Bước 5: xuất CSV
+
+Hệ thống có thể xuất:
+
+- CSV nội bộ đầy đủ
+- CSV tương thích CIC
+- CSV legacy
+- CSV source-format
+
+## 8.6. Bước 6: AI inference
+
+Model adapter:
+
+- nhận feature row
+- ép kiểu số
+- xử lý `NaN`, `inf`
+- scale bằng `StandardScaler`
+- đưa vào model TorchScript
+- lấy class index
+- map sang label
+
+## 8.7. Bước 7: diễn giải kết quả
+
+Kết quả không chỉ là nhãn, mà còn có:
+
+- severity
+- summary
+- possible_behavior
+- evidence
+- confidence / anomaly_score
+
+## 9. Trạng thái AI hiện tại trong repo
+
+Đây là phần quan trọng cần nói đúng với hiện trạng.
+
+### 9.1. Artifact có trong `ai/`
+
+Hiện repo có:
+
+- `ai/ft_transformer_torchscript.pt`
+- `ai/standard_scaler.pkl`
+- `ai/label_encoder.pkl`
+- `ai/model_info.json`
+
+### 9.2. Model thực tế đang dùng
+
+Theo `gui/application.py`, ứng dụng hiện đang nạp:
+
+- model file: `ft_transformer_torchscript.pt`
+- scaler: `standard_scaler.pkl`
+- label encoder: `label_encoder.pkl`
+- metadata: `model_info.json`
+
+Vì vậy, đường suy luận đóng gói hiện tại là:
+
+- **FT-Transformer TorchScript**
+
+chứ không phải một file XGBoost đang được nạp mặc định trong giao diện.
+
+### 9.3. Điểm lệch giữa metadata và artifact
+
+`ai/model_info.json` vẫn ghi:
+
+- `torchscript_file = ft_transformer_torchscript_cpu.pt`
+- `feature_columns_file = feature_columns.json`
+
+nhưng trong thư mục `ai/` hiện tại:
+
+- không có `ft_transformer_torchscript_cpu.pt`
+- không có `feature_columns.json`
+
+Ứng dụng vẫn chạy được vì:
+
+- file model thực tế được chỉ định cứng từ `gui/application.py`
+- thứ tự feature được sinh từ hằng số `AI_TRAFFIC_COLUMNS` rồi loại các cột metadata
+
+Nói cách khác:
+
+- metadata trong `model_info.json` chưa đồng bộ hoàn toàn với artifact đang commit
+- nhưng logic chạy thực tế đã bù bằng feature order nội bộ
+
+Đây là thông tin rất quan trọng nếu sau này cần tái lập pipeline training hoặc đóng gói lại model.
+
+## 10. Bộ nhãn AI
+
+`model_info.json` đang mô tả bộ nhãn 15 lớp:
+
+- `ARP_Spoofing`
 - `Benign`
+- `Bot`
+- `Brute Force Attacks`
 - `DDoS`
-- `PortScan`
 - `DoS Hulk`
+- `DrDoS_DNS`
+- `DrDoS_MSSQL`
+- `FTP-BruteForce`
+- `Infiltration`
+- `Man-in-the-middle`
+- `PortScan`
+- `Web Attack - Brute Force`
 - `Web Attack - SQL Injection`
+- `Web Attack - XSS`
 
-### 7.6 Feature
+Trong `gui/application.py` còn có một bộ fallback label/description cho phần trình bày kết quả.
 
-Features are the numeric or categorical inputs consumed by the AI model, such as:
+## 11. Bộ dữ liệu demo
 
-- flow duration
-- packet counts
-- byte counts
-- inter-arrival time statistics
-- TCP flag counts
-- segment length metrics
+Thư mục `demo/` chứa rất nhiều file `.pcapng` được đánh số:
 
-## 8. Dataset and Training Data
+- `001.pcapng`
+- `002.pcapng`
+- ...
+- `100.pcapng`
 
-Packetra follows a flow-based IDS workflow. The project is aligned with CIC-style datasets and schemas, especially the academic direction of `CIC-IDS-2017` and related derived flow data.
+Vai trò:
 
-Important reminder:
+- test nhanh giao diện
+- demo tính năng
+- minh họa dashboard, topology, AI
+- thao tác mà không cần bắt gói thật
 
-- the AI workflow is flow-based
-- each CSV row is one flow
-- packet captures are first converted into structured flows before AI inference
+## 12. Dashboard data và persistence
 
-The training reference process is documented in:
+### Template
 
-- `docs/full train kaggle.md`
+Template nằm ở:
 
-That document describes the research-side training workflow used to produce the current inference artifacts.
+- `data/dashboard_templates/*.json`
 
-## 9. AI Model Status
+### Dashboard người dùng
 
-This is a critical point for accuracy when describing the current repository state.
+Dashboard người dùng nằm ở:
 
-Older project descriptions may mention XGBoost, but the artifacts currently committed in the repository indicate that the active packaged inference path is based on an FT-Transformer TorchScript model running on CPU.
+- `data/dashboards/user_dashboards.json`
 
-At the same time:
+### Import / export
 
-- `requirements.txt` still includes libraries that support broader experimentation
-- `core/flow_engine/model_adapter.py` still contains logic flexible enough to support other model forms
-- the repository contains AI metadata and preprocessing assets that must stay consistent with the feature schema
+Hệ thống hỗ trợ:
 
-### AI Artifacts in `ai/`
+- export dashboard ra JSON
+- import dashboard từ JSON
+- nếu `dashboard_id` trùng thì sinh ID mới
+- lưu cache dashboard người dùng vào một file JSON duy nhất
+- nhân bản dashboard và sinh lại ID cho từng widget
+- đổi tên dashboard
+- dựng sẵn các chart template rút gọn từ dashboard mẫu
 
-Typical project artifacts include:
+## 13. Capture metadata và PCAPNG
 
-- `feature_columns.json`
-- `label_encoder.pkl`
-- `standard_scaler.pkl`
-- `model_info.json`
-- model weights or scripted model files
+Hệ thống hỗ trợ đọc và lưu một phần metadata của PCAPNG:
 
-### Why `feature_columns.json` Matters
+- file comment
+- section hardware
+- section OS
+- section application
+- interface list
+- per-packet comments
+- packet-to-interface mapping
 
-For any flow-based model, feature order is mandatory. If the exported feature columns are out of order, missing, or schema-incompatible with training, predictions can become meaningless.
+Điều này giúp ứng dụng không chỉ xem packet bytes, mà còn giữ được thêm ngữ cảnh của file capture.
 
-## 10. PCAP -> Flow -> CSV -> AI Pipeline
+Ngoài phần đọc metadata, code còn hỗ trợ ghi ngược một số nội dung trở lại file `pcapng`, chủ yếu là:
 
-### Step 1: Read capture data
+- cập nhật comment của toàn file
+- cập nhật comment theo từng packet
 
-The user can:
+## 14. Tài liệu báo cáo và nghiên cứu trong repo
 
-- start live capture
-- open a saved file
-- load a demo capture
+### Báo cáo LaTeX
 
-### Step 2: Parse packets
+Thư mục:
 
-`core/parser.py` converts raw packets into structured records with fields such as:
+- `scrap/DATN/`
 
-- number
-- time
-- source
-- destination
-- protocol
-- length
-- info
-- metadata
+Chứa:
 
-### Step 3: Build flows
+- `DoAn.tex`
+- `Bia.tex`
+- `Bia_lot.tex`
+- các chương trong `scrap/DATN/Chuong/`
+- hình minh họa trong `scrap/DATN/Hinhve/`
 
-`FlowFeatureExtractor` groups packets into flows and computes flow statistics.
+### Ghi chép training
 
-### Step 4: Export flow features
+File:
 
-Packetra can export the derived flows to CSV for inspection, research, or model input.
+- `scrap/full train kaggle.md`
 
-### Step 5: Normalize features
+Đây là ghi chép rất dài của quá trình huấn luyện trên Kaggle, bao gồm:
 
-Before inference:
+- dọn thư mục output
+- kiểm tra dataset
+- thống kê cột và đơn vị
+- thống kê label
+- tiền xử lý
+- huấn luyện
+- xuất artifact
 
-- missing values are handled
-- numeric conversion is applied
-- infinities and invalid values are cleaned
-- scaling is applied through the stored scaler
-- columns are aligned to the required feature order
+README này không thay thế file đó, nhưng file đó là nguồn tham khảo chính nếu cần hiểu quá trình training.
 
-### Step 6: Run prediction
+## 15. Yêu cầu môi trường
 
-The AI layer:
+### Hệ điều hành
 
-- loads the packaged model
-- converts features to the model input format
-- predicts labels
-- returns summaries and class counts
+- Windows là môi trường được hỗ trợ tốt nhất cho live capture cục bộ
+- Linux có vai trò ở nhánh remote capture
 
-### Step 7: Present results
+### Python
 
-Results can appear in:
+- README khuyến nghị dùng Python 3.11 vì file Torch wheel trong `requirements.txt` đang trỏ tới bản `cp311`
 
-- AI Analyst dialogs
-- CSV outputs
-- dashboard widgets
-- topology workflows
-- packet-level drill-down sessions
+### Dependency chính
 
-## 11. Dashboard System
+- `scapy`
+- `PySide6`
+- `psutil`
+- `lz4`
+- `paramiko`
+- `pywin32`
+- `numpy`
+- `xgboost`
+- `scikit-learn`
+- `joblib`
+- `torch` CPU wheel
 
-### Main Dashboard Capabilities
+### Phần mềm ngoài Python
 
-- built-in templates
-- user dashboards
-- widget editing
-- import/export through JSON
-- persistent local storage
+- Npcap: bắt buộc cho live capture trên Windows
+- OpenSSH: cần cho remote capture trên Windows agent
+- `tcpdump`: cần cho remote capture Linux
 
-### Dashboard Data Files
+## 16. Cài đặt và chạy
 
-| File | Role |
-| --- | --- |
-| `data/dashboards/templates/*.json` | Built-in templates |
-| `data/dashboards/user_dashboards.json` | User-created dashboards |
-
-### Import / Export
-
-The current build supports importing dashboards from JSON and exporting existing dashboards back to JSON. Sample import structures are documented in `help/dashboard_guide.html`.
-
-## 12. Network Topology
-
-The topology view is used to visualize communication between endpoints.
-
-It helps users:
-
-- identify active hosts
-- inspect edges between nodes
-- understand traffic concentration
-- explain attack scenarios more visually
-
-## 13. Demo Packet
-
-Demo Packet exists to:
-
-- showcase representative actions and scenarios
-- support classrooms and demonstrations
-- provide fast test data for GUI features
-
-When the user selects a demo action:
-
-- Packetra opens the matching capture from `demo/`
-- the action name is shown clearly
-- packet list, AI Analyst, dashboards, and topology can all be explored on that dataset
-
-## 14. Environment Setup
-
-### Requirements
-
-- Windows is the primary local-capture target
-- Python 3.10+ is recommended
-- Npcap is required for local live capture on Windows
-
-### Typical Setup
+## 16.1. Tạo môi trường
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+## 16.2. Chạy ứng dụng
+
+```powershell
 python main.py
 ```
 
-### Project Compile Check
+## 16.3. Kiểm tra nhanh code có compile được không
 
 ```powershell
 python -m py_compile main.py
 python utils/compile_project.py
 ```
 
-### Npcap
+## 16.4. Kiểm tra Npcap
 
-`main.py` checks for Npcap on Windows startup. If it is missing, Packetra warns the user because local capture cannot start without it.
+Khi chạy trên Windows, `main.py` sẽ kiểm tra Npcap. Nếu thiếu Npcap, ứng dụng sẽ hiện cảnh báo và không cho vào phiên capture local.
 
-## 15. Common Usage Paths
+## 17. Các luồng sử dụng điển hình
 
-### GUI Usage
+## 17.1. Mở file và phân tích packet
 
-Typical end-user flow:
+1. Mở file `.pcap` hoặc `.pcapng`
+2. Xem packet list
+3. Chọn packet để xem details và bytes
+4. Áp dụng display filter
+5. Tìm packet quan tâm
+6. Xem conversations / statistics / topology
 
-1. Open a capture or start live capture.
-2. Inspect packet list, details, and bytes.
-3. Apply display filters.
-4. Follow streams or use search.
-5. Run AI Analyst or export flow CSV.
-6. Use dashboard or topology for summary views.
-7. Save, export, split, or merge captures if needed.
+## 17.2. Bắt gói trực tiếp
 
-### Remote Capture
+1. Chọn interface
+2. Đặt capture filter nếu cần
+3. Start capture
+4. Theo dõi packet realtime
+5. Stop capture
+6. Lưu file nếu cần
 
-Remote capture is integrated into the GUI.
+## 17.3. Xuất flow CSV
 
-- Linux remote capture uses SSH plus `tcpdump`.
-- Windows remote capture uses the Packetra agent workflow in `agent/`.
+1. Mở capture hoặc bắt gói
+2. Chọn export flow CSV
+3. Hệ thống gom packet thành flow
+4. Xuất ra file CSV
+5. Đồng thời có thể sinh phần mô tả hành vi flow
 
-Detailed end-user instructions are in `help/agent_guide.html`.
+## 17.4. Dùng dashboard
 
-## 16. Model Training
+1. Mở dashboard overview
+2. Chọn template hoặc tạo dashboard mới
+3. Dùng packet scope hiện tại làm nguồn dữ liệu
+4. Chỉnh widget, query, visualization
+5. Lưu hoặc export JSON
 
-The current repository does not expose a single ready-to-run `train.py` at the root that reproduces the full research pipeline end to end.
+## 17.5. Dùng remote capture
 
-Instead, the training story is represented by:
+### Linux
 
-- the committed inference artifacts in `ai/`
-- the project code that consumes those artifacts
-- the research/training notes in `docs/full train kaggle.md`
+1. cấu hình host trong giao diện
+2. nhập user / auth
+3. lấy danh sách interface
+4. start capture từ xa
+5. nhận stream packet về máy local
 
-### Training Flow from the Reference Document
+### Windows
 
-The documented training process includes:
+1. cài `PacketraAgent`
+2. chuẩn bị OpenSSH + Npcap
+3. kết nối từ GUI
+4. list interface
+5. capture từ agent
 
-1. loading and combining dataset sources
-2. cleaning and normalizing labels
-3. selecting the target feature schema
-4. balancing or quota-controlling training data
-5. splitting data for training and evaluation
-6. training the model
-7. evaluating accuracy, macro F1, and confusion matrix
-8. exporting model and preprocessing artifacts
+## 18. Những điểm mạnh của đồ án ở mức kỹ thuật
 
-### Expected Training Outputs
+- có giao diện hoàn chỉnh, không chỉ là script proof-of-concept
+- parser rất sâu, theo dõi được nhiều state request/response
+- có display filter riêng
+- có packet comments và pcapng metadata
+- có flow engine và CSV pipeline
+- có AI inference thật trong ứng dụng
+- có dashboard riêng thay vì chỉ hiện bảng
+- có topology
+- có remote capture Linux và Windows
+- có bộ tài liệu HTML khá đầy đủ
+- có báo cáo LaTeX ngay trong repo
+- có cả phần sinh rule tường lửa mẫu từ packet đang chọn
 
-The project expects training outputs such as:
+## 19. Những điểm cần lưu ý hoặc còn chưa đồng bộ
 
-- model artifact
-- scaler
-- label encoder
-- feature column list
-- model metadata
+- `README.md` cũ có một số thông tin lệch so với repo hiện tại; bản này đã sửa theo trạng thái thực tế.
+- `model_info.json` chưa khớp hoàn toàn với artifact thật trong `ai/`.
+- `requirements.txt` vẫn giữ `xgboost`, nhưng nhánh suy luận mặc định hiện tại là TorchScript.
+- repo không có một pipeline huấn luyện tái lập hoàn chỉnh kiểu `train.py` một lệnh ở root.
+- một số hằng số trong `gui/application.py` còn trỏ tới `docs/...` cũ, trong khi tài liệu báo cáo hiện ở `scrap/`.
+- code giao diện tập trung nhiều logic trong `gui/application.py` và `gui/capture_view.py`, nên độ phức tạp bảo trì khá cao.
+- `core/formatters.py` rất lớn, nên đây là một trong những khu vực khó bảo trì và khó kiểm thử thủ công nhất của repo.
 
-## 17. Prediction with Trained Models
+## 20. File nào nên đọc trước nếu muốn hiểu nhanh repo
 
-In the current application, prediction is primarily driven through the GUI:
+Nếu muốn nắm nhanh từ tổng quan đến chi tiết, nên đọc theo thứ tự:
 
-1. open or capture traffic
-2. build flows
-3. extract feature rows
-4. scale and align features
-5. run inference
-6. show summaries and labels
+1. `main.py`
+2. `gui/application.py`
+3. `gui/capture_view.py`
+4. `core/capture.py`
+5. `core/parser.py`
+6. `core/formatters.py`
+7. `core/filtering.py`
+8. `core/flow_engine/feature_extractor.py`
+9. `core/flow_engine/model_adapter.py`
+10. `gui/dashboard/capture_integration.py`
+11. `gui/dashboard/repository.py`
+12. `core/firewall_acl.py`
+13. `utils/pcap_io.py`
+14. `help/user_guide.html`
+15. `scrap/DATN/DoAn.tex`
+16. `scrap/full train kaggle.md`
 
-If a different model is introduced later, its preprocessing contract must still match the expected feature schema.
+## 21. Kết luận
 
-## 18. Current Results
-
-The repository includes the packaged inference path and the surrounding infrastructure needed to:
-
-- parse packet captures
-- extract flows
-- export CSV
-- run AI inference
-- visualize outputs in the GUI
-
-Reference training metrics and academic discussion remain tied to the training notes in `docs/full train kaggle.md`.
-
-## 19. Limitations
-
-- The active AI workflow is strongly tied to CIC-style flow schemas.
-- Feature order and schema must match the trained artifact exactly.
-- The repository does not yet provide a fully reproducible one-command training pipeline at the root.
-- Real-world generalization still depends on further evaluation outside the original training environment.
-- Rare or behaviorally overlapping classes may still be unstable.
-- Some advanced workflows remain GUI-first rather than CLI-first.
-
-## 20. Future Work
-
-- make the training pipeline reproducible directly inside the repository
-- improve schema documentation for the flow engine
-- expand explainable AI output
-- improve large-capture dashboard performance
-- extend selective packet-to-flow conversion workflows
-- strengthen evaluation on real-world traffic
-- simplify packaging and onboarding for new users
-
-## 21. Frequently Asked Questions
-
-### Does this project analyze packets or flows?
-
-Both. Packets are the raw evidence layer; flows are the behavioral analysis layer.
-
-### Why does the AI not classify individual packets directly?
-
-Because common IDS datasets and behavior models rely on flow context rather than isolated packets.
-
-### Is each CSV row a packet or a flow?
-
-In Packetra's AI pipeline, each CSV row is one flow.
-
-### Does the project use CICFlowMeter?
-
-The project is aligned with CIC-style schemas and also includes its own flow engine implementation under `core/flow_engine/`.
-
-### Is the current repository using XGBoost or FT-Transformer?
-
-The currently committed inference artifacts point to FT-Transformer TorchScript as the real packaged inference path, even though older descriptions may mention XGBoost.
-
-### Can I use Packetra without AI?
-
-Yes. Packetra is still useful as a packet capture viewer and analysis tool even if AI Analyst is never used.
-
-### Is remote capture required?
-
-No. Remote capture is optional.
-
-## 22. Conclusion
-
-Packetra is an academic-minded but practical network analysis project. Its core value is the way it connects the full chain:
+`DATN-Packetra` là một đồ án phần mềm phân tích mạng có phạm vi tương đối rộng. Nó không chỉ dừng ở việc hiển thị packet, mà còn nối được nhiều lớp xử lý:
 
 ```text
-capture data
--> parse packets
--> build flows
--> export structured features
--> run AI inference
--> present readable visual results
+capture
+-> parse packet
+-> filter / inspect / search
+-> group thành flow
+-> export CSV
+-> AI inference
+-> dashboard / topology / summary
 ```
 
-For a new reader, this README should answer the essential questions:
+Nếu xem repo này như một hệ thống hoàn chỉnh, thì nó gồm 4 phần lớn:
 
-- what the project does
-- how the main modules are organized
-- how packet and flow analysis fit together
-- how AI inference is integrated
-- what is required to run the application
-- where training information currently lives
-- what the current limitations and future directions are
+- phần mềm phân tích packet
+- engine flow và AI
+- giao diện dashboard/topology
+- bộ tài liệu và báo cáo đồ án
 
+README này được viết lại dựa trên trạng thái hiện tại của mã nguồn và tài liệu trong repo, nhằm mô tả đầy đủ ứng dụng đang có gì, dùng gì, chạy như thế nào, và các thành phần liên kết với nhau ra sao.

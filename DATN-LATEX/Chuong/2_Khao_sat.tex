@@ -1,0 +1,183 @@
+% !TEX root = ../DoAn.tex
+\documentclass[../DoAn.tex]{subfiles}
+\begin{document}
+
+\section{Khảo sát hiện trạng}
+Chương này trình bày bối cảnh sử dụng, nhu cầu thực tế và các nhóm chức năng chính của phần mềm. Mục đích là làm rõ vì sao đề tài cần một công cụ vừa thu thập được dữ liệu mạng, vừa giúp người dùng xem lại, lọc, thống kê và nhận ra dấu hiệu bất thường theo cách dễ hiểu hơn.
+
+Trong thực tế học tập và làm việc, dữ liệu mạng thường rất nhiều và thay đổi liên tục. Nếu chỉ nhìn vào một danh sách gói tin thô thì người dùng khó thấy được bức tranh chung. Ngược lại, nếu chỉ nhìn phần tổng hợp thì lại dễ bỏ lỡ chi tiết quan trọng trong từng gói. Vì vậy, một công cụ phù hợp cần kết hợp được cả hai mức: xem chi tiết và xem tổng quan.
+
+\subsection{Thực trạng giám sát và phân tích lưu lượng mạng hiện nay}
+Việc giám sát lưu lượng mạng ngày càng phổ biến trong nhiều môi trường khác nhau, từ phòng máy thực hành, phòng thí nghiệm, đến hệ thống mạng của doanh nghiệp. Khi có sự cố, người phụ trách thường cần biết máy nào đang giao tiếp, giao tiếp với ai, dùng kiểu dữ liệu nào và thời điểm nào có dấu hiệu bất thường. Nếu không có công cụ hỗ trợ, việc tìm nguyên nhân thường phải làm thủ công và mất nhiều thời gian.
+
+Đối với người mới học mạng máy tính, khó khăn lớn nhất không nằm ở chỗ có dữ liệu hay không, mà nằm ở chỗ dữ liệu quá nhiều. Một phiên bắt gói có thể chứa hàng nghìn đến hàng triệu bản tin nhỏ. Muốn hiểu được nội dung, người dùng phải mở gói, xem giao thức, kiểm tra địa chỉ, kiểm tra thời gian và ghép các gói liên quan lại với nhau. Nếu làm theo cách này một mình, rất dễ rối và dễ bỏ sót thông tin quan trọng.
+
+Trong bối cảnh đó, nhu cầu thường gặp không chỉ là xem một gói đơn lẻ, mà còn là xem luồng giao tiếp giữa các máy, xem tần suất trao đổi, biết có dịch vụ nào đang chiếm nhiều tài nguyên hay không, và nhận ra mẫu hành vi đáng nghi. Đây là lý do đề tài cần một phần mềm có khả năng chuyển dữ liệu thô thành thông tin dễ theo dõi hơn.
+
+\subsection{Đặc điểm của các công cụ quan sát và phân tích gói tin hiện có}
+Các công cụ hiện có nhìn chung đều rất hữu ích và đã được sử dụng rộng rãi trong thực tế. Tuy nhiên, mỗi công cụ thường được thiết kế với trọng tâm riêng. Có công cụ phù hợp cho việc xem gói tin chi tiết, có công cụ thuận tiện khi làm việc bằng dòng lệnh, có công cụ phù hợp cho thống kê tổng hợp, và cũng có công cụ hướng đến giám sát hệ thống quy mô lớn. Vì vậy, khi người dùng cần một môi trường làm việc thống nhất, dễ theo dõi và phù hợp với mục đích học tập, việc kết hợp nhiều thao tác ở nhiều màn hình khác nhau có thể làm mạch quan sát bị gián đoạn.
+
+Từ góc nhìn của đề tài, một số điểm cần quan tâm thêm là:
+\begin{itemize}
+\item dữ liệu thường được trình bày theo hướng kỹ thuật, nên người mới học cần thêm thời gian để làm quen;
+\item nhiều công cụ tập trung nổi bật ở một lớp thông tin nhất định, chẳng hạn mức chi tiết hoặc mức tổng hợp;
+\item việc liên kết giữa gói tin, luồng giao tiếp và góc nhìn tổng quan đôi khi cần thêm các bước thao tác;
+\item người dùng có thể cần kết hợp nhiều chức năng ở nhiều vị trí khác nhau để hoàn thành một phiên phân tích;
+\item trong môi trường học tập, nếu có thêm các màn hình trực quan và luồng thao tác thống nhất thì quá trình tiếp cận sẽ thuận lợi hơn.
+\end{itemize}
+
+\subsection{Nhu cầu hỗ trợ học tập, thực hành và minh họa trong môi trường đào tạo}
+Trong môi trường đào tạo, mục tiêu không chỉ là ``xem được dữ liệu'' mà còn là ``hiểu được dữ liệu''. Vì vậy, phần mềm cần có giao diện đủ rõ để người học đọc được từng gói, xem được luồng, xem được thống kê và quan sát được sự thay đổi theo thời gian. Khi có một công cụ như vậy, giảng viên cũng dễ minh họa hơn, còn sinh viên dễ tự thực hành hơn.
+
+Một nhu cầu quan trọng khác là hỗ trợ người dùng tự kiểm tra lại kết quả. Ví dụ, sau khi bắt gói hoặc mở một tệp lưu sẵn, người dùng có thể lọc nhanh theo giao thức, tìm theo chuỗi nội dung, xem một phiên giao tiếp cụ thể, rồi lưu lại kết quả để đối chiếu sau. Cách làm này phù hợp với việc học theo tình huống thực tế hơn là chỉ đọc lý thuyết.
+
+Ngoài ra, trong những bài thực hành hoặc bài thuyết trình, người dùng thường cần trình bày kết quả theo cách trực quan. Khi phần mềm có bảng điều khiển, sơ đồ mạng và phần hỗ trợ nhận diện hành vi, bài làm sẽ dễ giải thích hơn, đồng thời giúp người nghe nhìn ra mối liên hệ giữa dữ liệu gốc và nhận xét cuối cùng.
+
+\section{Tổng quan chức năng}
+Phần này tóm tắt các nhóm chức năng chính của hệ thống. Ở mức tổng quan, phần mềm được thiết kế để làm việc theo một luồng khá rõ ràng: thu thập dữ liệu, mở hoặc nạp dữ liệu có sẵn, lọc và tìm kiếm, xem chi tiết gói tin, xem tổng quan bằng bảng điều khiển, quan sát sơ đồ mạng và hỗ trợ nhận diện hành vi dựa trên dữ liệu luồng.
+
+\subsection{Biểu đồ ca sử dụng tổng quát}
+Hệ thống có thể được mô tả bằng một biểu đồ ca sử dụng tổng quát với tác nhân chính là người dùng. Người dùng có thể là sinh viên, giảng viên, người thực hành mạng hoặc người kiểm tra dữ liệu. Ngoài ra, hệ thống còn làm việc với nguồn dữ liệu mạng và thành phần hỗ trợ dự đoán để xử lý các luồng dữ liệu đã được chuẩn bị.
+
+Các chức năng mức cao gồm:
+\begin{itemize}
+\item bắt gói trực tiếp từ máy đang chạy;
+\item mở tệp dữ liệu bắt gói để xem lại;
+\item lọc, tìm kiếm và xem chi tiết gói tin;
+\item xem luồng giao tiếp và thống kê lưu lượng;
+\item trực quan hóa dữ liệu bằng bảng điều khiển và sơ đồ mạng;
+\item phân tích luồng và gợi ý nhận biết hành vi bất thường.
+\end{itemize}
+
+\subsection{Nhóm chức năng thu thập lưu lượng mạng thời gian thực}
+Nhóm chức năng này phục vụ việc thu dữ liệu ngay tại máy đang chạy hoặc từ một nguồn mạng phù hợp. Người dùng có thể chọn giao diện mạng, khởi động quá trình thu, tạm dừng khi cần và xem danh sách gói tin xuất hiện theo thời gian thực. Cách làm này giúp kiểm tra nhanh tình huống đang xảy ra mà không cần chờ có tệp lưu sẵn.
+
+Ở mức sử dụng, nhóm này cần đơn giản và dễ hiểu. Người dùng chỉ cần biết bắt đầu từ đâu, dừng ở đâu và kết quả nằm ở màn hình nào. Nếu có thêm chế độ thu từ xa hoặc từ nguồn đặc biệt thì cũng phải được đặt cùng một chỗ để tránh làm người dùng nhầm lẫn giữa nhiều kiểu nhập dữ liệu.
+
+\subsection{Nhóm chức năng phân tích tệp bắt gói}
+Nhóm này cho phép người dùng mở lại dữ liệu đã lưu ở dạng tệp bắt gói. Đây là một chức năng rất quan trọng vì phần lớn việc học và kiểm tra đều cần xem lại mẫu dữ liệu cũ nhiều lần. Khi mở một tệp, hệ thống cần giữ lại được cấu trúc gói, thông tin bổ sung và các ghi chú đã có nếu người dùng đã lưu trước đó.
+
+Với nhóm chức năng này, người dùng có thể làm việc gần giống như đang quan sát một phiên trực tiếp, nhưng có lợi thế là dữ liệu không đổi. Nhờ vậy, việc phân tích, đối chiếu và giải thích trở nên ổn định hơn, đặc biệt hữu ích khi cần giảng giải cho người khác.
+
+\subsection{Nhóm chức năng lọc, tìm kiếm và thống kê lưu lượng mạng}
+Nhóm này giúp người dùng nhanh chóng thu hẹp tập dữ liệu cần xem. Thay vì phải cuộn qua toàn bộ danh sách gói tin, người dùng có thể áp dụng bộ lọc theo giao thức, địa chỉ, cổng, nội dung hoặc mẫu tìm kiếm phù hợp. Khi cần, người dùng cũng có thể lặp lại các bộ lọc đã dùng trước đó để tiết kiệm thời gian.
+
+Bên cạnh việc lọc, hệ thống còn cần hỗ trợ thống kê ở mức dễ hiểu, chẳng hạn như số lượng gói tin, mức độ xuất hiện của giao thức hoặc một số thông tin tổng hợp để người dùng biết vùng dữ liệu nào đáng chú ý. Khi kết hợp được lọc và thống kê, việc đọc dữ liệu sẽ bớt mù mờ hơn rất nhiều.
+
+\subsection{Nhóm chức năng trực quan hóa lưu lượng mạng}
+Nhóm chức năng này làm nhiệm vụ chuyển dữ liệu mạng thành các màn hình dễ nhìn hơn. Thay vì chỉ đọc từng dòng thông tin, người dùng có thể xem bảng điều khiển, biểu đồ tổng hợp hoặc sơ đồ mạng để nắm nhanh mối quan hệ giữa các máy và các luồng giao tiếp.
+
+Trong đồ án này, phần trực quan hóa không nhằm thay thế việc xem gói tin chi tiết, mà nhằm bổ sung thêm góc nhìn tổng quan. Nhờ đó, người dùng có thể chuyển qua lại giữa chi tiết và tổng quát mà không phải rời khỏi cùng một phần mềm.
+
+\subsection{Nhóm chức năng nhận diện hành vi trên môi trường mạng}
+Nhóm chức năng này sử dụng dữ liệu đã được gom và rút đặc trưng để đưa ra gợi ý nhận diện. Mục tiêu của phần này không phải là thay người dùng kết luận hoàn toàn, mà là cung cấp thêm một góc nhìn hỗ trợ khi quan sát dữ liệu mạng. Với người học, đây là phần giúp họ thấy rõ hơn việc dữ liệu mạng có thể được đưa vào mô hình để phân tích ở mức cao hơn.
+
+Luồng xử lý thường bắt đầu từ các gói tin hoặc các luồng giao tiếp, sau đó chuyển thành dạng đặc trưng phù hợp. Kết quả nhận diện được hiển thị lại trong phần mềm để người dùng đối chiếu với dữ liệu gốc. Cách trình bày này giúp mối liên hệ giữa dữ liệu đầu vào, đặc trưng trung gian và kết quả cuối cùng trở nên rõ ràng hơn.
+
+\subsection{Quy trình nghiệp vụ}
+Quy trình nghiệp vụ của hệ thống có thể hiểu như một chuỗi công việc tương đối tự nhiên. Trước hết, người dùng tạo dữ liệu bằng cách bắt gói trực tiếp hoặc mở tệp có sẵn. Sau đó, người dùng lọc và tìm kiếm để thu hẹp phạm vi quan sát. Tiếp theo, người dùng xem chi tiết gói tin, xem luồng giao tiếp, quan sát bảng điều khiển và sơ đồ mạng. Khi cần, người dùng có thể đưa dữ liệu luồng vào phần nhận diện hành vi để có thêm một kết quả tham khảo.
+
+Quy trình này giúp người dùng không phải làm việc rời rạc giữa nhiều công cụ khác nhau. Thay vào đó, toàn bộ các bước quan sát, kiểm tra, tổng hợp và đối chiếu đều diễn ra trong cùng một môi trường. Đây cũng là điểm làm cho phần mềm phù hợp với việc học tập và minh họa hơn.
+
+\section{Đặc tả chức năng}
+Phần này mô tả ngắn gọn các chức năng quan trọng nhất của hệ thống. Mỗi chức năng được trình bày theo hướng dễ đọc, tập trung vào mục đích, điều kiện sử dụng, cách thực hiện và kết quả sau cùng.
+
+\subsection{Đặc tả chức năng bắt gói tin trực tiếp}
+\begin{itemize}
+\item Mục đích: cho phép người dùng thu thập dữ liệu mạng ngay trong lúc phần mềm
+đang chạy.
+\item Tác nhân: người dùng.
+\item Điều kiện đầu vào: máy có giao diện mạng hoạt động và người dùng có quyền truy
+cập phù hợp.
+\item Luồng chính: người dùng chọn nguồn thu, khởi động quá trình bắt gói, theo dõi
+danh sách gói tin và dừng khi cần.
+\item Kết quả: hệ thống hiển thị được các gói tin vừa thu và cho phép tiếp tục phân tích.
+\end{itemize}
+
+\subsection{Đặc tả chức năng mở tệp PCAP hoặc PCAPNG}
+\begin{itemize}
+\item Mục đích: nạp lại dữ liệu bắt gói đã lưu sẵn để xem và phân tích.
+\item Tác nhân: người dùng.
+\item Điều kiện đầu vào: có sẵn một tệp dữ liệu hợp lệ.
+\item Luồng chính: người dùng chọn tệp, hệ thống đọc dữ liệu, hiển thị danh sách gói tin
+và cho phép xem chi tiết.
+\item Kết quả: dữ liệu cũ được mở lại đầy đủ để tiếp tục phân tích hoặc minh họa.
+\end{itemize}
+
+\subsection{Đặc tả chức năng lọc và tìm kiếm gói tin}
+\begin{itemize}
+\item Mục đích: giúp người dùng tìm nhanh phần dữ liệu cần xem.
+\item Tác nhân: người dùng.
+\item Điều kiện đầu vào: đã có danh sách gói tin đang hiển thị.
+\item Luồng chính: người dùng nhập điều kiện lọc hoặc từ khóa tìm kiếm, hệ thống sàng
+lọc dữ liệu và trả về kết quả phù hợp.
+\item Kết quả: danh sách gói tin được rút gọn, dễ quan sát hơn.
+\end{itemize}
+
+\subsection{Đặc tả chức năng phân tích gói tin chi tiết}
+\begin{itemize}
+\item Mục đích: xem rõ cấu trúc, nội dung và thông tin kỹ thuật của từng gói.
+\item Tác nhân: người dùng.
+\item Điều kiện đầu vào: đã chọn được một gói tin cụ thể.
+\item Luồng chính: người dùng chọn gói tin, hệ thống hiển thị phần mô tả chi tiết và phần
+dữ liệu thô tương ứng.
+\item Kết quả: người dùng biết được gói tin đó chứa thông tin gì và có gì đáng chú ý.
+\end{itemize}
+
+\subsection{Đặc tả chức năng dùng bảng điều khiển phân tích}
+\begin{itemize}
+\item Mục đích: cung cấp cái nhìn tổng hợp về lưu lượng mạng.
+\item Tác nhân: người dùng.
+\item Điều kiện đầu vào: đã có dữ liệu đủ để thống kê.
+\item Luồng chính: hệ thống tổng hợp số liệu, hiển thị các thẻ thông tin, biểu đồ hoặc chỉ
+số nổi bật.
+\item Kết quả: người dùng nắm nhanh tình hình chung mà không cần đọc hết từng gói
+tin.
+\end{itemize}
+
+\subsection{Đặc tả chức năng dùng sơ đồ mạng}
+\begin{itemize}
+\item Mục đích: biểu diễn mối quan hệ giao tiếp giữa các máy dưới dạng trực quan.
+\item Tác nhân: người dùng.
+\item Điều kiện đầu vào: có dữ liệu giao tiếp đủ để dựng sơ đồ.
+\item Luồng chính: hệ thống lấy thông tin các nút mạng, các hướng giao tiếp và hiển thị
+thành sơ đồ.
+\item Kết quả: người dùng nhìn được máy nào đang liên hệ với máy nào và mức độ kết
+nối ra sao.
+\end{itemize}
+
+\subsection{Đặc tả chức năng phân tích luồng và hỗ trợ dự đoán bằng mô hình}
+\begin{itemize}
+\item Mục đích: rút đặc trưng từ dữ liệu mạng và đưa ra kết quả hỗ trợ nhận diện hành vi.
+\item Tác nhân: người dùng và thành phần mô hình.
+\item Điều kiện đầu vào: có dữ liệu luồng phù hợp để đưa vào bước xử lý tiếp theo.
+\item Luồng chính: hệ thống gom dữ liệu theo luồng, rút đặc trưng, đưa vào mô hình và
+hiển thị kết quả.
+\item Kết quả: người dùng nhận được gợi ý ban đầu để tham khảo khi đánh giá lưu lượng.
+\end{itemize}
+
+\section{Yêu cầu phi chức năng}
+Ngoài các chức năng chính, hệ thống còn cần đáp ứng một số yêu cầu phi chức năng để có thể sử dụng ổn định và thuận tiện hơn trong thực tế.
+\begin{itemize}
+\item Dễ dùng: giao diện phải rõ ràng, bố cục hợp lý, người mới vẫn có thể làm quen
+nhanh.
+\item á»"n định: khi mở tệp lớn hoặc bắt gói lâu, phần mềm vẫn cần hoạt động ổn định và
+không bị treo.
+\item Nhanh: việc lọc, tìm kiếm và chuyển giữa các màn hình nên đủ mượt để người dùng
+không bị gián đoạn.
+\item Dễ bảo trì: phần mềm cần được chia tách hợp lý để dễ sửa, dễ thêm chức năng và
+dễ kiểm tra lỗi.
+\item Tương thích: ứng dụng phải hoạt động ổn định trên môi trường triển khai mà đồ án
+hướng đến.
+\item An toàn dữ liệu: dữ liệu đã mở hoặc đã lưu cần được giữ nguyên trạng, tránh mất
+mát ngoài ý muốn.
+\item Trình bày rõ: chữ, bảng và hình phải đủ lớn để người đọc có thể hiểu ngay khi xem
+báo cáo.
+\end{itemize}
+
+\section{Kết chương}
+Chương này đã khảo sát hiện trạng giám sát và phân tích lưu lượng mạng, chỉ ra các khó khăn thường gặp khi làm việc với dữ liệu gói tin, đồng thời xác định các nhóm chức năng chính của phần mềm. Từ đó, đồ án hình thành được một hướng thiết kế rõ ràng hơn: vừa thu thập được dữ liệu, vừa cho phép xem lại, vừa hỗ trợ lọc, thống kê, trực quan hóa và nhận diện hành vi.
+
+Các nội dung trong chương này là cơ sở để triển khai các chương sau, đặc biệt là phần nền tảng công nghệ, phần thiết kế hệ thống và phần đánh giá kết quả. Khi yêu cầu đã được làm rõ, việc xây dựng phần mềm sẽ nhất quán hơn và dễ kiểm tra hơn trong thực tế.
+
+\end{document}

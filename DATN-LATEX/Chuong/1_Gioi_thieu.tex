@@ -1,0 +1,53 @@
+% !TEX root = ../DoAn.tex
+\documentclass[../DoAn.tex]{subfiles}
+\begin{document}
+
+\section{Đặt vấn đề}
+Trong bối cảnh hạ tầng mạng máy tính và Internet phát triển mạnh mẽ, việc đảm bảo an toàn thông tin, giám sát lưu lượng và kịp thời phát hiện các hành vi bất thường đã trở thành nhiệm vụ sống còn đối với mọi hệ thống phần mềm và tổ chức. Quá trình vận hành, điều tra kỹ thuật an ninh mạng đòi hỏi người quản trị cũng như người nghiên cứu phải có khả năng quan sát sâu sắc dòng dữ liệu truyền qua hệ thống. Tuy nhiên, lưu lượng mạng hiện đại ngày càng phức tạp về mặt giao thức và tinh vi về mặt hành vi tấn công. Việc chỉ phân tích các gói tin (packet) rời rạc theo cách truyền thống thường không đủ để người vận hành nhận diện được bức tranh tổng thể, bởi nhiều dấu hiệu xâm nhập trái phép hoặc bất thường hệ thống chỉ thực sự bộc lộ khi dữ liệu được tổng hợp, trích xuất đặc trưng và đánh giá ở cấp độ luồng giao tiếp hai chiều (flow).
+
+Mặc dù nhu cầu kết nối góc nhìn giữa mức gói tin và mức luồng là rất lớn, thực tế hiện nay tiến trình phân tích này đang gặp phải những rào cản kỹ thuật đáng kể. Các công cụ phân tích lưu lượng mạng mạnh mẽ và phổ biến hiện nay (như Wireshark hoặc Tshark) tuy cung cấp khả năng bóc tách giao thức sâu, nhưng lại sở hữu giao diện và cách thức vận hành tương đối phức tạp. Đối với sinh viên, kỹ thuật viên không chuyên hoặc người mới bắt đầu nghiên cứu, việc phải chuyển đổi liên tục giữa các màn hình danh sách gói tin, dữ liệu byte thô, các bảng thống kê rời rạc và các công cụ khai thác dữ liệu độc lập bên ngoài gây ra sự phân tán thông tin nghiêm trọng. Quy trình xử lý dữ liệu mạng hiện tại — từ khâu bắt gói, giải mã, gom cụm luồng dữ liệu, trích xuất đặc trưng đến việc đưa vào các mô hình học máy để suy luận hành vi an ninh — vẫn diễn ra một cách ngắt quãng, thiếu tính hệ thống và đòi hỏi quá nhiều thao tác thủ công phức tạp. Sự cô lập giữa công cụ giám sát trực quan ở tầng thấp (packet) và các mô hình phân tích thông minh ở tầng cao (flow-based AI) làm giảm đáng kể hiệu suất điều tra, dễ dẫn đến việc bỏ sót sự cố an ninh mang tính hệ thống.
+
+Từ thực trạng đó, bài toán đặt ra là cần nghiên cứu một phương thức tiếp cận mới nhằm tích hợp và kết nối đồng bộ các lớp quan sát lưu lượng mạng từ thấp đến cao vào cùng một môi trường làm việc thống nhất. Việc giải quyết bài toán xây dựng một tiến trình xử lý tự động, khép kín từ khâu thu thập dữ liệu gói tin, chuẩn hóa dữ liệu tầng luồng, cho đến ứng dụng trí tuệ nhân tạo để diễn giải hành vi mạng dựa trên ngữ cảnh là một nhu cầu vô cùng cấp thiết. Kết quả giải quyết bài toán này không chỉ giúp đơn giản hóa quy trình giám sát, tối ưu hóa thời gian phân tích và giảm thiểu sự phụ thuộc vào các công cụ rời rạc cho người vận hành, mà còn cung cấp một nền tảng trực quan, đắc lực phục vụ công tác giảng dạy, thực hành và diễn giải kỹ thuật mạng tại các cơ sở đào tạo công nghệ thông tin.
+
+\section{Mục tiêu và Phạm vi đề tài}
+Mục tiêu của đề tài là xây dựng một công cụ phân tích mạng, giúp người dùng theo dõi và đánh giá lưu lượng mạng ở cả mức gói tin lẫn mức luồng giao tiếp. Từ đó, người dùng có thể đọc dữ liệu, tìm luồng bất thường, xem thống kê tổng hợp và nhận gợi ý về hành vi mạng một cách trực quan hơn.
+
+Cụ thể, hệ thống cần đáp ứng các mục tiêu sau. Thứ nhất, phần mềm phải mở được tệp bắt gói phổ biến và bắt gói trực tiếp trên máy đang chạy. Điều này giúp người dùng vừa làm việc với dữ liệu đã có sẵn, vừa thu thập dữ liệu mới trong lúc kiểm tra thực tế. Thứ hai, phần mềm phải hiển thị được danh sách gói tin, phần mô tả chi tiết của gói và dữ liệu thô để người dùng xem lại từng trường thông tin. Thứ ba, phần mềm phải gom các gói tin có liên quan thành luồng giao tiếp để tính các số liệu như thời gian, số lượng gói, dung lượng và tốc độ trao đổi. Thứ tư, phần mềm phải dùng một mô hình học máy đã được chuẩn bị sẵn để hỗ trợ nhận diện hành vi mạng từ các số liệu nói trên. Thứ năm, phần mềm cần có màn hình tổng quan để người dùng nắm nhanh tình hình lưu lượng thay vì chỉ đọc từng gói riêng lẻ.
+
+Phạm vi của đề tài được giới hạn vào môi trường triển khai phù hợp với điều kiện thực tế của đồ án, ưu tiên Windows và sử dụng thành phần bắt gói tương ứng. Đề tài tập trung vào phân tích lưu lượng mạng và hỗ trợ nhận diện hành vi giao tiếp, không nhằm thay thế hoàn toàn các công cụ giám sát chuyên dụng trong môi trường sản xuất quy mô lớn. Mô hình học máy trong hệ thống cũng chỉ phục vụ việc hỗ trợ phân tích trên dữ liệu luồng, không phải là kết luận cuối cùng thay cho đánh giá của con người.
+
+Đối tượng sử dụng chính của hệ thống là sinh viên, giảng viên, người học về mạng máy tính và an toàn thông tin, cùng những người cần công cụ để minh họa hoặc kiểm tra lưu lượng trong thực hành. Đây là nhóm người dùng cần một phần mềm dễ quan sát, dễ thao tác và có khả năng giải thích kết quả ở mức đơn giản.
+
+Trong phạm vi đề tài này, các nội dung như triển khai ở quy mô máy chủ lớn, thay thế hoàn toàn các công cụ phân tích chuyên sâu, hoặc xây dựng một hệ thống phòng thủ độc lập không phải là trọng tâm. Mục tiêu chính vẫn là tạo ra một phần mềm phục vụ học tập, thực hành và hỗ trợ phân tích lưu lượng mạng theo cách dễ hiểu.
+
+\section{Định hướng giải pháp}
+Để giải quyết bài toán trên, hệ thống được tổ chức theo nhiều lớp chức năng, mỗi lớp phụ trách một nhóm công việc riêng. Cách tổ chức này giúp phần mềm dễ phát triển, dễ kiểm tra và dễ giải thích cho người dùng.
+
+Lớp đầu tiên là lớp thu thập dữ liệu. Lớp này nhận dữ liệu từ tệp bắt gói hoặc từ quá trình bắt trực tiếp trên mạng, rồi chuyển dữ liệu thô thành dạng mà phần mềm có thể xử lý tiếp. Ngoài việc đọc dữ liệu chính, lớp này còn giữ lại một số thông tin phụ của tệp bắt gói để bảo toàn nội dung khi cần lưu lại.
+
+Lớp thứ hai là lớp xử lý và hiển thị gói tin. Lớp này chịu trách nhiệm sắp xếp gói tin thành danh sách, hiển thị phần giải thích chi tiết của từng gói, và cho phép xem dữ liệu thô ở dạng dễ kiểm tra. Đồng thời, lớp này hỗ trợ các thao tác lọc và tìm kiếm để người dùng nhanh chóng tìm được phần mình cần xem.
+
+Lớp thứ ba là lớp phân tích luồng giao tiếp. Thay vì chỉ nhìn từng gói riêng lẻ, hệ thống gom các gói có cùng quan hệ giao tiếp thành một luồng. Từ đó, phần mềm có thể tính thời gian trao đổi, số lượng gói theo từng hướng, tổng dung lượng, khoảng thời gian giữa các gói và nhiều số liệu khác. Nhờ cách nhìn theo luồng, người dùng dễ hiểu hơn về hành vi của một kết nối mạng.
+
+Lớp thứ tư là lớp dự đoán bằng học máy. Sau khi luồng được tạo ra, hệ thống đưa các số liệu đặc trưng vào mô hình học máy đã được chuẩn bị sẵn để đưa ra nhãn dự đoán. Kết quả dự đoán này chỉ mang tính hỗ trợ phân tích, giúp người dùng có thêm một góc nhìn khi xem xét lưu lượng.
+
+Lớp cuối là lớp hiển thị tổng quan. Lớp này tập hợp các số liệu quan trọng để tạo ra màn hình quan sát nhanh, sơ đồ giao tiếp giữa các máy và các biểu đồ tổng hợp khác. Nhờ vậy, người dùng có thể chuyển từ cái nhìn chi tiết sang cái nhìn toàn cảnh chỉ trong cùng một phần mềm.
+
+Từ định hướng trên, có thể khái quát đóng góp của đề tài ở ba điểm. Một là gộp các thao tác đọc, bắt, xem và phân tích lưu lượng vào cùng một phần mềm. Hai là chuyển dữ liệu gói tin thành dữ liệu luồng để việc phân tích dễ hiểu hơn. Ba là hỗ trợ dự đoán hành vi mạng bằng mô hình học máy đã được đóng gói sẵn, giúp người dùng có thêm thông tin tham khảo khi đánh giá lưu lượng.
+
+\section{Bố cục đồ án}
+Nội dung của đồ án được tổ chức thành các chương như sau.
+
+Chương 1 trình bày lý do chọn đề tài, mục tiêu, phạm vi nghiên cứu và định hướng giải pháp. Chương này giúp xác định bài toán trung tâm mà hệ thống cần giải quyết, đồng thời giới thiệu bối cảnh thực hiện và cách tổ chức nội dung của toàn bộ luận văn.
+
+Chương 2 khảo sát hiện trạng, phân tích yêu cầu và xác định các nhóm chức năng chính của hệ thống. Phần này làm rõ nhu cầu phân tích lưu lượng mạng, các tình huống sử dụng tiêu biểu của phần mềm và những yêu cầu mà hệ thống cần đáp ứng trong thực tế.
+
+Chương 3 trình bày nền tảng công nghệ và cơ sở lý thuyết được sử dụng trong đề tài. Nội dung chương này giải thích cơ chế bắt gói, cách lưu trữ dữ liệu bắt gói, công nghệ giao diện, cách xử lý dữ liệu luồng và vai trò của mô hình học máy trong phần mềm.
+
+Chương 4 phân tích thiết kế, triển khai và đánh giá hệ thống. Chương này mô tả kiến trúc phần mềm, các thành phần chính, cách tổ chức giao diện, cơ chế lưu trữ dữ liệu, cách các phần phối hợp với nhau và kết quả kiểm tra trên môi trường thực tế.
+
+Chương 5 trình bày các giải pháp và đóng góp nổi bật của đề tài. Đây là phần tổng hợp các quyết định kỹ thuật quan trọng, giải thích cách hệ thống giải quyết bài toán phân tích lưu lượng mạng và những điểm có ý nghĩa trong quá trình xây dựng phần mềm.
+
+Chương 6 nêu kết luận và hướng phát triển tiếp theo. Phần này tổng kết những gì hệ thống đã đạt được, chỉ ra các giới hạn còn tồn tại và đề xuất các hướng mở rộng phù hợp trong tương lai.
+
+\end{document}
