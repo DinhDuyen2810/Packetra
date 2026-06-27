@@ -2,36 +2,45 @@
 \documentclass[../DoAn.tex]{subfiles}
 \begin{document}
 
+Nối tiếp bối cảnh thực tiễn ở Chương 1, Chương 2 tập trung khảo sát hiện trạng các công cụ phân tích lưu lượng mạng hiện có để chỉ ra hạn chế và xác định các yêu cầu chức năng cần thiết. Thông qua việc phân tích ca sử dụng và đặc tả các yêu cầu chức năng cũng như phi chức năng, chương này sẽ định hình khung nghiệp vụ cốt lõi, làm cơ sở để lựa chọn công nghệ ở Chương 3 và triển khai thiết kế tại Chương 4.
+
 \section{Khảo sát hiện trạng}
-Chương này trình bày bối cảnh sử dụng, nhu cầu thực tế và các nhóm chức năng chính của phần mềm. Mục đích là làm rõ vì sao đề tài cần một công cụ vừa thu thập được dữ liệu mạng, vừa giúp người dùng xem lại, lọc, thống kê và nhận ra dấu hiệu bất thường theo cách dễ hiểu hơn.
+Để xây dựng một giải pháp thiết thực và phù hợp, quá trình khảo sát hiện trạng và xác định yêu cầu hệ thống được thực hiện tập trung vào việc nghiên cứu, phân tích và đánh giá các giải pháp công nghệ cũng như phần mềm phân tích lưu lượng mạng hiện có trên thị trường.
 
-Trong thực tế học tập và làm việc, dữ liệu mạng thường rất nhiều và thay đổi liên tục. Nếu chỉ nhìn vào một danh sách gói tin thô thì người dùng khó thấy được bức tranh chung. Ngược lại, nếu chỉ nhìn phần tổng hợp thì lại dễ bỏ lỡ chi tiết quan trọng trong từng gói. Vì vậy, một công cụ phù hợp cần kết hợp được cả hai mức: xem chi tiết và xem tổng quan.
+\subsection{Phân tích đặc điểm các giải pháp lưu lượng mạng hiện có}
+Hiện nay, các công cụ phục vụ giám sát và phân tích mạng khá đa dạng, được thiết kế tối ưu cho từng mục đích sử dụng cụ thể. 
 
-\subsection{Thực trạng giám sát và phân tích lưu lượng mạng hiện nay}
-Việc giám sát lưu lượng mạng ngày càng phổ biến trong nhiều môi trường khác nhau, từ phòng máy thực hành, phòng thí nghiệm, đến hệ thống mạng của doanh nghiệp. Khi có sự cố, người phụ trách thường cần biết máy nào đang giao tiếp, giao tiếp với ai, dùng kiểu dữ liệu nào và thời điểm nào có dấu hiệu bất thường. Nếu không có công cụ hỗ trợ, việc tìm nguyên nhân thường phải làm thủ công và mất nhiều thời gian.
+Đối với các phần mềm bắt và giải mã gói tin trực quan, ưu điểm vượt trội là khả năng bóc tách sâu từng byte dữ liệu thô của rất nhiều giao thức mạng. Tuy nhiên, các công cụ này thường chỉ tập trung hiển thị chi tiết gói tin mà thiếu khả năng tổng hợp trực quan hóa luồng giao tiếp hoặc biểu diễn mối quan hệ giữa các thiết bị. Điều này khiến người học gặp nhiều khó khăn trong việc xâu chuỗi thông tin để có một góc nhìn toàn cảnh.
 
-Đối với người mới học mạng máy tính, khó khăn lớn nhất không nằm ở chỗ có dữ liệu hay không, mà nằm ở chỗ dữ liệu quá nhiều. Một phiên bắt gói có thể chứa hàng nghìn đến hàng triệu bản tin nhỏ. Muốn hiểu được nội dung, người dùng phải mở gói, xem giao thức, kiểm tra địa chỉ, kiểm tra thời gian và ghép các gói liên quan lại với nhau. Nếu làm theo cách này một mình, rất dễ rối và dễ bỏ sót thông tin quan trọng.
+Đối với các hệ thống giám sát an ninh mạng chuyên dụng, thế mạnh nằm ở việc gom cụm luồng lưu lượng và tự động phân tích hành vi bất thường quy mô lớn. Tuy nhiên, các hệ thống này thường rất nặng nề, yêu cầu kỹ năng cấu hình phức tạp và đòi hỏi tài nguyên phần cứng lớn, không phù hợp để triển khai linh hoạt trên các máy tính cá nhân phục vụ thực hành của học viên.
 
-Trong bối cảnh đó, nhu cầu thường gặp không chỉ là xem một gói đơn lẻ, mà còn là xem luồng giao tiếp giữa các máy, xem tần suất trao đổi, biết có dịch vụ nào đang chiếm nhiều tài nguyên hay không, và nhận ra mẫu hành vi đáng nghi. Đây là lý do đề tài cần một phần mềm có khả năng chuyển dữ liệu thô thành thông tin dễ theo dõi hơn.
+\subsection{Đánh giá và so sánh các giải pháp hiện tại}
+Dựa trên kết quả phân tích các giải pháp trên, các công cụ phân tích lưu lượng mạng phổ biến hiện có được đặt lên bàn cân so sánh với giải pháp đề xuất của đồ án theo các tiêu chí quan trọng tại Bảng \ref{tab:so_sanh_cong_cu}.
 
-\subsection{Đặc điểm của các công cụ quan sát và phân tích gói tin hiện có}
-Các công cụ hiện có nhìn chung đều rất hữu ích và đã được sử dụng rộng rãi trong thực tế. Tuy nhiên, mỗi công cụ thường được thiết kế với trọng tâm riêng. Có công cụ phù hợp cho việc xem gói tin chi tiết, có công cụ thuận tiện khi làm việc bằng dòng lệnh, có công cụ phù hợp cho thống kê tổng hợp, và cũng có công cụ hướng đến giám sát hệ thống quy mô lớn. Vì vậy, khi người dùng cần một môi trường làm việc thống nhất, dễ theo dõi và phù hợp với mục đích học tập, việc kết hợp nhiều thao tác ở nhiều màn hình khác nhau có thể làm mạch quan sát bị gián đoạn.
+\begin{table}[H]
+\centering
+\caption{Bảng so sánh tính năng giữa các giải pháp hiện có và đồ án đề xuất}
+\label{tab:so_sanh_cong_cu}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|p{4.5cm}|c|c|c|}
+\hline
+\textbf{Tiêu chí so sánh} & \textbf{Công cụ bắt và giải mã gói tin} & \textbf{Hệ thống giám sát luồng} & \textbf{Giải pháp đề xuất} \\ \hline
+Bắt và giải mã gói tin & Rất tốt & Hạn chế & Tốt \\ \hline
+Thống kê luồng lưu lượng & Khá & Tốt & Tốt \\ \hline
+Trực quan hóa dòng dữ liệu & Hạn chế & Khá & Tốt \\ \hline
+Mức độ dễ tiếp cận cho người học & Trung bình & Thấp & Cao \\ \hline
+\end{tabular}%
+}
+\end{table}
 
-Từ góc nhìn của đề tài, một số điểm cần quan tâm thêm là:
-\begin{itemize}
-\item dữ liệu thường được trình bày theo hướng kỹ thuật, nên người mới học cần thêm thời gian để làm quen;
-\item nhiều công cụ tập trung nổi bật ở một lớp thông tin nhất định, chẳng hạn mức chi tiết hoặc mức tổng hợp;
-\item việc liên kết giữa gói tin, luồng giao tiếp và góc nhìn tổng quan đôi khi cần thêm các bước thao tác;
-\item người dùng có thể cần kết hợp nhiều chức năng ở nhiều vị trí khác nhau để hoàn thành một phiên phân tích;
-\item trong môi trường học tập, nếu có thêm các màn hình trực quan và luồng thao tác thống nhất thì quá trình tiếp cận sẽ thuận lợi hơn.
-\end{itemize}
+\subsection{Xác định các tính năng phần mềm cần phát triển}
+Từ kết quả phân tích các giải pháp hiện tại, có thể thấy hạn chế lớn nhất nằm ở sự rời rạc trong quy trình giám sát mạng, khoảng cách lớn giữa dữ liệu gói tin thô tầng thấp và góc nhìn tổng quan mức luồng, cùng với việc thiếu hụt các công cụ trực quan hóa kết nối và hỗ trợ phân tích thông minh dễ tiếp cận cho học viên.
 
-\subsection{Nhu cầu hỗ trợ học tập, thực hành và minh họa trong môi trường đào tạo}
-Trong môi trường đào tạo, mục tiêu không chỉ là ``xem được dữ liệu'' mà còn là ``hiểu được dữ liệu''. Vì vậy, phần mềm cần có giao diện đủ rõ để người học đọc được từng gói, xem được luồng, xem được thống kê và quan sát được sự thay đổi theo thời gian. Khi có một công cụ như vậy, giảng viên cũng dễ minh họa hơn, còn sinh viên dễ tự thực hành hơn.
+Do đó, để giải quyết triệt để các hạn chế đã nêu, hệ thống cần tập trung phát triển các khối chức năng thu thập và phân tích lưu lượng. Trước hết, phần mềm phải xây dựng cơ chế thu thập gói tin thời gian thực trực tiếp từ các card mạng vật lý kết hợp khả năng đọc hoặc ghi tệp dữ liệu chuẩn. Bên cạnh đó, quy trình giải mã và tìm kiếm cần được thiết kế linh hoạt, hỗ trợ bóc tách sâu cấu trúc các trường thông tin của nhiều giao thức thông dụng, hiển thị mã hex trực quan và cung cấp bộ lọc cú pháp thông minh phục vụ tra cứu dữ liệu.
 
-Một nhu cầu quan trọng khác là hỗ trợ người dùng tự kiểm tra lại kết quả. Ví dụ, sau khi bắt gói hoặc mở một tệp lưu sẵn, người dùng có thể lọc nhanh theo giao thức, tìm theo chuỗi nội dung, xem một phiên giao tiếp cụ thể, rồi lưu lại kết quả để đối chiếu sau. Cách làm này phù hợp với việc học theo tình huống thực tế hơn là chỉ đọc lý thuyết.
+Một yêu cầu quan trọng khác là việc xây dựng lớp trực quan hóa trực diện và quản lý luồng lưu lượng, trong đó các gói tin đơn lẻ được tự động nhóm thành các luồng hai chiều để tính toán các tham số thống kê về thời gian, dung lượng và tốc độ. Dữ liệu này sau đó được biểu diễn sinh động qua các sơ đồ tiến trình dòng chảy dữ liệu, sơ đồ mạng liên kết các thiết bị mạng cùng hệ thống biểu đồ thống kê dạng đường, cột, tròn trên giao diện hiển thị, qua đó giúp người học có được góc nhìn toàn cảnh về hoạt động của mạng.
 
-Ngoài ra, trong những bài thực hành hoặc bài thuyết trình, người dùng thường cần trình bày kết quả theo cách trực quan. Khi phần mềm có bảng điều khiển, sơ đồ mạng và phần hỗ trợ nhận diện hành vi, bài làm sẽ dễ giải thích hơn, đồng thời giúp người nghe nhìn ra mối liên hệ giữa dữ liệu gốc và nhận xét cuối cùng.
+Cuối cùng, phần mềm tích hợp các tính năng nâng cao bao gồm các kịch bản mẫu để mô phỏng sự cố, phát hiện lỗi giao thức qua công cụ phân tích. Đồng thời, ứng dụng tự động khởi tạo luật tường lửa tương thích với thiết bị Cisco, iptables hoặc Windows Firewall, kết hợp mô hình học sâu để gán nhãn dự đoán hành vi luồng phục vụ công tác học tập.
 
 \section{Tổng quan chức năng}
 Phần này tóm tắt các nhóm chức năng chính của hệ thống. Ở mức tổng quan, phần mềm được thiết kế để làm việc theo một luồng khá rõ ràng: thu thập dữ liệu, mở hoặc nạp dữ liệu có sẵn, lọc và tìm kiếm, xem chi tiết gói tin, xem tổng quan bằng bảng điều khiển, quan sát sơ đồ mạng và hỗ trợ nhận diện hành vi dựa trên dữ liệu luồng.
