@@ -93,11 +93,166 @@ Hình~\ref{fig:gui_capture} minh họa giao diện làm việc chính của hệ
 
 Trong quá trình thiết kế, giao diện được xem như một phần của luồng xử lý chứ không chỉ là nơi hiển thị kết quả. Khi người dùng thay đổi bộ lọc, chọn nguồn dữ liệu hoặc chuyển sang một góc nhìn khác, hệ thống cần phản hồi nhanh và cập nhật đúng phần nội dung liên quan. Vì vậy, phần hiển thị và phần xử lý được tách biệt rõ ràng để giao diện luôn giữ được tính mạch lạc, dễ quan sát và thuận lợi cho việc mở rộng thêm các chức năng mới về sau.
 \subsection{Thiết kế lớp}
+Sau khi đã xác lập kiến trúc tổng thể và bố cục giao diện, bước tiếp theo là làm rõ cách các lớp chủ đạo phối hợp với nhau trong quá trình xử lý dữ liệu. Trong đồ án này, bốn lớp quan trọng nhất được chọn để thiết kế chi tiết gồm PacketSniffer, PacketParser, DisplayFilter và PacketraModelAdapter. Bốn lớp này bao phủ bốn khâu cốt lõi của hệ thống, từ thu thập gói tin, giải mã cấu trúc dữ liệu, sàng lọc theo điều kiện hiển thị cho đến suy luận hành vi lưu lượng bằng mô hình học máy.
+
+\textbf{PacketSniffer} là lớp điều khiển tiến trình bắt gói ở mức thấp nhất của hệ thống. Lớp này được triển khai dưới dạng một luồng riêng biệt để việc thu thập dữ liệu không làm ảnh hưởng đến giao diện người dùng. Trong code hiện tại, PacketSniffer giữ các thuộc tính chính như iface để lưu tên giao diện hoặc nguồn dữ liệu, capture\_filter để lưu bộ lọc bắt gói, promiscuous để xác định chế độ bắt hỗn tạp, cùng với cờ running để kiểm soát vòng đời thu thập. Ngoài ra, lớp còn có các trường nội bộ phục vụ tài nguyên đọc dữ liệu như \_stream, \_reader và danh sách nhận dạng giao diện được ánh xạ trước khi bắt đầu làm việc. Các phương thức quan trọng của lớp gồm run() để khởi chạy tiến trình thu thập, handle\_packet(packet) để xử lý từng gói vừa bắt được, và stop() để kết thúc an toàn. Khi bắt gói thành công, lớp phát tín hiệu packet\_captured; khi có sự cố, lớp phát error\_occurred; còn trạng thái làm việc được cập nhật qua status\_changed. Cách tổ chức này giúp luồng thu thập chạy liên tục nhưng vẫn tách biệt khỏi phần trình bày ở giao diện.
+
+\textbf{PacketParser} là lớp chịu trách nhiệm giải mã và chuẩn hóa dữ liệu gói tin sau khi thu được. Đây là lớp trung tâm của khâu phân tích vì nó biến một gói thô thành một bản ghi có cấu trúc rõ ràng để phục vụ cả bảng danh sách, cây giao thức và vùng dữ liệu thô. Lớp này duy trì nhiều trạng thái phục vụ việc ghép và nhận diện luồng như conversations, transport\_stream\_state, các bảng chờ cho ICMP, DNS, HTTP, SMTP, FTP, LDAP, SMB2, cùng các vùng trạng thái cho phân mảnh IPv4 và IPv6. Phương thức quan trọng nhất của lớp là parse(packet, number, iface), trong đó gói thô được bóc tách thành PacketRecord với các trường như thời gian, độ dài, địa chỉ nguồn, địa chỉ đích, giao thức, thông tin mô tả và dữ liệu liên quan. Bên cạnh đó, lớp còn có các hàm hỗ trợ như \_extract\_endpoints, \_extract\_ports, \_guess\_protocol, hierarchy\_packet\_layers và hierarchy\_path\_text để chuẩn hóa cấu trúc giao thức thành dạng cây. Nhờ PacketParser, dữ liệu từ Scapy không chỉ được đọc ra mà còn được sắp xếp lại theo đúng thứ tự hiển thị và phân tích mà giao diện cần.
+
+\textbf{DisplayFilter} đảm nhiệm phần lọc và sàng lọc dữ liệu theo biểu thức do người dùng nhập. Đây là lớp giúp hệ thống không phải hiển thị toàn bộ gói tin mà chỉ giữ lại những bản ghi thỏa điều kiện quan sát. Lớp này có nhiệm vụ phân tích biểu thức lọc, nhận diện các từ khóa giao thức phổ biến và đánh giá từng gói dựa trên thuộc tính thực tế của bản ghi. Phương thức matches(record, expression) là trọng tâm của lớp, trong đó biểu thức được chuẩn hóa rồi tách thành các token để đánh giá logic. Ngoài việc so khớp theo giao thức như TCP, UDP, DNS, ARP hay IPv6, lớp còn hỗ trợ phân tích các điều kiện phức hợp liên quan đến địa chỉ, cổng, nội dung và các nhánh giao thức trong cây hiển thị. Các hàm hierarchy\_packet\_layers và hierarchy\_path\_text giúp chuyển thông tin lớp giao thức thành chuỗi mô tả thống nhất, từ đó làm nền cho cơ chế hiển thị theo cây và các bộ lọc theo chiều sâu. Nhờ lớp này, việc sàng lọc gói tin diễn ra ngay trong bộ nhớ làm việc, phản hồi nhanh và không làm nặng thêm giao diện.
+
+\textbf{PacketraModelAdapter} là lớp cầu nối giữa dữ liệu lưu lượng đã được trích xuất và mô hình học máy dùng để phát hiện hành vi bất thường. Lớp này được thiết kế để nạp mô hình, chuẩn hóa đặc trưng và thực hiện suy luận trên các luồng dữ liệu đã gom nhóm. Các thuộc tính chính của lớp gồm đường dẫn đến mô hình, bộ chuẩn hóa, danh sách cột đặc trưng, bộ nhãn và cờ trạng thái tải mô hình. Phương thức \_try\_load() chịu trách nhiệm chọn hướng nạp phù hợp, trong đó nhánh TorchScript là hướng được dùng trong đồ án khi mô hình có đuôi .pt và đi kèm bộ chuẩn hóa. Các phương thức \_try\_load\_torchscript() và predict(features) thực hiện lần lượt các bước đọc mô hình, chuẩn hóa đầu vào, suy luận và ánh xạ kết quả số về nhãn dễ hiểu như Normal, DoS hoặc PortScan. Lớp cũng xử lý bài toán đồng nhất dữ liệu đầu vào qua \_normalize\_matrix để bảo đảm đặc trưng đưa vào mô hình luôn đúng thứ tự và đúng kích thước. Về mặt thiết kế, PacketraModelAdapter không can thiệp vào giao diện mà chỉ cung cấp kết quả dự đoán để lớp điều khiển bên trên diễn giải và hiển thị.
+
+Với bốn lớp trên, hệ thống hình thành một chuỗi xử lý khép kín nhưng vẫn tách lớp rõ ràng. PacketSniffer chịu trách nhiệm đưa gói tin vào hệ thống; PacketParser biến gói thô thành dữ liệu có cấu trúc; DisplayFilter sàng lọc dữ liệu theo yêu cầu hiển thị; PacketraModelAdapter tiếp nhận các đặc trưng đã gom để suy luận hành vi lưu lượng. Cách tách nhiệm vụ này giúp mỗi lớp chỉ tập trung vào một vai trò, từ đó dễ kiểm thử hơn và ít phụ thuộc chéo hơn khi cần mở rộng về sau.
+
+Để minh họa cách các lớp phối hợp trong thực tế, đồ án sử dụng ba biểu đồ trình tự tương ứng với ba ca sử dụng quan trọng. Các biểu đồ này không chỉ mô tả thứ tự truyền thông điệp giữa các đối tượng mà còn cho thấy rõ cách hệ thống phản ứng khi người dùng bắt đầu thu thập dữ liệu, khi cần sàng lọc danh sách gói tin và khi chạy phân tích bằng mô hình học máy.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Hinhve/UC01.png}
+    \caption{Biểu đồ trình tự cho ca sử dụng UC01 - bắt gói tin}
+    \label{fig:uc01_sequence}
+\end{figure}
+
+Hình~\ref{fig:uc01_sequence} cho thấy luồng bắt gói tin thời gian thực. Người dùng khởi động thao tác từ CaptureView, sau đó giao diện tạo PacketSniffer và khởi chạy nó trong luồng nền. PacketSniffer gọi hàm bắt gói của thư viện thu thập để lấy dữ liệu từ giao diện mạng đang chọn, rồi phát tín hiệu packet\_captured cho giao diện khi có gói mới. Mỗi gói sau đó được chuyển qua PacketParser để giải mã thành bản ghi có cấu trúc, tiếp theo được kiểm tra qua DisplayFilter nhằm quyết định có hiển thị hay không. Nếu gói thỏa điều kiện, CaptureView cập nhật PacketTable để thêm bản ghi vào danh sách đang xem. Trình tự này thể hiện rõ cách hệ thống vừa thu thập liên tục vừa giữ giao diện không bị treo.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Hinhve/UC04.png}
+    \caption{Biểu đồ trình tự cho ca sử dụng UC04 - nhận diện gói tin}
+    \label{fig:uc04_sequence}
+\end{figure}
+
+Hình~\ref{fig:uc04_sequence} mô tả luồng sàng lọc gói tin theo điều kiện hiển thị. Khi người dùng nhập biểu thức lọc, CaptureView tiếp nhận chuỗi điều kiện và chuyển toàn bộ danh sách gói tin đang có cho DisplayFilter xử lý. Lớp DisplayFilter duyệt lần lượt từng bản ghi, đánh giá biểu thức và trả về kết quả đúng hoặc sai cho từng gói. Các bản ghi thỏa điều kiện được gom lại thành danh sách hiển thị mới, sau đó PacketTable thay thế dữ liệu cũ bằng danh sách đã sàng lọc. Kết quả là người dùng chỉ còn nhìn thấy các gói phù hợp với điều kiện quan sát hiện tại, còn phần còn lại được ẩn đi nhưng vẫn không bị xóa khỏi dữ liệu gốc trong bộ nhớ làm việc.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Hinhve/UC06.png}
+    \caption{Biểu đồ trình tự cho ca sử dụng UC06 - phát hiện hành vi bất thường}
+    \label{fig:uc06_sequence}
+\end{figure}
+
+Hình~\ref{fig:uc06_sequence} trình bày luồng phát hiện hành vi bất thường bằng mô hình học máy. Người dùng kích hoạt chức năng phân tích từ giao diện chính, sau đó PacketraApplication thu thập danh sách gói hoặc luồng đã chọn và chuyển cho bộ trích xuất đặc trưng. FlowFeatureExtractor gom các gói theo luồng, tính toán bộ đặc trưng thống kê theo chuẩn CICFlowMeter rồi chuẩn hóa dữ liệu đầu vào cho mô hình. Kết quả đặc trưng được gửi đến PacketraModelAdapter, nơi mô hình TorchScript được nạp cùng bộ chuẩn hóa standard\_scaler và tiến hành suy luận. Từ đầu ra xác suất, lớp này ánh xạ sang nhãn dễ hiểu như Normal, DoS hoặc PortScan, rồi trả kết quả về cho lớp giao diện để hiển thị thành danh sách cảnh báo và cây diễn giải chi tiết. Luồng này cho thấy phần AI của đồ án không hoạt động rời rạc mà được gắn chặt vào chuỗi xử lý chung của hệ thống.
+
+Tổng thể, thiết kế lớp của đồ án bám sát đúng vai trò từng thành phần trong code hiện tại. Phần bắt gói, giải mã, lọc hiển thị và suy luận bất thường đều được tách thành các lớp độc lập nhưng vẫn kết nối với nhau qua các điểm giao tiếp rõ ràng. Nhờ đó, hệ thống đạt được sự cân bằng giữa tính dễ hiểu, khả năng bảo trì và khả năng mở rộng cho các bước phát triển tiếp theo.
+\clearpage
 \subsection{Thiết kế cơ chế lưu trữ dữ liệu}
-Phần lưu trữ dữ liệu được thiết kế nhằm phục vụ hai mục đích chính: giữ cấu hình làm việc của người dùng và lưu kết quả xử lý để xem lại sau. Những thông tin như thiết lập giao diện, danh sách gần đây hoặc tham số làm việc được lưu gọn để có thể khôi phục nhanh. Dữ liệu phân tích và kết quả xuất được tổ chức theo định dạng phù hợp để người dùng dễ mở lại, kiểm tra hoặc chuyển sang công cụ khác.
+Do đặc thù của hệ thống giám sát lưu lượng mạng đòi hỏi xử lý dữ liệu với tốc độ cao (Gigabit Ethernet), việc sử dụng các hệ quản trị cơ sở dữ liệu quan hệ truyền thống (như MySQL, SQL Server) ghi trực tiếp lên ổ cứng sẽ tạo ra các nút thắt cổ chai về mặt hiệu năng I/O. Do đó, đồ án đề xuất cấu trúc lưu trữ kết hợp (Hybrid Storage Architecture) phân tầng bao gồm: cơ sở dữ liệu trong bộ nhớ (In-memory Database) cho dữ liệu thời gian thực; cơ sở dữ liệu dạng tệp nhị phân chuẩn hóa (PCAP/PCAPNG) cho lưu trữ bền vững; và cơ sở dữ liệu cấu hình phẳng (QSettings) cho lưu giữ trạng thái làm việc.
 
-Thiết kế này giúp hệ thống ổn định hơn trong sử dụng thực tế vì người dùng không phải thiết lập lại mọi thứ mỗi lần mở chương trình, đồng thời dữ liệu cũng không bị khóa trong một kiểu lưu trữ riêng của đồ án.
+\subsubsection{Cơ sở dữ liệu trong bộ nhớ (In-Memory Database)}
+Hệ thống sử dụng các bộ đệm đối tượng được tối ưu hóa trong bộ nhớ RAM để quản lý thông tin các gói tin và luồng dữ liệu đang bắt trực tiếp. Dữ liệu gói tin sau khi bóc tách được ánh xạ vào lớp \texttt{PacketRecord} để đóng vai trò như các bản ghi trong một bảng cơ sở dữ liệu ảo.
 
+\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
+\caption{Đặc tả cấu trúc thực thể PacketRecord (Gói tin trong bộ nhớ)} \label{tab:schema_packet_record} \\
+\hline
+\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\endfirsthead
+\hline
+\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\endhead
+\hline
+\endfoot
+\hline
+\endlastfoot
+number & Integer & Khóa chính & Số thứ tự tăng dần của gói tin trong phiên bắt. \\ \hline
+timestamp & Double & Not Null & Mốc thời gian tuyệt đối khi gói tin được thu thập. \\ \hline
+source & String & Not Null & Địa chỉ IP hoặc địa chỉ MAC nguồn của gói tin. \\ \hline
+destination & String & Not Null & Địa chỉ IP hoặc địa chỉ MAC đích của gói tin. \\ \hline
+protocol & String & Not Null & Tên giao thức tầng ứng dụng hoặc tầng vận chuyển chính. \\ \hline
+length & Integer & Not Null & Độ dài kích thước gói tin (tính bằng byte). \\ \hline
+info & String & Nullable & Thông tin tóm tắt nhanh nội dung gói tin. \\ \hline
+raw & Bytes & Not Null & Mảng byte dữ liệu thô nguyên bản của gói tin. \\ \hline
+layers & Dictionary & Nullable & Cấu trúc cây phân tầng chứa các trường đã giải mã. \\ \hline
+\end{longtable}
+
+Đối với các luồng dữ liệu được gom nhóm phục vụ phân tích hành vi AI, hệ thống duy trì bảng lưu trữ các thực thể luồng dựa trên lớp \texttt{PacketraFlow} và định danh khóa luồng \texttt{FlowKey}.
+
+\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
+\caption{Đặc tả cấu trúc thực thể PacketraFlow (Luồng dữ liệu phục vụ AI)} \label{tab:schema_packetra_flow} \\
+\hline
+\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\endfirsthead
+\hline
+\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\endhead
+\hline
+\endfoot
+\hline
+\endlastfoot
+flow\_key & Object (FlowKey) & Khóa chính & Tổ hợp Tuple-5 gồm: IP nguồn, IP đích, Cổng nguồn, Cổng đích, Giao thức. \\ \hline
+packet\_count & Integer & Not Null & Tổng số gói tin thuộc luồng này. \\ \hline
+byte\_count & Integer & Not Null & Tổng số byte dữ liệu của luồng. \\ \hline
+start\_time & Double & Not Null & Mốc thời gian bắt đầu của luồng. \\ \hline
+end\_time & Double & Not Null & Mốc thời gian kết thúc (gói tin cuối cùng) của luồng. \\ \hline
+features & Array & Not Null & Vector chứa 80 đặc trưng số lượng theo chuẩn CICFlowMeter. \\ \hline
+prediction & String & Nullable & Kết quả dự đoán nhãn hành vi từ mô hình AI. \\ \hline
+\end{longtable}
+
+\subsubsection{Cơ sở dữ liệu cấu hình hệ thống (Registry/QSettings Schema)}
+Để lưu trữ bền vững các thiết lập cấu hình của người dùng mà không cần cài đặt các máy chủ cơ sở dữ liệu cồng kềnh, ứng dụng khai thác lớp \texttt{QSettings} của nền tảng Qt. Cấu trúc lưu trữ này ánh xạ trực tiếp xuống Windows Registry hoặc tệp tin cấu hình phẳng (.ini) tùy theo hệ điều hành.
+
+\begin{longtable}{|p{3.8cm}|p{2.2cm}|p{1.8cm}|p{4.7cm}|}
+\caption{Đặc tả các khóa cấu hình hệ thống trong QSettings} \label{tab:schema_qsettings} \\
+\hline
+\textbf{Khóa cấu hình} & \textbf{Kiểu dữ liệu} & \textbf{Mặc định} & \textbf{Mô tả chức năng} \\ \hline
+\endfirsthead
+\hline
+\textbf{Khóa cấu hình} & \textbf{Kiểu dữ liệu} & \textbf{Mặc định} & \textbf{Mô tả chức năng} \\ \hline
+\endhead
+\hline
+\endfoot
+\hline
+\endlastfoot
+capture/promiscuous\_mode & Boolean & True & Bật/tắt chế độ hỗn tạp của card mạng khi bắt gói. \\ \hline
+capture/filter\_presets & JSON String & [] & Lưu trữ các biểu thức lọc bắt gói cấu hình sẵn. \\ \hline
+theme/current\_style & String & "Light" & Chủ đề giao diện người dùng hiện tại (Sáng/Tối). \\ \hline
+ai/model\_path & String & "ai/model.pt" & Đường dẫn vật lý đến file trọng số của mô hình học sâu. \\ \hline
+ai/threshold & Double & 0.85 & Ngưỡng tin cậy tối thiểu để kích hoạt cảnh báo bất thường. \\ \hline
+\end{longtable}
+
+\subsubsection{Cơ sở dữ liệu lưu trữ vật lý (Physical File Database)}
+Dữ liệu phiên giám sát mạng khi được lưu trữ bền vững trên ổ cứng sẽ sử dụng cấu trúc nhị phân chuẩn hóa của định dạng PCAP và PCAPNG. Đây là định dạng lưu trữ phi cấu trúc hiệu năng cao, cho phép ghi tuần tự trực tiếp mảng byte với độ trễ thấp nhất.
+
+Cấu trúc tệp tin PCAP gồm có một tiêu đề chung (Global Header) đặt ở đầu tệp, tiếp theo là danh sách các gói tin, mỗi gói tin được tiền định bởi một tiêu đề gói (Packet Header).
+
+\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
+\caption{Cấu trúc các trường trong Global Header của tệp PCAP} \label{tab:schema_pcap_global} \\
+\hline
+\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Giá trị mẫu} & \textbf{Mô tả chức năng} \\ \hline
+\endfirsthead
+\hline
+\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Giá trị mẫu} & \textbf{Mô tả chức năng} \\ \hline
+\endhead
+\hline
+\endfoot
+\hline
+\endlastfoot
+Magic Number & 4 Bytes & 0xa1b2c3d4 & Xác định định dạng tệp và thứ tự đọc byte (Endianness). \\ \hline
+Version Major & 2 Bytes & 2 & Phiên bản lớn của định dạng PCAP. \\ \hline
+Version Minor & 2 Bytes & 4 & Phiên bản nhỏ của định dạng PCAP. \\ \hline
+This Zone & 4 Bytes & 0 & Lệch múi giờ UTC (mặc định bằng 0). \\ \hline
+Sig Figs & 4 Bytes & 0 & Độ chính xác của mốc thời gian. \\ \hline
+Snap Len & 4 Bytes & 65535 & Chiều dài tối đa của gói tin bị cắt khi bắt. \\ \hline
+Network & 4 Bytes & 1 & Loại tầng liên kết dữ liệu (1 tương ứng Ethernet). \\ \hline
+\end{longtable}
+
+\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
+\caption{Cấu trúc các trường trong Packet Header của tệp PCAP} \label{tab:schema_pcap_packet} \\
+\hline
+\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Đơn vị} & \textbf{Mô tả chức năng} \\ \hline
+\endfirsthead
+\hline
+\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Đơn vị} & \textbf{Mô tả chức năng} \\ \hline
+\endhead
+\hline
+\endfoot
+\hline
+\endlastfoot
+Timestamp Seconds & 4 Bytes & Giây & Số giây tính từ kỷ nguyên Epoch (1/1/1970). \\ \hline
+Timestamp Microseconds & 4 Bytes & Micro giây & Số micro giây lẻ của mốc thời gian bắt gói. \\ \hline
+Captured Length & 4 Bytes & Byte & Kích thước thực tế của gói tin được lưu trữ vào đĩa. \\ \hline
+Original Length & 4 Bytes & Byte & Kích thước ban đầu của gói tin khi đi qua card mạng. \\ \hline
+\end{longtable}
 \section{Xây dựng ứng dụng}
 \subsection{Thư viện và công cụ sử dụng}
 Để hiện thực các chức năng của đồ án, nhóm công nghệ chính gồm ngôn ngữ triển khai, thư viện bắt và phân tích gói tin, thư viện giao diện, thư viện xử lý dữ liệu và các công cụ hỗ trợ kết nối từ xa. Mỗi công cụ được chọn để giải quyết một phần việc cụ thể thay vì dùng theo thói quen hay theo độ phổ biến chung chung.
