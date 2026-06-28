@@ -253,33 +253,138 @@ Tổng cộng & 218 & 117 & 77,210 & 46.04 MB \\ \hline
 Kết quả trên cho thấy hệ thống không chỉ hoàn thành các chức năng nghiệp vụ đã đặt ra ở Chương 2 mà còn được tổ chức thành những khối đóng gói tương đối gọn, rõ trách nhiệm và có thể tách biệt khi triển khai. Đây là nền tảng trực tiếp để bước sang phần kiểm thử và đánh giá ở các mục tiếp theo.
 
 \subsection{Minh họa các chức năng chính}
-Các màn hình chức năng chính của hệ thống được trình bày theo đúng luồng sử dụng thực tế gồm chọn nguồn dữ liệu, thu thập gói tin, xem chi tiết, thống kê theo luồng và xuất kết quả. Việc minh họa được thực hiện theo hướng bám sát từng bước người dùng thao tác để người đọc có thể hình dung rõ cách hệ thống vận hành.
+Các màn hình chức năng chính của hệ thống được lựa chọn theo đúng luồng sử dụng thực tế, từ khởi tạo nguồn dữ liệu, quan sát gói tin, phân tích kết quả cho tới các công cụ hỗ trợ như điều khiển từ xa, tạo dashboard và mô phỏng thao tác mạng. Mỗi hình dưới đây đều đại diện cho một bước quan trọng trong quá trình sử dụng, giúp người đọc thấy rõ cách các quyết định ở phần thiết kế đã được chuyển thành giao diện cụ thể.
 
-Phần minh họa này giúp liên kết giữa phần thiết kế và phần kiểm thử, đồng thời cho thấy các quyết định ở phần kiến trúc đã được chuyển thành giao diện và chức năng cụ thể như thế nào.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_Khoitao.png}
+    \caption{Giao diện khởi tạo và chọn nguồn gói tin}
+    \label{fig:demo_khoitao}
+\end{figure}
+
+Hình~\ref{fig:demo_khoitao} là màn hình đầu tiên người dùng gặp khi mở ứng dụng. Tại đây, hệ thống cho phép chọn nguồn dữ liệu phù hợp trước khi bước vào phiên làm việc chính, nhờ vậy quá trình khởi động được tách khỏi phần quan sát gói tin và trở nên rõ ràng hơn.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Hinhve/Demo_main.png}
+    \caption{Giao diện làm việc chính với danh sách gói tin và vùng chi tiết}
+    \label{fig:demo_main}
+\end{figure}
+
+Hình~\ref{fig:demo_main} thể hiện giao diện trung tâm của hệ thống, nơi danh sách gói tin, cây phân tích chi tiết và vùng dữ liệu thô được trình bày đồng thời. Bố cục này giúp người dùng vừa quan sát tổng thể luồng dữ liệu vừa có thể đi sâu vào từng gói mà không phải chuyển qua nhiều màn hình khác nhau.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_Remote.png}
+    \caption{Giao diện quản lý giao diện mạng từ xa}
+    \label{fig:demo_remote}
+\end{figure}
+
+Hình~\ref{fig:demo_remote} minh họa chức năng quản lý giao diện từ xa, dùng khi cần làm việc với một máy khác trong cùng hệ thống. Giao diện này hỗ trợ theo dõi và lựa chọn nguồn dữ liệu từ xa một cách tập trung, phù hợp với nhu cầu thu thập lưu lượng ở nhiều môi trường khác nhau.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_AI.png}
+    \caption{Chức năng dùng mô hình AI để phân tích lưu lượng}
+    \label{fig:demo_ai}
+\end{figure}
+
+Hình~\ref{fig:demo_ai} cho thấy màn hình tích hợp mô hình AI để đánh giá hành vi lưu lượng. Kết quả phân tích được trình bày theo hướng trực quan, giúp người dùng nhận biết nhanh các luồng có dấu hiệu bất thường thay vì chỉ đọc dữ liệu thô.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_Topo.png}
+    \caption{Chức năng vẽ topo mạng}
+    \label{fig:demo_topo}
+\end{figure}
+
+Hình~\ref{fig:demo_topo} minh họa khả năng trực quan hóa topo mạng. Đây là một góc nhìn bổ trợ cho quá trình phân tích gói tin, giúp người dùng dễ hình dung quan hệ giữa các nút mạng và luồng trao đổi dữ liệu.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_Demo.png}
+    \caption{Chức năng demo thao tác mạng trên hệ thống}
+    \label{fig:demo_demo}
+\end{figure}
+
+Hình~\ref{fig:demo_demo} là giao diện mô phỏng thao tác mạng dùng cho mục đích trình diễn và kiểm tra. Màn hình này giúp người dùng tạo nhanh các tình huống mẫu để quan sát phản ứng của hệ thống trong những kịch bản khác nhau.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_das01.png}
+    \caption{Danh sách các dashboard do người dùng tạo}
+    \label{fig:demo_dashboards}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{Hinhve/Demo_das02.png}
+    \caption{Nội dung chi tiết của một dashboard với các biểu đồ}
+    \label{fig:demo_dashboard_detail}
+\end{figure}
+
+Hai hình~\ref{fig:demo_dashboards} và~\ref{fig:demo_dashboard_detail} thuộc cùng một nhóm chức năng dashboard. Hình đầu cho thấy danh sách các dashboard đã lưu để người dùng quản lý nhanh các bộ hiển thị khác nhau, còn hình sau đi sâu vào nội dung bên trong một dashboard với các biểu đồ được sắp xếp theo mục đích theo dõi cụ thể. Cách trình bày này giúp hệ thống vừa có khả năng tổng hợp nhiều góc nhìn, vừa giữ được sự linh hoạt khi người dùng muốn tạo từng bộ theo dõi riêng.
+
+Phần minh họa trên cho thấy hệ thống không chỉ dừng ở việc hiển thị gói tin mà còn hỗ trợ đầy đủ các góc nhìn quan trọng khác như điều khiển từ xa, phân tích bằng AI, mô phỏng mạng và tổng hợp số liệu qua dashboard. Nhờ đó, người đọc có thể hình dung trọn vẹn khả năng vận hành của ứng dụng qua các màn hình tiêu biểu nhất.
 
 \section{Kiểm thử}
-Phần kiểm thử được xây dựng để đối chiếu các chức năng đã hiện thực với yêu cầu đặt ra ban đầu. Mỗi nhóm chức năng được kiểm thử theo luồng sử dụng điển hình và cả các tình huống lỗi nhằm bảo đảm hệ thống không chỉ chạy được trong điều kiện thuận lợi mà còn phản hồi đúng khi gặp đầu vào bất thường.
+Phần kiểm thử được xây dựng để đối chiếu các chức năng đã hiện thực với yêu cầu đặt ra ban đầu. Đồ án tập trung vào ba nhóm chức năng quan trọng nhất là phân tích gói tin, trực quan hóa bằng dashboard và thống kê luồng giao tiếp. Mỗi nhóm được kiểm thử theo dữ liệu thực tế, có đối chiếu với Wireshark và có đánh giá mức độ khớp kết quả sau cùng.
 
-\subsection{Kiểm thử nhóm chức năng bắt gói tin}
-Nhóm này tập trung vào việc kiểm tra khả năng khởi tạo phiên bắt gói, nhận dữ liệu và hiển thị đúng danh sách gói tin. Đồng thời, hệ thống phải phản hồi rõ ràng khi không thể khởi tạo giao diện hoặc khi cấu hình bắt gói không hợp lệ.
+Kỹ thuật kiểm thử được sử dụng chủ yếu là kiểm thử chức năng theo kịch bản sử dụng, kiểm thử đối chiếu kết quả và kiểm thử hồi quy trên nhiều tệp đầu vào khác nhau. Với các chức năng phân tích và thống kê, hệ thống được so sánh trực tiếp với Wireshark để kiểm tra tính nhất quán của dữ liệu đầu ra. Với dashboard, hệ thống được kiểm thử theo hướng thử tải chức năng và kiểm tra độ ổn định khi tạo nhiều biểu đồ liên tiếp từ nhiều nguồn khác nhau.
 
-\subsection{Kiểm thử nhóm chức năng thao tác tệp lưu trữ}
-Nhóm này kiểm tra việc mở, lưu, tách và ghép tệp dữ liệu. Hệ thống cần nhận đúng định dạng, xử lý được lỗi tệp không hợp lệ và thông báo rõ khi thao tác ghi tệp không thành công.
+\subsection{Kiểm thử chức năng phân tích gói tin}
+Chức năng phân tích gói tin được kiểm thử bằng một tệp PCAPNG gốc có tên là ''The Ultimate PCAP v20260316'' có dung lượng lớn, sau đó được tách thành 10 tệp nhỏ, mỗi tệp chứa 5000 gói tin, để kiểm tra khả năng đọc, bóc tách và hiển thị dữ liệu của hệ thống trên nhiều đầu vào khác nhau thay vì chỉ dùng một tệp lớn duy nhất. Cách làm này giúp đánh giá cả độ ổn định khi xử lý lẫn khả năng tái hiện cấu trúc giao thức của từng phiên bắt gói.
 
-\subsection{Kiểm thử nhóm chức năng phân tích gói tin}
-Nhóm này kiểm tra quá trình bóc tách trường dữ liệu, nhận diện giao thức và xử lý các gói tin có cấu trúc khác nhau. Kết quả mong muốn là dữ liệu sau phân tích phải đầy đủ hơn dữ liệu thô ban đầu và được đưa lên giao diện đúng cách.
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.0cm}p{4.0cm}p{3.8cm}p{2.8cm}}
+\hline
+\textbf{Trường hợp} & \textbf{Dữ liệu kiểm thử} & \textbf{Cách đối chiếu} & \textbf{Kết quả} \\ \hline
+Phân tích theo từng tệp & 10 tệp, mỗi tệp 5000 gói & Đối chiếu từng nhóm gói với Wireshark & Khớp ổn định trên 95\% \\ \hline
+Kiểm tra hiển thị chi tiết & Nhiều gói giao thức khác nhau & Kiểm tra cây phân tích và dữ liệu thô & Hiển thị đúng cấu trúc \\ \hline
+\end{tabular}
+\caption{Các trường hợp kiểm thử chức năng phân tích gói tin}
+\label{tab:test_packet_analysis}
+\end{table}
 
-\subsection{Kiểm thử nhóm chức năng nhận diện gói tin}
-Phần này kiểm tra khả năng phân loại và trích xuất thông tin từ các gói tin phổ biến. Hệ thống phải xác định được lớp giao thức chính và hiển thị các thuộc tính quan trọng phục vụ quan sát.
+Kết quả cho thấy phần giải mã của hệ thống bám khá sát dữ liệu chuẩn. Một số chênh lệch nhỏ xuất hiện ở những trường hợp gói tin có trường mở rộng hoặc dữ liệu bổ sung đặc thù, nhưng các khác biệt này không làm sai lệch cấu trúc chính của gói tin và vẫn nằm trong mức chấp nhận được khi đối chiếu thực nghiệm.
 
-\subsection{Kiểm thử nhóm chức năng thống kê luồng giao tiếp}
-Nhóm kiểm thử này tập trung vào cách hệ thống gom gói tin thành luồng và tính các chỉ số tổng hợp. Kết quả kiểm thử cần cho thấy các luồng được xác định đúng và số liệu thống kê phản ánh hợp lý dữ liệu đầu vào.
+\subsection{Kiểm thử chức năng trực quan hóa bằng dashboard}
+Chức năng dashboard được kiểm thử theo hướng tạo liên tiếp 10 biểu đồ khác nhau từ các nguồn dữ liệu khác nhau mà hệ thống hỗ trợ. Mục tiêu của kiểm thử không chỉ là xem biểu đồ có hiển thị đúng hay không, mà còn kiểm tra xem hệ thống có giữ được độ ổn định khi người dùng chuyển đổi giữa nhiều nguồn, nhiều loại chart và nhiều dashboard đã lưu hay không. Đây là nhóm kiểm thử quan trọng vì dashboard là nơi tổng hợp góc nhìn nhanh cho toàn bộ dữ liệu đã thu thập.
 
-\subsection{Kiểm thử nhóm chức năng phát hiện hành vi bất thường}
-Phần này đánh giá khả năng đưa ra cảnh báo hoặc gợi ý khi dữ liệu có dấu hiệu không bình thường. Mục tiêu là bảo đảm kết quả phân tích không chỉ dừng ở mức mô tả mà còn hỗ trợ người dùng nhận biết tình huống cần chú ý.
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.0cm}p{3.8cm}p{4.1cm}p{2.7cm}}
+\hline
+\textbf{Trường hợp} & \textbf{Dữ liệu kiểm thử} & \textbf{Cách thực hiện} & \textbf{Kết quả} \\ \hline
+Tạo các biểu đồ khác nhau & 10 chart khác nhau & Thêm các chart khác nhau & Hoạt động ổn định \\ \hline
+Hiển thị dashboard & Danh sách đã lưu & Mở nhiều dashboard và kiểm tra hiển thị & Không lỗi, phản hồi tốt \\ \hline
+Thay đổi nguồn trong một dashboard & Các nguồn khác nhau có trong gói tin & Quan sát với các nguồn hợp lệ thì chart hiển thị chuẩn & Hiển thị đúng và đồng bộ \\ \hline
+\end{tabular}
+\caption{Các trường hợp kiểm thử chức năng trực quan hóa bằng dashboard}
+\label{tab:test_dashboard}
+\end{table}
 
-\subsection{Kiểm thử nhóm chức năng trực quan hóa giao tiếp}
-Nhóm này kiểm tra việc hiển thị biểu đồ, bảng thống kê và các góc nhìn trực quan khác. Dữ liệu phải được trình bày rõ ràng, dễ đọc và nhất quán với kết quả phân tích.
+Kết quả kiểm thử cho thấy dashboard hoạt động ổn định khi tăng dần số lượng biểu đồ và khi thay đổi nguồn dữ liệu. Các biểu đồ được tạo ra vẫn giữ đúng vai trò trực quan hóa, không bị đơ giao diện và không làm mất trạng thái làm việc của người dùng trong quá trình thao tác.
+
+\subsection{Kiểm thử chức năng thống kê luồng giao tiếp}
+Chức năng thống kê luồng giao tiếp được kiểm thử bằng 10 tệp dữ liệu khác nhau và đối chiếu với kết quả mà Wireshark cung cấp. Trong nhóm kiểm thử này, hệ thống phải gom đúng các gói có cùng đặc trưng thành một luồng, tính đúng số lượng luồng, số gói trong luồng và các số liệu tổng hợp liên quan. Việc dùng nhiều tệp kiểm thử giúp xác nhận kết quả không chỉ đúng ở một trường hợp riêng lẻ mà còn ổn định trên nhiều kiểu lưu lượng khác nhau.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.0cm}p{4.0cm}p{3.8cm}p{2.8cm}}
+\hline
+\textbf{Trường hợp} & \textbf{Dữ liệu kiểm thử} & \textbf{Cách đối chiếu} & \textbf{Kết quả} \\ \hline
+Thống kê tổng hợp & 10 tệp khác nhau & So sánh số luồng, số gói và giao thức với Wireshark & Khớp trên 95\% \\ \hline
+Thống kê nhiều mức & 1 tệp ngẫu nhiên trong nhóm 10 tệp & Mở từng loại thống kê của tệp đấy và đối chiếu với Wireshark & Khớp ổn định \\ \hline
+\end{tabular}
+\caption{Các trường hợp kiểm thử chức năng thống kê luồng giao tiếp}
+\label{tab:test_flow_statistics}
+\end{table}
+
+Kết quả kiểm thử cho thấy các chỉ số thống kê do hệ thống sinh ra có độ tin cậy cao và bám sát công cụ tham chiếu. Những khác biệt nhỏ còn lại chủ yếu đến từ cách một số công cụ diễn giải các trường hợp gói tin đặc biệt, nhưng mức sai khác không đáng kể và không ảnh hưởng đến mục tiêu sử dụng của đồ án.
+
+Tổng hợp lại, nhóm kiểm thử trong Chương 4 đã bao phủ ba chức năng chính, trong đó 2 trường hợp thuộc phân tích gói tin, 3 trường hợp thuộc dashboard và 2 trường hợp thuộc thống kê luồng giao tiếp. Kết quả chung đều đạt mức khớp trên 95\% khi so sánh với Wireshark hoặc cho thấy hệ thống hoạt động ổn định trong quá trình thao tác liên tục. Không có trường hợp nào gây lỗi làm gián đoạn phiên làm việc; các chênh lệch nhỏ nếu có đều nằm ở chi tiết hiển thị hoặc cách quy ước nội bộ giữa các công cụ, không làm thay đổi kết quả tổng thể.
 
 \section{Triển khai}
 Đồ án được triển khai trong môi trường máy tính cá nhân với cấu hình phù hợp cho việc bắt gói, xử lý dữ liệu và hiển thị giao diện. Phần triển khai được thiết kế sao cho các thành phần chính có thể hoạt động ổn định trên môi trường làm việc phổ biến của người dùng.
