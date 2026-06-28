@@ -387,16 +387,29 @@ Kết quả kiểm thử cho thấy các chỉ số thống kê do hệ thống 
 Tổng hợp lại, nhóm kiểm thử trong Chương 4 đã bao phủ ba chức năng chính, trong đó 2 trường hợp thuộc phân tích gói tin, 3 trường hợp thuộc dashboard và 2 trường hợp thuộc thống kê luồng giao tiếp. Kết quả chung đều đạt mức khớp trên 95\% khi so sánh với Wireshark hoặc cho thấy hệ thống hoạt động ổn định trong quá trình thao tác liên tục. Không có trường hợp nào gây lỗi làm gián đoạn phiên làm việc; các chênh lệch nhỏ nếu có đều nằm ở chi tiết hiển thị hoặc cách quy ước nội bộ giữa các công cụ, không làm thay đổi kết quả tổng thể.
 
 \section{Triển khai}
-Đồ án được triển khai trong môi trường máy tính cá nhân với cấu hình phù hợp cho việc bắt gói, xử lý dữ liệu và hiển thị giao diện. Phần triển khai được thiết kế sao cho các thành phần chính có thể hoạt động ổn định trên môi trường làm việc phổ biến của người dùng.
+Đồ án được triển khai theo mô hình ứng dụng desktop cài trực tiếp trên máy người dùng, trong đó phần thu thập, giải mã, lọc và thống kê chạy cục bộ trên máy chính. Với các trường hợp cần quan sát lưu lượng ở thiết bị khác, hệ thống sử dụng một thành phần tác tử cài trên máy đích và trao đổi qua SSH để lấy danh sách giao diện và dữ liệu gói tin. Cách triển khai này phù hợp với bản chất của đồ án vì cho phép xử lý nhanh ở máy quan sát nhưng vẫn giữ được khả năng làm việc từ xa khi cần.
 
-\subsection{Môi trường triển khai và kiểm thử trên Windows}
-Hệ thống được kiểm thử trên Windows để bảo đảm các thành phần thu thập dữ liệu và giao diện hoạt động đúng như mong đợi. Trong quá trình này, các phụ thuộc hệ thống và quyền truy cập gói tin được kiểm tra để tránh lỗi phát sinh khi chạy thực tế.
+Trong phạm vi thử nghiệm, ứng dụng không triển khai theo mô hình web nhiều người dùng hay có máy chủ trung tâm riêng. Thay vào đó, toàn bộ giao diện và logic phân tích được đặt trên máy trạm của người dùng, còn dữ liệu gói tin được đọc từ giao diện cục bộ, từ tệp lưu trữ hoặc từ tác tử từ xa. Mô hình này giúp việc cài đặt đơn giản hơn, giảm phụ thuộc hạ tầng và phù hợp với một công cụ phân tích gói tin phục vụ học tập, thực hành và trình diễn.
 
-\subsection{Cấu hình thư viện và thành phần phụ trợ}
-Các thư viện hỗ trợ được cài đặt và cấu hình theo đúng vai trò của từng thành phần. Điều này giúp hệ thống khởi chạy nhất quán và giảm các lỗi do thiếu phụ thuộc hoặc khác biệt môi trường.
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.0cm}p{5.7cm}p{4.8cm}}
+\hline
+\textbf{Thiết bị} & \textbf{Cấu hình và thành phần cần cài} & \textbf{Vai trò trong triển khai} \\ \hline
+Máy chính & Windows 10 Pro 64-bit, Intel Core i5-6500T 2.50GHz, 8 GB RAM; cài Python 3.11, PySide6 6.11.1, Scapy 2.7.0, Paramiko 5.0.0, Npcap 1.87 và các thư viện đi kèm. & Chạy giao diện desktop, đọc tệp bắt gói, hiển thị gói tin, dashboard và các chức năng phân tích cục bộ. \\ \hline
+Máy đích Windows & Cài \texttt{PacketraAgent} bằng bộ MSI; máy cần OpenSSH Client/Server, Npcap và dịch vụ \texttt{PacketraAgent} khởi động tự động. & Cung cấp giao diện mạng và gói tin từ xa cho chế độ thu thập qua SSH trên Windows. \\ \hline
+Máy đích Linux & Cài \texttt{openssh-server} và \texttt{tcpdump}; đảm bảo người dùng có quyền bắt gói hoặc có thể chạy \texttt{tcpdump} với quyền phù hợp. & Cung cấp danh sách giao diện và stream gói tin trực tiếp bằng \texttt{tcpdump} cho chế độ thu thập qua SSH trên Linux. \\ \hline
+Dữ liệu hỗ trợ & Tệp PCAPNG mẫu, dashboard mẫu, hình minh họa và tài liệu hướng dẫn. & Phục vụ kiểm thử chức năng, minh họa giao diện và tái hiện các kịch bản sử dụng thực tế. \\ \hline
+\end{tabular}
+\caption{Môi trường triển khai và thành phần thử nghiệm của đồ án}
+\label{tab:deployment_environment}
+\end{table}
 
-\subsection{Kết quả triển khai thử nghiệm}
-Kết quả thử nghiệm cho thấy hệ thống có thể khởi động, thu thập dữ liệu, hiển thị gói tin và lưu kết quả theo đúng quy trình đã thiết kế. Những vấn đề phát sinh trong quá trình triển khai được xử lý theo từng nhóm chức năng, giúp hệ thống ổn định hơn khi vận hành.
+Về mặt cài đặt, ứng dụng desktop được khởi chạy từ mã nguồn chính và sử dụng các thư viện đã liệt kê ở mục trước để thực hiện toàn bộ luồng xử lý. Khi làm việc ở chế độ từ xa trên Windows, máy đích được cài tác tử bằng bộ MSI, còn trên Linux máy đích chỉ cần SSH và \texttt{tcpdump}. Ứng dụng trên máy chính sau đó kết nối qua SSH để lấy danh sách giao diện, khởi động phiên bắt gói và nhận dữ liệu trả về. Cơ chế này giúp phần mềm hoạt động thống nhất giữa hai bối cảnh sử dụng khác nhau nhưng vẫn giữ được một quy trình thao tác đơn giản cho người dùng.
+
+Kết quả triển khai thử nghiệm cho thấy hệ thống khởi động ổn định, tải giao diện ban đầu đúng, chọn được nguồn bắt gói, đọc được tệp lưu trữ, tạo dashboard và mở các góc nhìn phân tích mà không gây treo giao diện. Khi dùng chế độ từ xa, hệ thống tải được danh sách giao diện của máy đích và bắt đầu phiên thu thập đúng quy trình, còn phần tác tử trên máy Windows chạy ổn định dưới dạng dịch vụ. Với máy Linux, ứng dụng cũng lấy được danh sách giao diện và bắt gói đúng khi tài khoản SSH có đủ quyền truy cập. Trong các lần chạy thử nội bộ, người dùng có thể thao tác liên tục với giao diện chính, dashboard và các chức năng phân tích mà không gặp lỗi làm gián đoạn phiên làm việc.
+
+Vì đây là đồ án ứng dụng cài trên máy trạm nên không có bài đo tải theo kiểu hàng trăm người dùng đồng thời như hệ thống web. Thay vào đó, phần đánh giá triển khai tập trung vào tính ổn định của một phiên làm việc thực tế, khả năng duy trì phản hồi khi mở nhiều chức năng liên tiếp và khả năng xử lý các nguồn dữ liệu khác nhau trong cùng một phiên. Kết quả cho thấy mô hình triển khai hiện tại đáp ứng tốt mục tiêu của đồ án, đủ gọn để cài đặt, đủ linh hoạt để làm việc cục bộ hoặc từ xa, và đủ ổn định để phục vụ trình diễn cũng như thực hành.
 
 \section{Kết chương}
 Chương 4 đã mô tả quá trình chuyển các yêu cầu và công nghệ đã chọn thành một hệ thống hoàn chỉnh hơn ở mức thiết kế và hiện thực. Từ kiến trúc phần mềm, giao diện, cơ chế lưu trữ cho đến kiểm thử và triển khai, các phần đều được tổ chức theo một chuỗi xử lý thống nhất để bảo đảm hệ thống hoạt động ổn định và có khả năng mở rộng.

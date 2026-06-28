@@ -3,18 +3,98 @@
 \begin{document}
 
 \section{Giải pháp xây dựng tính năng bảng điều khiển phân tích}
-Chương này có độ dài tối thiểu 5 trang, tối đa không giới hạn. Sinh viên cần trình bày tất cả những nội dung đóng góp mà mình thấy tâm đắc nhất trong suốt quá trình làm ĐATN. Đó có thể là một loạt các vấn đề khó khăn mà sinh viên đã từng bước giải quyết được, là giải thuật cho một bài toán cụ thể, là giải pháp tổng quát cho một lớp bài toán, hoặc là mô hình hoặc kiến trúc hữu hiệu nào đó được sinh viên thiết kế.
+\subsection{Dẫn dắt bài toán}
+Trong lĩnh vực giám sát và phân tích lưu lượng mạng, dữ liệu thô thu thập được từ các giao diện mạng thường có khối lượng rất lớn và ở dạng phi cấu trúc. Người quản trị mạng hoặc các chuyên gia bảo mật thường xuyên phải đối mặt với hàng triệu gói tin mỗi ngày. Việc đọc và phân tích trực tiếp các gói tin đơn lẻ trên bảng danh sách truyền thống (như giao diện mặc định của Wireshark) là một quá trình tốn thời gian, dễ gây quá tải thông tin và rất khó để nhận ra các xu hướng hoặc bất thường ở góc độ toàn cục.
 
-Chương này là cơ sở quan trọng để các thầy cô đánh giá sinh viên. Vì vậy, sinh viên cần phát huy tính sáng tạo, khả năng phân tích, phản biện, lập luận, tổng quát hóa vấn đề và tập trung viết cho thật tốt. Mỗi giải pháp hoặc đóng góp của sinh viên cần được trình bày trong một mục độc lập bao gồm ba mục con: (i) dẫn dắt hoặc giới thiệu về bài toán, (ii) giải pháp, và (iii) kết quả đạt được nếu có.
+Vấn đề đặt ra là làm thế nào để tổng hợp hàng vạn gói tin rời rạc này thành những thông tin mang tính chiến lược, dễ hiểu và có tính định hướng cao. Hơn thế nữa, mỗi người quản trị mạng lại quan tâm đến một khía cạnh khác nhau: người làm bảo mật quan tâm đến các truy cập bất thường và cổng mạng, người tối ưu hạ tầng quan tâm đến băng thông theo thời gian, trong khi người phát triển phần mềm lại tập trung vào độ trễ và các lỗi truy vấn DNS/HTTP. Do đó, một bảng điều khiển tĩnh, đóng cứng các biểu đồ sẽ không đáp ứng được nhu cầu đa dạng này. Bức thiết cần một công cụ bảng điều khiển phân tích linh hoạt, cho phép tự định nghĩa biểu đồ và phân tích trực quan theo nhu cầu cá nhân.
 
-Sinh viên lưu ý không trình bày lặp lại nội dung. Những nội dung đã trình bày chi tiết trong các chương trước không được trình bày lại trong chương này. Vì vậy, với nội dung hay, mang tính đóng góp hoặc giải pháp, sinh viên chỉ nên tóm lược hoặc mô tả sơ bộ trong các chương trước, đồng thời tạo tham chiếu chéo tới đề mục tương ứng trong Chương 5. Chi tiết thông tin về đóng góp hoặc giải pháp được trình bày trong mục đó.
+\subsection{Giải pháp}
+Để giải quyết triệt để bài toán trên, đồ án đề xuất giải pháp thiết kế tính năng Bảng điều khiển phân tích (Dashboard/Analysis Panel) mang tính tương tác cao dựa trên kiến trúc hệ thống truy vấn và trực quan hóa động. Chi tiết về kiến trúc hệ thống này đã được đề cập sơ bộ ở phần 4.1 của Chương 4, tại đây sẽ đi sâu vào khía cạnh giải pháp phân tích.
 
-Ví dụ, trong Chương 4, sinh viên có thiết kế được kiến trúc đáng lưu ý gì đó, là sự kết hợp của các kiến trúc MVC, MVP, SOA, v.v. Khi đó, sinh viên sẽ chỉ mô tả ngắn gọn kiến trúc đó ở Chương 4, rồi thêm các câu có dạng: ``Chi tiết về kiến trúc này sẽ được trình bày trong phần 5.1''.
+Giải pháp được chia thành hai thành phần lõi hoạt động chặt chẽ với nhau: Bộ máy truy vấn động (\textit{Dynamic Query Engine}) và Trình soạn thảo bảng điều khiển trực quan (\textit{Visual Dashboard Editor}).
+
+\textbf{Bộ máy truy vấn động (Query Engine):} Thay vì xử lý từng gói tin riêng lẻ trên giao diện, hệ thống sử dụng kiến trúc trong bộ nhớ (In-memory) để tải dữ liệu mạng vào các mô hình dữ liệu tập trung dạng mảng phân trang. Bộ máy truy vấn hỗ trợ cấu trúc \textit{Advanced Queries}, cho phép gom nhóm dữ liệu (GROUP BY) theo nhiều chiều như: địa chỉ IP nguồn, giao thức, thời gian (time-series), hoặc dải cổng mạng. Các hàm tập hợp (Aggregation) như đếm số lượng, tính tổng dung lượng, hoặc tìm độ trễ tối đa được tối ưu hóa bằng các thuật toán băm (hashing) trong bộ nhớ để đạt tốc độ xử lý tính bằng mili-giây kể cả với tập dữ liệu hàng triệu gói tin.
+
+\textbf{Trình soạn thảo bảng điều khiển (Dashboard Editor):} Để giải quyết tính đa dạng trong nhu cầu quan sát, hệ thống cung cấp một bảng điều khiển cho phép người dùng tự do kéo thả, điều chỉnh kích thước và sắp xếp các ô biểu đồ (widgets). Mỗi ô biểu đồ được liên kết độc lập với một mẫu truy vấn từ Query Engine. Các loại biểu đồ đa dạng được hỗ trợ bao gồm biểu đồ đường (Line Chart) để xem sự thay đổi băng thông theo thời gian, biểu đồ tròn (Pie Chart) cho cơ cấu giao thức, và biểu đồ thanh (Bar Chart) để phân loại top IP nguồn. Khi dữ liệu luồng gói tin mới được bắt, hệ thống sẽ chỉ cập nhật những biểu đồ có thay đổi qua cơ chế tín hiệu bất đồng bộ thay vì vẽ lại toàn bộ, nhằm đảm bảo giao diện luôn mượt mà.
+
+\subsection{Kết quả đạt được}
+Thông qua giải pháp trên, ứng dụng Packetra đã cung cấp được một công cụ phân tích lưu lượng không chỉ mạnh mẽ mà còn rất linh hoạt. 
+\begin{itemize}
+    \item \textbf{Khả năng tùy biến cao:} Người dùng có thể tạo và lưu trữ hàng chục mẫu bảng điều khiển khác nhau cho các kịch bản phân tích riêng (VD: "Dashboard Giám sát An ninh", "Dashboard Tối ưu Băng thông"). 
+    \item \textbf{Góc nhìn bao quát:} Các bất thường về lưu lượng như một IP gửi yêu cầu kết nối ồ ạt, hay sự tăng đột biến của lưu lượng UDP ngay lập tức hiển thị rõ ràng trên các biểu đồ hình sin thay vì bị chìm nghỉm trong bảng dữ liệu tĩnh.
+    \item \textbf{Hiệu năng mượt mà:} Dù bảng điều khiển liên tục cập nhật theo thời gian thực (real-time stream) với số lượng lớn dữ liệu đầu vào, giao diện phần mềm không bị giật lag nhờ sự tách biệt hoàn toàn giữa luồng truy vấn dữ liệu nền và luồng kết xuất (render) giao diện.
+\end{itemize}
+
 
 \section{Giải pháp xây dựng tính năng sơ đồ mạng}
+\subsection{Dẫn dắt bài toán}
+Bảng điều khiển phân tích giúp giải quyết bài toán số liệu tổng hợp, tuy nhiên khi phân tích một cuộc tấn công mạng, hay khi cần kiểm tra sự kết nối bất hợp pháp giữa các máy chủ, số liệu đơn thuần là chưa đủ. Một danh sách hàng ngàn cặp IP nguồn - IP đích sẽ khiến người đọc mất phương hướng trong việc xác định: "Ai đang kết nối với ai? Đâu là nút trung tâm điều phối mạng? Có kết nối nào vòng vèo bất thường không?".
+
+Trong các hệ thống phân tích mạng truyền thống, việc xem xét kiến trúc mạng thường đòi hỏi phải xuất dữ liệu cấu hình ra các phần mềm bên ngoài (như Visio hay Packet Tracer) để vẽ lại bằng tay, hoặc xem qua bảng định tuyến tĩnh khô khan. Yêu cầu cấp thiết là cần có một giải pháp trực quan hóa kiến trúc tương tác mạng (Topology) ngay trên dữ liệu luồng thực tế (traffic-based topology). Sơ đồ này cần phản ánh chính xác các điểm cuối (endpoints) và các liên kết (links) có thật đang phát sinh lưu lượng tại thời điểm quan sát.
+
+\subsection{Giải pháp}
+Để khắc phục điểm hạn chế về khả năng mường tượng không gian mạng, đồ án đề xuất giải pháp xây dựng tính năng Sơ đồ mạng (Network Topology Map) tự động sinh ra từ dữ liệu mạng thu thập được.
+
+\textbf{Khai phá dữ liệu điểm cuối và liên kết:} Giải pháp xây dựng một bộ đệm cấu trúc đồ thị có hướng $G = (V, E)$, trong đó tập đỉnh $V$ là các điểm cuối mạng (Network Endpoints) đại diện bởi địa chỉ IP hoặc MAC, và tập cạnh $E$ là các kết nối có phát sinh truyền tải. Mỗi khi có một gói tin mới truyền từ IP $A$ đến IP $B$, hệ thống sẽ kiểm tra xem đỉnh $A$ và $B$ đã tồn tại chưa, nếu chưa sẽ tạo mới. Đồng thời, một cạnh có hướng từ $A$ đến $B$ sẽ được thiết lập (hoặc cập nhật trọng số nếu đã tồn tại). Trọng số của cạnh chính là dung lượng byte đã truyền hoặc số lượng gói tin liên lạc.
+
+\textbf{Thuật toán sắp xếp đồ thị trực quan (Force-Directed Layout):} Việc biểu diễn đồ thị lên giao diện hai chiều là bài toán khó khi số lượng nút tăng cao. Giải pháp tích hợp thuật toán mô phỏng tương tác vật lý \textit{Force-Directed Layout}. Thuật toán này coi các điểm cuối mạng như các hạt mang điện tích cùng dấu đẩy nhau, trong khi các liên kết giống như những lò xo kéo chúng lại. Dưới tác động mô phỏng liên tục của thuật toán, đồ thị tự động "giãn" ra đến một trạng thái cân bằng. Những nút IP cục bộ hoặc mạng LAN sẽ tự động co cụm lại với nhau, trong khi các dải IP ngoại mạng hoặc các máy chủ trạm sẽ được tách xa, tạo ra một sơ đồ cực kỳ khoa học và sát với không gian thực tế mà không cần bất kỳ sự can thiệp xếp đặt thủ công nào từ người dùng.
+
+\textbf{Tương tác động trên đồ thị:} Không chỉ là một hình ảnh tĩnh, đồ thị còn cho phép tương tác trực tiếp. Người dùng có thể phóng to, thu nhỏ, cuộn sơ đồ hoặc di chuột lên các nút IP để xem chi tiết lưu lượng, cũng như nhấp vào các đường nối để gọi ngược lại (callback) và lọc ngay ra danh sách các gói tin đang giao tiếp giữa hai IP đó.
+
+\subsection{Kết quả đạt được}
+Giải pháp tính năng sơ đồ mạng đã mang lại sự cải tiến mang tính đột phá về mặt trải nghiệm phân tích:
+\begin{itemize}
+    \item \textbf{Phát hiện hình mẫu (Pattern Recognition):} Các mô hình tấn công như DDoS (nhiều nút con tụ hội về một nút trung tâm), quét cổng trinh sát mạng (Port Scanning - một nút tỏa ra rất nhiều nút) được hiển thị thành những "bông hoa" hoặc chùm sao cực kỳ trực quan trên sơ đồ mà không cần bất kỳ kỹ năng phân tích sâu nào để nhận dạng.
+    \item \textbf{Phản ánh đúng thực tế:} Do đồ thị được sinh từ lưu lượng thật đang thu thập (real-time traffic topology), sơ đồ luôn thể hiện được đúng cấu trúc mạng tại thời điểm xảy ra sự cố, kể cả khi cấu hình mạng đã bị hacker ngụy trang hoặc thay đổi.
+    \item \textbf{Giao diện hiện đại:} Việc kết hợp thuật toán sắp xếp vật lý Force-Directed mang lại hiệu ứng chuyển động mượt mà, giúp người dùng cảm thấy ứng dụng đang thực sự sống động và phản ánh luồng chảy của dữ liệu.
+\end{itemize}
+
 
 \section{Giải pháp xây dựng tính năng mô phỏng và minh họa dữ liệu mẫu}
+\subsection{Dẫn dắt bài toán}
+Trong quá trình phát triển, kiểm thử, cũng như triển khai một phần mềm phân tích mạng, một thách thức rất lớn là "làm sao để đánh giá phần mềm nếu không có sẵn môi trường mạng bị tấn công hoặc môi trường mạng đa dạng?". Việc tạo ra các hành vi tấn công độc hại ngay trong mạng thực tế của tổ chức hay trường học để kiểm thử công cụ là vi phạm chính sách bảo mật và rất nguy hiểm. Ngược lại, nếu chỉ bắt gói tin trên môi trường mạng thông thường (như xem Youtube, lướt web), phần mềm sẽ không có cơ hội thể hiện năng lực phát hiện các gói tin bất thường, cũng không đủ số lượng gói tin để biểu diễn độ chịu tải của các biểu đồ và tính năng phân tích thống kê.
+
+Ngoài ra, đối với người sử dụng mới làm quen với Packetra, nếu vừa khởi động phần mềm lên chỉ là một màn hình trống trơn đợi bắt gói tin, họ sẽ gặp khó khăn trong việc học cách sử dụng các tính năng phức tạp như Bảng điều khiển hay Bộ lọc. Cần một cách tiếp cận mang tính mô phỏng an toàn, cho phép hệ thống giả lập việc "đang bắt được dữ liệu" từ một môi trường mạng phong phú ảo.
+
+\subsection{Giải pháp}
+Giải pháp cho vấn đề trên là xây dựng module \textbf{Mô phỏng dữ liệu (Mock Data / Simulation Engine)}, một module tách biệt hoạt động song song với module lõi đọc Card mạng vật lý. Mối liên kết thiết kế của module này đã được tổ chức trong cấu trúc hướng đối tượng trình bày ở phần 4.1.
+
+\textbf{Nguồn dữ liệu mô phỏng:} Thay vì lắng nghe từ \textit{Network Interface Card (NIC)}, module mô phỏng sử dụng các tệp tin PCAP chuẩn chứa các tập dữ liệu mạng mẫu, ví dụ như các tập dữ liệu mạng bị tấn công DDoS, mạng nội bộ có máy trạm nhiễm mã độc, hoặc các lưu lượng mạng đã được đóng gói sẵn cho mục đích giáo dục.
+
+\textbf{Cơ chế tái phát lại luồng (Replay Mechanism):} Không đơn thuần chỉ là "đọc file và nạp tất cả vào bộ nhớ ngay lập tức", giải pháp xây dựng một bộ đếm thời gian (Timer/Thread) mô phỏng lại quá trình mạng thời gian thực. Hệ thống đọc thời gian ghi nhận (timestamp) của từng gói tin trong file PCAP, tính toán khoảng chênh lệch thời gian giữa chúng (Delta-Time), và phát lại (replay) các gói tin này vào đường ống phân tích với tốc độ tương tự như lúc chúng được ghi lại trong thực tế. Cơ chế này được thiết kế theo mẫu \textit{Producer-Consumer}, với một luồng chạy ngầm đẩy dữ liệu vào Queue, giúp toàn bộ hệ thống (từ biểu đồ, sơ đồ mạng đến giao diện) vẫn hoạt động cập nhật sinh động như thể máy tính đang trực tiếp bị tấn công.
+
+\textbf{Điều tiết luồng mô phỏng:} Bổ sung thêm tính linh hoạt, giải pháp cung cấp tùy chọn "Tăng tốc thời gian" (Time Warp) cho phép phát lại dữ liệu ở tốc độ x2, x5, hoặc x10 để nhanh chóng vượt qua các đoạn thời gian chết của mạng, giúp quá trình kiểm thử phân tích trở nên tinh gọn.
+
+\subsection{Kết quả đạt được}
+Việc tích hợp tính năng mô phỏng dữ liệu đã mang lại nhiều lợi ích thiết thực, bao gồm:
+\begin{itemize}
+    \item \textbf{Đảm bảo chất lượng phần mềm (QA):} Module mô phỏng cho phép thực hiện các quy trình kiểm thử đơn vị (Unit Test) và kiểm thử độ chịu tải (Stress Test) một cách lặp lại và độc lập, không phụ thuộc vào hạ tầng mạng vật lý hiện tại của máy cài đặt.
+    \item \textbf{Hỗ trợ đào tạo và trình diễn (Showcase):} Hệ thống có thể dễ dàng trình diễn năng lực phân tích các kịch bản tấn công nguy hiểm tại bất kỳ buổi giới thiệu nào một cách trực quan, mượt mà mà không lo rủi ro ảnh hưởng đến an ninh hạ tầng mạng thật.
+    \item \textbf{Tối ưu quá trình nghiên cứu AI:} Việc có thể phát lại dữ liệu mẫu với tốc độ cao tạo điều kiện thuận lợi cho module AI (mô tả ở mục 5.4) có thể nhanh chóng thu nhận dữ liệu đặc trưng để suy luận, rút ngắn chu kỳ thử nghiệm các mô hình học máy.
+\end{itemize}
+
 
 \section{Giải pháp xây dựng tính năng phân tích và hỗ trợ nhận diện bằng AI}
+\subsection{Dẫn dắt bài toán}
+Phân tích mạng dựa trên luật tĩnh (Signature-based IDS) như việc đối chiếu địa chỉ IP có nằm trong danh sách đen hay không, hay gói tin có chứa chuỗi ký tự độc hại không, đang ngày càng bộc lộ nhiều điểm yếu. Tin tặc dễ dàng thay đổi IP, mã hóa dữ liệu (Payload) hoặc ngụy trang phần thân gói tin, khiến các luật tĩnh trở nên vô dụng. Một cuộc tấn công từ chối dịch vụ phân tán (DDoS) hoặc dò quét cổng (Port Scan) thường không có gì sai lệch về mặt cấu trúc từng gói tin riêng lẻ; sự bất thường chỉ bộc lộ ra khi nhìn nhận dựa trên **tần suất**, **thời lượng**, và **khối lượng** của cả một chuỗi các gói tin liên tiếp (gọi là Lưu lượng - Flow).
+
+Bài toán đặt ra là: Cần một giải pháp thông minh hơn, có khả năng học được thế nào là hành vi của một luồng mạng bình thường, và tự động cảnh báo khi có một luồng giao tiếp biểu hiện sự bất thường dựa trên các đặc trưng hành vi (Behavioral features) thay vì đặc trưng nội dung (Content features). Hơn nữa, việc tích hợp một mô hình trí tuệ nhân tạo nặng nề vào một ứng dụng phân tích thời gian thực bằng Python/PySide6 đòi hỏi sự tối ưu khắt khe về độ trễ và sự tương thích thư viện để không làm đóng băng giao diện.
+
+\subsection{Giải pháp}
+Đồ án quyết định áp dụng phương pháp \textit{Trí tuệ nhân tạo nhận dạng hành vi luồng (Flow-based AI Detection)} sử dụng mô hình học sâu hiện đại.
+
+\textbf{Trích xuất đặc trưng luồng (Flow Feature Extraction):} Khác với phân tích gói, hệ thống tự động gom các gói tin có cùng bộ quy tắc 5 chiều (Tuple-5 bao gồm: IP nguồn, IP đích, Cổng nguồn, Cổng đích, Giao thức) vào chung một Luồng (Flow). Hệ thống giám sát bộ nhớ đệm luồng theo một khung thời gian (Time Window). Từ các gói tin trong luồng, thuật toán sẽ tự động tính toán ra khoảng 80 đặc trưng hành vi số học bám sát tiêu chuẩn phân tích mạng CICFlowMeter (như: độ dài trung bình gói, phương sai thời gian giữa các gói, tốc độ byte/giây, số lượng gói tin bị cờ SYN/FIN). Việc chỉ sử dụng thông tin Header và thống kê (không đụng đến Payload) giúp giải pháp miễn nhiễm với việc mã hóa dữ liệu HTTPS.
+
+\textbf{Kiến trúc mô hình FT-Transformer:} Để xử lý các dữ liệu đặc trưng dạng bảng (Tabular Data) vừa được trích xuất, giải pháp không sử dụng Mạng nơ-ron truyền thống (MLP) mà ứng dụng mô hình \textit{Feature Tokenizer Transformer (FT-Transformer)}. Đây là một kiến trúc tiên tiến mang sức mạnh của cơ chế sự chú ý (Attention Mechanism) áp dụng vào dữ liệu bảng, cho phép mô hình tự tìm ra mối tương quan phức tạp giữa các đặc trưng (VD: sự tương quan giữa số gói gửi đi và tốc độ nhận lại) tốt hơn so với các thuật toán học máy cổ điển như Random Forest hay SVM.
+
+\textbf{Tích hợp qua TorchScript:} Việc nhúng mô hình PyTorch vào phần mềm giao diện máy tính thường gặp rắc rối vì đòi hỏi cài đặt môi trường phức tạp và quá trình khởi tạo mô hình chậm. Giải pháp được đưa ra là biên dịch trước (Ahead-of-Time) mô hình học sâu này sang định dạng \textbf{TorchScript}. TorchScript tuần tự hóa hoàn toàn cấu trúc mạng nơ-ron và trọng số thành một tệp nhị phân tĩnh (\texttt{ft\_transformer\_torchscript.pt}). Ứng dụng Packetra sau đó chỉ cần một module siêu nhẹ \texttt{PacketraModelAdapter} để nạp tệp TorchScript và thực thi suy luận mà không cần mang theo toàn bộ bộ mã nguồn PyTorch khổng lồ, đảm bảo tính gọn nhẹ khi phân phối sản phẩm.
+
+\subsection{Kết quả đạt được}
+Giải pháp nhúng AI dựa trên phân tích luồng đã mang lại những đóng góp nổi bật nhất cho hệ thống:
+\begin{itemize}
+    \item \textbf{Phát hiện tự động hành vi ẩn khuất:} Mô hình thành công trong việc nhận diện các dạng tấn công lưu lượng phổ biến như DoS, Port Scan, Botnet với độ chính xác và độ phản hồi nhạy bén, dù lưu lượng đã bị mã hóa. Khi phát hiện bất thường, hệ thống dán nhãn trực tiếp lên giao diện cho luồng đó, kèm theo màu sắc cảnh báo (Đỏ/Vàng).
+    \item \textbf{Tối ưu hiệu năng vượt trội:} Bằng việc trích xuất đặc trưng thống kê và kết hợp chạy suy luận TorchScript, thời gian phát hiện một luồng bất thường chỉ mất dưới vài chục mili-giây. Module AI hoàn toàn không cản trở luồng phân tích gói tin thời gian thực của hệ thống mạng.
+    \item \textbf{Tính ứng dụng cao:} Giải pháp chứng minh rằng việc nhúng trí tuệ nhân tạo học sâu vào các công cụ giám sát mạng cá nhân là hoàn toàn khả thi, mang lại góc nhìn cảnh báo chủ động thay vì chỉ là công cụ thống kê thụ động như trước đây. Điều này mở ra khả năng tiếp tục huấn luyện các phiên bản cập nhật của mô hình trong tương lai và chỉ cần nạp lại tệp cấu hình mô hình mà không cần cập nhật mã nguồn phần mềm.
+\end{itemize}
 
 \end{document}
