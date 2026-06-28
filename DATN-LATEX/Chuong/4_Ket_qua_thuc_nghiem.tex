@@ -137,122 +137,51 @@ Hình~\ref{fig:uc06_sequence} trình bày luồng phát hiện hành vi bất th
 Tổng thể, thiết kế lớp của đồ án bám sát đúng vai trò từng thành phần trong code hiện tại. Phần bắt gói, giải mã, lọc hiển thị và suy luận bất thường đều được tách thành các lớp độc lập nhưng vẫn kết nối với nhau qua các điểm giao tiếp rõ ràng. Nhờ đó, hệ thống đạt được sự cân bằng giữa tính dễ hiểu, khả năng bảo trì và khả năng mở rộng cho các bước phát triển tiếp theo.
 \clearpage
 \subsection{Thiết kế cơ chế lưu trữ dữ liệu}
-Do đặc thù của hệ thống giám sát lưu lượng mạng đòi hỏi xử lý dữ liệu với tốc độ cao (Gigabit Ethernet), việc sử dụng các hệ quản trị cơ sở dữ liệu quan hệ truyền thống (như MySQL, SQL Server) ghi trực tiếp lên ổ cứng sẽ tạo ra các nút thắt cổ chai về mặt hiệu năng I/O. Do đó, đồ án đề xuất cấu trúc lưu trữ kết hợp (Hybrid Storage Architecture) phân tầng bao gồm: cơ sở dữ liệu trong bộ nhớ (In-memory Database) cho dữ liệu thời gian thực; cơ sở dữ liệu dạng tệp nhị phân chuẩn hóa (PCAP/PCAPNG) cho lưu trữ bền vững; và cơ sở dữ liệu cấu hình phẳng (QSettings) cho lưu giữ trạng thái làm việc.
+Do đặc thù của hệ thống phân tích gói tin là phải xử lý liên tục dữ liệu thời gian thực nhưng vẫn cần lưu lại phiên làm việc để mở lại sau này, đồ án không sử dụng cơ sở dữ liệu quan hệ tập trung cho toàn bộ dữ liệu. Thay vào đó, cơ chế lưu trữ được tách thành hai phần rõ ràng: lớp cấu hình người dùng bằng QSettings và lớp lưu trữ phiên bắt gói bằng các định dạng tệp PCAP/PCAPNG. 
 
-\subsubsection{Cơ sở dữ liệu trong bộ nhớ (In-Memory Database)}
-Hệ thống sử dụng các bộ đệm đối tượng được tối ưu hóa trong bộ nhớ RAM để quản lý thông tin các gói tin và luồng dữ liệu đang bắt trực tiếp. Dữ liệu gói tin sau khi bóc tách được ánh xạ vào lớp \texttt{PacketRecord} để đóng vai trò như các bản ghi trong một bảng cơ sở dữ liệu ảo.
+\subsubsection{Lưu trạng thái làm việc bằng QSettings}
+Đối với các thiết lập cần ghi nhớ giữa các lần mở chương trình, hệ thống sử dụng QSettings của Qt để lưu cấu hình theo cặp khóa - giá trị. Cách làm này phù hợp với một ứng dụng máy tính cục bộ vì không phải cài thêm máy chủ cơ sở dữ liệu, thao tác đọc ghi đơn giản và tốc độ đủ nhanh cho các thiết lập nhỏ nhưng được dùng thường xuyên.
 
-\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
-\caption{Đặc tả cấu trúc thực thể PacketRecord (Gói tin trong bộ nhớ)} \label{tab:schema_packet_record} \\
+\begin{longtable}{|p{3.6cm}|p{4.1cm}|p{5.5cm}|}
+\caption{Các thiết lập hệ thống được lưu bằng QSettings} \label{tab:schema_qsettings} \\
 \hline
-\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\textbf{Nhóm thiết lập} & \textbf{Mục cấu hình tiêu biểu} & \textbf{Vai trò trong hệ thống} \\ \hline
 \endfirsthead
 \hline
-\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\textbf{Nhóm thiết lập} & \textbf{Mục cấu hình tiêu biểu} & \textbf{Vai trò trong hệ thống} \\ \hline
 \endhead
 \hline
 \endfoot
 \hline
 \endlastfoot
-number & Integer & Khóa chính & Số thứ tự tăng dần của gói tin trong phiên bắt. \\ \hline
-timestamp & Double & Not Null & Mốc thời gian tuyệt đối khi gói tin được thu thập. \\ \hline
-source & String & Not Null & Địa chỉ IP hoặc địa chỉ MAC nguồn của gói tin. \\ \hline
-destination & String & Not Null & Địa chỉ IP hoặc địa chỉ MAC đích của gói tin. \\ \hline
-protocol & String & Not Null & Tên giao thức tầng ứng dụng hoặc tầng vận chuyển chính. \\ \hline
-length & Integer & Not Null & Độ dài kích thước gói tin (tính bằng byte). \\ \hline
-info & String & Nullable & Thông tin tóm tắt nhanh nội dung gói tin. \\ \hline
-raw & Bytes & Not Null & Mảng byte dữ liệu thô nguyên bản của gói tin. \\ \hline
-layers & Dictionary & Nullable & Cấu trúc cây phân tầng chứa các trường đã giải mã. \\ \hline
+Thiết lập bắt gói & Chế độ bắt gói; bộ lọc bắt gói & Ghi nhớ cách bắt gói thường dùng để người dùng không phải thiết lập lại mỗi lần mở chương trình. \\ \hline
+Lịch sử làm việc & Danh sách tệp gần đây; chế độ mở tệp; thư mục mặc định & Lưu lại ngữ cảnh làm việc gần nhất để rút ngắn thao tác khi quay lại một phiên trước đó. \\ \hline
+Giao diện người dùng & Chủ đề giao diện; số lượng mục hiển thị; tự động gợi ý bộ lọc & Giữ cho cách trình bày và các tùy chọn hỗ trợ luôn nhất quán giữa các lần sử dụng. \\ \hline
+Thành phần AI & Đường dẫn mô hình; ngưỡng cảnh báo & Ghi nhớ cấu hình phục vụ suy luận để kết quả dự đoán được thực hiện đúng với thiết lập đã chọn. \\ \hline
 \end{longtable}
 
-Đối với các luồng dữ liệu được gom nhóm phục vụ phân tích hành vi AI, hệ thống duy trì bảng lưu trữ các thực thể luồng dựa trên lớp \texttt{PacketraFlow} và định danh khóa luồng \texttt{FlowKey}.
+Trên Windows, QSettings có thể ánh xạ xuống Registry, còn trên các môi trường khác hệ thống sẽ dùng tệp cấu hình phẳng tương ứng. Nhờ vậy, trạng thái làm việc như bộ lọc gần đây, danh sách tệp đã mở, chế độ bắt gói và thiết lập giao diện đều được khôi phục tự động khi người dùng mở lại chương trình.
 
-\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
-\caption{Đặc tả cấu trúc thực thể PacketraFlow (Luồng dữ liệu phục vụ AI)} \label{tab:schema_packetra_flow} \\
+\subsubsection{Lưu phiên bắt gói bằng định dạng PCAP và PCAPNG}
+Phần dữ liệu lớn nhất của đồ án là nội dung các phiên bắt gói. Để lưu trữ loại dữ liệu này, hệ thống sử dụng hai định dạng phổ biến là PCAP và PCAPNG. Đây là lựa chọn phù hợp vì dữ liệu có thể ghi tuần tự theo thứ tự thời gian, dễ mở lại trên nhiều công cụ khác nhau và giữ nguyên được các byte gốc của gói tin để phục vụ phân tích sau này.
+
+\begin{longtable}{|p{3.0cm}|p{4.4cm}|p{4.6cm}|}
+\caption{Các định dạng lưu trữ phiên bắt gói} \label{tab:schema_capture_files} \\
 \hline
-\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\textbf{Định dạng} & \textbf{Mục đích sử dụng} & \textbf{Ý nghĩa trong đồ án} \\ \hline
 \endfirsthead
 \hline
-\textbf{Tên trường} & \textbf{Kiểu dữ liệu} & \textbf{Ràng buộc} & \textbf{Ý nghĩa} \\ \hline
+\textbf{Định dạng} & \textbf{Mục đích sử dụng} & \textbf{Ý nghĩa trong đồ án} \\ \hline
 \endhead
 \hline
 \endfoot
 \hline
 \endlastfoot
-flow\_key & Object (FlowKey) & Khóa chính & Tổ hợp Tuple-5 gồm: IP nguồn, IP đích, Cổng nguồn, Cổng đích, Giao thức. \\ \hline
-packet\_count & Integer & Not Null & Tổng số gói tin thuộc luồng này. \\ \hline
-byte\_count & Integer & Not Null & Tổng số byte dữ liệu của luồng. \\ \hline
-start\_time & Double & Not Null & Mốc thời gian bắt đầu của luồng. \\ \hline
-end\_time & Double & Not Null & Mốc thời gian kết thúc (gói tin cuối cùng) của luồng. \\ \hline
-features & Array & Not Null & Vector chứa 80 đặc trưng số lượng theo chuẩn CICFlowMeter. \\ \hline
-prediction & String & Nullable & Kết quả dự đoán nhãn hành vi từ mô hình AI. \\ \hline
+PCAP & Lưu gói tin ở dạng nhị phân cơ bản với tiêu đề toàn cục và tiêu đề cho từng gói. & Phù hợp khi cần lưu nhanh, tương thích rộng và chỉ cần bảo toàn nội dung gói tin cùng thời điểm bắt. \\ \hline
+PCAPNG & Lưu gói tin kèm metadata mở rộng, chú thích và thông tin bổ sung cho phiên làm việc. & Phù hợp khi cần giữ lại mô tả phiên bắt gói rõ hơn, đặc biệt hữu ích cho thao tác lưu, mở lại và ghi chú kết quả phân tích. \\ \hline
 \end{longtable}
 
-\subsubsection{Cơ sở dữ liệu cấu hình hệ thống (Registry/QSettings Schema)}
-Để lưu trữ bền vững các thiết lập cấu hình của người dùng mà không cần cài đặt các máy chủ cơ sở dữ liệu cồng kềnh, ứng dụng khai thác lớp \texttt{QSettings} của nền tảng Qt. Cấu trúc lưu trữ này ánh xạ trực tiếp xuống Windows Registry hoặc tệp tin cấu hình phẳng (.ini) tùy theo hệ điều hành.
-
-\begin{longtable}{|p{3.8cm}|p{2.2cm}|p{1.8cm}|p{4.7cm}|}
-\caption{Đặc tả các khóa cấu hình hệ thống trong QSettings} \label{tab:schema_qsettings} \\
-\hline
-\textbf{Khóa cấu hình} & \textbf{Kiểu dữ liệu} & \textbf{Mặc định} & \textbf{Mô tả chức năng} \\ \hline
-\endfirsthead
-\hline
-\textbf{Khóa cấu hình} & \textbf{Kiểu dữ liệu} & \textbf{Mặc định} & \textbf{Mô tả chức năng} \\ \hline
-\endhead
-\hline
-\endfoot
-\hline
-\endlastfoot
-capture/promiscuous\_mode & Boolean & True & Bật/tắt chế độ hỗn tạp của card mạng khi bắt gói. \\ \hline
-capture/filter\_presets & JSON String & [] & Lưu trữ các biểu thức lọc bắt gói cấu hình sẵn. \\ \hline
-theme/current\_style & String & "Light" & Chủ đề giao diện người dùng hiện tại (Sáng/Tối). \\ \hline
-ai/model\_path & String & "ai/model.pt" & Đường dẫn vật lý đến file trọng số của mô hình học sâu. \\ \hline
-ai/threshold & Double & 0.85 & Ngưỡng tin cậy tối thiểu để kích hoạt cảnh báo bất thường. \\ \hline
-\end{longtable}
-
-\subsubsection{Cơ sở dữ liệu lưu trữ vật lý (Physical File Database)}
-Dữ liệu phiên giám sát mạng khi được lưu trữ bền vững trên ổ cứng sẽ sử dụng cấu trúc nhị phân chuẩn hóa của định dạng PCAP và PCAPNG. Đây là định dạng lưu trữ phi cấu trúc hiệu năng cao, cho phép ghi tuần tự trực tiếp mảng byte với độ trễ thấp nhất.
-
-Cấu trúc tệp tin PCAP gồm có một tiêu đề chung (Global Header) đặt ở đầu tệp, tiếp theo là danh sách các gói tin, mỗi gói tin được tiền định bởi một tiêu đề gói (Packet Header).
-
-\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
-\caption{Cấu trúc các trường trong Global Header của tệp PCAP} \label{tab:schema_pcap_global} \\
-\hline
-\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Giá trị mẫu} & \textbf{Mô tả chức năng} \\ \hline
-\endfirsthead
-\hline
-\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Giá trị mẫu} & \textbf{Mô tả chức năng} \\ \hline
-\endhead
-\hline
-\endfoot
-\hline
-\endlastfoot
-Magic Number & 4 Bytes & 0xa1b2c3d4 & Xác định định dạng tệp và thứ tự đọc byte (Endianness). \\ \hline
-Version Major & 2 Bytes & 2 & Phiên bản lớn của định dạng PCAP. \\ \hline
-Version Minor & 2 Bytes & 4 & Phiên bản nhỏ của định dạng PCAP. \\ \hline
-This Zone & 4 Bytes & 0 & Lệch múi giờ UTC (mặc định bằng 0). \\ \hline
-Sig Figs & 4 Bytes & 0 & Độ chính xác của mốc thời gian. \\ \hline
-Snap Len & 4 Bytes & 65535 & Chiều dài tối đa của gói tin bị cắt khi bắt. \\ \hline
-Network & 4 Bytes & 1 & Loại tầng liên kết dữ liệu (1 tương ứng Ethernet). \\ \hline
-\end{longtable}
-
-\begin{longtable}{|p{3.0cm}|p{2.2cm}|p{1.8cm}|p{5.5cm}|}
-\caption{Cấu trúc các trường trong Packet Header của tệp PCAP} \label{tab:schema_pcap_packet} \\
-\hline
-\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Đơn vị} & \textbf{Mô tả chức năng} \\ \hline
-\endfirsthead
-\hline
-\textbf{Tên trường} & \textbf{Kích thước} & \textbf{Đơn vị} & \textbf{Mô tả chức năng} \\ \hline
-\endhead
-\hline
-\endfoot
-\hline
-\endlastfoot
-Timestamp Seconds & 4 Bytes & Giây & Số giây tính từ kỷ nguyên Epoch (1/1/1970). \\ \hline
-Timestamp Microseconds & 4 Bytes & Micro giây & Số micro giây lẻ của mốc thời gian bắt gói. \\ \hline
-Captured Length & 4 Bytes & Byte & Kích thước thực tế của gói tin được lưu trữ vào đĩa. \\ \hline
-Original Length & 4 Bytes & Byte & Kích thước ban đầu của gói tin khi đi qua card mạng. \\ \hline
-\end{longtable}
+Định dạng lưu trữ này cho phép hệ thống nạp lại dữ liệu bắt gói, đếm số gói, đọc metadata và phục hồi các chú thích liên quan đến phiên làm việc. Khi người dùng cần xuất kết quả tổng hợp ra báo cáo, hệ thống có thể tạo thêm tệp CSV riêng, nhưng đây chỉ là kênh xuất dữ liệu phụ trợ chứ không phải lớp lưu trữ chính của đồ án.
 \section{Xây dựng ứng dụng}
 \subsection{Thư viện và công cụ sử dụng}
 Để hiện thực các chức năng của đồ án, nhóm công nghệ chính gồm ngôn ngữ triển khai, thư viện bắt và phân tích gói tin, thư viện giao diện, thư viện xử lý dữ liệu và các công cụ hỗ trợ kết nối từ xa. Mỗi công cụ được chọn để giải quyết một phần việc cụ thể thay vì dùng theo thói quen hay theo độ phổ biến chung chung.
