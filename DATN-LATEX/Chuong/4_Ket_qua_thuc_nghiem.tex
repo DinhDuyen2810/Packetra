@@ -2,64 +2,133 @@
 \documentclass[../DoAn.tex]{subfiles}
 \begin{document}
 
+Chương 4 trình bày quá trình thiết kế và hiện thực hệ thống dựa trên các nền tảng đã được lựa chọn ở Chương 3. Nếu Chương 2 xác định yêu cầu và Chương 3 lựa chọn công nghệ, thì Chương 4 là bước chuyển các lựa chọn đó thành cấu trúc phần mềm cụ thể, mô hình dữ liệu rõ ràng và các chức năng có thể vận hành thực tế.
+
+Nội dung của chương được tổ chức theo hướng đi từ tổng thể đến chi tiết. Trước hết là kiến trúc phần mềm và cách phân chia các thành phần chính của hệ thống. Tiếp theo là thiết kế giao diện, thiết kế lớp và cơ chế lưu trữ dữ liệu. Sau đó chương trình bày các thành phần xây dựng ứng dụng, kết quả đạt được, các nội dung kiểm thử và phần triển khai.
+
 \section{Thiết kế kiến trúc}
 \subsection{Lựa chọn kiến trúc phần mềm}
-Mục này có độ dài từ một đến ba trang. Sinh viên cần lựa chọn kiến trúc phần mềm cho ứng dụng của mình như: kiến trúc ba lớp MVC, MVP, SOA, Microservice, v.v. rồi giải thích sơ bộ về kiến trúc đó, không giải thích chi tiết hoặc dài dòng. Sử dụng kiến trúc phần mềm đã chọn ở trên, sinh viên mô tả kiến trúc cụ thể cho ứng dụng của mình. Gợi ý: sinh viên áp dụng lý thuyết chung vào hệ thống hoặc sản phẩm của mình như thế nào, có thay đổi, bổ sung hoặc cải tiến gì không.
+Việc thiết kế một kiến trúc phần mềm vững chắc là tiền đề quan trọng để bảo đảm hệ thống có khả năng mở rộng và thuận lợi cho việc bảo trì trong tương lai. Đối với một hệ thống phân tích mạng phải đồng thời thu thập gói tin, giải mã dữ liệu, hiển thị trực quan, lưu trữ kết quả và hỗ trợ phân tích theo luồng, kiến trúc cần được tổ chức thành các khối chuyên biệt để giảm phụ thuộc lẫn nhau giữa các thành phần. Nếu gộp toàn bộ xử lý, hiển thị và lưu trữ vào cùng một nơi thì hệ thống sẽ rất khó kiểm soát khi mở rộng hoặc sửa lỗi.
+
+Từ yêu cầu đó, đồ án lựa chọn kiến trúc ba lớp theo hướng gần với mô hình MVC để tổ chức toàn bộ chương trình. Đây không phải là mô hình dành cho ứng dụng web, mà là cách áp dụng tư duy phân tách giao diện, xử lý và dữ liệu vào một ứng dụng máy tính đơn lẻ. Cách tổ chức này phù hợp với đồ án vì thao tác của người dùng trên giao diện cần được chuyển ngay thành hành động xử lý gói tin, còn kết quả sau xử lý lại phải quay về màn hình theo một chuỗi rõ ràng và ít ràng buộc.
+
+Trong cách hiểu MVC của đồ án, thành phần View là toàn bộ phần giao diện người dùng, nơi hiển thị danh sách gói tin, cây chi tiết, khung dữ liệu thô, các bảng thống kê, sơ đồ trực quan và hộp thoại cấu hình. Đây là nơi người dùng thao tác trực tiếp và nhận phản hồi từ hệ thống.
+
+Thành phần Model không phải là giao diện mà là phần dữ liệu và logic xử lý phía sau giao diện. Model của đồ án gồm các lớp và mô-đun dùng để thu thập gói tin, bóc tách dữ liệu, chuẩn hóa thông tin, gom các gói tin vào cùng một luồng giao tiếp, trích xuất đặc trưng, lưu cấu hình và giữ các kết quả trung gian phục vụ hiển thị hoặc suy luận. Nói cách khác, Model chính là nơi lưu trữ trạng thái làm việc và thực hiện xử lý nghiệp vụ, còn giao diện chỉ lấy kết quả từ đó để trình bày cho người dùng.
+
+Thành phần Controller là lớp điều phối luồng xử lý giữa giao diện và Model. Khi người dùng chọn giao diện, nhập bộ lọc, yêu cầu bắt gói, mở tệp, đổi góc nhìn thống kê hoặc xuất dữ liệu, Controller sẽ nhận sự kiện đó, gọi đúng phần xử lý tương ứng rồi chuyển kết quả trở lại giao diện. Trong ứng dụng này, vai trò Controller được thực hiện chủ yếu bởi các lớp cửa sổ chính, các hàm xử lý sự kiện và các phương thức gắn với nút bấm, hộp thoại và tín hiệu giao diện.
+
+So với cách để giao diện gọi thẳng vào hàm xử lý hoặc để các phần dữ liệu tự va chạm lẫn nhau, cách tổ chức này giúp hệ thống ổn định hơn rõ rệt. Khi cần thay đổi cách trình bày trên giao diện, chủ yếu chỉ ảnh hưởng đến View; khi cần đổi cách phân tích gói hoặc gom luồng, phần tác động chủ yếu nằm ở Model; khi cần đổi cách nhận thao tác người dùng, phần tác động rơi vào Controller. Nhờ đó, việc kiểm thử từng khối trở nên rõ ràng hơn và hệ thống dễ mở rộng hơn trong các bước sau.
 
 \subsection{Thiết kế tổng quan}
-Sinh viên vẽ biểu đồ gói UML, nêu rõ sự phụ thuộc giữa các gói. Sinh viên cần vẽ các gói sao cho chúng được phân theo các tầng rõ ràng, không được sắp đặt package lộn xộn trong hình vẽ. Sinh viên chú ý các quy tắc thiết kế như: các gói không phụ thuộc lẫn nhau, gói tầng dưới không phụ thuộc gói tầng trên, không phụ thuộc bỏ qua tầng, v.v. và cần giải thích sơ lược về mục đích hoặc nhiệm vụ của từng package.
+Để hiện thực hóa kiến trúc phần mềm đã lựa chọn, hệ thống được phân rã thành các gói chức năng được tổ chức theo cấu trúc phân tầng rõ ràng. Biểu đồ gói UML giúp xác định ranh giới trách nhiệm giữa các thành phần, đồng thời làm rõ những phụ thuộc hợp lệ giữa các gói trong hệ thống. Nhờ đó, việc tổ chức mã nguồn trở nên có kỷ luật hơn, tránh tình trạng các phần giao diện, xử lý và lưu trữ phụ thuộc chéo vào nhau.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.82\textwidth]{Hinhve/Package_Diagram.png}
+    \caption{Biểu đồ gói UML của hệ thống}
+    \label{fig:package_overview}
+\end{figure}
+
+Trong biểu đồ này, gói giao diện nằm ở tầng cao nhất và chịu trách nhiệm trình bày dữ liệu, tiếp nhận thao tác của người dùng và gọi các chức năng cần thiết. Gói xử lý nghiệp vụ nằm ở tầng trung tâm, đảm nhiệm việc bắt gói, phân tích, lọc, gom luồng, trích xuất đặc trưng và hỗ trợ suy luận. Gói hạ tầng và lưu trữ nằm ở tầng dưới, cung cấp các chức năng đọc ghi tệp, kiểm tra môi trường và quản lý dữ liệu nền. Thành phần hỗ trợ thu thập từ xa và tài nguyên mô hình được đặt như các nhánh phụ trợ, phục vụ các nhu cầu chuyên biệt nhưng vẫn tuân theo nguyên tắc phụ thuộc một chiều từ trên xuống dưới.
+
+Về mặt thiết kế, hệ thống tránh các liên kết chéo bỏ qua tầng trung gian. Giao diện không gọi trực tiếp vào lớp lưu trữ nếu chưa qua lớp xử lý; lớp lưu trữ cũng không tự động tác động ngược lại giao diện. Thay vào đó, dữ liệu đi qua các lớp trung gian đã xác định trước, nhờ vậy mỗi gói chỉ giữ một vai trò rõ ràng và việc kiểm thử từng phần cũng thuận tiện hơn.
+
+Xét theo ba gói lớn trong mô hình MVC, View bao gồm các thành phần phục vụ hiển thị và tương tác, chẳng hạn như màn hình chính, vùng xem danh sách gói tin, khung chi tiết, khu vực dữ liệu thô và các hộp thoại cấu hình. Gói này không xử lý nghiệp vụ chính mà chỉ đảm nhiệm việc trình bày kết quả và nhận thao tác từ người dùng. Controller đóng vai trò điều phối, tiếp nhận yêu cầu từ View rồi chuyển chúng đến phần xử lý phù hợp trong Model, đồng thời trả lại kết quả theo đúng ngữ cảnh sử dụng. Model là nơi tập trung các chức năng xử lý dữ liệu và logic cốt lõi, gồm thu thập gói tin, phân tích, lọc, gom luồng, trích xuất đặc trưng, quản lý dữ liệu làm việc và phối hợp với các thành phần hỗ trợ như mô hình học máy hoặc cơ chế thu thập từ xa.
+
+Việc tổ chức các gói theo hướng này giúp ranh giới trách nhiệm giữa các phần trở nên rõ ràng hơn. Khi cần thay đổi cách hiển thị, phần tác động chủ yếu nằm ở View; khi cần bổ sung thao tác hoặc điều chỉnh luồng điều khiển, phần thay đổi tập trung ở Controller; còn khi cần nâng cấp cách phân tích hoặc mở rộng dữ liệu đầu vào, các điều chỉnh chủ yếu diễn ra trong Model. Cách chia tách đó làm cho hệ thống dễ kiểm thử, dễ bảo trì và thuận lợi hơn khi phát triển thêm chức năng mới về sau.
 
 \subsection{Thiết kế chi tiết gói}
-Sinh viên thiết kế và lần lượt vẽ biểu đồ thiết kế cho từng package, hoặc một nhóm các package liên quan để giải quyết một vấn đề nào đó. Khi vẽ thiết kế gói, sinh viên chỉ cần đưa tên lớp, không cần chỉ ra các thành viên phương thức và thuộc tính. Sinh viên cần vẽ rõ ràng quan hệ giữa các lớp trong biểu đồ. Các quan hệ bao gồm: phụ thuộc, kết hợp, kết tập, hợp thành, kế thừa và thực thi. Sau khi vẽ hình minh họa, sinh viên cần giải thích ngắn gọn về thiết kế của mình.
+Ở mức chi tiết hơn, các lớp được xây dựng theo hướng phục vụ trực tiếp cho từng nhóm chức năng cụ thể. Bên giao diện có lớp cửa sổ chính, các khung con, hộp thoại chọn giao diện, hộp thoại quản lý giao diện, bảng gói tin, bảng chi tiết và khung hiển thị dữ liệu thô. Đây là lớp chịu trách nhiệm nhận thao tác người dùng, cập nhật trạng thái và trình bày kết quả.
+
+Bên xử lý dữ liệu, \texttt{PacketSniffer} trong \texttt{core/capture.py} chịu trách nhiệm lấy dữ liệu gói tin từ nguồn cục bộ hoặc từ xa. \texttt{PacketParser} trong \texttt{core/parser.py} chịu trách nhiệm đọc từng gói, bóc tách các lớp giao thức, tính thời gian tương đối, xác định địa chỉ nguồn đích, chiều truyền, độ dài gói và các thuộc tính cần thiết để hiển thị. \texttt{DisplayFilter} trong \texttt{core/filtering.py} xử lý biểu thức lọc để người dùng có thể thu hẹp danh sách gói tin mà không phải nạp lại dữ liệu từ đầu.
+
+Phần gom luồng được tổ chức riêng trong \texttt{core/stream\_manager.py} và \texttt{core/flow\_engine/}. Tại đây, hệ thống dùng các hàm nhận diện luồng theo Ethernet, IPv4, IPv6, TCP và UDP để gom các gói tin hai chiều thành cùng một phiên giao tiếp. Sau đó, \texttt{core/flow\_engine/flow.py} và \texttt{feature\_extractor.py} tính ra các đặc trưng thống kê của từng luồng, còn \texttt{model\_adapter.py} và \texttt{behavior\_analyzer.py} dùng các dữ liệu đó để hỗ trợ đánh giá hành vi ở mức cao hơn. Như vậy, lớp xử lý của đồ án không chỉ là lớp đọc dữ liệu mà còn là lớp tổ chức và diễn giải dữ liệu.
+
+Phần lưu trữ và định dạng dữ liệu được đặt trong \texttt{utils/pcap\_io.py}, \texttt{utils/pcapng\_parser.py} và các hàm liên quan. Các mô-đun này giữ nhiệm vụ đọc/ghi tệp bắt gói, bảo toàn metadata, tách ghép tệp và hỗ trợ lưu lại trạng thái làm việc. Vì vậy, khi dữ liệu đi ra khỏi hệ thống, nó vẫn giữ được cấu trúc đủ tốt để mở lại hoặc mang sang môi trường khác.
+
+Đối với phần mô hình học máy, \texttt{ai/} chứa các tài nguyên đã huấn luyện sẵn như mô hình TorchScript, bộ chuẩn hóa và bộ mã hóa nhãn. Hướng này giúp hệ thống tách riêng giai đoạn suy luận khỏi giai đoạn huấn luyện, tức là chương trình chỉ nạp mô hình đã sẵn sàng để dùng thay vì phải huấn luyện lại trong lúc chạy. Cách làm này phù hợp với đồ án vì giảm thời gian khởi động, giảm tải xử lý và giữ cho luồng hoạt động ổn định hơn.
+
+Từ góc nhìn thiết kế, thành phần điều khiển của đồ án được hình thành từ các kết nối giữa giao diện và lớp xử lý. Ví dụ, các nút trên \texttt{MainWindow} gọi đến \texttt{PacketSniffer}, \texttt{PacketParser}, bộ lọc hiển thị và các hàm lưu/đọc tệp; giao diện chỉ giữ vai trò khởi phát và hiển thị kết quả, không tự xử lý toàn bộ logic. Đây chính là điểm điều chỉnh quan trọng của mô hình MVC khi áp dụng vào một ứng dụng phân tích mạng cục bộ.
+
+\subsection{Thiết kế cơ chế lưu trữ dữ liệu}
+Hệ thống cần lưu lại cấu hình, dữ liệu bắt gói và một số kết quả trung gian để người dùng có thể mở lại hoặc xuất ra ngoài khi cần. Vì vậy, cơ chế lưu trữ được thiết kế theo hướng phân tầng: cấu hình ngắn hạn dùng \texttt{QSettings}, dữ liệu tệp bắt gói dùng PCAP/PCAPNG, dữ liệu kết quả có cấu trúc dùng JSON hoặc CSV, còn các tài nguyên mô hình và mẫu dữ liệu dùng các tệp riêng trong \texttt{data/} và \texttt{ai/}.
+
+Phần cấu hình ngắn hạn như giao diện, bộ lọc gần đây, nguồn làm việc hoặc các thiết lập lặp lại nhiều lần được lưu bằng \texttt{QSettings} vì nó gọn và ít phụ thuộc vào định dạng. Phần dữ liệu mạng gốc được lưu bằng \texttt{utils/pcap\_io.py} để bảo đảm khả năng mở lại đúng chuẩn. Phần xuất kết quả thống kê hoặc đặc trưng được ghi ra CSV để có thể đem sang phần mềm bảng tính hoặc công cụ phân tích khác. Nếu cần lưu thêm thông tin cấu hình giàu cấu trúc hơn, hệ thống dùng JSON vì định dạng này dễ đọc, dễ sửa và thuận tiện cho việc chia sẻ giữa các mô-đun.
+
+Thiết kế lưu trữ như vậy giúp hệ thống không bị khóa vào một kiểu tệp nội bộ duy nhất. Người dùng có thể khôi phục phiên làm việc, mở lại tệp bắt gói cũ, lưu bảng thống kê ra ngoài hoặc sao chép dữ liệu sang máy khác mà không cần phụ thuộc hoàn toàn vào ứng dụng gốc. Đây là điểm quan trọng đối với một công cụ phân tích mạng thiên về làm việc cục bộ nhưng vẫn cần tính linh hoạt khi trao đổi dữ liệu.
 
 \section{Thiết kế chi tiết}
 \subsection{Thiết kế giao diện}
-Phần này có độ dài từ hai đến ba trang. Sinh viên đặc tả thông tin về màn hình mà ứng dụng của mình hướng tới, bao gồm độ phân giải màn hình, kích thước màn hình, số lượng màu sắc hỗ trợ, v.v. Tiếp đến, sinh viên đưa ra các thống nhất hoặc chuẩn hóa của mình khi thiết kế giao diện như thiết kế nút, điều khiển, vị trí hiển thị thông điệp phản hồi, phối màu, v.v. Sau cùng sinh viên đưa ra một số hình ảnh minh họa thiết kế giao diện cho các chức năng quan trọng nhất. Lưu ý, sinh viên không nhầm lẫn giao diện thiết kế với giao diện của sản phẩm sau cùng.
+Giao diện của hệ thống được thiết kế để hiển thị đồng thời danh sách gói tin, thông tin chi tiết, phần thống kê và các hộp thoại cấu hình. Bố cục giao diện được chia thành các vùng chức năng rõ ràng để người dùng có thể theo dõi luồng dữ liệu, kiểm tra kết quả phân tích và thay đổi tham số làm việc mà không phải chuyển qua nhiều màn hình rời rạc.
+
+Trong đồ án này, giao diện không chỉ là nơi trình bày kết quả mà còn là nơi điều khiển toàn bộ quá trình làm việc. Khi người dùng thay đổi bộ lọc, chọn nguồn dữ liệu hoặc chuyển sang góc nhìn khác, hệ thống cần phản hồi nhanh và cập nhật đúng phần nội dung liên quan. Vì vậy, giao diện được xây dựng theo hướng tách biệt giữa phần hiển thị và phần xử lý để tránh làm rối luồng chương trình.
 
 \subsection{Thiết kế lớp}
-Phần này có độ dài từ ba đến bốn trang. Sinh viên trình bày thiết kế chi tiết các thuộc tính và phương thức cho một số lớp chủ đạo hoặc quan trọng nhất của ứng dụng. Thiết kế chi tiết cho các lớp khác, nếu muốn trình bày, sinh viên đưa vào phần phụ lục.
+Thiết kế lớp được xây dựng xoay quanh các nhiệm vụ chính của hệ thống gồm thu thập dữ liệu, phân tích gói tin, tổng hợp theo luồng, lưu trữ và điều khiển giao diện. Mỗi lớp đảm nhận một phần việc cụ thể để tránh tình trạng một lớp phải kiêm quá nhiều trách nhiệm.
 
-Để minh họa thiết kế lớp, sinh viên thiết kế luồng truyền thông điệp giữa các đối tượng tham gia cho hai đến ba use case quan trọng nào đó bằng biểu đồ trình tự hoặc biểu đồ giao tiếp.
+Việc chia lớp như vậy giúp mã nguồn dễ đọc hơn và thuận tiện hơn khi bảo trì. Nếu sau này cần bổ sung một nguồn dữ liệu mới hoặc một kiểu thống kê mới, hệ thống có thể mở rộng ở đúng lớp liên quan thay vì phải sửa toàn bộ chương trình.
 
 \subsection{Thiết kế cơ chế lưu trữ dữ liệu}
-Phần này có độ dài từ hai đến bốn trang. Sinh viên thiết kế, vẽ và giải thích biểu đồ thực thể liên kết. Từ đó, sinh viên thiết kế cơ sở dữ liệu tùy theo hệ quản trị cơ sở dữ liệu mà mình sử dụng.
+Phần lưu trữ dữ liệu được thiết kế nhằm phục vụ hai mục đích chính: giữ cấu hình làm việc của người dùng và lưu kết quả xử lý để xem lại sau. Những thông tin như thiết lập giao diện, danh sách gần đây hoặc tham số làm việc được lưu gọn để có thể khôi phục nhanh. Dữ liệu phân tích và kết quả xuất được tổ chức theo định dạng phù hợp để người dùng dễ mở lại, kiểm tra hoặc chuyển sang công cụ khác.
+
+Thiết kế này giúp hệ thống ổn định hơn trong sử dụng thực tế vì người dùng không phải thiết lập lại mọi thứ mỗi lần mở chương trình, đồng thời dữ liệu cũng không bị khóa trong một kiểu lưu trữ riêng của đồ án.
 
 \section{Xây dựng ứng dụng}
 \subsection{Thư viện và công cụ sử dụng}
-Sinh viên liệt kê các công cụ, ngôn ngữ lập trình, API, thư viện, IDE, công cụ kiểm thử, v.v. mà mình sử dụng để phát triển ứng dụng. Mỗi công cụ phải được chỉ rõ phiên bản sử dụng. Sinh viên nên kẻ bảng mô tả tương tự như Bảng 4.1. Nếu có nhiều nội dung trình bày, sinh viên cần xoay ngang bảng.
+Để hiện thực các chức năng của đồ án, nhóm công nghệ chính gồm ngôn ngữ triển khai, thư viện bắt và phân tích gói tin, thư viện giao diện, thư viện xử lý dữ liệu và các công cụ hỗ trợ kết nối từ xa. Mỗi công cụ được chọn để giải quyết một phần việc cụ thể thay vì dùng theo thói quen hay theo độ phổ biến chung chung.
+
+Nhờ tổ hợp công nghệ này, hệ thống có thể đọc dữ liệu mạng, hiển thị kết quả theo thời gian thực, lưu cấu hình, xuất dữ liệu và hỗ trợ xử lý trên cả môi trường cục bộ lẫn môi trường từ xa.
 
 \subsection{Kết quả đạt được}
-Sinh viên trước tiên mô tả kết quả đạt được của mình là gì, ví dụ như các sản phẩm được đóng gói là gì, bao gồm những thành phần nào, ý nghĩa và vai trò ra sao.
+Sau quá trình xây dựng, hệ thống đã hình thành các khối chức năng chính phục vụ cho việc bắt gói, xem danh sách gói tin, đọc chi tiết dữ liệu, thống kê theo nhiều góc nhìn, lưu kết quả và hỗ trợ phân tích theo luồng. Các chức năng này được tổ chức thành một chuỗi làm việc thống nhất thay vì tách rời từng phần.
 
-Sinh viên cần thống kê các thông tin về ứng dụng của mình như: số dòng code, số lớp, số gói, dung lượng toàn bộ mã nguồn, dung lượng của từng sản phẩm đóng gói, v.v. Tương tự như phần liệt kê về công cụ sử dụng, sinh viên cũng nên dùng bảng để mô tả phần thông tin thống kê này.
+Kết quả đạt được cho thấy kiến trúc đã chọn đủ để đáp ứng các yêu cầu đã nêu ở Chương 2, đồng thời tạo nền tảng cho các bước kiểm thử và đánh giá ở phần sau.
 
 \subsection{Minh họa các chức năng chính}
-Sinh viên lựa chọn và đưa ra màn hình cho các chức năng chính, quan trọng và thú vị nhất. Mỗi giao diện cần phải có lời giải thích ngắn gọn. Khi giải thích, sinh viên có thể kết hợp với các chú thích ở trong hình ảnh giao diện.
+Các màn hình chức năng chính của hệ thống được trình bày theo đúng luồng sử dụng thực tế gồm chọn nguồn dữ liệu, thu thập gói tin, xem chi tiết, thống kê theo luồng và xuất kết quả. Việc minh họa được thực hiện theo hướng bám sát từng bước người dùng thao tác để người đọc có thể hình dung rõ cách hệ thống vận hành.
+
+Phần minh họa này giúp liên kết giữa phần thiết kế và phần kiểm thử, đồng thời cho thấy các quyết định ở phần kiến trúc đã được chuyển thành giao diện và chức năng cụ thể như thế nào.
 
 \section{Kiểm thử}
-Phần này có độ dài từ hai đến ba trang. Sinh viên thiết kế các trường hợp kiểm thử cho hai đến ba chức năng quan trọng nhất. Sinh viên cần chỉ rõ các kỹ thuật kiểm thử đã sử dụng. Chi tiết các trường hợp kiểm thử khác, nếu muốn trình bày, sinh viên đưa vào phần phụ lục. Sinh viên sau cùng tổng kết về số lượng các trường hợp kiểm thử và kết quả kiểm thử. Sinh viên cần phân tích lý do nếu kết quả kiểm thử không đạt.
+Phần kiểm thử được xây dựng để đối chiếu các chức năng đã hiện thực với yêu cầu đặt ra ban đầu. Mỗi nhóm chức năng được kiểm thử theo luồng sử dụng điển hình và cả các tình huống lỗi nhằm bảo đảm hệ thống không chỉ chạy được trong điều kiện thuận lợi mà còn phản hồi đúng khi gặp đầu vào bất thường.
 
 \subsection{Kiểm thử nhóm chức năng bắt gói tin}
+Nhóm này tập trung vào việc kiểm tra khả năng khởi tạo phiên bắt gói, nhận dữ liệu và hiển thị đúng danh sách gói tin. Đồng thời, hệ thống phải phản hồi rõ ràng khi không thể khởi tạo giao diện hoặc khi cấu hình bắt gói không hợp lệ.
 
 \subsection{Kiểm thử nhóm chức năng thao tác tệp lưu trữ}
+Nhóm này kiểm tra việc mở, lưu, tách và ghép tệp dữ liệu. Hệ thống cần nhận đúng định dạng, xử lý được lỗi tệp không hợp lệ và thông báo rõ khi thao tác ghi tệp không thành công.
 
 \subsection{Kiểm thử nhóm chức năng phân tích gói tin}
+Nhóm này kiểm tra quá trình bóc tách trường dữ liệu, nhận diện giao thức và xử lý các gói tin có cấu trúc khác nhau. Kết quả mong muốn là dữ liệu sau phân tích phải đầy đủ hơn dữ liệu thô ban đầu và được đưa lên giao diện đúng cách.
 
 \subsection{Kiểm thử nhóm chức năng nhận diện gói tin}
+Phần này kiểm tra khả năng phân loại và trích xuất thông tin từ các gói tin phổ biến. Hệ thống phải xác định được lớp giao thức chính và hiển thị các thuộc tính quan trọng phục vụ quan sát.
 
 \subsection{Kiểm thử nhóm chức năng thống kê luồng giao tiếp}
+Nhóm kiểm thử này tập trung vào cách hệ thống gom gói tin thành luồng và tính các chỉ số tổng hợp. Kết quả kiểm thử cần cho thấy các luồng được xác định đúng và số liệu thống kê phản ánh hợp lý dữ liệu đầu vào.
 
 \subsection{Kiểm thử nhóm chức năng phát hiện hành vi bất thường}
+Phần này đánh giá khả năng đưa ra cảnh báo hoặc gợi ý khi dữ liệu có dấu hiệu không bình thường. Mục tiêu là bảo đảm kết quả phân tích không chỉ dừng ở mức mô tả mà còn hỗ trợ người dùng nhận biết tình huống cần chú ý.
 
 \subsection{Kiểm thử nhóm chức năng trực quan hóa giao tiếp}
+Nhóm này kiểm tra việc hiển thị biểu đồ, bảng thống kê và các góc nhìn trực quan khác. Dữ liệu phải được trình bày rõ ràng, dễ đọc và nhất quán với kết quả phân tích.
 
 \section{Triển khai}
-Sinh viên trình bày mô hình và hoặc cách thức triển khai thử nghiệm hoặc thực tế. Ứng dụng của sinh viên được triển khai trên server hoặc thiết bị gì, cấu hình như thế nào. Kết quả triển khai thử nghiệm nếu có như số lượng người dùng, số lượng truy cập, thời gian phản hồi, phản hồi người dùng, khả năng chịu tải, các thống kê, v.v.
+Đồ án được triển khai trong môi trường máy tính cá nhân với cấu hình phù hợp cho việc bắt gói, xử lý dữ liệu và hiển thị giao diện. Phần triển khai được thiết kế sao cho các thành phần chính có thể hoạt động ổn định trên môi trường làm việc phổ biến của người dùng.
 
 \subsection{Môi trường triển khai và kiểm thử trên Windows}
+Hệ thống được kiểm thử trên Windows để bảo đảm các thành phần thu thập dữ liệu và giao diện hoạt động đúng như mong đợi. Trong quá trình này, các phụ thuộc hệ thống và quyền truy cập gói tin được kiểm tra để tránh lỗi phát sinh khi chạy thực tế.
 
 \subsection{Cấu hình thư viện và thành phần phụ trợ}
+Các thư viện hỗ trợ được cài đặt và cấu hình theo đúng vai trò của từng thành phần. Điều này giúp hệ thống khởi chạy nhất quán và giảm các lỗi do thiếu phụ thuộc hoặc khác biệt môi trường.
 
 \subsection{Kết quả triển khai thử nghiệm}
+Kết quả thử nghiệm cho thấy hệ thống có thể khởi động, thu thập dữ liệu, hiển thị gói tin và lưu kết quả theo đúng quy trình đã thiết kế. Những vấn đề phát sinh trong quá trình triển khai được xử lý theo từng nhóm chức năng, giúp hệ thống ổn định hơn khi vận hành.
+
+\section{Kết chương}
+Chương 4 đã mô tả quá trình chuyển các yêu cầu và công nghệ đã chọn thành một hệ thống hoàn chỉnh hơn ở mức thiết kế và hiện thực. Từ kiến trúc phần mềm, giao diện, cơ chế lưu trữ cho đến kiểm thử và triển khai, các phần đều được tổ chức theo một chuỗi xử lý thống nhất để bảo đảm hệ thống hoạt động ổn định và có khả năng mở rộng.
+
+Những nội dung ở chương này là cơ sở trực tiếp để bước sang phần đánh giá tổng hợp và định hướng hoàn thiện tiếp theo của đồ án ở các chương sau.
 
 \end{document}
