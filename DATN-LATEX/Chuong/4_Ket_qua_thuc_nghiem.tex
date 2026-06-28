@@ -59,16 +59,40 @@ Gói AI và AGENT được đặt ở phía dưới như hai nhánh hỗ trợ c
 Ở phần giao diện, ApplicationWindow quản lý các khung con nên có quan hệ chứa với CaptureView và các thành phần liên quan. Ở phần xử lý, PacketSniffer phụ thuộc vào PacketParser và DisplayFilter để hoàn thành nhiệm vụ của mình. Ở phần lưu trữ, PcapngParser và PcapngFileWriter cùng dựa trên CaptureMetadata để mô tả dữ liệu phiên làm việc. Tất cả các liên kết này đều hướng tới mục tiêu chung là làm cho cấu trúc hệ thống rõ ràng, dễ kiểm thử và thuận lợi khi mở rộng về sau.
 
 \section{Thiết kế chi tiết}
+
 \subsection{Thiết kế giao diện}
-Giao diện của hệ thống được thiết kế để hiển thị đồng thời danh sách gói tin, thông tin chi tiết, phần thống kê và các hộp thoại cấu hình. Bố cục giao diện được chia thành các vùng chức năng rõ ràng để người dùng có thể theo dõi luồng dữ liệu, kiểm tra kết quả phân tích và thay đổi tham số làm việc mà không phải chuyển qua nhiều màn hình rời rạc.
+Thiết kế giao diện người dùng đóng vai trò là lớp cầu nối quyết định trải nghiệm thực tế của hệ thống. Với một ứng dụng phân tích mạng, giao diện không chỉ cần hiển thị rõ ràng mà còn phải hỗ trợ quan sát nhanh, thao tác ít bước và phản hồi kịp thời trong suốt quá trình làm việc. Vì vậy, giao diện của đồ án được định hướng theo phong cách gọn, sáng, ưu tiên vùng nội dung chính và hạn chế tối đa các thành phần trang trí không cần thiết. Các hình minh họa trong mục này chỉ nhằm thể hiện bố cục và luồng thao tác, không phải ảnh chụp sản phẩm hoàn thiện sau cùng. Một số chức năng chuyên biệt còn mở ra cửa sổ làm việc riêng để người dùng có thể thao tác song song với vùng hiển thị gói tin, nhờ đó quá trình quan sát và điều chỉnh được thực hiện linh hoạt hơn.
 
-Trong đồ án này, giao diện không chỉ là nơi trình bày kết quả mà còn là nơi điều khiển toàn bộ quá trình làm việc. Khi người dùng thay đổi bộ lọc, chọn nguồn dữ liệu hoặc chuyển sang góc nhìn khác, hệ thống cần phản hồi nhanh và cập nhật đúng phần nội dung liên quan. Vì vậy, giao diện được xây dựng theo hướng tách biệt giữa phần hiển thị và phần xử lý để tránh làm rối luồng chương trình.
+Về mặt kỹ thuật, giao diện được xây dựng cho màn hình máy tính để bàn với độ phân giải mục tiêu 1920x1080. Đây là mức hiển thị phù hợp để đồng thời đặt được vùng chọn nguồn dữ liệu, bảng danh sách gói tin, vùng chi tiết và khu vực dữ liệu thô trên cùng một cửa sổ mà không gây chật chội. Hệ thống cũng được tính đến khả năng hiển thị trên các màn hình có độ phân giải thấp hơn như 1366x768 hoặc 1600x900, khi đó các vùng nội dung vẫn có thể co giãn theo chiều ngang và cuộn theo chiều dọc để bảo toàn khả năng sử dụng. Theo cấu hình giao diện trong mã nguồn, tông nền chung là nền sáng với mặt nền trắng, viền xám nhạt, chữ đậm ở mức dễ đọc và một màu nhấn xanh dương cho các thao tác chính. Các trạng thái phản hồi như thành công, cảnh báo và lỗi được tách riêng bằng các màu xanh, cam và đỏ để người dùng nhận biết nhanh mà không cần đọc quá nhiều thông tin.
 
+Giao diện được tổ chức theo nguyên tắc phân vùng chức năng rõ ràng và bám theo cách người dùng thao tác thực tế. Khu vực phía trên thường dành cho thanh tiêu đề, thanh công cụ và các thao tác khởi tạo. Vùng trung tâm là nơi chứa dữ liệu chính như danh sách gói tin, danh sách giao diện hoặc bảng tổng hợp. Vùng dưới cùng hoặc vùng bên phải được dùng cho các nội dung cần kiểm tra sâu hơn như chi tiết gói, cây giao thức, dữ liệu thô hoặc thông điệp trạng thái. Cách chia này giúp người dùng theo dõi luồng dữ liệu theo đúng trình tự làm việc: chọn đầu vào, quan sát kết quả rồi đi xuống kiểm tra chi tiết khi cần.
+
+Các điều khiển trên giao diện cũng được chuẩn hóa để tạo cảm giác thống nhất giữa các màn hình. Nút lệnh có kích thước đủ lớn để thao tác nhanh, bo góc nhẹ và giữ khoảng cách đều nhau nhằm tránh nhầm lẫn khi sử dụng liên tục. Ô nhập liệu và hộp chọn được đặt theo thứ tự từ trên xuống dưới, từ trái sang phải, phù hợp với luồng thao tác tự nhiên của người dùng. Các nút chức năng quan trọng như mở nguồn dữ liệu, bắt đầu, tạm dừng, dừng, lọc và xuất kết quả được đặt ở vị trí dễ thấy nhất để giảm số lần di chuyển chuột. Thông điệp phản hồi được đặt gần khu vực đang thao tác hoặc hiển thị trong vùng thông báo cố định để người dùng biết ngay kết quả của hành động vừa thực hiện. Khi có lỗi, thông báo không chỉ ghi trạng thái chung mà còn mô tả rõ nguyên nhân để người dùng biết cần sửa ở đâu.
+
+Nhóm điều khiển dành cho dữ liệu thô và nội dung chi tiết cũng được xử lý theo đúng đặc trưng của chương trình. Bảng gói tin sử dụng hàng được đánh dấu bằng màu riêng khi cần nhấn mạnh, hàng bị bỏ qua được làm mờ đi, và hàng đang chọn được tô bằng màu xanh dương nổi bật để người dùng định vị nhanh bản ghi cần xem. Khung chi tiết giao thức giữ cấu trúc cây mở rộng dần để người dùng đi từ lớp ngoài vào lớp trong, còn vùng dữ liệu thô sử dụng phông chữ đơn cách để bảo đảm các byte và cột hiển thị luôn thẳng hàng. Cách tổ chức này phản ánh đúng luồng làm việc của chương trình: đọc danh sách trước, mở sâu từng gói sau, rồi đối chiếu ở mức byte khi cần.
+
+Giao diện cũng được thiết kế để phù hợp với kiểu làm việc liên tục của một ứng dụng bắt và phân tích mạng. Khi người dùng chuyển từ màn hình chọn nguồn sang màn hình làm việc chính, bố cục các vùng vẫn giữ tính quen thuộc, nghĩa là vùng chọn ở phía trên hoặc bên trái, vùng dữ liệu chính ở trung tâm và vùng kiểm tra chi tiết ở phía dưới hoặc bên phải. Điều này giúp giảm thời gian làm quen và làm cho trải nghiệm giữa các chức năng trở nên nhất quán hơn. Một số chức năng như cấu hình, lọc nâng cao, thống kê hoặc thao tác với tệp có thể được mở bằng cửa sổ riêng để không che mất vùng danh sách gói tin, nhờ vậy người dùng vẫn theo dõi được dữ liệu đang chạy trong khi xử lý các tác vụ bổ trợ.
+
+Hình~\ref{fig:gui_select} minh họa giao diện chọn nguồn làm việc ban đầu. Đây là màn hình mà người dùng sử dụng ngay khi khởi động ứng dụng để xem danh sách các giao diện mạng khả dụng, kiểm tra trạng thái từng nguồn và chọn đúng nguồn dữ liệu cần theo dõi. Khu vực nội dung chính được đặt ở giữa màn hình để hiển thị danh sách giao diện và thông tin khái quát của từng mục, trong khi cụm nút thao tác nhanh ở bên phải giúp người dùng mở nguồn để chọn, tải lại danh sách hoặc chuyển sang chế độ làm việc phù hợp. Cách bố trí này giúp giai đoạn khởi tạo trở nên ngắn gọn, rõ ràng và hạn chế tối đa thao tác thừa trước khi bắt đầu thu thập dữ liệu.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Hinhve/GUI01.png}
+    \caption{Giao diện chọn nguồn làm việc}
+    \label{fig:gui_select}
+\end{figure}
+
+Hình~\ref{fig:gui_capture} minh họa giao diện làm việc chính của hệ thống, nơi người dùng theo dõi dữ liệu trong suốt phiên bắt gói. Phần trên cùng là bảng danh sách gói tin với các cột thông tin chính như thời gian, địa chỉ nguồn, địa chỉ đích, giao thức, độ dài và nội dung tóm tắt, giúp người dùng nhận biết nhanh các gói đang đi qua hệ thống. Bên dưới bảng danh sách là khu vực chi tiết, trong đó cây thông tin cho phép mở dần từng lớp giao thức để xem nội dung phân rã theo cấu trúc, còn khung dữ liệu thô ở bên phải hiển thị chính xác các byte của gói để phục vụ đối chiếu khi cần kiểm tra sâu hơn. Nhờ cách chia bố cục này, người dùng có thể vừa quan sát tổng thể luồng dữ liệu, vừa đi vào từng gói cụ thể mà không phải chuyển qua nhiều cửa sổ khác nhau.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Hinhve/GUI02.png}
+    \caption{Giao diện làm việc chính với danh sách, chi tiết và dữ liệu thô}
+    \label{fig:gui_capture}
+\end{figure}
+
+Trong quá trình thiết kế, giao diện được xem như một phần của luồng xử lý chứ không chỉ là nơi hiển thị kết quả. Khi người dùng thay đổi bộ lọc, chọn nguồn dữ liệu hoặc chuyển sang một góc nhìn khác, hệ thống cần phản hồi nhanh và cập nhật đúng phần nội dung liên quan. Vì vậy, phần hiển thị và phần xử lý được tách biệt rõ ràng để giao diện luôn giữ được tính mạch lạc, dễ quan sát và thuận lợi cho việc mở rộng thêm các chức năng mới về sau.
 \subsection{Thiết kế lớp}
-Thiết kế lớp được xây dựng xoay quanh các nhiệm vụ chính của hệ thống gồm thu thập dữ liệu, phân tích gói tin, tổng hợp theo luồng, lưu trữ và điều khiển giao diện. Mỗi lớp đảm nhận một phần việc cụ thể để tránh tình trạng một lớp phải kiêm quá nhiều trách nhiệm.
-
-Việc chia lớp như vậy giúp mã nguồn dễ đọc hơn và thuận tiện hơn khi bảo trì. Nếu sau này cần bổ sung một nguồn dữ liệu mới hoặc một kiểu thống kê mới, hệ thống có thể mở rộng ở đúng lớp liên quan thay vì phải sửa toàn bộ chương trình.
-
 \subsection{Thiết kế cơ chế lưu trữ dữ liệu}
 Phần lưu trữ dữ liệu được thiết kế nhằm phục vụ hai mục đích chính: giữ cấu hình làm việc của người dùng và lưu kết quả xử lý để xem lại sau. Những thông tin như thiết lập giao diện, danh sách gần đây hoặc tham số làm việc được lưu gọn để có thể khôi phục nhanh. Dữ liệu phân tích và kết quả xuất được tổ chức theo định dạng phù hợp để người dùng dễ mở lại, kiểm tra hoặc chuyển sang công cụ khác.
 
