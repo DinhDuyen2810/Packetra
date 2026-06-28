@@ -356,7 +356,7 @@ class CaptureFiltersDialog(QDialog):
                 QMessageBox.information(self, 'Capture Filter', 'Valid capture filter.')
             return True
         self.status_label.setText(f'Invalid capture filter: {err}')
-        QMessageBox.warning(self, 'ERROR', 'ERROR')
+        QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
         return False
 
     def _on_new(self):
@@ -388,7 +388,7 @@ class CaptureFiltersDialog(QDialog):
     def _on_apply(self):
         candidate = self._build_current_preset()
         if not candidate['name']:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if not self._validate_current_expression(show_ok=False):
             return
@@ -728,11 +728,11 @@ class CaptureOptionsDialog(QDialog):
                     dir_path = '.'
                 
                 if not os.path.exists(dir_path):
-                    QMessageBox.warning(self, 'ERROR', 'ERROR')
+                    QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                     return False
 
                 if not os.access(dir_path, os.W_OK):
-                    QMessageBox.warning(self, 'ERROR', 'ERROR')
+                    QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                     return False
         
         # Validate Create new file automatically conditions
@@ -743,7 +743,7 @@ class CaptureOptionsDialog(QDialog):
             wallclock_ok = self.rollover_wallclock_cb.isChecked()
             
             if not (packets_ok or size_ok or duration_ok or wallclock_ok):
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return False
         
         return True
@@ -1138,7 +1138,7 @@ class CaptureOptionsDialog(QDialog):
         self._apply_filter_to_selected_interface()
         item = self._get_selected_interface_item()
         if not item:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._start_capture_with_item(item)
 
@@ -1246,7 +1246,8 @@ class CaptureOptionsDialog(QDialog):
                 compile_errors.append(str(exc))
 
         if compile_backends:
-            return False, compile_errors[-1] if compile_errors else 'Unknown capture filter syntax error.'
+            reason = compile_errors[-1] if compile_errors else 'unknown'
+            return False, f'Capture filter syntax error: {reason}'
 
         # If no compiler backend is discoverable, do not apply custom regex restrictions
         # that could reject valid BPF syntax. Runtime capture backend will validate.
@@ -1264,7 +1265,7 @@ class CaptureOptionsDialog(QDialog):
         iface_name = item.data(0, Qt.UserRole) or item.text(0).strip()
         is_valid_filter, filter_error = self._validate_capture_filter_expression(capture_filter, iface_name=iface_name)
         if not is_valid_filter:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         self._save_output_settings()
@@ -1317,7 +1318,7 @@ class CaptureOptionsDialog(QDialog):
                 return
 
         if self.capture_view is None:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         self.capture_view.interface_config = iface_config
@@ -3299,7 +3300,7 @@ class ApplicationWindow(QMainWindow):
     def _on_open_analysis_dashboard(self):
         """Open Analysis Dashboard with current capture view"""
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         
         # Import dashboard components
@@ -3522,7 +3523,7 @@ class ApplicationWindow(QMainWindow):
     def _on_open_demo_packet(self):
         entries = self._load_demo_packet_entries()
         if not entries:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog(self)
@@ -3570,14 +3571,14 @@ class ApplicationWindow(QMainWindow):
         def _open_selected_demo():
             entry = _selected_entry()
             if not entry:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
 
             demo_id = int(entry.get('id', 0) or 0)
             demo_name = self._demo_entry_display_name(entry)
             demo_path = str(entry.get('path') or '')
             if not os.path.exists(demo_path):
-                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
+                QMessageBox.critical(dialog, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
                 return
 
             proceed = self._prompt_save_before_destructive_action(
@@ -3590,16 +3591,16 @@ class ApplicationWindow(QMainWindow):
             try:
                 packets = list(iter_pcap_packets(demo_path))
             except Exception as exc:
-                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
+                QMessageBox.critical(dialog, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
                 return
 
             if not packets:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
 
             self.show_capture_view('', demo_name, '')
             if not self.capture_view:
-                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
+                QMessageBox.critical(dialog, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
                 return
 
             self._replace_capture_packets(
@@ -3651,12 +3652,12 @@ class ApplicationWindow(QMainWindow):
             except Exception:
                 self._ai_analyst_dialog = None
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         records = list(self.capture_view.get_effective_records(include_ignored=False))
         if not records:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         packet_numbers = sorted(int(r.number) for r in records)
         record_by_number = {}
@@ -3825,13 +3826,13 @@ class ApplicationWindow(QMainWindow):
                 traffic_header = list(self.AI_TRAFFIC_COLUMNS)
                 traffic_rows = self._build_ai_traffic_rows_from_flows(flows)
                 if any(len(row) != len(traffic_header) for row in traffic_rows):
-                    raise ValueError('Schema error: TrafficLabelling column count does not match the header.')
+                    raise ValueError('Data schema error: the TrafficLabelling column count does not match the header.')
 
                 ml_header, ml_rows = self._traffic_to_ml(traffic_header, traffic_rows)
                 if any(len(row) != len(ml_header) for row in ml_rows):
-                    raise ValueError('Schema error: inference feature column count does not match the header.')
+                    raise ValueError('Data schema error: the inference feature column count does not match the header.')
                 if any(str(col).strip().lower() == 'label' for col in ml_header):
-                    raise ValueError('Schema error: Label column still exists in feature inference.')
+                    raise ValueError('Data schema error: the Label column still exists in the inference dataset.')
 
                 predictions = self._predict_ai_labels(ml_header, ml_rows)
                 action_groups = self._build_ai_action_groups(traffic_header, traffic_rows, predictions, conversation_catalog)
@@ -4123,12 +4124,12 @@ class ApplicationWindow(QMainWindow):
                 self._ai_analyst_dialog = None
 
         if not self.capture_view or not getattr(self.capture_view, 'records', None):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         records = list(self.capture_view.get_effective_records(include_ignored=False))
         if not records:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog()
@@ -4942,7 +4943,8 @@ class ApplicationWindow(QMainWindow):
                 compile_errors.append(str(exc))
 
         if compile_backends:
-            return False, compile_errors[-1] if compile_errors else 'Unknown capture filter syntax error.'
+            reason = compile_errors[-1] if compile_errors else 'unknown'
+            return False, f'Capture filter syntax error: {reason}'
         return True, ''
 
     def _on_capture_filters(self):
@@ -4965,29 +4967,29 @@ class ApplicationWindow(QMainWindow):
             return
         normalized_path = os.path.abspath(os.path.normpath(candidate))
         if not os.path.exists(normalized_path):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         try:
             probe_iter = iter_pcap_packets(normalized_path)
             first_packet = next(probe_iter, None)
         except Exception as exc:
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
             return
         if first_packet is None:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         proceed = self._prompt_save_before_destructive_action('Opening a new file will replace the current data. Do you want to save first?')
         if not proceed:
             return
         self.show_capture_view('', 'Offline', '')
         if not self.capture_view:
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
             return
         started = time.perf_counter()
         try:
             self.capture_view.load_file(normalized_path)
         except Exception as exc:
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
             return
         self._last_loaded_seconds = max(0.0, time.perf_counter() - started)
         self._status_mode = 'activity'
@@ -4997,7 +4999,7 @@ class ApplicationWindow(QMainWindow):
         self._update_packet_status_label()
         self.detail_field_label.setText('Field: - | Byte: 0')
         if not getattr(self.capture_view, 'records', None):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._sync_capture_buttons()
         self._update_capture_window_title()
@@ -5114,7 +5116,7 @@ class ApplicationWindow(QMainWindow):
         """Save the PCAP file"""
         if self.capture_view:
             if self.capture_view.is_capturing():
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             self.capture_view.save_file()
             self._update_capture_window_title()
@@ -5122,13 +5124,13 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
             self._refresh_file_menu_state()
         else:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
     def _on_save_as_file(self):
         """Save the PCAP file as a new name"""
         if self.capture_view:
             if self.capture_view.is_capturing():
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             self.capture_view.save_file(force_dialog=True)
             self._update_capture_window_title()
@@ -5136,15 +5138,15 @@ class ApplicationWindow(QMainWindow):
                 self.iface_selector_view.refresh_recent_files()
             self._refresh_file_menu_state()
         else:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
     def _on_merge_file(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QFileDialog(self, 'Merge Capture File')
@@ -5174,11 +5176,11 @@ class ApplicationWindow(QMainWindow):
             incoming_packets = list(iter_pcap_packets(merge_path))
             incoming_metadata = load_capture_metadata(merge_path)
         except Exception as exc:
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
             return
 
         if not incoming_packets:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         merged_entries = [self._packet_entry_from_record(r) for r in cv.records if getattr(r, 'raw', None) is not None]
@@ -5223,10 +5225,10 @@ class ApplicationWindow(QMainWindow):
     def _on_separate_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog(self)
@@ -5479,7 +5481,7 @@ class ApplicationWindow(QMainWindow):
             last_to = int((split_table.item(last_row, 2).text() or str(total_packets)).strip())
             last_len = last_to - last_from + 1
             if last_len < 2:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
 
             left_len = last_len // 2
@@ -5508,7 +5510,7 @@ class ApplicationWindow(QMainWindow):
         def _on_split_add():
             current_rows = split_table.rowCount()
             if current_rows >= total_packets:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             if split_state['manual_edit']:
                 _split_last_file_in_half()
@@ -5570,7 +5572,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 ranges = _collect_split_ranges_from_table()
             except Exception as exc:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
 
             default_dir = os.path.dirname(str(cv.loaded_file_path)) if cv.loaded_file_path else str(Path.cwd())
@@ -5589,7 +5591,7 @@ class ApplicationWindow(QMainWindow):
                 return
             base_name = str(base_name or '').strip()
             if not base_name:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
 
             file_format = 'pcapng'
@@ -5626,7 +5628,7 @@ class ApplicationWindow(QMainWindow):
                     )
                     saved_paths.append(saved_path)
             except Exception as exc:
-                QMessageBox.critical(self, 'ERROR', 'ERROR')
+                QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
                 return
 
             QMessageBox.information(
@@ -5655,10 +5657,10 @@ class ApplicationWindow(QMainWindow):
             delete_indices.update(range_indices)
 
         if not criteria_used:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if not delete_indices:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         confirm = QMessageBox.question(
@@ -5690,10 +5692,10 @@ class ApplicationWindow(QMainWindow):
     def _on_export_specified_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if cv.is_capturing():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog(self)
@@ -5769,17 +5771,17 @@ class ApplicationWindow(QMainWindow):
             export_indices.update(self._resolve_indices_by_ranges_text(export_ranges_input.toPlainText()))
 
         if not criteria_used:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         if not export_indices:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         export_records = [cv.records[i] for i in sorted(export_indices) if getattr(cv.records[i], 'raw', None) is not None]
         packets = [rec.raw for rec in export_records]
         if not packets:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         filename, selected_format, selected_compression = cv._show_save_with_options_dialog(preselect_existing_file=False)
@@ -5801,7 +5803,7 @@ class ApplicationWindow(QMainWindow):
                 f'Successfully exported {len(packets)} packets:\n{out_path}',
             )
         except Exception as exc:
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
 
     def _parse_packet_ranges_to_numbers(self, ranges_text: str):
         text = str(ranges_text or '').strip()
@@ -5835,7 +5837,7 @@ class ApplicationWindow(QMainWindow):
         try:
             numbers = self._parse_packet_ranges_to_numbers(ranges_text)
         except Exception:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return set()
         if not numbers:
             return set()
@@ -5850,11 +5852,11 @@ class ApplicationWindow(QMainWindow):
             return set()
         text = str(protocol_text or '').strip()
         if not text:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return set()
         tokens = [t.strip().lower() for t in re.split(r'[,\s;]+', text) if t.strip()]
         if not tokens:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return set()
         token_set = set(tokens)
         return {
@@ -5865,7 +5867,7 @@ class ApplicationWindow(QMainWindow):
     def _on_print_packets(self):
         cv = self.capture_view
         if not cv or not cv.has_packets():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog(self)
@@ -5901,13 +5903,13 @@ class ApplicationWindow(QMainWindow):
             return
 
         if not (summary_cb.isChecked() or detail_cb.isChecked() or bytes_cb.isChecked()):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         scope = scope_combo.currentText()
         indexes = self._resolve_record_indices(scope, from_no=None, to_no=None, filter_expr='')
         if not indexes:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         lines = []
@@ -5984,7 +5986,7 @@ class ApplicationWindow(QMainWindow):
         try:
             return [i for i, rec in enumerate(cv.records) if cv.display_filter.matches(rec, expr)]
         except Exception as exc:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return []
         return []
 
@@ -6298,7 +6300,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_export_flow_csv_current(self):
         if not self.capture_view or not getattr(self.capture_view, "records", None):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -6317,7 +6319,7 @@ class ApplicationWindow(QMainWindow):
                 if getattr(r, "raw", None) is not None
             ]
             if not packets:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             csv_path, flows = export_packets_to_csv(packets, file_path)
             model_adapter = self._build_flow_model_adapter()
@@ -6328,11 +6330,11 @@ class ApplicationWindow(QMainWindow):
                 f"Export successful:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "ERROR", "ERROR")
+            QMessageBox.critical(self, "Error", "A critical error occurred while performing the action. Please check the configuration, connection, or data file.")
 
     def _on_export_flow_csv_selected(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         selected_packets = []
         for record in self.capture_view.get_selected_records():
@@ -6342,7 +6344,7 @@ class ApplicationWindow(QMainWindow):
             if raw is not None:
                 selected_packets.append(raw)
         if not selected_packets:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -6367,7 +6369,7 @@ class ApplicationWindow(QMainWindow):
                 f"{warning}Export successful:\n{csv_path}\n\n{self._render_flow_behavior_text(behavior)}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "ERROR", "ERROR")
+            QMessageBox.critical(self, "Error", "A critical error occurred while performing the action. Please check the configuration, connection, or data file.")
 
     def _on_search(self):
         """Find"""
@@ -6435,12 +6437,12 @@ class ApplicationWindow(QMainWindow):
                     lines.append('\t'.join(values))
                 QApplication.clipboard().setText('\n'.join(lines))
                 return
-        QMessageBox.warning(self, 'ERROR', 'ERROR')
+        QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
     def _require_capture_for_edit_action(self) -> bool:
         if self.capture_view and self.stacked_widget.currentWidget() is self.capture_view and self.capture_view.has_packets():
             return True
-        QMessageBox.warning(self, 'ERROR', 'ERROR')
+        QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
         return False
 
     def _on_find_next(self):
@@ -6451,7 +6453,7 @@ class ApplicationWindow(QMainWindow):
                 self.capture_view.toggle_find_panel()
             self.capture_view.find_input.setFocus()
             self.capture_view.find_input.selectAll()
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self.capture_view.find_next()
 
@@ -6463,7 +6465,7 @@ class ApplicationWindow(QMainWindow):
                 self.capture_view.toggle_find_panel()
             self.capture_view.find_input.setFocus()
             self.capture_view.find_input.selectAll()
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self.capture_view.find_previous()
 
@@ -6471,7 +6473,7 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.toggle_mark_selected():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._update_capture_window_title()
 
@@ -6479,10 +6481,10 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.visible_indices:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if not self.capture_view.toggle_mark_all_displayed():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._update_capture_window_title()
 
@@ -6490,19 +6492,19 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.goto_next_mark():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
     def _on_previous_mark(self):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.goto_previous_mark():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
     def _on_ignore_unignore_selected(self):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.toggle_ignore_selected():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._update_capture_window_title()
 
@@ -6510,10 +6512,10 @@ class ApplicationWindow(QMainWindow):
         if not self._require_capture_for_edit_action():
             return
         if not self.capture_view.visible_indices:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if not self.capture_view.toggle_ignore_all_displayed():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._update_capture_window_title()
 
@@ -6530,7 +6532,7 @@ class ApplicationWindow(QMainWindow):
         if not ok:
             return
         if not self.capture_view.set_comment_for_selected(text):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         current_path = str(getattr(self.capture_view, 'loaded_file_path', '') or '').strip()
         if current_path and current_path.lower().endswith('.pcap'):
@@ -6553,7 +6555,7 @@ class ApplicationWindow(QMainWindow):
                     if not target_path.lower().endswith('.pcapng'):
                         target_path += '.pcapng'
                     if not self.capture_view.save_as_pcapng(target_path):
-                        QMessageBox.warning(self, 'ERROR', 'ERROR')
+                        QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                         self._update_capture_window_title()
                         return
                 else:
@@ -6562,7 +6564,7 @@ class ApplicationWindow(QMainWindow):
 
         persisted = self.capture_view.save_packet_comments_to_file()
         if not persisted:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
         self._update_capture_window_title()
 
     def _on_delete_all_packet_comments(self):
@@ -6579,7 +6581,7 @@ class ApplicationWindow(QMainWindow):
             return
         count = int(self.capture_view.delete_all_packet_comments() or 0)
         if count <= 0:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self.capture_view.save_packet_comments_to_file()
         self._update_capture_window_title()
@@ -7072,7 +7074,7 @@ class ApplicationWindow(QMainWindow):
             if row < 0:
                 return
             if columns_table.rowCount() <= 1:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             columns_table.removeRow(row)
             _toggle_columns_filter_rows()
@@ -7462,15 +7464,15 @@ class ApplicationWindow(QMainWindow):
         def _check_expert_row():
             row = expert_table.currentRow()
             if row < 0:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             data = _read_expert_row(row)
             cond = str(data.get('field', '')).strip().lower()
             if not cond:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             if not self._has_capture_document():
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             entries = self.capture_view.get_expert_information([data])
             count = sum(1 for e in entries if e.get('group') == 'Custom' and e.get('summary') == (data.get('message') or data.get('field')))
@@ -7533,10 +7535,10 @@ class ApplicationWindow(QMainWindow):
                 collected_columns.append(spec)
 
             if not collected_columns:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return None
             if not any(bool(spec.get('displayed', True)) for spec in collected_columns):
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return None
 
             collected_expert = []
@@ -7552,7 +7554,7 @@ class ApplicationWindow(QMainWindow):
             ]
             non_empty_panes = [value for value in pane_values if value != 'none']
             if len(non_empty_panes) != len(set(non_empty_panes)):
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return None
 
             new_prefs = dict(prefs)
@@ -7775,7 +7777,7 @@ class ApplicationWindow(QMainWindow):
             return
         current = self.capture_view.get_current_record()
         if current is None:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         key = self._conversation_key_for_record(current)
@@ -7785,7 +7787,7 @@ class ApplicationWindow(QMainWindow):
                 highlight_indexes.append(idx)
 
         if not highlight_indexes:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         current_highlight = set(getattr(self.capture_view, '_conversation_highlight_indexes', set()) or set())
@@ -7991,7 +7993,7 @@ class ApplicationWindow(QMainWindow):
         def _check_new_rule():
             expression = str(new_rule_filter.text() or '').strip()
             if not expression:
-                QMessageBox.warning(dialog, 'ERROR', 'Please enter a display filter for the new rule.')
+                QMessageBox.warning(dialog, 'Error', 'Please enter a filter expression for the new rule.')
                 return
             matcher = DisplayFilter()
             match_count = 0
@@ -8008,10 +8010,10 @@ class ApplicationWindow(QMainWindow):
             rule_name = str(new_rule_name.text() or '').strip()
             expression = str(new_rule_filter.text() or '').strip()
             if not rule_name:
-                QMessageBox.warning(dialog, 'ERROR', 'Please enter a rule name.')
+                QMessageBox.warning(dialog, 'Error', 'Please enter a rule name.')
                 return
             if not expression:
-                QMessageBox.warning(dialog, 'ERROR', 'Please enter a display filter for the new rule.')
+                QMessageBox.warning(dialog, 'Error', 'Please enter a filter expression for the new rule.')
                 return
             custom_rules.append(
                 {
@@ -8029,7 +8031,7 @@ class ApplicationWindow(QMainWindow):
         def _delete_selected_rule():
             rule = _selected_rule()
             if rule['kind'] != 'custom':
-                QMessageBox.warning(dialog, 'ERROR', 'Only custom rules can be deleted.')
+                QMessageBox.warning(dialog, 'Error', 'Only custom rules can be deleted.')
                 return
             del custom_rules[rule['ref']]
             match_result_label.setText('Custom rule deleted. Apply to save the change.')
@@ -8088,7 +8090,7 @@ class ApplicationWindow(QMainWindow):
             return
         record = self.capture_view.get_current_record()
         if record is None:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog(self)
@@ -8131,7 +8133,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_refresh_interfaces(self):
         if self.capture_view and self.capture_view.is_capturing():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if self.iface_selector_view:
             try:
@@ -8389,18 +8391,18 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_firewall_acl_rules(self):
         if not self.capture_view or not self._has_capture_document():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if bool(self.capture_view.is_file_format_view_mode()):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         selected_records = self._selected_records_from_packet_list()
         if not selected_records:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if len(selected_records) > 1:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         snapshot = self._build_acl_snapshot_from_record(selected_records[0])
@@ -8529,17 +8531,17 @@ class ApplicationWindow(QMainWindow):
         def _on_copy():
             text = str(rule_preview.toPlainText() or '').strip()
             if not text:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             try:
                 QApplication.clipboard().setText(text)
             except Exception:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
         def _on_save():
             text = str(rule_preview.toPlainText() or '').strip()
             if not text:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             file_path, _ = QFileDialog.getSaveFileName(
                 dialog,
@@ -8552,7 +8554,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(file_path).write_text(text + '\n', encoding='utf-8')
             except Exception:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
         product_combo.currentIndexChanged.connect(lambda _idx: _render_rule())
         action_allow.toggled.connect(lambda _checked: _render_rule())
@@ -8577,7 +8579,7 @@ class ApplicationWindow(QMainWindow):
             return
         if reason:
             try:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             except Exception:
                 pass
         try:
@@ -8711,10 +8713,10 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_network_topology_graph(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         if bool(self.capture_view.is_file_format_view_mode()):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog = QDialog(self)
@@ -9654,7 +9656,7 @@ class ApplicationWindow(QMainWindow):
             if expr:
                 self._set_display_filter_text(expr, apply_now=True)
             else:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
         def _goto_selected_first_packet():
             sel = state['selected']
@@ -9675,14 +9677,14 @@ class ApplicationWindow(QMainWindow):
                 except Exception:
                     pass
             else:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
         def _copy_selected_filter():
             expr = _selected_filter_expr()
             if expr:
                 QApplication.clipboard().setText(expr)
             else:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
         refresh_btn.clicked.connect(_refresh_topology)
         layout_combo.currentTextChanged.connect(lambda _v: _render_graph(fit_view=True))
@@ -10269,14 +10271,14 @@ class ApplicationWindow(QMainWindow):
             expression = str(item.get('expression', '') or '').strip()
             comment = str(item.get('comment', '') or '').strip()
             if not name or not expression:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             key = name.casefold()
             if key in seen:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             seen.add(key)
             normalized.append({'name': name, 'expression': expression, 'comment': comment})
@@ -10508,11 +10510,11 @@ class ApplicationWindow(QMainWindow):
 
     def _on_apply_as_filter(self):
         if not self._has_capture_document():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         base_expr, _field_name = self._selected_field_filter_expression()
         if not base_expr:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         options = [
@@ -10539,7 +10541,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_apply_as_column(self):
         if not self._has_capture_document():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         item = self._selected_detail_item()
         expr, field_name = self._selected_field_filter_expression()
@@ -10576,7 +10578,7 @@ class ApplicationWindow(QMainWindow):
             cfg_detail = str(cfg.get('detail_query', '') or '').strip().casefold()
             cfg_path = [str(v).strip().casefold() for v in (cfg.get('detail_path', []) or []) if str(v).strip()]
             if (field and cfg_field == field.casefold()) or (detail_query and cfg_detail == detail_query and cfg_path == [str(v).casefold() for v in self._stable_detail_path(detail_path)]):
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
 
         if not field:
@@ -10635,12 +10637,12 @@ class ApplicationWindow(QMainWindow):
 
     def _on_conversation_filter(self):
         if not self._has_capture_document():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         cv = self.capture_view
         record = cv.get_current_record()
         if record is None:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         candidates = []
@@ -10663,7 +10665,7 @@ class ApplicationWindow(QMainWindow):
             return
         expr = self._conversation_filter_expression_for_mode(str(choice))
         if not expr:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self._set_display_filter_text(expr, apply_now=True)
 
@@ -10765,7 +10767,7 @@ class ApplicationWindow(QMainWindow):
             return
         records, stream_filter = self._follow_stream_records(mode, record_override=record)
         if not records:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         first = records[0]
@@ -10860,7 +10862,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(path).write_text(text.toPlainText(), encoding='utf-8')
             except Exception as exc:
-                QMessageBox.critical(self, 'ERROR', 'ERROR')
+                QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
 
         save_btn.clicked.connect(_save_text)
         close_btn.clicked.connect(dialog.accept)
@@ -10870,16 +10872,16 @@ class ApplicationWindow(QMainWindow):
 
     def _on_follow_stream(self):
         if not self._has_capture_document():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         record = self.capture_view.get_current_record() if self.capture_view else None
         if record is None:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         choices = self._follow_mode_choices_for_record(record)
         if not choices:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         labels = [label for label, _mode in choices]
         stream_choice, ok = QInputDialog.getItem(self, 'Follow', 'Follow type:', labels, 0, False)
@@ -11198,7 +11200,7 @@ class ApplicationWindow(QMainWindow):
                 for row in rows:
                     writer.writerow({col: row.get(col, '') for col in columns})
         except Exception as exc:
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
 
     def _statistics_current_row(self, table: QTableWidget) -> dict:
         row = int(table.currentRow())
@@ -11523,7 +11525,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_resolved_addresses(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('Resolved Addresses')
@@ -11616,7 +11618,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_protocol_hierarchy(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('Protocol Hierarchy')
@@ -11791,7 +11793,7 @@ class ApplicationWindow(QMainWindow):
                 return
             path_text = str(item.data(0, Qt.UserRole + 1) or '').strip()
             if not path_text:
-                QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             expr = f'hierarchy.path contains {json.dumps(path_text)}'
             self._set_display_filter_text(expr, apply_now=True)
@@ -11845,7 +11847,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_endpoints(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('Endpoints')
@@ -12020,7 +12022,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_packet_lengths(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('Packet Lengths')
@@ -12162,7 +12164,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_flow_graph(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('Flow Graph')
@@ -12611,7 +12613,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_http(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('HTTP Packet Counter')
@@ -12834,7 +12836,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_ipv4(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('IPv4 Statistics')
@@ -12976,7 +12978,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_statistics_ipv6(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, layout = self._create_standard_dialog('IPv6 Statistics')
@@ -13237,7 +13239,7 @@ class ApplicationWindow(QMainWindow):
     def _open_help_document(self, filename):
         doc_path = self.HELP_DOC_DIR / filename
         if not doc_path.exists():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(doc_path)))
 
@@ -13435,7 +13437,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_expert_information(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         self._auxiliary_analysis_opening = True
@@ -13548,7 +13550,7 @@ class ApplicationWindow(QMainWindow):
 
     def _on_open_capture_properties(self):
         if not self.capture_view:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         dialog, main_layout = self._create_standard_dialog('Capture File Properties')
@@ -13722,7 +13724,7 @@ class ApplicationWindow(QMainWindow):
             try:
                 Path(path).write_text(content_browser.toPlainText(), encoding='utf-8')
             except Exception as exc:
-                QMessageBox.critical(dialog, 'ERROR', 'ERROR')
+                QMessageBox.critical(dialog, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
 
         def edit_comment():
             props = self.capture_view.get_capture_properties()
@@ -13734,7 +13736,7 @@ class ApplicationWindow(QMainWindow):
                 if self.capture_view.save_capture_comment_to_file():
                     QMessageBox.information(dialog, 'Comment Saved', 'Comment updated and saved to file successfully.')
                 else:
-                    QMessageBox.warning(dialog, 'ERROR', 'ERROR')
+                    QMessageBox.warning(dialog, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 fill_values()
 
         def show_help():

@@ -1983,7 +1983,7 @@ class CaptureView(QWidget):
             self._file_format_record = self._build_file_format_mode_record()
             if self._file_format_record is None:
                 self._show_file_format_view = False
-                QMessageBox.warning(None, 'ERROR', 'ERROR')
+                QMessageBox.warning(None, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
                 return
             self.packet_panes_stack.setCurrentWidget(self.main_splitter)
             self.table.replace_records([self._file_format_record])
@@ -2712,7 +2712,12 @@ class CaptureView(QWidget):
         self._update_status(f'Rollover completed. New file segment started after {saved_path}')
 
     def on_sniffer_error(self, msg):
-        QMessageBox.critical(None, 'ERROR', 'ERROR')
+        detail = str(msg or '').strip()
+        if detail:
+            detail = f'Unable to continue packet capture: {detail}'
+        else:
+            detail = 'Unable to continue packet capture because the system encountered an unknown error.'
+        QMessageBox.critical(None, 'Capture Error', detail)
         self.stop_capture()
 
     def _on_sniffer_finished(self):
@@ -3257,7 +3262,7 @@ class CaptureView(QWidget):
 
     def save_file(self, force_dialog: bool = False):
         if not self.records:
-            QMessageBox.warning(None, 'ERROR', 'ERROR')
+            QMessageBox.warning(None, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return False
         if self.loaded_file_path and not force_dialog:
             if not self._is_dirty:
@@ -3447,7 +3452,7 @@ class CaptureView(QWidget):
 
     def reload_file(self):
         if not self.records:
-            QMessageBox.warning(None, 'ERROR', 'ERROR')
+            QMessageBox.warning(None, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         packets = [r.raw for r in self.records]
@@ -4348,7 +4353,7 @@ class CaptureView(QWidget):
                     self._last_find_row = row
                     self._last_find_offset = None
                     return
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         for row in self._iter_search_rows(backwards, include_current=False):
@@ -4399,7 +4404,7 @@ class CaptureView(QWidget):
 
             return
 
-        QMessageBox.warning(self, 'ERROR', 'ERROR')
+        QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
 
     def find_next(self) -> bool:
         query = self.find_input.text().strip()
@@ -4637,14 +4642,14 @@ class CaptureView(QWidget):
     def _on_go_to_packet_row_submit(self):
         text = self.goto_packet_input.text().strip()
         if not text.isdigit():
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         target = int(text)
         if not self.goto_packet_number(target):
             if self._record_exists_by_number(target):
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             else:
-                QMessageBox.warning(self, 'ERROR', 'ERROR')
+                QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         self.goto_packet_widget.setVisible(False)
 
@@ -5220,7 +5225,7 @@ class CaptureView(QWidget):
         """Xem tong quan capture."""
         effective_records = self.get_effective_records(include_ignored=False)
         if not effective_records:
-            QMessageBox.warning(None, 'ERROR', 'ERROR')
+            QMessageBox.warning(None, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         proto_counts = Counter(r.protocol for r in effective_records)
@@ -5255,7 +5260,7 @@ class CaptureView(QWidget):
         """Xem conversations."""
         effective_records = self.get_effective_records(include_ignored=False)
         if not effective_records:
-            QMessageBox.warning(None, 'ERROR', 'ERROR')
+            QMessageBox.warning(None, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         from gui.conversations_dialog import ConversationsDialog

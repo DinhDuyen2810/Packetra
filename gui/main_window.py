@@ -152,7 +152,12 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def on_sniffer_error(self, msg):
-        QMessageBox.critical(self, 'ERROR', 'ERROR')
+        detail = str(msg or '').strip()
+        if detail:
+            detail = f'Unable to continue packet capture: {detail}'
+        else:
+            detail = 'Unable to continue packet capture because the system encountered an unknown error.'
+        QMessageBox.critical(self, 'Capture Error', detail)
         self.stop_capture()
 
     def add_packet(self, packet):
@@ -187,7 +192,7 @@ class MainWindow(QMainWindow):
 
     def save_file(self):
         if not self.records:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
         filename, _ = QFileDialog.getSaveFileName(self, 'Save PCAP', '', 'PCAP Files (*.pcap)')
         if filename:

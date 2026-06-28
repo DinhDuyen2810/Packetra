@@ -2365,7 +2365,7 @@ class WidgetEditorDialog(QDialog):
     def _validate_and_accept(self):
         title = self.title_input.text().strip() or self._auto_title().strip()
         if not title:
-            QMessageBox.warning(self, "ERROR", "ERROR")
+            QMessageBox.warning(self, "Error", "The operation failed. Please check the input data, connection state, or source file.")
             self.tabs.setCurrentIndex(0)
             return
         self._working_copy = self._collect_working_copy()
@@ -2666,7 +2666,7 @@ class GridWidget(QFrame):
                     self._make_visualization_flexible(viz_widget)
                     content_layout.addWidget(viz_widget, 1)
                 else:
-                    error_label = QLabel(f"Renderer '{viz_type}' not found")
+                    error_label = QLabel(f"No renderer was found for chart type '{viz_type}'")
                     error_label.setStyleSheet("color: #c00;")
                     content_layout.addWidget(error_label, 1)
             except Exception as e:
@@ -3104,7 +3104,7 @@ class DashboardEditor(QDialog):
     def on_add_widget(self):
         """Add new widget to dashboard"""
         if not self.edit_mode:
-            QMessageBox.warning(self, "ERROR", "ERROR")
+            QMessageBox.warning(self, "Error", "The operation failed. Please check the input data, connection state, or source file.")
             return
         
         width, height = 3, 2

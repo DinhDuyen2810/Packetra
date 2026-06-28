@@ -23,7 +23,7 @@ from gui.table_editor_helpers import (
 class ManageInterfacesDialog(QDialog):
     """Manage Interfaces dialog - Local Interfaces, Pipes, Remote Interfaces"""
 
-    PIPE_HELP_TEXT = """Tham khao: Windows Named Pipe publisher cho Packetra
+    PIPE_HELP_TEXT = """Reference: Windows Named Pipe publisher example for Packetra
 
 import time
 import struct
@@ -88,7 +88,7 @@ def handle_packet(pkt):
         win32file.WriteFile(pipe, pkt_header)
         win32file.WriteFile(pipe, pkt_bytes)
 
-        print(f"Forwarded packet #{counter} ({incl_len} bytes)")
+print(f"Forwarded packet #{counter} ({incl_len} bytes)")
         counter += 1
 
     except Exception as e:
@@ -833,12 +833,12 @@ if __name__ == '__main__':
     def _on_load_remote_interfaces(self):
         row = self.remote_table.currentRow()
         if row < 0:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         config = self._remote_row_to_config(row)
         if not config['host'] or not config['username']:
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return
 
         try:
@@ -858,7 +858,11 @@ if __name__ == '__main__':
             import logging
             message = str(exc or '').strip() or 'Cannot connect to remote agent.'
             logging.getLogger(__name__).warning('Remote interface load failed: %s', message)
-            QMessageBox.critical(self, 'ERROR', message)
+            QMessageBox.critical(
+                self,
+                'Remote Connection Error',
+                f'Unable to load the remote interface list: {message}',
+            )
             return
 
         interfaces = []
@@ -990,7 +994,7 @@ if __name__ == '__main__':
         # Packetra bundles the remote agent zip that contains PacketraAgent.msi.
         zip_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'packetra-remote-agent.zip')
         if not os.path.exists(zip_src):
-            QMessageBox.warning(self, 'ERROR', 'ERROR')
+            QMessageBox.warning(self, 'Error', 'The operation failed. Please check the input data, connection state, or source file.')
             return None
 
         target_file, _ = QFileDialog.getSaveFileName(self, 'Save Remote Agent Installer Package', 'packetra-remote-agent.zip', 'ZIP Archive (*.zip)')
@@ -1003,7 +1007,7 @@ if __name__ == '__main__':
         except OSError as exc:
             import logging
             logging.getLogger(__name__).exception('Cannot write agent package')
-            QMessageBox.critical(self, 'ERROR', 'ERROR')
+            QMessageBox.critical(self, 'Error', 'A critical error occurred while performing the action. Please check the configuration, connection, or data file.')
             return None
 
         return target_file
