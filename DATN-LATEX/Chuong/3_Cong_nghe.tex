@@ -2,50 +2,86 @@
 \documentclass[../DoAn.tex]{subfiles}
 \begin{document}
 
-\section{Tổng quan nền tảng công nghệ của hệ thống}
-Chương này có độ dài không quá 10 trang. Nếu cần trình bày dài hơn, sinh viên đưa vào phần phụ lục. Chú ý đây là kiến thức đã có sẵn; sinh viên sau khi tìm hiểu được thì phân tích và tóm tắt lại. Sinh viên không trình bày dài dòng, chi tiết.
+\section{Nền tảng công nghệ của hệ thống}
+Từ các yêu cầu đã phân tích ở Chương 2, hệ thống cần vừa bắt được gói tin, vừa hiển thị được dữ liệu theo thời gian thực, vừa lưu được cấu hình và kết quả để người dùng tiếp tục xem lại hoặc xuất ra ngoài khi cần. Vì vậy, việc chọn công nghệ không chỉ dựa trên việc “có làm được hay không”, mà phải xem công nghệ đó giúp hệ thống ổn định hơn, ít lỗi hơn và dễ mở rộng hơn so với các cách làm khác. Chương này trình bày các nền tảng và công nghệ chính được chọn cho đồ án, đồng thời giải thích rõ chúng giải quyết phần nào trong yêu cầu của Chương 2.
 
-Với đồ án ứng dụng, sinh viên để tên chương là ``Nền tảng lý thuyết và Công nghệ sử dụng''. Trong chương này, sinh viên giới thiệu về các công nghệ, nền tảng lý thuyết sử dụng trong đồ án. Sinh viên cũng có thể trình bày thêm nền tảng lý thuyết nào đó nếu cần dùng tới.
+Trong một hệ thống phân tích mạng, chuỗi xử lý phải đi từ thu thập, đọc dữ liệu, chuẩn hóa, hiển thị, lưu trữ cho đến phân tích ở mức cao hơn. Nếu từng khâu dùng một kiểu công cụ riêng rời rạc thì hệ thống dễ khó bảo trì, dễ lệch dữ liệu và khó bảo đảm ổn định khi chạy lâu. Vì vậy, các công nghệ dưới đây được chọn theo hướng khép kín chuỗi xử lý, giúp dữ liệu đi qua hệ thống theo một luồng rõ ràng và nhất quán.
 
-Với từng công nghệ, nền tảng hoặc lý thuyết được trình bày, sinh viên phải phân tích rõ công nghệ, nền tảng hoặc lý thuyết đó dùng để giải quyết vấn đề, yêu cầu cụ thể nào ở Chương 2. Hơn nữa, với từng vấn đề hoặc yêu cầu, sinh viên phải liệt kê danh sách các công nghệ hoặc hướng tiếp cận tương tự có thể dùng làm lựa chọn thay thế, rồi giải thích rõ sự lựa chọn của mình.
+\section{Thu thập và phân tích gói tin}
+\subsection{Python và Scapy}
+Python là ngôn ngữ triển khai chính của đồ án. Lý do quan trọng nhất không phải vì Python “dễ dùng” theo nghĩa chung chung, mà vì hệ thống cần ghép nhiều phần khác nhau như thu thập gói tin, xử lý dữ liệu, giao diện, lưu cấu hình và phân tích theo luồng trong cùng một chương trình. Với bài toán này, Python giúp giảm đáng kể độ phức tạp khi nối các khối chức năng lại với nhau, trong khi vẫn đủ linh hoạt để xử lý dữ liệu mạng và đủ phổ biến để dễ bảo trì về sau.
 
-Lưu ý: nội dung ĐATN phải có tính chất liên kết, liền mạch và nhất quán. Vì vậy, các công nghệ hoặc thuật toán trình bày trong chương này phải khớp với nội dung giới thiệu của sinh viên ở phần trước đó.
+So với C hoặc C++, Python không cho tốc độ xử lý thô cao bằng, nhưng đồ án không nằm ở mức yêu cầu tối ưu cực hạn theo từng byte mà cần một hệ thống chạy ổn định, dễ chỉnh sửa và dễ mở rộng. So với Java, Python thuận lợi hơn khi kết hợp trực tiếp với các thư viện mạng, thư viện giao diện và thư viện xử lý dữ liệu mà không phải xây dựng nhiều lớp trung gian. Điều này giúp đồ án giữ được cấu trúc gọn hơn và giảm rủi ro phát sinh lỗi khi nối nhiều thành phần.
 
-Trong chương này, để tăng tính khoa học và độ tin cậy, sinh viên nên chỉ rõ nguồn kiến thức mình thu thập được ở tài liệu nào, đồng thời đưa tài liệu đó vào trong danh sách tài liệu tham khảo rồi tạo các tham chiếu chéo.
+Trong các thư viện xử lý gói tin, Scapy được chọn vì nó cho phép đọc, tạo, bóc tách và sửa gói tin ở mức khá thấp nhưng vẫn rất linh hoạt. Đây là điểm mạnh quan trọng hơn so với các hướng chỉ thiên về đọc tệp hay chỉ thiên về chụp gói. Đồ án không chỉ cần “có dữ liệu”, mà cần hiểu được trong gói tin có gì, thuộc giao thức nào, ai gửi cho ai, và những thông tin nào phải đưa lên giao diện cho người dùng thấy ngay. Scapy đáp ứng trực tiếp yêu cầu này nhờ khả năng truy cập từng lớp giao thức và tách trường dữ liệu rõ ràng.
 
-\section{Nền tảng thu thập và phân tích lưu lượng mạng}
-\subsection{Npcap, Scapy và cơ chế thu thập gói tin}
+So với PyShark, Scapy cho đồ án này mức chủ động cao hơn khi cần xử lý dữ liệu theo cách riêng, đặc biệt là khi phải kết hợp cả gói tin thu trực tiếp lẫn gói tin đọc lại từ tệp. So với dpkt, Scapy thuận lợi hơn trong các tình huống cần quan sát và can thiệp linh hoạt vào từng phần của gói tin. Nhờ vậy, hệ thống có thể đọc gói tin, nhận diện giao thức, trích thông tin cần thiết và chuyển sang các bước xử lý tiếp theo mà không bị phụ thuộc vào một cấu trúc cố định quá chặt.
 
-\subsection{Định dạng PCAP, PCAPNG và siêu dữ liệu}
+Vai trò của Scapy trong đồ án là biến dữ liệu mạng thô thành dữ liệu có thể dùng được ngay cho các khâu sau. Sau khi gói tin được phân tích, hệ thống có thể biết đó là Ethernet, IPv4, IPv6, TCP hay UDP; biết hướng truyền và biết trường nào nên hiển thị cho người dùng. Đây là nền tảng trực tiếp để hệ thống đáp ứng yêu cầu ở Chương 2 về việc không chỉ bắt được gói tin mà còn phải đọc và giải thích được nội dung của gói tin.
 
-\subsection{So sánh và đánh giá các giải pháp thay thế}
+Scapy cũng giúp hệ thống xử lý tốt các trường hợp dữ liệu không đồng nhất. Trong thực tế, gói tin có thể đến từ nhiều nguồn khác nhau, có cấu trúc khác nhau hoặc thiếu một số trường tùy giao thức. Khả năng tách lớp giao thức và xử lý từng lớp riêng của Scapy làm cho hệ thống ổn định hơn so với cách tự viết bộ phân tích từ đầu, vì nếu tự viết toàn bộ thì rất dễ bỏ sót trường hợp biên và khó mở rộng sau này.
 
-\section{Nền tảng giao diện và trực quan hóa dữ liệu}
-\subsection{PySide6 và kiến trúc giao diện đa thành phần}
+\subsection{PCAP và PCAPNG}
+Để lưu dữ liệu bắt gói, đồ án sử dụng hai định dạng phổ biến là PCAP và PCAPNG. PCAP có ưu điểm là đơn giản, nhẹ và được hỗ trợ rộng rãi, nên phù hợp khi cần lưu nhanh hoặc trao đổi dữ liệu với các công cụ khác. PCAPNG linh hoạt hơn vì ngoài dữ liệu gói tin còn có thể giữ thêm ngữ cảnh của phiên bắt gói, chẳng hạn như thông tin giao diện, ghi chú bổ sung hoặc dữ liệu phụ trợ liên quan. So với việc tự tạo một định dạng riêng, dùng các chuẩn này giúp dữ liệu dễ mở hơn, ít phụ thuộc và thuận lợi hơn cho việc kiểm tra chéo.
 
-\subsection{Bảng điều khiển, sơ đồ mạng và cơ chế trực quan hóa}
+Trong đồ án, hai định dạng này giải quyết bài toán lưu và chia sẻ dữ liệu bắt gói theo cách ổn định hơn. Nếu hệ thống tự sinh một kiểu tệp riêng thì người dùng sẽ phải dùng đúng phần mềm của đồ án mới xem được dữ liệu, trong khi PCAP và PCAPNG cho phép mở lại bằng nhiều công cụ quen thuộc khác. Điều này quan trọng vì đồ án không chỉ cần chạy được trong lúc bắt gói mà còn cần giữ được dữ liệu để xem lại, đối chiếu hoặc phân tích thêm sau đó.
 
-\subsection{So sánh và lựa chọn hướng xây dựng giao diện}
+PCAPNG đặc biệt hữu ích khi cần giữ nguyên ngữ cảnh của lần thu thập, nhất là khi người dùng làm việc với nhiều giao diện mạng hoặc nhiều phiên khác nhau. Nhờ có thêm phần mô tả đi kèm dữ liệu, hệ thống dễ quản lý hơn và tránh nhầm lẫn giữa các lần bắt gói. Đây là ưu điểm rõ ràng hơn so với chỉ dùng PCAP trong toàn bộ trường hợp.
 
-\section{Nền tảng xử lý dữ liệu và điều tra lưu lượng}
-\subsection{Gói tin, phiên làm việc, luồng và thống kê lưu lượng}
+\section{Giao diện người dùng}
+\subsection{PySide6}
+Đồ án cần một giao diện đủ mạnh để hiển thị danh sách gói tin, chi tiết từng gói, thống kê theo nhiều góc nhìn và các hộp thoại cấu hình. PySide6 được chọn vì nó cho phép tổ chức giao diện thành các khối chức năng rõ ràng, hỗ trợ cập nhật dữ liệu động tốt và đặc biệt phù hợp với ứng dụng chạy trên máy tính có nhiều khu vực hiển thị cùng lúc. So với Tkinter, PySide6 linh hoạt hơn nhiều về bố cục, thành phần hiển thị và khả năng xây dựng giao diện giàu tương tác. So với giao diện web, PySide6 phù hợp hơn vì đồ án cần làm việc trực tiếp với dữ liệu cục bộ và phản hồi nhanh theo thao tác của người dùng mà không phải đi qua lớp trình duyệt.
 
-\subsection{Bộ lọc thu thập, bộ lọc hiển thị và truy vết dữ liệu}
+Trong bài toán này, giao diện không chỉ là nơi hiển thị kết quả mà còn là nơi điều khiển toàn bộ quá trình làm việc. Người dùng có thể chọn giao diện mạng, nhập bộ lọc, xem gói tin, chuyển sang các góc nhìn khác hoặc dừng phiên bắt gói ngay trong cùng một cửa sổ. PySide6 đáp ứng tốt kiểu tương tác đó vì các thành phần có thể gắn với nhau bằng tín hiệu và sự kiện rất rõ ràng, giúp phần giao diện phản hồi đúng phần cần cập nhật thay vì phải vẽ lại toàn bộ màn hình.
 
-\section{Nền tảng học máy và phát hiện bất thường}
-\subsection{Bộ đặc trưng luồng và hướng tiếp cận tương thích CIC}
+PySide6 cũng giúp tách phần hiển thị khỏi phần xử lý dữ liệu. Đây là lợi thế quan trọng đối với một đồ án có nhiều luồng thông tin chạy song song, vì giao diện sẽ bớt rối và mã nguồn dễ bảo trì hơn. Nếu dùng một cách tổ chức đơn giản hơn, việc thêm biểu đồ, bảng thống kê hoặc hộp thoại cấu hình rất dễ làm hệ thống cồng kềnh và khó kiểm soát.
 
-\subsection{Mạng nơ ron FT-Transformer và cơ chế suy luận TorchScript}
+\subsection{QSettings, JSON, CSV và nén dữ liệu}
+Đồ án cần lưu nhiều loại thông tin như thiết lập giao diện, danh sách gần đây, tham số bắt gói và các cấu hình người dùng chọn lại nhiều lần. QSettings phù hợp cho phần này vì nó giải quyết đúng bài toán lưu trạng thái ứng dụng nhỏ và vừa một cách gọn gàng. So với việc tự viết file cấu hình thuần túy, QSettings giảm công sức đọc ghi và giảm nguy cơ làm sai định dạng; so với dùng cơ sở dữ liệu cho toàn bộ cấu hình, nó nhẹ hơn và đơn giản hơn nhiều, đúng với quy mô của đồ án.
 
-\subsection{So sánh và lý do lựa chọn hướng tiếp cận}
+Trong đồ án, QSettings giúp người dùng không phải nhập lại những thiết lập quen thuộc mỗi lần mở chương trình. Điều này làm cho hệ thống ổn định hơn trong sử dụng thực tế vì trạng thái làm việc được giữ lại đúng cách, thay vì buộc người dùng cấu hình lại từ đầu. Với một công cụ phân tích mạng, khả năng nhớ lại trạng thái gần nhất là một lợi thế thực tế rõ ràng.
 
-\section{Các công cụ và thư viện hỗ trợ chuyên sâu}
-\subsection{Python và hệ sinh thái thư viện}
+JSON được dùng cho các dữ liệu có cấu trúc như cấu hình hiển thị hoặc các mẫu thông tin trao đổi giữa các khối chức năng. CSV phù hợp cho xuất kết quả vì có thể mở bằng nhiều công cụ khác nhau, dễ kiểm tra bằng mắt và thuận tiện khi cần đưa sang bảng tính hoặc phần mềm thống kê. Việc nén bằng gzip hoặc lz4 giúp giảm kích thước tệp khi lưu hoặc chia sẻ, nhất là khi dữ liệu bắt gói có thể lớn. So với việc chỉ lưu tệp thô, cách này làm cho dữ liệu gọn hơn mà vẫn giữ được khả năng trao đổi.
 
-\subsection{Paramiko, Psutil và các thành phần hỗ trợ hệ thống}
+Nhóm công nghệ này cũng giúp hệ thống có đường đi dữ liệu rõ ràng hơn. Người dùng có thể lưu lại kết quả, chuyển sang máy khác hoặc mở lại sau này mà không bị phụ thuộc vào một định dạng riêng chỉ đồ án mới đọc được. Đây là điểm mạnh cụ thể hơn so với các lựa chọn tự thiết kế định dạng nội bộ.
 
-\subsection{LZ4, NumPy, scikit-learn, joblib và PyTorch}
+\section{Phân tích theo luồng và hỗ trợ học máy}
+\subsection{Lý thuyết phân tích luồng}
+Chương 2 cho thấy hệ thống không chỉ cần nhìn từng gói tin riêng lẻ mà còn cần nhìn theo luồng giao tiếp để hiểu hành vi mạng rõ hơn. Phân tích theo luồng giúp gom các gói tin có cùng đặc trưng giao tiếp thành một đơn vị và tính ra các đặc trưng như số gói, số byte, thời lượng, tần suất, hướng truyền và mức độ đối xứng của trao đổi. So với việc nhìn từng gói riêng lẻ, cách này ổn định hơn vì nó giảm nhiễu và phản ánh được cả quá trình giao tiếp thay vì chỉ một lát cắt nhỏ.
+
+Trong đồ án, luồng là cầu nối giữa phần bắt gói và phần phân tích. Nếu chỉ có gói tin thì người dùng thấy dữ liệu rời rạc; nếu có luồng thì hệ thống có thể mô tả phiên giao tiếp rõ hơn, từ đó hỗ trợ phát hiện mẫu bất thường hoặc điểm đáng chú ý. Đây cũng là lý do đồ án không dừng ở việc hiển thị danh sách gói tin mà còn cần tổng hợp theo phiên và theo nhóm giao tiếp.
+
+Luồng còn là đơn vị rất phù hợp để đưa vào bước phân tích cao hơn. So với việc huấn luyện hoặc suy luận trực tiếp trên từng gói, sử dụng đặc trưng theo luồng thường ổn định hơn vì một luồng phản ánh nhiều khía cạnh của hành vi giao tiếp. Điều này làm cho các kết quả thống kê và nhận diện sau đó có ý nghĩa thực tế hơn.
+
+\subsection{NumPy, scikit-learn, joblib và PyTorch}
+NumPy được dùng cho các phép tính số và xử lý mảng vì đây là nền tảng gọn, nhanh và đủ mạnh cho dữ liệu dạng bảng. Trong đồ án, nhiều đặc trưng được trích ra từ luồng có thể nằm ở các thang đo khác nhau, nên cần một lớp xử lý số học ổn định trước khi đưa vào bước phân tích tiếp theo. So với việc tự xử lý bằng cấu trúc dữ liệu thuần của Python, NumPy giúp gọn hơn và ít lỗi hơn khi phải làm việc với dữ liệu lớn.
+
+scikit-learn được chọn cho các bước chuẩn hóa, biến đổi và thử nghiệm mô hình cơ bản vì thư viện này mạnh ở phần xử lý dữ liệu có cấu trúc và rất tiện cho việc thử nhiều cách tiếp cận. So với việc tự hiện thực toàn bộ, scikit-learn giúp giảm thời gian triển khai và giảm khả năng sai sót ở các bước tiền xử lý vốn rất dễ gây lệch kết quả nếu viết tay.
+
+joblib được dùng để lưu và nạp các đối tượng đã tạo sẵn, nhất là khi đồ án cần giữ lại cấu hình xử lý hoặc mô hình ở trạng thái có thể dùng lại. Đây là cách làm thực tế hơn so với việc huấn luyện hoặc dựng lại từ đầu mỗi lần chạy. Nó giúp hệ thống ổn định hơn khi triển khai vì phần nặng đã được chuẩn bị trước.
+
+PyTorch được dùng ở lớp suy luận vì thư viện này thuận lợi khi làm việc với mô hình học sâu và dễ tích hợp vào quy trình hiện có của đồ án. So với TensorFlow, PyTorch thuận hơn cho cách tổ chức mã hiện tại; so với các mô hình cổ điển như XGBoost, PyTorch phù hợp hơn khi đồ án cần một lớp nhận diện linh hoạt hơn trên dữ liệu theo luồng. Vai trò của PyTorch là cung cấp kết quả suy luận ở mức cao hơn sau khi dữ liệu đã được gom và chuẩn hóa, nhờ đó hệ thống không chỉ thống kê mà còn có thể đưa ra đánh giá có ý nghĩa hơn với người dùng.
+
+\section{Kết nối từ xa và môi trường Windows}
+\subsection{Paramiko, tcpdump, Npcap và pywin32}
+Đồ án cần hỗ trợ cả bắt gói cục bộ lẫn thu thập từ xa. Paramiko được chọn vì nó xử lý SSH ổn định, đủ cho việc điều khiển từ xa mà không phải tự viết cơ chế kết nối thấp cấp. So với các cách gọi lệnh ngoài bằng script rời rạc, Paramiko giúp kiểm soát kết nối tốt hơn, xử lý lỗi rõ hơn và giữ cho luồng làm việc của hệ thống nhất quán hơn.
+
+tcpdump là công cụ quen thuộc và ổn định để bắt và xuất gói tin trên Linux. Khi hệ thống cần thu thập dữ liệu từ máy từ xa, tcpdump là lựa chọn đáng tin cậy hơn so với việc tự viết lại toàn bộ cơ chế bắt gói. Điều này giảm rủi ro sai lệch dữ liệu và đảm bảo kết quả thu thập phù hợp với các công cụ mạng thông dụng khác.
+
+Npcap và pywin32 là phần hỗ trợ cần thiết cho môi trường Windows. Npcap cung cấp lớp bắt gói trên Windows ổn định hơn các giải pháp cũ như WinPcap, còn pywin32 giúp làm việc với một số thành phần hệ điều hành Windows khi cần. Nhờ bộ công nghệ này, đồ án có thể chạy được trong bối cảnh người dùng dùng máy Windows nhưng vẫn giữ được khả năng thu thập dữ liệu mạng đáng tin cậy.
+
+Điểm quan trọng ở nhóm công nghệ này là tách rõ phần thu thập khỏi phần hiển thị và phân tích. Máy từ xa chỉ làm nhiệm vụ cung cấp dữ liệu, còn hệ thống chính xử lý các bước còn lại. Cách chia này làm cho đồ án dễ triển khai hơn và ổn định hơn vì mỗi phần có trách nhiệm riêng, không chồng chéo.
+
+\section{Tài liệu hỗ trợ sử dụng}
+Ngoài các công nghệ lõi, đồ án còn có tài liệu hướng dẫn ở dạng HTML để người dùng dễ tra cứu thao tác cần thiết. Phần này không phải là thành phần xử lý chính, nhưng nó giúp giảm lỗi sử dụng vì người dùng có thể nhanh chóng xem lại cách bắt gói, cách lọc, cách xuất dữ liệu hoặc cách làm việc với các chế độ khác nhau của hệ thống.
+
+Với một công cụ có nhiều chế độ hoạt động, tài liệu đi kèm giúp người dùng hiểu đúng quy trình thay vì phải tự thử từng bước. Đây là cách hỗ trợ thực tế hơn so với việc chỉ để giao diện tự giải thích, nhất là khi đồ án hướng đến người dùng cần nắm nhanh cách vận hành.
 
 \section{Kết chương}
+Chương 3 đã trình bày các nền tảng và công nghệ chính của đồ án theo đúng chuỗi xử lý mà hệ thống cần có. Python và Scapy xử lý phần thu thập và bóc tách gói tin; PCAP và PCAPNG bảo đảm dữ liệu lưu lại có thể mở và trao đổi rộng rãi; PySide6 tạo giao diện tương tác trực tiếp với dữ liệu; QSettings, JSON, CSV và các cơ chế nén phục vụ lưu cấu hình và xuất kết quả; phân tích theo luồng cùng các thư viện NumPy, scikit-learn, joblib và PyTorch hỗ trợ bước tổng hợp và đánh giá; còn Paramiko, tcpdump, Npcap và pywin32 giúp hệ thống làm việc ổn định trong các môi trường triển khai khác nhau.
+
+Điểm chung của các lựa chọn này là chúng không chỉ “làm được việc” mà còn giúp hệ thống chạy ổn định hơn, giữ cấu trúc rõ ràng hơn và dễ mở rộng hơn so với các phương án tự xây hoặc ghép rời rạc. Nhờ vậy, các yêu cầu đã nêu ở Chương 2 được nối tiếp thành một giải pháp cụ thể và khả thi hơn trong triển khai thực tế.
+
+Từ nền tảng đó, Chương 4 sẽ đi vào phần triển khai và đánh giá, nơi các công nghệ này được áp dụng trên dữ liệu thực tế để kiểm tra mức độ đáp ứng so với các yêu cầu đã đặt ra ở Chương 2.
 
 \end{document}
