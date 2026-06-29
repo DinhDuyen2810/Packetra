@@ -3,10 +3,9 @@
 \begin{document}
 
 \section{Nền tảng công nghệ của hệ thống}
-Từ các yêu cầu đã phân tích ở Chương 2, hệ thống cần vừa bắt được gói tin, vừa hiển thị được dữ liệu theo thời gian thực, vừa lưu được cấu hình và kết quả để người dùng tiếp tục xem lại hoặc xuất ra ngoài khi cần. Vì vậy, việc chọn công nghệ không chỉ dựa trên việc “có làm được hay không”, mà phải xem công nghệ đó giúp hệ thống ổn định hơn, ít lỗi hơn và dễ mở rộng hơn so với các cách làm khác. Chương này trình bày các nền tảng và công nghệ chính được chọn cho đồ án, đồng thời giải thích rõ chúng giải quyết phần nào trong yêu cầu của Chương 2.
+Tiếp nối các yêu cầu đã phân tích ở Chương 2, hệ thống cần vừa bắt được gói tin, vừa hiển thị được dữ liệu theo thời gian thực, vừa lưu được cấu hình và kết quả để người dùng tiếp tục xem lại hoặc xuất ra ngoài khi cần. Vì vậy, việc chọn công nghệ không chỉ dựa trên việc “có làm được hay không”, mà còn phải xem công nghệ đó giúp hệ thống ổn định hơn, ít lỗi hơn và dễ mở rộng hơn so với các hướng tiếp cận khác. Chương này trình bày các nền tảng và công nghệ chính được chọn cho đồ án, đồng thời giải thích rõ chúng giải quyết phần nào trong yêu cầu của Chương 2.
 
-Trong một hệ thống phân tích mạng, chuỗi xử lý phải đi từ thu thập, đọc dữ liệu, chuẩn hóa, hiển thị, lưu trữ cho đến phân tích ở mức cao hơn. Nếu từng khâu dùng một kiểu công cụ riêng rời rạc thì hệ thống dễ khó bảo trì, dễ lệch dữ liệu và khó bảo đảm ổn định khi chạy lâu. Vì vậy, các công nghệ dưới đây được chọn theo hướng khép kín chuỗi xử lý, giúp dữ liệu đi qua hệ thống theo một luồng rõ ràng và nhất quán.
-
+Trong một hệ thống phân tích mạng, chuỗi xử lý phải đi từ thu thập, đọc dữ liệu, chuẩn hóa, hiển thị, lưu trữ cho đến phân tích ở mức cao hơn. Nếu tách rời từng khâu thành nhiều công cụ rời rạc, hệ thống rất dễ khó bảo trì, dễ lệch dữ liệu và khó bảo đảm ổn định khi chạy lâu. Vì vậy, các công nghệ dưới đây được chọn theo hướng khép kín chuỗi xử lý, giúp dữ liệu đi qua hệ thống theo một luồng rõ ràng và nhất quán.
 \section{Thu thập và phân tích gói tin}
 \subsection{Python và Scapy}
 Python là ngôn ngữ triển khai chính của đồ án. Lý do quan trọng nhất không phải vì Python “dễ dùng” theo nghĩa chung chung, mà vì hệ thống cần ghép nhiều phần khác nhau như thu thập gói tin, xử lý dữ liệu, giao diện, lưu cấu hình và phân tích theo luồng trong cùng một chương trình. Với bài toán này, Python giúp giảm đáng kể độ phức tạp khi nối các khối chức năng lại với nhau, trong khi vẫn đủ linh hoạt để xử lý dữ liệu mạng và đủ phổ biến để dễ bảo trì về sau.

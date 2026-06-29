@@ -3,13 +3,20 @@
 \begin{document}
 
 \section{Kết luận}
-Sinh viên so sánh kết quả nghiên cứu hoặc sản phẩm của mình với các nghiên cứu hoặc sản phẩm tương tự.
+Sau quá trình nghiên cứu, thiết kế và hiện thực, đồ án đã xây dựng được một hệ thống phân tích mạng có khả năng thu thập, giải mã, trực quan hóa và hỗ trợ nhận diện lưu lượng theo hướng tích hợp. Hệ thống không chỉ dừng lại ở việc hiển thị danh sách gói tin như các công cụ phân tích chuyên sâu truyền thống, mà còn cung cấp thêm bảng điều khiển tổng hợp, sơ đồ mạng tương tác, chức năng quản lý giao diện từ xa và cơ chế hỗ trợ đánh giá hành vi bất thường bằng mô hình học máy. Nhờ cách tổ chức này, người dùng có thể quan sát đồng thời cả chi tiết từng gói tin lẫn bức tranh tổng quan của luồng giao tiếp, từ đó rút ngắn đáng kể thời gian tìm hiểu và phân tích dữ liệu mạng.
 
-Sinh viên phân tích trong suốt quá trình thực hiện ĐATN, mình đã làm được gì, chưa làm được gì, các đóng góp nổi bật là gì, và tổng hợp những bài học kinh nghiệm rút ra nếu có.
+So với các công cụ chuyên dụng như Wireshark, hệ thống của đồ án có phạm vi hẹp hơn về số lượng giao thức được bóc tách chi tiết, nhưng lại có lợi thế ở khả năng kết hợp nhiều chức năng trong cùng một môi trường làm việc. Việc tích hợp sẵn các thành phần trực quan hóa, thống kê, hỗ trợ nhận diện và quản lý giao diện từ xa giúp hệ thống phù hợp hơn với bối cảnh học tập, minh họa và khai thác nhanh dữ liệu mạng. Đây cũng là điểm nhấn quan trọng thể hiện định hướng của đồ án: tập trung vào trải nghiệm sử dụng thống nhất, dễ theo dõi và có thể mở rộng theo từng nhu cầu thực tế.
+
+\section{Bài học kinh nghiệm}
+Trong quá trình thực hiện, một bài học quan trọng là việc tách rõ từng lớp xử lý ngay từ đầu có ảnh hưởng trực tiếp đến khả năng bảo trì và mở rộng của hệ thống. Khi luồng bắt gói, luồng phân tích, luồng hiển thị và luồng suy luận được tổ chức độc lập hơn, việc sửa đổi từng thành phần trở nên an toàn và ít gây tác động dây chuyền. Điều này đặc biệt hữu ích khi hệ thống phải xử lý dữ liệu mạng liên tục và đồng thời hỗ trợ nhiều thao tác tương tác của người dùng.
+
+Đồ án cũng cho thấy tầm quan trọng của kiểm thử trên dữ liệu thực tế có kích thước lớn. Thông qua các bộ tệp PCAPNG dung lượng cao và việc đối chiếu với công cụ tham chiếu, quá trình phát triển đã giúp xác định sớm các điểm có thể gây sai lệch khi giải mã hoặc thống kê. Bên cạnh đó, việc triển khai chức năng từ xa trên cả môi trường Linux và Windows giúp làm rõ các khác biệt về công cụ hỗ trợ, quyền truy cập và cách thức thu thập dữ liệu, từ đó hoàn thiện hơn giải pháp tổng thể của hệ thống.
+
+Về mặt mô hình học máy, quá trình đóng gói mô hình để suy luận trực tiếp trong ứng dụng cho thấy giá trị của việc biến kết quả nghiên cứu thành một thành phần có thể sử dụng được trong thực tế. Thay vì chỉ dừng ở mô hình thử nghiệm, hệ thống đã gắn mô hình vào luồng xử lý thật, giúp quá trình nhận diện bất thường trở nên gần với kịch bản sử dụng cuối hơn.
 
 \section{Hướng phát triển}
-Trong phần này, sinh viên trình bày định hướng công việc trong tương lai để hoàn thiện sản phẩm hoặc nghiên cứu của mình.
+Mặc dù đã đạt được các mục tiêu chính, hệ thống vẫn còn nhiều hướng cải tiến để phù hợp hơn với những môi trường mạng đa dạng và quy mô lớn hơn. Một hướng phát triển quan trọng là mở rộng khả năng chạy ở chế độ dòng lệnh hoặc chế độ dịch vụ nền, qua đó cho phép triển khai linh hoạt trên các máy chủ không có giao diện đồ họa. Khi đó, phần hiển thị có thể được tách ra thành một lớp khách độc lập, còn phần lõi thu thập và xử lý dữ liệu có thể vận hành ổn định như một dịch vụ lâu dài.
 
-Trước tiên, sinh viên trình bày các công việc cần thiết để hoàn thiện các chức năng hoặc nhiệm vụ đã làm. Sau đó sinh viên phân tích các hướng đi mới cho phép cải thiện và nâng cấp các chức năng hoặc nhiệm vụ đã làm.
+Bên cạnh đó, mô hình nhận diện bất thường cần được tiếp tục cập nhật bằng các tập dữ liệu mới để thích ứng với các biến thể tấn công thay đổi theo thời gian. Trong các phiên bản tiếp theo, hệ thống có thể được mở rộng theo hướng phân loại chi tiết hơn thay vì chỉ đưa ra cảnh báo tổng quát, đồng thời bổ sung cơ chế phản hồi từ người dùng để tăng dần độ chính xác của mô hình. Ngoài ra, việc tối ưu bộ nhớ, cải thiện tốc độ xử lý trên các tệp dữ liệu rất lớn và mở rộng danh sách giao thức được hỗ trợ cũng là những bước phát triển phù hợp cho giai đoạn tiếp theo của đồ án.
 
 \end{document}

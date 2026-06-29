@@ -2,10 +2,9 @@
 \documentclass[../DoAn.tex]{subfiles}
 \begin{document}
 
-Chương 4 trình bày quá trình thiết kế và hiện thực hệ thống dựa trên các nền tảng đã được lựa chọn ở Chương 3. Nếu Chương 2 xác định yêu cầu và Chương 3 lựa chọn công nghệ, thì Chương 4 là bước chuyển các lựa chọn đó thành cấu trúc phần mềm cụ thể, mô hình dữ liệu rõ ràng và các chức năng có thể vận hành thực tế.
+Chương 4 trình bày quá trình thiết kế và hiện thực hệ thống dựa trên các nền tảng đã được lựa chọn ở Chương 3. Nếu Chương 2 làm rõ bài toán và Chương 3 xác lập công nghệ, thì Chương 4 là bước chuyển những lựa chọn đó thành cấu trúc phần mềm cụ thể, mô hình dữ liệu rõ ràng và các chức năng có thể vận hành trong thực tế. Nói cách khác, chương này là phần kết nối trực tiếp giữa yêu cầu lý thuyết và sản phẩm hoàn chỉnh, nơi từng thành phần của hệ thống được tổ chức lại thành một chuỗi xử lý thống nhất, dễ kiểm thử, dễ mở rộng và bám sát đúng mục tiêu của đồ án.
 
 Nội dung của chương được tổ chức theo hướng đi từ tổng thể đến chi tiết. Trước hết là kiến trúc phần mềm và cách phân chia các thành phần chính của hệ thống. Tiếp theo là thiết kế giao diện, thiết kế lớp và cơ chế lưu trữ dữ liệu. Sau đó chương trình bày các thành phần xây dựng ứng dụng, kết quả đạt được, các nội dung kiểm thử và phần triển khai.
-
 \section{Thiết kế kiến trúc}
 \subsection{Lựa chọn kiến trúc phần mềm}
 Việc thiết kế một kiến trúc phần mềm vững chắc là tiền đề quan trọng để bảo đảm hệ thống có khả năng mở rộng và thuận lợi cho việc bảo trì trong tương lai. Đối với một hệ thống phân tích mạng phải đồng thời thu thập gói tin, giải mã dữ liệu, hiển thị trực quan, lưu trữ kết quả và hỗ trợ phân tích theo luồng, kiến trúc cần được tổ chức thành các khối chuyên biệt để giảm phụ thuộc lẫn nhau giữa các thành phần. Nếu gộp toàn bộ xử lý, hiển thị và lưu trữ vào cùng một nơi thì hệ thống sẽ rất khó kiểm soát khi mở rộng hoặc sửa lỗi.
