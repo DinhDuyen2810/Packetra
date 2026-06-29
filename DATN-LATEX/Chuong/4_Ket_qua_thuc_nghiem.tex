@@ -141,7 +141,7 @@ Hình~\ref{fig:uc06_sequence} trình bày luồng phát hiện hành vi bất th
 
 Tổng thể, thiết kế lớp của đồ án bám sát đúng vai trò từng thành phần trong code hiện tại. Phần bắt gói, giải mã, lọc hiển thị và suy luận bất thường đều được tách thành các lớp độc lập nhưng vẫn kết nối với nhau qua các điểm giao tiếp rõ ràng. Nhờ đó, hệ thống đạt được sự cân bằng giữa tính dễ hiểu, khả năng bảo trì và khả năng mở rộng cho các bước phát triển tiếp theo.
 \subsection{Thiết kế cơ chế lưu trữ dữ liệu}
-Do đặc thù của hệ thống phân tích gói tin là phải xử lý liên tục dữ liệu thời gian thực nhưng vẫn cần lưu lại phiên làm việc để mở lại sau này, đồ án không sử dụng cơ sở dữ liệu quan hệ tập trung cho toàn bộ dữ liệu. Thay vào đó, cơ chế lưu trữ được tách thành hai phần rõ ràng: lớp cấu hình người dùng bằng QSettings và lớp lưu trữ phiên bắt gói bằng các định dạng tệp PCAP/PCAPNG. 
+Do đặc thù của hệ thống phân tích gói tin là phải xử lý liên tục dữ liệu thời gian thực nhưng vẫn cần lưu lại phiên làm việc để mở lại sau này, đồ án không sử dụng cơ sở dữ liệu quan hệ tập trung cho toàn bộ dữ liệu. Thay vào đó, cơ chế lưu trữ được tách thành ba phần rõ ràng: lớp cấu hình người dùng bằng QSettings, lớp lưu cấu hình dashboard bằng JSON và lớp lưu trữ phiên bắt gói bằng các định dạng tệp PCAP/PCAPNG. 
 
 \subsubsection{Lưu trạng thái làm việc bằng QSettings}
 Đối với các thiết lập cần ghi nhớ giữa các lần mở chương trình, hệ thống sử dụng QSettings của Qt để lưu cấu hình theo cặp khóa - giá trị. Cách làm này phù hợp với một ứng dụng máy tính cục bộ vì không phải cài thêm máy chủ cơ sở dữ liệu, thao tác đọc ghi đơn giản và tốc độ đủ nhanh cho các thiết lập nhỏ nhưng được dùng thường xuyên.
@@ -166,6 +166,28 @@ Giao diện người dùng & Chủ đề giao diện; số lượng mục hiển
 Trên Windows, QSettings có thể ánh xạ xuống Registry, còn trên các môi trường khác hệ thống sẽ dùng tệp cấu hình phẳng tương ứng. Nhờ vậy, trạng thái làm việc như bộ lọc gần đây, danh sách tệp đã mở, chế độ bắt gói và thiết lập giao diện đều được khôi phục tự động khi người dùng mở lại chương trình.
 
 Nhóm thiết lập này đóng vai trò rất thực tế trong trải nghiệm sử dụng vì nó làm cho phần mềm có cảm giác nhớ được người dùng. Khi quay lại ứng dụng sau một lần làm việc trước đó, người dùng không phải nhập lại toàn bộ cấu hình ban đầu, từ đó tiết kiệm thời gian và tránh sai sót do quên thiết lập cũ. Với một công cụ phân tích mạng, khả năng khôi phục đúng trạng thái gần nhất là một lợi thế lớn vì công việc thường diễn ra theo phiên và cần quay lại nhanh đúng ngữ cảnh.
+
+\subsubsection{Lưu cấu hình dashboard bằng JSON}
+Các dashboard do người dùng tạo được lưu dưới dạng JSON để giữ lại bố cục hiển thị, danh sách biểu đồ, nguồn dữ liệu và các tuỳ chọn liên quan trong những lần làm việc sau. Cách lưu này phù hợp vì dashboard chủ yếu là dữ liệu có cấu trúc, ít thay đổi theo từng gói tin nhưng cần bảo toàn đầy đủ trạng thái trình bày của từng bộ theo dõi.
+
+\begin{longtable}{|p{3.5cm}|p{4.2cm}|p{5.5cm}|}
+\caption{Các thông tin dashboard được lưu bằng JSON} \label{tab:schema_dashboard_json} \\
+\hline
+\textbf{Nhóm thông tin} & \textbf{Mục lưu trữ tiêu biểu} & \textbf{Vai trò trong hệ thống} \\ \hline
+\endfirsthead
+\hline
+\textbf{Nhóm thông tin} & \textbf{Mục lưu trữ tiêu biểu} & \textbf{Vai trò trong hệ thống} \\ \hline
+\endhead
+\hline
+\endfoot
+\hline
+\endlastfoot
+Bố cục dashboard & Thứ tự sắp xếp vùng hiển thị, kích thước tương đối, trạng thái cửa sổ & Giúp người dùng mở lại đúng cách trình bày đã thiết lập trước đó mà không phải sắp xếp lại từ đầu. \\ \hline
+Danh sách biểu đồ & Loại biểu đồ, nguồn dữ liệu, tiêu đề, bộ lọc và tham số hiển thị & Bảo toàn nội dung phân tích của từng dashboard để có thể nạp lại nhanh trong các lần sử dụng sau. \\ \hline
+Thiết lập trình bày & Màu sắc, nhãn, thuộc tính phụ trợ của từng biểu đồ & Giữ cho dashboard nhất quán giữa các phiên làm việc, đồng thời hỗ trợ sao lưu hoặc chia sẻ cấu hình. \\ \hline
+\end{longtable}
+
+Nhờ lưu dưới dạng JSON, dashboard không bị ràng buộc vào một cấu trúc cơ sở dữ liệu phức tạp nhưng vẫn bảo đảm khả năng đọc lại, chỉnh sửa và mở rộng khi cần thêm loại biểu đồ hoặc thêm thuộc tính mới. Điều này làm cho phần dashboard trở thành một cấu hình làm việc có thể tái sử dụng thay vì chỉ là trạng thái tạm thời trong một phiên mở chương trình.
 
 \subsubsection{Lưu phiên bắt gói bằng định dạng PCAP và PCAPNG}
 Phần dữ liệu lớn nhất của đồ án là nội dung các phiên bắt gói. Để lưu trữ loại dữ liệu này, hệ thống sử dụng hai định dạng phổ biến là PCAP và PCAPNG. Đây là lựa chọn phù hợp vì dữ liệu có thể ghi tuần tự theo thứ tự thời gian, dễ mở lại trên nhiều công cụ khác nhau và giữ nguyên được các byte gốc của gói tin để phục vụ phân tích sau này.
@@ -227,7 +249,11 @@ Hỗ trợ Windows & pywin32 312 & \url{https://github.com/mhammond/pywin32} \\ 
 \end{table}
 
 \subsection{Kết quả đạt được}
-Sau quá trình phát triển, đồ án đã hoàn thiện một hệ thống phân tích gói tin gồm ba nhóm sản phẩm chính và một nhóm tài nguyên đi kèm được tổ chức rõ ràng. Nhóm thứ nhất là ứng dụng desktop, giữ vai trò trung tâm trong việc bắt gói, hiển thị danh sách gói tin, giải mã chi tiết, lọc dữ liệu, thống kê và xuất kết quả. Nhóm thứ hai là thành phần thu thập từ xa, dùng khi cần thu thập lưu lượng trên máy khác thông qua kết nối điều khiển từ xa. Nhóm thứ ba là bộ mô hình AI, cung cấp các tệp trọng số và tham số phụ trợ để phục vụ bước nhận diện hành vi bất thường. Bên cạnh đó, các thư mục `demo`, `data`, `help` và `image` được giữ lại như nhóm tài nguyên đi kèm, dùng để minh họa, hướng dẫn và phục vụ dữ liệu thử nghiệm. Các nhóm này phối hợp với nhau để tạo thành một chuỗi xử lý thống nhất, từ thu thập dữ liệu đến phân tích, trình diễn và đưa ra kết quả.
+Sau quá trình phát triển, đồ án đã hoàn thiện một hệ thống phân tích gói tin gồm ba nhóm sản phẩm chính và một nhóm tài nguyên đi kèm được tổ chức rõ ràng. Nhóm thứ nhất là ứng dụng desktop, giữ vai trò trung tâm trong việc bắt gói, hiển thị danh sách gói tin, giải mã chi tiết, lọc dữ liệu, thống kê và xuất kết quả. Nhóm thứ hai là thành phần thu thập từ xa, dùng khi cần thu thập lưu lượng trên máy khác thông qua kết nối điều khiển từ xa. Nhóm thứ ba là bộ mô hình AI, được huấn luyện từ hai bộ dữ liệu CICIDS2017 và CICIDS2018 để phục vụ bước nhận diện hành vi bất thường. Bên cạnh đó, các thư mục `demo`, `data`, `help` và `image` được giữ lại như nhóm tài nguyên đi kèm, dùng để minh họa, hướng dẫn và phục vụ dữ liệu thử nghiệm. Các nhóm này phối hợp với nhau để tạo thành một chuỗi xử lý thống nhất, từ thu thập dữ liệu đến phân tích, trình diễn và đưa ra kết quả.
+
+Quá trình huấn luyện mô hình được thực hiện theo hướng gộp dữ liệu từ CICIDS2017 và CICIDS2018 thành một tập train thống nhất rồi xử lý lại để phù hợp với đặc trưng đầu vào của mô hình. Từ dữ liệu gốc, hệ thống chọn ra 77 đặc trưng số để làm đầu vào, sau đó chia thành tập huấn luyện và tập kiểm tra theo tỷ lệ 80/20. Trước khi đưa vào mô hình, dữ liệu được chuẩn hóa bằng StandardScaler để các đặc trưng có cùng thang đo, đồng thời bộ lấy mẫu và trọng số lớp được sử dụng để giảm ảnh hưởng của tình trạng lệch lớp giữa các loại tấn công và lưu lượng bình thường.
+
+Mô hình chính được huấn luyện là FTTransformer và quá trình huấn luyện kéo dài 30 epoch. Trong suốt quá trình này, hệ thống theo dõi Accuracy, Macro F1 và Weighted F1 để chọn ra phiên bản tốt nhất của mô hình. Kết quả tốt nhất đạt được ở epoch 28 với Accuracy 0.886799, Macro F1 0.866807 và Weighted F1 0.883087. Sau khi hoàn tất, mô hình tốt nhất được xuất ra dưới dạng TorchScript để ứng dụng desktop có thể nạp trực tiếp khi chạy thực tế, giúp phần suy luận hoạt động ổn định và không phụ thuộc vào môi trường train ban đầu.
 
 Xét về cấu trúc mã nguồn và tài nguyên, hệ thống được tổ chức thành năm gói chính là agent, ai, core, gui và utils, cùng hai gói con là core.flow\_engine và gui.dashboard. Ngoài ra, các thư mục `demo`, `data`, `help` và `image` được dùng làm nhóm tài nguyên đi kèm cho dữ liệu mẫu, hướng dẫn và hình minh họa. Cách phân chia này giúp mỗi phần có trách nhiệm riêng, đồng thời thuận lợi cho việc bảo trì, mở rộng và đóng gói về sau.
 
@@ -351,6 +377,8 @@ Phần minh họa trên cho thấy hệ thống không chỉ dừng ở việc h
 Phần kiểm thử được xây dựng để đối chiếu các chức năng đã hiện thực với yêu cầu đặt ra ban đầu. Đồ án tập trung vào ba nhóm chức năng quan trọng nhất là phân tích gói tin, trực quan hóa bằng dashboard và thống kê luồng giao tiếp. Mỗi nhóm được kiểm thử theo dữ liệu thực tế, có đối chiếu với Wireshark và có đánh giá mức độ khớp kết quả sau cùng.
 
 Kỹ thuật kiểm thử được sử dụng chủ yếu là kiểm thử chức năng theo kịch bản sử dụng, kiểm thử đối chiếu kết quả và kiểm thử hồi quy trên nhiều tệp đầu vào khác nhau. Với các chức năng phân tích và thống kê, hệ thống được so sánh trực tiếp với Wireshark để kiểm tra tính nhất quán của dữ liệu đầu ra. Với dashboard, hệ thống được kiểm thử theo hướng thử tải chức năng và kiểm tra độ ổn định khi tạo nhiều biểu đồ liên tiếp từ nhiều nguồn khác nhau.
+
+Riêng với phần nhận diện bằng AI, mô hình được huấn luyện trên tập 15 nhãn nên phân bố dữ liệu giữa các lớp không đồng đều. Một số nhãn phổ biến như Benign, DDoS, DoS Hulk, ARP\_Spoofing hay PortScan có nhiều mẫu hơn, trong khi các nhãn như Web Attack - XSS, Web Attack - Brute Force và Web Attack - SQL Injection có số mẫu ít hơn đáng kể. Vì vậy, trong đánh giá thực nghiệm, ngoài việc xem độ chính xác tổng thể, đồ án còn chú ý đến nhóm nhãn có tần suất thấp để kiểm tra xem mô hình có bị thiên lệch sang các lớp đông mẫu hay không.
 
 Trong các bài kiểm thử này, việc sử dụng một tệp PCAPNG lớn rồi tách thành nhiều phần nhỏ giúp đánh giá hệ thống trên nhiều lát cắt dữ liệu thay vì chỉ một mẫu duy nhất. Cách làm này làm cho kết quả đối chiếu đáng tin cậy hơn vì nếu chỉ dựa vào một tệp thì rất dễ bỏ sót các trường hợp giao thức đặc biệt hoặc các mẫu lưu lượng có cấu trúc khác nhau. Nhờ đó, phần kiểm thử vừa phản ánh được năng lực giải mã vừa phản ánh được khả năng duy trì ổn định khi dữ liệu tăng lên.
 

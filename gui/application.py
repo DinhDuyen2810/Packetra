@@ -10736,6 +10736,32 @@ class ApplicationWindow(QMainWindow):
             return b''
         return b''
 
+    def _packet_follow_fallback_bytes(self, record, mode: str) -> bytes:
+        raw = getattr(record, 'raw', None)
+        if raw is None:
+            return b''
+        try:
+            normalized_mode = str(mode or '').strip().lower()
+            if normalized_mode == 'tcp' and raw.haslayer(TCP):
+                return bytes(raw[TCP])
+            if normalized_mode == 'udp' and raw.haslayer(UDP):
+                return bytes(raw[UDP])
+            if raw.haslayer(TCP):
+                return bytes(raw[TCP])
+            if raw.haslayer(UDP):
+                return bytes(raw[UDP])
+            if raw.haslayer(IP):
+                return bytes(raw[IP].payload)
+            if raw.haslayer(IPv6):
+                return bytes(raw[IPv6].payload)
+            if raw.haslayer(ARP):
+                return bytes(raw[ARP])
+            if raw.haslayer(Ether):
+                return bytes(raw[Ether].payload)
+            return bytes(raw)
+        except Exception:
+            return b''
+
     def _format_follow_payload(self, payload: bytes, fmt: str) -> str:
         data = bytes(payload or b'')
         if not data:
@@ -10812,40 +10838,58 @@ class ApplicationWindow(QMainWindow):
         def _refresh_text():
             fmt = str(format_combo.currentText() or 'ASCII')
             direction = str(direction_combo.currentText() or 'Entire conversation')
+            payload_map = {
+                int(getattr(rec, 'number', 0) or 0): self._packet_payload_bytes(rec, str(mode or '').strip().lower())
+                for rec in records
+            }
+            use_header_fallback = not any(payload_map.values())
             lines = []
-            total_bytes = 0
-            client_bytes = 0
-            server_bytes = 0
-            packet_count = 0
+            displayed_total_bytes = 0
+            displayed_client_bytes = 0
+            displayed_server_bytes = 0
+            displayed_packet_count = 0
+            stream_packet_count = len(records)
             for rec in records:
-                payload = self._packet_payload_bytes(rec, str(mode or '').strip().lower())
-                if not payload:
+                frame_no = int(getattr(rec, 'number', 0) or 0)
+                payload = payload_map.get(frame_no, b'')
+                body_bytes = payload
+                if use_header_fallback and not body_bytes:
+                    body_bytes = self._packet_follow_fallback_bytes(rec, str(mode or '').strip().lower())
+                if not body_bytes:
                     continue
-                packet_count += 1
-                total_bytes += len(payload)
                 is_client = (str(getattr(rec, 'src', '') or ''), str(getattr(rec, 'sport', '') or '')) == client_key
-                if is_client:
-                    client_bytes += len(payload)
-                else:
-                    server_bytes += len(payload)
 
                 if direction == 'Client to server' and not is_client:
                     continue
                 if direction == 'Server to client' and is_client:
                     continue
 
+                displayed_packet_count += 1
+                displayed_total_bytes += len(body_bytes)
+                if is_client:
+                    displayed_client_bytes += len(body_bytes)
+                else:
+                    displayed_server_bytes += len(body_bytes)
+
                 prefix = 'Client -> Server' if is_client else 'Server -> Client'
-                body = self._format_follow_payload(payload, fmt)
+                body = self._format_follow_payload(body_bytes, fmt)
                 if not body:
                     continue
-                frame_no = int(getattr(rec, 'number', 0) or 0)
-                lines.append(f'{prefix:<18} Frame {frame_no:>6}  Bytes {len(payload):>6}')
+                lines.append(f'{prefix:<18} Frame {frame_no:>6}  Bytes {len(body_bytes):>6}')
                 for body_line in str(body).splitlines():
                     lines.append(f'    {body_line}')
                 lines.append('')
 
             text.setPlainText('\n'.join(lines).strip())
-            status_label.setText(f'Status: {packet_count} packets, {client_bytes} bytes client, {server_bytes} bytes server, {total_bytes} bytes total')
+            fallback_note = ' | No application payload detected; showing transport/network bytes.' if use_header_fallback else ''
+            status_label.setText(
+                f'Status: {stream_packet_count} stream packets, '
+                f'{displayed_packet_count} displayed packets, '
+                f'{displayed_client_bytes} bytes client, '
+                f'{displayed_server_bytes} bytes server, '
+                f'{displayed_total_bytes} bytes total'
+                f'{fallback_note}'
+            )
 
         format_combo.currentTextChanged.connect(lambda _text: _refresh_text())
         direction_combo.currentTextChanged.connect(lambda _text: _refresh_text())
@@ -13253,7 +13297,7 @@ class ApplicationWindow(QMainWindow):
             f'Version {self.APP_VERSION}\n\n'
             'A powerful packet sniffer and analyzer tool.\n\n'
             'Built with Python, Scapy, and PySide6\n\n'
-            'https://github.com/packetra/packetra'
+            'https://github.com/DinhDuyen2810/Packetra.git'
         )
         dialog.setStandardButtons(QMessageBox.Ok)
         dialog.resize(900, 600)

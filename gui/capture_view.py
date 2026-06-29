@@ -3727,6 +3727,40 @@ class CaptureView(QWidget):
             if frame is not None:
                 return frame
 
+        # Some protocol handlers only annotate one side of the request/response pair.
+        # If the current packet has no direct pointer, scan other packets for a reverse
+        # reference back to the current frame and pick the nearest match.
+        reverse_frames = []
+        reverse_key_suffixes = (
+            '_request_frame',
+            '_query_frame',
+            '_response_to_frame',
+            '_answer_frame',
+        )
+        for candidate in self.records:
+            if candidate is None:
+                continue
+            candidate_number = int(getattr(candidate, 'number', 0) or 0)
+            if candidate_number <= 0 or candidate_number == current_number:
+                continue
+            candidate_meta = getattr(candidate, 'metadata', {}) or {}
+            if not isinstance(candidate_meta, dict):
+                continue
+            for key, value in candidate_meta.items():
+                key_text = str(key or '').strip()
+                if not key_text.endswith(reverse_key_suffixes):
+                    continue
+                try:
+                    pointed_frame = int(value)
+                except Exception:
+                    continue
+                if pointed_frame == current_number:
+                    reverse_frames.append(candidate_number)
+                    break
+        if reverse_frames:
+            reverse_frames = sorted(set(reverse_frames), key=lambda frame: (abs(frame - current_number), frame))
+            return int(reverse_frames[0])
+
         fallback_keys = [
             'tcp_ack_frame_number', 'tcp_duplicate_ack_frame_number',
             'ip_reassembled_in_frame',

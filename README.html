@@ -187,6 +187,7 @@
         <p>One simple Windows packaging option is PyInstaller.</p>
         <pre><code>pip install pyinstaller
 pyinstaller --noconfirm --clean --windowed --name Packetra ^
+  --add-data "image/ava.png;image" ^
   --add-data "ai;ai" ^
   --add-data "data;data" ^
   --add-data "demo;demo" ^
@@ -194,6 +195,7 @@ pyinstaller --noconfirm --clean --windowed --name Packetra ^
   --add-data "image;image" ^
   --collect-all PySide6 ^
   main.py</code></pre>
+        <p>This command explicitly bundles <code>image/ava.png</code> together with the rest of the <code>image</code> folder, so the application avatar is available in the packaged build.</p>
         <p>After build completes, check the packaged app in <code>dist/Packetra/</code>.</p>
       </div>
     </main>

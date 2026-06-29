@@ -495,20 +495,26 @@ class PacketBytesView(QWidget):
         if self._tab_bar.count() > 0 and not self._tab_bar.isHidden():
             host = self.window()
             if isinstance(host, QWidget):
-                if self._tab_bar.parentWidget() is not host:
-                    self._tab_bar.setParent(host)
-                    self._tab_bar.show()
                 statusbar = host.statusBar() if hasattr(host, "statusBar") and callable(getattr(host, "statusBar")) else None
                 statusbar = statusbar if isinstance(statusbar, QStatusBar) else None
-                local_x = self.mapTo(host, QPoint(6, 0)).x()
-                top_y = self.mapTo(host, QPoint(0, self.height())).y()
                 bar_height = max(19, self._tab_bar.sizeHint().height())
                 bar_width = min(max(110, self._tab_bar.sizeHint().width() + 6), max(0, self.width() - 12))
                 if statusbar is not None:
+                    if self._tab_bar.parentWidget() is not host:
+                        self._tab_bar.setParent(host)
+                        self._tab_bar.show()
+                    local_x = self.mapTo(host, QPoint(6, 0)).x()
+                    top_y = self.mapTo(host, QPoint(0, self.height())).y()
                     status_rect = statusbar.geometry()
                     top_y = max(status_rect.top() - 3, top_y - 2)
-                self._tab_bar.setGeometry(local_x, max(0, top_y), bar_width, bar_height)
-                self._tab_bar.raise_()
+                    self._tab_bar.setGeometry(local_x, max(0, top_y), bar_width, bar_height)
+                    self._tab_bar.raise_()
+                else:
+                    if self._tab_bar.parentWidget() is not self:
+                        self._tab_bar.setParent(self)
+                        self._tab_bar.show()
+                    self._tab_bar.setGeometry(6, max(0, bounds.height() - bar_height + 1), bar_width, bar_height)
+                    self._tab_bar.raise_()
             else:
                 bar_height = max(19, self._tab_bar.sizeHint().height())
                 bar_width = min(max(110, self._tab_bar.sizeHint().width() + 6), max(0, bounds.width() - 12))

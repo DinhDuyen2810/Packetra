@@ -16,5 +16,173 @@
   {}
 \endgroup
 
+
+\refsection{0}
+  \datalist[entry]{none/global//global/global/global}
+    \entry{cicids2017}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=90053790b0371459a72e55d14a2cedfe}{%
+           family={{Canadian Institute for Cybersecurity}},
+           familyi={C\bibinitperiod}}}%
+      }
+      \strng{namehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{fullhash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{fullhashraw}{90053790b0371459a72e55d14a2cedfe}
+      \strng{bibnamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorbibnamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authornamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorfullhash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorfullhashraw}{90053790b0371459a72e55d14a2cedfe}
+      \field{extraname}{1}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{Intrusion Detection Evaluation Dataset - {CICIDS2017}}
+      \field{urlday}{30}
+      \field{urlmonth}{6}
+      \field{urlyear}{2026}
+      \field{year}{2026}
+      \field{urldateera}{ce}
+      \true{nocite}
+      \verb{urlraw}
+      \verb https://www.unb.ca/cic/datasets/ids-2017.html
+      \endverb
+      \verb{url}
+      \verb https://www.unb.ca/cic/datasets/ids-2017.html
+      \endverb
+    \endentry
+    \entry{cicids2018}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=90053790b0371459a72e55d14a2cedfe}{%
+           family={{Canadian Institute for Cybersecurity}},
+           familyi={C\bibinitperiod}}}%
+      }
+      \strng{namehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{fullhash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{fullhashraw}{90053790b0371459a72e55d14a2cedfe}
+      \strng{bibnamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorbibnamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authornamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorfullhash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorfullhashraw}{90053790b0371459a72e55d14a2cedfe}
+      \field{extraname}{2}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{Intrusion Detection Evaluation Dataset - {CICIDS2018}}
+      \field{urlday}{30}
+      \field{urlmonth}{6}
+      \field{urlyear}{2026}
+      \field{year}{2026}
+      \field{urldateera}{ce}
+      \true{nocite}
+      \verb{urlraw}
+      \verb https://www.unb.ca/cic/datasets/ids-2018.html
+      \endverb
+      \verb{url}
+      \verb https://www.unb.ca/cic/datasets/ids-2018.html
+      \endverb
+    \endentry
+    \entry{cicflowmeter}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=90053790b0371459a72e55d14a2cedfe}{%
+           family={{Canadian Institute for Cybersecurity}},
+           familyi={C\bibinitperiod}}}%
+      }
+      \strng{namehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{fullhash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{fullhashraw}{90053790b0371459a72e55d14a2cedfe}
+      \strng{bibnamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorbibnamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authornamehash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorfullhash}{90053790b0371459a72e55d14a2cedfe}
+      \strng{authorfullhashraw}{90053790b0371459a72e55d14a2cedfe}
+      \field{extraname}{3}
+      \field{sortinit}{3}
+      \field{sortinithash}{ad6fe7482ffbd7b9f99c9e8b5dccd3d7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{{CICFlowMeter}: A Network Traffic Flow Generator}
+      \field{urlday}{30}
+      \field{urlmonth}{6}
+      \field{urlyear}{2026}
+      \field{year}{2026}
+      \field{urldateera}{ce}
+      \true{nocite}
+      \verb{urlraw}
+      \verb https://github.com/ahlashkari/CICFlowMeter
+      \endverb
+      \verb{url}
+      \verb https://github.com/ahlashkari/CICFlowMeter
+      \endverb
+    \endentry
+    \entry{wiresharkdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=2fa23f7afc106fc67fe3cbc91011e0e5}{%
+           family={{Wireshark Foundation}},
+           familyi={W\bibinitperiod}}}%
+      }
+      \strng{namehash}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{fullhash}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{fullhashraw}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{bibnamehash}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{authorbibnamehash}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{authornamehash}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{authorfullhash}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \strng{authorfullhashraw}{2fa23f7afc106fc67fe3cbc91011e0e5}
+      \field{sortinit}{4}
+      \field{sortinithash}{9381316451d1b9788675a07e972a12a7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{Wireshark User's Guide}
+      \field{urlday}{30}
+      \field{urlmonth}{6}
+      \field{urlyear}{2026}
+      \field{year}{2026}
+      \field{urldateera}{ce}
+      \true{nocite}
+      \verb{urlraw}
+      \verb https://www.wireshark.org/docs/wsug_html_chunked/
+      \endverb
+      \verb{url}
+      \verb https://www.wireshark.org/docs/wsug_html_chunked/
+      \endverb
+    \endentry
+    \entry{apacketsinsights}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=31175fae2fb215d816625260982dbacf}{%
+           family={{apackets}},
+           familyi={a\bibinitperiod}}}%
+      }
+      \strng{namehash}{31175fae2fb215d816625260982dbacf}
+      \strng{fullhash}{31175fae2fb215d816625260982dbacf}
+      \strng{fullhashraw}{31175fae2fb215d816625260982dbacf}
+      \strng{bibnamehash}{31175fae2fb215d816625260982dbacf}
+      \strng{authorbibnamehash}{31175fae2fb215d816625260982dbacf}
+      \strng{authornamehash}{31175fae2fb215d816625260982dbacf}
+      \strng{authorfullhash}{31175fae2fb215d816625260982dbacf}
+      \strng{authorfullhashraw}{31175fae2fb215d816625260982dbacf}
+      \field{sortinit}{5}
+      \field{sortinithash}{20e9b4b0b173788c5dace24730f47d8c}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{Visualizing Invisible {PCAP} Data: Network Insights}
+      \field{urlday}{30}
+      \field{urlmonth}{6}
+      \field{urlyear}{2026}
+      \field{year}{2026}
+      \field{urldateera}{ce}
+      \true{nocite}
+      \verb{urlraw}
+      \verb https://apackets.com/blog/visualizing-invisible-pcap-data-network-insights
+      \endverb
+      \verb{url}
+      \verb https://apackets.com/blog/visualizing-invisible-pcap-data-network-insights
+      \endverb
+    \endentry
+  \enddatalist
+\endrefsection
 \endinput
 
