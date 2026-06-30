@@ -805,7 +805,7 @@ class WidgetEditorDialog(QDialog):
 
     def _create_field_combo(self, include_star: bool = False) -> QComboBox:
         combo = _NoWheelComboBox()
-        combo.setEditable(True)
+        combo.setEditable(False)
         if include_star:
             combo.addItem("*")
         return combo
@@ -1045,7 +1045,6 @@ class WidgetEditorDialog(QDialog):
                 self._set_combo_to_text(self.secondary_source_field_combo, compatible_values[0])
             else:
                 self.secondary_source_field_combo.setCurrentIndex(-1)
-                self.secondary_source_field_combo.setEditText("")
 
         no_compatible = enforce_compatibility and not compatible_values
         self.secondary_source_field_combo.setEnabled(not no_compatible)
@@ -1119,7 +1118,6 @@ class WidgetEditorDialog(QDialog):
                 self._set_combo_to_text(self.y_data_source_combo, compatible_sources[0])
             else:
                 self.y_data_source_combo.setCurrentIndex(-1)
-                self.y_data_source_combo.setEditText("")
 
         has_compatible_source = bool(compatible_sources)
         self.y_data_source_combo.setEnabled(has_compatible_source)
@@ -1163,7 +1161,6 @@ class WidgetEditorDialog(QDialog):
     def _clear_combo_text(self, combo: QComboBox):
         combo.blockSignals(True)
         combo.setCurrentIndex(-1)
-        combo.setEditText("")
         combo.blockSignals(False)
 
     def _preferred_single_source_total_field(self, detail_field: Optional[str], current_value_field: Optional[str]) -> Optional[str]:
@@ -1647,13 +1644,13 @@ class WidgetEditorDialog(QDialog):
     def _set_combo_to_text(self, combo: QComboBox, text: str):
         cleaned = str(text or "").strip()
         if not cleaned:
+            combo.setCurrentIndex(-1)
             return
         index = combo.findText(cleaned)
         if index < 0:
             combo.addItem(cleaned)
             index = combo.findText(cleaned)
         combo.setCurrentIndex(index)
-        combo.setEditText(cleaned)
 
     def _apply_size_preset(self, preset_name: str):
         preset = self.SIZE_PRESETS.get(preset_name)
@@ -1903,7 +1900,6 @@ class WidgetEditorDialog(QDialog):
                 self._set_combo_to_text(combo, current_text)
             else:
                 combo.setCurrentIndex(-1)
-                combo.setEditText("")
             combo.blockSignals(False)
         self._refresh_secondary_field_compatibility()
         self._refresh_dual_source_compatibility()
