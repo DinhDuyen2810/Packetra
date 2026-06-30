@@ -174,6 +174,111 @@ def _preview_rows_signature(rows: List[Dict[str, Any]]) -> tuple[Any, ...]:
     return _row_collection_signature(rows)
 
 
+JOIN_FIELD_SEMANTICS: Dict[str, str] = {
+    "address": "endpoint",
+    "ip": "endpoint",
+    "src_ip": "endpoint",
+    "dst_ip": "endpoint",
+    "ip.src": "endpoint",
+    "ip.dst": "endpoint",
+    "protocol": "protocol",
+    "protocols": "protocol",
+    "frame.protocol": "protocol",
+    "query": "dns_query",
+    "dns.query": "dns_query",
+    "dns.qry.name": "dns_query",
+    "dns_query": "dns_query",
+    "dns.query_name": "dns_query",
+    "kind": "http_kind",
+    "http_kind": "http_kind",
+    "http.kind": "http_kind",
+    "method": "http_method",
+    "http_method": "http_method",
+    "http.method": "http_method",
+    "http.request.method": "http_method",
+    "status": "http_status",
+    "http.status": "http_status",
+    "http.status_code": "http_status",
+    "uri": "http_uri",
+    "http_request_uri": "http_uri",
+    "http.request_uri": "http_uri",
+    "tcp_stream_index": "tcp_stream",
+    "udp_stream_index": "udp_stream",
+    "src_port": "src_port",
+    "dst_port": "dst_port",
+    "tcp.srcport": "src_port",
+    "udp.srcport": "src_port",
+    "tcp.dstport": "dst_port",
+    "udp.dstport": "dst_port",
+}
+
+
+def _field_join_semantic(field_name: Optional[str]) -> str:
+    cleaned = str(field_name or "").strip().lower()
+    if not cleaned:
+        return ""
+    if cleaned in JOIN_FIELD_SEMANTICS:
+        return JOIN_FIELD_SEMANTICS[cleaned]
+    if cleaned.endswith(".src") or cleaned.endswith(".dst"):
+        prefix = cleaned.split(".", 1)[0]
+        if prefix in {"ip", "ipv6"}:
+            return "endpoint"
+    if cleaned.endswith("stream_index"):
+        if "tcp" in cleaned:
+            return "tcp_stream"
+        if "udp" in cleaned:
+            return "udp_stream"
+    return ""
+
+
+def _normalize_join_values(value: Any, semantic: str) -> List[str]:
+    if _is_blank_value(value):
+        return []
+    if semantic in {"src_port", "dst_port", "http_status", "tcp_stream", "udp_stream"}:
+        numeric = _coerce_numeric(value)
+        if numeric is None:
+            cleaned = str(value).strip()
+            return [cleaned] if cleaned else []
+        return [str(int(numeric))]
+
+    text = str(value).strip()
+    if not text:
+        return []
+    if semantic == "protocol":
+        return [part.strip().upper() for part in text.split(",") if part.strip()]
+    return [text.lower()]
+
+
+def _matching_candidate_fields(field_name: Optional[str], target_field_ids: List[str]) -> List[str]:
+    semantic = _field_join_semantic(field_name)
+    if not semantic:
+        return []
+    result: List[str] = []
+    seen = set()
+    for field_id in target_field_ids:
+        cleaned = str(field_id or "").strip()
+        if not cleaned:
+            continue
+        if _field_join_semantic(cleaned) != semantic:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def _build_join_index(rows: List[Dict[str, Any]], candidate_fields: List[str], semantic: str) -> Dict[str, List[int]]:
+    index: Dict[str, List[int]] = defaultdict(list)
+    for row_index, row in enumerate(rows):
+        row_tokens = set()
+        for field_id in candidate_fields:
+            row_tokens.update(_normalize_join_values(row.get(field_id), semantic))
+        for token in row_tokens:
+            index[token].append(row_index)
+    return index
+
+
 def _widget_metric_parts(widget: DashboardWidget) -> tuple[str, str, str]:
     metric = widget.query.metrics[0] if widget.query and widget.query.metrics else None
     metric_type = str(metric.type if metric is not None else "none").strip() or "none"
@@ -252,10 +357,14 @@ def _aggregate_group_rows(rows: List[Dict[str, Any]], metric_type: str, field_na
     return None
 
 
-def _single_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
+def _single_source_chart_rows(query_engine, widget: DashboardWidget, source_rows_by_name: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
     chart_type = str(widget.visualization.type or "").strip().lower()
     metric_type, metric_field, metric_alias = _widget_metric_parts(widget)
-    source_rows_raw = _fetch_rows_for_source(query_engine, widget.data_source, limit=None)
+    source_rows_raw = (
+        list((source_rows_by_name or {}).get(widget.data_source, []))
+        if source_rows_by_name is not None and widget.data_source in source_rows_by_name
+        else _fetch_rows_for_source(query_engine, widget.data_source, limit=None)
+    )
     source_rows = _apply_widget_filter(query_engine, source_rows_raw, widget.query.filter)
     if not source_rows:
         return []
@@ -305,19 +414,29 @@ def _single_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dic
     ]
 
 
-def _double_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
+def _double_source_chart_rows(query_engine, widget: DashboardWidget, source_rows_by_name: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
     style = dict(widget.style or {})
     x_source = str(style.get("x_data_source") or widget.data_source or "").strip()
     y_source = str(style.get("y_data_source") or widget.data_source or "").strip()
-    if not x_source or not y_source or x_source != y_source:
+    if not x_source or not y_source:
         return []
 
     x_field = str(widget.visualization.x_field or widget.visualization.category_field or "").strip()
     y_field = str(widget.visualization.y_field or widget.visualization.value_field or "").strip()
     metric_type, metric_field, metric_alias = _widget_metric_parts(widget)
-    source_rows_raw = _fetch_rows_for_source(query_engine, x_source, limit=None)
-    source_rows = _apply_widget_filter(query_engine, source_rows_raw, widget.query.filter)
-    if not source_rows or not x_field or not y_field:
+    x_rows_raw = (
+        list((source_rows_by_name or {}).get(x_source, []))
+        if source_rows_by_name is not None and x_source in source_rows_by_name
+        else _fetch_rows_for_source(query_engine, x_source, limit=None)
+    )
+    y_rows_raw = (
+        list((source_rows_by_name or {}).get(y_source, []))
+        if source_rows_by_name is not None and y_source in source_rows_by_name
+        else _fetch_rows_for_source(query_engine, y_source, limit=None)
+    )
+    x_rows = _apply_widget_filter(query_engine, x_rows_raw, widget.query.filter)
+    y_rows = _apply_widget_filter(query_engine, y_rows_raw, widget.query.filter)
+    if not x_rows or not y_rows or not x_field or not y_field:
         return []
 
     if metric_type == "none":
@@ -327,29 +446,74 @@ def _double_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dic
             metric_type = "sum"
 
     aggregation_field = metric_field if metric_field not in {"", "*"} else y_field
-    grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    ordered_values: List[str] = []
-    for row in source_rows:
-        x_value = row.get(x_field)
-        if _is_blank_value(x_value):
-            continue
-        key = str(x_value)
-        if key not in grouped_rows:
-            ordered_values.append(key)
-        grouped_rows[key].append(row)
-
-    if not grouped_rows:
-        return []
-
     output_value_field = metric_alias or ("count" if metric_type == "count" else y_field)
     result_rows: List[Dict[str, Any]] = []
-    for key in ordered_values:
-        group_rows = grouped_rows.get(key, [])
-        value = _aggregate_group_rows(group_rows, metric_type, aggregation_field)
+
+    if x_source == y_source:
+        grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        ordered_values: List[str] = []
+        for row in x_rows:
+            x_value = row.get(x_field)
+            if _is_blank_value(x_value):
+                continue
+            key = str(x_value)
+            if key not in grouped_rows:
+                ordered_values.append(key)
+            grouped_rows[key].append(row)
+
+        for key in ordered_values:
+            group_rows = grouped_rows.get(key, [])
+            value = _aggregate_group_rows(group_rows, metric_type, aggregation_field)
+            if value is None:
+                continue
+            result_rows.append({
+                x_field: key,
+                output_value_field: value,
+            })
+        return result_rows
+
+    semantic = _field_join_semantic(x_field)
+    if not semantic:
+        return []
+
+    y_field_ids = list(y_rows[0].keys()) if y_rows else []
+    join_fields = _matching_candidate_fields(x_field, y_field_ids)
+    if not join_fields:
+        return []
+
+    indexed_rows = _build_join_index(y_rows, join_fields, semantic)
+    grouped_primary_values: Dict[str, Dict[str, Any]] = {}
+    ordered_primary_values: List[str] = []
+
+    for row in x_rows:
+        raw_value = row.get(x_field)
+        if _is_blank_value(raw_value):
+            continue
+        display_key = str(raw_value)
+        if display_key in grouped_primary_values:
+            continue
+        join_tokens = _normalize_join_values(raw_value, semantic)
+        if not join_tokens:
+            continue
+        grouped_primary_values[display_key] = {
+            "display": raw_value,
+            "tokens": join_tokens,
+        }
+        ordered_primary_values.append(display_key)
+
+    for display_key in ordered_primary_values:
+        join_tokens = grouped_primary_values[display_key]["tokens"]
+        matched_indexes = set()
+        for token in join_tokens:
+            matched_indexes.update(indexed_rows.get(token, []))
+        if not matched_indexes:
+            continue
+        matched_rows = [y_rows[idx] for idx in sorted(matched_indexes)]
+        value = _aggregate_group_rows(matched_rows, metric_type, aggregation_field)
         if value is None:
             continue
         result_rows.append({
-            x_field: key,
+            x_field: grouped_primary_values[display_key]["display"],
             output_value_field: value,
         })
     return result_rows
@@ -357,22 +521,37 @@ def _double_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dic
 
 def build_widget_dataset(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
     chart_type = str(widget.visualization.type or "").strip().lower()
+    prefetched_rows: Dict[str, List[Dict[str, Any]]] = {}
     if query_engine is not None:
         primary_source = str(widget.data_source or "").strip()
         style = dict(widget.style or {})
+        relevant_sources: List[str] = []
         if chart_type in STANDARD_DOUBLE_SOURCE_CHARTS:
-            primary_source = str(style.get("x_data_source") or primary_source).strip()
-        source_rows = _fetch_rows_for_source(query_engine, primary_source, limit=None) if primary_source else []
+            x_source = str(style.get("x_data_source") or primary_source).strip()
+            y_source = str(style.get("y_data_source") or primary_source).strip()
+            for source_name in [x_source, y_source]:
+                if source_name and source_name not in relevant_sources:
+                    relevant_sources.append(source_name)
+        elif primary_source:
+            relevant_sources.append(primary_source)
+
+        for source_name in relevant_sources:
+            prefetched_rows[source_name] = _fetch_rows_for_source(query_engine, source_name, limit=None)
+
         cache = _get_dataset_cache(query_engine)
-        cache_key = _widget_dataset_cache_key(widget, _row_collection_signature(source_rows))
+        source_signatures = tuple(
+            (source_name, _row_collection_signature(prefetched_rows.get(source_name, [])))
+            for source_name in relevant_sources
+        )
+        cache_key = _widget_dataset_cache_key(widget, source_signatures)
         cached_rows = cache.get(cache_key)
         if cached_rows is not None:
             return cached_rows
 
     if chart_type in STANDARD_SINGLE_SOURCE_CHARTS:
-        result = _single_source_chart_rows(query_engine, widget)
+        result = _single_source_chart_rows(query_engine, widget, prefetched_rows)
     elif chart_type in STANDARD_DOUBLE_SOURCE_CHARTS:
-        result = _double_source_chart_rows(query_engine, widget)
+        result = _double_source_chart_rows(query_engine, widget, prefetched_rows)
     else:
         try:
             result = query_engine.execute(widget.data_source, widget.query, None) if query_engine else []
@@ -1409,6 +1588,25 @@ class WidgetEditorDialog(QDialog):
                 return True
         return False
 
+    def _source_pair_is_compatible(self, x_source: str, y_source: str, chart_type: str, primary_field: Optional[str]) -> bool:
+        cleaned_x = str(x_source or "").strip()
+        cleaned_y = str(y_source or "").strip()
+        primary_cleaned = str(primary_field or "").strip()
+        if not cleaned_x or not cleaned_y or not primary_cleaned:
+            return False
+        if not self._source_has_compatible_secondary_fields(cleaned_y, chart_type, primary_field):
+            return False
+        if cleaned_x == cleaned_y:
+            return True
+
+        x_catalog = self._source_field_catalog_for(cleaned_x)
+        y_catalog = self._source_field_catalog_for(cleaned_y)
+        x_field_ids = [str(entry.get("id") or "").strip() for entry in x_catalog]
+        y_field_ids = [str(entry.get("id") or "").strip() for entry in y_catalog]
+        if primary_cleaned not in x_field_ids:
+            return False
+        return bool(_matching_candidate_fields(primary_cleaned, y_field_ids))
+
     def _refresh_dual_source_compatibility(self):
         if not hasattr(self, "y_data_source_combo"):
             return
@@ -1429,7 +1627,7 @@ class WidgetEditorDialog(QDialog):
         self.y_data_source_combo.blockSignals(True)
         for row in range(self.y_data_source_combo.count()):
             source_name = self.y_data_source_combo.itemText(row).strip()
-            compatible = bool(source_name and x_source and source_name == x_source and self._source_has_compatible_secondary_fields(source_name, chart_type, primary_field))
+            compatible = self._source_pair_is_compatible(x_source, source_name, chart_type, primary_field)
             if compatible:
                 compatible_sources.append(source_name)
             if hasattr(model, "item"):

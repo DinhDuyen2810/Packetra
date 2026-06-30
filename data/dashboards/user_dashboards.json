@@ -191,7 +191,7 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-03T16:57:50.521565",
-      "updated_at": "2026-06-30T16:50:30.280406",
+      "updated_at": "2026-06-30T17:11:20.519933",
       "layout": {
         "columns": 12,
         "row_height": 80
@@ -349,13 +349,13 @@
           "query": {
             "filter": null,
             "group_by": [
-              "protocols"
+              "address"
             ],
             "metrics": [
               {
                 "type": "count",
-                "field": "packet",
-                "as_": "packet"
+                "field": "frame.protocol",
+                "as_": "frame_protocol"
               }
             ],
             "sort": [
@@ -367,16 +367,16 @@
             "limit": 10,
             "time_bucket": null,
             "columns": [
-              "protocols",
-              "packet"
+              "address",
+              "frame_protocol"
             ]
           },
           "visualization": {
             "type": "horizontal_bar",
-            "x_field": "protocols",
-            "y_field": "packet",
-            "category_field": "protocols",
-            "value_field": "packet",
+            "x_field": "address",
+            "y_field": "frame_protocol",
+            "category_field": "address",
+            "value_field": "frame_protocol",
             "series_field": null,
             "show_legend": true,
             "show_labels": false
@@ -392,7 +392,7 @@
             "primary_color": "#31a70d",
             "display_mode": "chart",
             "x_data_source": "endpoints",
-            "y_data_source": "endpoints"
+            "y_data_source": "packets"
           }
         },
         {
@@ -528,8 +528,16 @@
           "data_source": "protocol_stats",
           "query": {
             "filter": null,
-            "group_by": null,
-            "metrics": null,
+            "group_by": [
+              "protocol"
+            ],
+            "metrics": [
+              {
+                "type": "count",
+                "field": "time",
+                "as_": "time"
+              }
+            ],
             "sort": [
               {
                 "field": "packets",
@@ -538,14 +546,17 @@
             ],
             "limit": 10,
             "time_bucket": null,
-            "columns": null
+            "columns": [
+              "protocol",
+              "time"
+            ]
           },
           "visualization": {
             "type": "bar",
-            "x_field": null,
-            "y_field": null,
+            "x_field": "protocol",
+            "y_field": "time",
             "category_field": "protocol",
-            "value_field": "packets",
+            "value_field": "time",
             "series_field": null,
             "show_legend": true,
             "show_labels": false
@@ -557,7 +568,11 @@
             "h": 4
           },
           "description": null,
-          "style": null
+          "style": {
+            "x_data_source": "protocol_stats",
+            "y_data_source": "packets",
+            "display_mode": "chart"
+          }
         },
         {
           "id": "c1804a62-f6b1-4b8b-9e77-b051108d7a28",
@@ -566,12 +581,11 @@
           "query": {
             "filter": null,
             "group_by": [
-              "time",
-              "protocol"
+              "time"
             ],
             "metrics": [
               {
-                "type": "sum",
+                "type": "count",
                 "field": "bytes",
                 "as_": "bytes"
               }
@@ -581,8 +595,7 @@
             "time_bucket": "1s",
             "columns": [
               "time",
-              "bytes",
-              "protocol"
+              "bytes"
             ]
           },
           "visualization": {
@@ -591,7 +604,7 @@
             "y_field": "bytes",
             "category_field": null,
             "value_field": "bytes",
-            "series_field": "protocol",
+            "series_field": null,
             "show_legend": false,
             "show_labels": false
           },
@@ -614,8 +627,16 @@
           "data_source": "conversations",
           "query": {
             "filter": null,
-            "group_by": null,
-            "metrics": null,
+            "group_by": [
+              "protocol"
+            ],
+            "metrics": [
+              {
+                "type": "count",
+                "field": "src_port",
+                "as_": "src_port"
+              }
+            ],
             "sort": [
               {
                 "field": "packets",
@@ -625,18 +646,17 @@
             "limit": 10,
             "time_bucket": null,
             "columns": [
-              "conversation",
               "protocol",
-              "packets"
+              "src_port"
             ]
           },
           "visualization": {
             "type": "treemap",
-            "x_field": null,
-            "y_field": null,
-            "category_field": "conversation",
-            "value_field": "packets",
-            "series_field": "protocol",
+            "x_field": "protocol",
+            "y_field": "src_port",
+            "category_field": "protocol",
+            "value_field": "src_port",
+            "series_field": null,
             "show_legend": true,
             "show_labels": false
           },
@@ -648,35 +668,38 @@
           },
           "description": null,
           "style": {
-            "display_mode": "chart"
+            "display_mode": "chart",
+            "x_data_source": "conversations",
+            "y_data_source": "conversations"
           }
         },
         {
           "id": "aa77e04e-9503-40af-9dd1-e5690401f37e",
           "title": "Packets Over Time",
-          "data_source": "conversations",
+          "data_source": "packets",
           "query": {
             "filter": null,
-            "group_by": null,
+            "group_by": [
+              "length"
+            ],
             "metrics": [
               {
                 "type": "count",
-                "field": "*",
-                "as_": "count"
+                "field": "packets",
+                "as_": "packets"
               }
             ],
             "sort": null,
             "limit": null,
             "time_bucket": "1s",
             "columns": [
-              "time",
-              "frame.len",
+              "length",
               "packets"
             ]
           },
           "visualization": {
             "type": "scatter",
-            "x_field": "frame.len",
+            "x_field": "length",
             "y_field": "packets",
             "category_field": null,
             "value_field": "packets",
@@ -691,139 +714,6 @@
             "h": 4
           },
           "description": "Packet rate across the capture timeline",
-          "style": {
-            "x_data_source": "packets",
-            "y_data_source": "conversations",
-            "display_mode": "chart"
-          }
-        },
-        {
-          "id": "0e66bfed-cd95-4a54-a0bd-0ca3a0968495",
-          "title": "New Widget",
-          "data_source": "packets",
-          "query": {
-            "filter": null,
-            "group_by": null,
-            "metrics": null,
-            "sort": null,
-            "limit": null,
-            "time_bucket": null,
-            "columns": [
-              "frame.len"
-            ]
-          },
-          "visualization": {
-            "type": "histogram",
-            "x_field": null,
-            "y_field": null,
-            "category_field": null,
-            "value_field": "frame.len",
-            "series_field": null,
-            "show_legend": false,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 0,
-            "y": 16,
-            "w": 6,
-            "h": 4
-          },
-          "description": "New widget",
-          "style": {
-            "display_mode": "chart"
-          }
-        },
-        {
-          "id": "533a6f95-4fbd-4228-86fb-776f970ea0c6",
-          "title": "New Widget",
-          "data_source": "packets",
-          "query": {
-            "filter": null,
-            "group_by": [
-              "bytes",
-              "protocol"
-            ],
-            "metrics": [
-              {
-                "type": "count",
-                "field": "*",
-                "as_": "count"
-              }
-            ],
-            "sort": null,
-            "limit": null,
-            "time_bucket": null,
-            "columns": [
-              "time",
-              "bytes",
-              "count",
-              "protocol"
-            ]
-          },
-          "visualization": {
-            "type": "line",
-            "x_field": "bytes",
-            "y_field": "count",
-            "category_field": null,
-            "value_field": "count",
-            "series_field": "protocol",
-            "show_legend": false,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 6,
-            "y": 16,
-            "w": 6,
-            "h": 4
-          },
-          "description": "New widget",
-          "style": {
-            "x_data_source": "packets",
-            "y_data_source": "packets",
-            "display_mode": "chart"
-          }
-        },
-        {
-          "id": "dceea57a-04dc-4d2a-8804-2aebfc4ec9e1",
-          "title": "New Widget",
-          "data_source": "packets",
-          "query": {
-            "filter": null,
-            "group_by": [
-              "protocol"
-            ],
-            "metrics": [
-              {
-                "type": "count",
-                "field": "*",
-                "as_": "count"
-              }
-            ],
-            "sort": null,
-            "limit": null,
-            "time_bucket": null,
-            "columns": [
-              "protocol",
-              "count"
-            ]
-          },
-          "visualization": {
-            "type": "heatmap",
-            "x_field": null,
-            "y_field": null,
-            "category_field": "protocol",
-            "value_field": "count",
-            "series_field": null,
-            "show_legend": false,
-            "show_labels": false
-          },
-          "layout": {
-            "x": 0,
-            "y": 20,
-            "w": 6,
-            "h": 4
-          },
-          "description": "New widget",
           "style": {
             "x_data_source": "packets",
             "y_data_source": "packets",
