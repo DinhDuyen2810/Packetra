@@ -191,7 +191,7 @@
       "description": null,
       "is_template": false,
       "created_at": "2026-06-03T16:57:50.521565",
-      "updated_at": "2026-06-17T03:08:59.005139",
+      "updated_at": "2026-06-30T16:50:30.280406",
       "layout": {
         "columns": 12,
         "row_height": 80
@@ -209,8 +209,8 @@
             "metrics": [
               {
                 "type": "count",
-                "field": "*",
-                "as_": "count"
+                "field": "packet",
+                "as_": "packet"
               }
             ],
             "sort": null,
@@ -218,15 +218,15 @@
             "time_bucket": null,
             "columns": [
               "http.kind",
-              "count"
+              "packet"
             ]
           },
           "visualization": {
             "type": "sunburst",
-            "x_field": null,
-            "y_field": null,
+            "x_field": "http.kind",
+            "y_field": "packet",
             "category_field": "http.kind",
-            "value_field": "count",
+            "value_field": "packet",
             "series_field": null,
             "show_legend": true,
             "show_labels": false
@@ -300,14 +300,12 @@
           "data_source": "packets",
           "query": {
             "filter": null,
-            "group_by": [
-              "tcp_ack_frame_number"
-            ],
+            "group_by": null,
             "metrics": [
               {
-                "type": "avg",
-                "field": "tcp_ack_frame_number",
-                "as_": "tcp_ack_frame_number"
+                "type": "count_percent",
+                "field": "tcp_flags",
+                "as_": "%"
               }
             ],
             "sort": [
@@ -319,16 +317,16 @@
             "limit": 10,
             "time_bucket": null,
             "columns": [
-              "tcp_ack_frame_number",
-              "tcp_ack_frame_number"
+              "tcp_flags",
+              "%"
             ]
           },
           "visualization": {
             "type": "radar",
             "x_field": null,
             "y_field": null,
-            "category_field": "tcp_ack_frame_number",
-            "value_field": "tcp_ack_frame_number",
+            "category_field": "tcp_flags",
+            "value_field": "%",
             "series_field": null,
             "show_legend": true,
             "show_labels": false
@@ -350,8 +348,16 @@
           "data_source": "endpoints",
           "query": {
             "filter": null,
-            "group_by": null,
-            "metrics": null,
+            "group_by": [
+              "protocols"
+            ],
+            "metrics": [
+              {
+                "type": "count",
+                "field": "packet",
+                "as_": "packet"
+              }
+            ],
             "sort": [
               {
                 "field": "bytes",
@@ -361,16 +367,16 @@
             "limit": 10,
             "time_bucket": null,
             "columns": [
-              "address",
-              "bytes"
+              "protocols",
+              "packet"
             ]
           },
           "visualization": {
             "type": "horizontal_bar",
-            "x_field": null,
-            "y_field": null,
-            "category_field": "address",
-            "value_field": "bytes",
+            "x_field": "protocols",
+            "y_field": "packet",
+            "category_field": "protocols",
+            "value_field": "packet",
             "series_field": null,
             "show_legend": true,
             "show_labels": false
@@ -384,7 +390,9 @@
           "description": null,
           "style": {
             "primary_color": "#31a70d",
-            "display_mode": "chart"
+            "display_mode": "chart",
+            "x_data_source": "endpoints",
+            "y_data_source": "endpoints"
           }
         },
         {
@@ -431,34 +439,32 @@
         },
         {
           "id": "8a52b0d6-5036-4f21-a784-715e9ebc07a1",
-          "title": "New Widget",
+          "title": "Interface",
           "data_source": "packets",
           "query": {
             "filter": null,
-            "group_by": [
-              "dst_port"
-            ],
+            "group_by": null,
             "metrics": [
               {
-                "type": "count",
-                "field": "*",
-                "as_": "count"
+                "type": "count_percent",
+                "field": "frame_interface_name",
+                "as_": "%"
               }
             ],
             "sort": null,
             "limit": null,
             "time_bucket": null,
             "columns": [
-              "dst_port",
-              "count"
+              "frame_interface_name",
+              "%"
             ]
           },
           "visualization": {
             "type": "donut",
             "x_field": null,
             "y_field": null,
-            "category_field": "dst_port",
-            "value_field": "count",
+            "category_field": "frame_interface_name",
+            "value_field": "%",
             "series_field": null,
             "show_legend": false,
             "show_labels": false

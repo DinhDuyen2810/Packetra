@@ -188,11 +188,8 @@ class DashboardService:
     ) -> List[Dict[str, Any]]:
         """Execute a widget's query"""
         try:
-            return self.query_engine.execute(
-                widget.data_source,
-                widget.query,
-                global_filter
-            )
+            from .dashboard_editor import build_widget_dataset
+            return build_widget_dataset(self.query_engine, widget)
         except Exception as e:
             print(f"Error executing query: {e}")
             return []

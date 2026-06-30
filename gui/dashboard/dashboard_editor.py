@@ -68,7 +68,7 @@ def _fetch_rows_for_source(query_engine, source_name: str, *, limit: Optional[in
     except Exception:
         return []
     if limit is None:
-        return list(rows)
+        return rows if isinstance(rows, list) else list(rows)
     return list(rows)[:max(1, int(limit or 500))]
 
 
@@ -104,6 +104,74 @@ def _build_dual_source_xy_rows(
 STANDARD_SINGLE_SOURCE_CHARTS = {"metric", "pie", "donut", "radar"}
 STANDARD_DOUBLE_SOURCE_CHARTS = {"table", "bar", "horizontal_bar", "line", "area", "scatter", "treemap", "heatmap", "histogram", "sunburst"}
 STANDARD_PROPORTION_CHARTS = {"pie", "donut", "radar"}
+
+
+def _trim_cache(cache: Dict[Any, Any], *, max_items: int = 96) -> None:
+    while len(cache) > max_items:
+        try:
+            cache.pop(next(iter(cache)))
+        except StopIteration:
+            break
+
+
+def _row_collection_signature(rows: List[Dict[str, Any]]) -> tuple[Any, ...]:
+    if not rows:
+        return (0, None, None, ())
+    first = rows[0]
+    last = rows[-1]
+    key_fields = ("number", "frame.number", "time", "frame.time_relative", "protocol", "frame.protocol")
+    first_key = tuple(first.get(field) for field in key_fields)
+    last_key = tuple(last.get(field) for field in key_fields)
+    sample_keys = tuple(list(first.keys())[:6])
+    return (len(rows), first_key, last_key, sample_keys)
+
+
+def _widget_dataset_cache_key(widget: DashboardWidget, rows_signature: tuple[Any, ...]) -> tuple[Any, ...]:
+    metric = widget.query.metrics[0] if widget.query and widget.query.metrics else None
+    style = dict(widget.style or {})
+    return (
+        rows_signature,
+        str(widget.data_source or ""),
+        str(widget.visualization.type or ""),
+        str(widget.visualization.x_field or ""),
+        str(widget.visualization.y_field or ""),
+        str(widget.visualization.category_field or ""),
+        str(widget.visualization.value_field or ""),
+        str(widget.visualization.series_field or ""),
+        str(style.get("x_data_source") or ""),
+        str(style.get("y_data_source") or ""),
+        str(widget.query.filter or ""),
+        str(metric.type if metric is not None else ""),
+        str(metric.field if metric is not None else ""),
+        str(metric.as_ if metric is not None else ""),
+    )
+
+
+def _get_dataset_cache(query_engine) -> Dict[Any, List[Dict[str, Any]]]:
+    if query_engine is None:
+        return {}
+    cache = getattr(query_engine, "_dashboard_widget_dataset_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(query_engine, "_dashboard_widget_dataset_cache", cache)
+    return cache
+
+
+def _freeze_preview_config(config: Dict[str, Any]) -> tuple[Any, ...]:
+    frozen: List[tuple[str, Any]] = []
+    for key in sorted(config.keys()):
+        value = config.get(key)
+        if isinstance(value, list):
+            frozen.append((key, tuple(value)))
+        elif isinstance(value, dict):
+            frozen.append((key, tuple(sorted(value.items()))))
+        else:
+            frozen.append((key, value))
+    return tuple(frozen)
+
+
+def _preview_rows_signature(rows: List[Dict[str, Any]]) -> tuple[Any, ...]:
+    return _row_collection_signature(rows)
 
 
 def _widget_metric_parts(widget: DashboardWidget) -> tuple[str, str, str]:
@@ -187,7 +255,8 @@ def _aggregate_group_rows(rows: List[Dict[str, Any]], metric_type: str, field_na
 def _single_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
     chart_type = str(widget.visualization.type or "").strip().lower()
     metric_type, metric_field, metric_alias = _widget_metric_parts(widget)
-    source_rows = _apply_widget_filter(query_engine, _fetch_rows_for_source(query_engine, widget.data_source, limit=None), widget.query.filter)
+    source_rows_raw = _fetch_rows_for_source(query_engine, widget.data_source, limit=None)
+    source_rows = _apply_widget_filter(query_engine, source_rows_raw, widget.query.filter)
     if not source_rows:
         return []
 
@@ -246,7 +315,8 @@ def _double_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dic
     x_field = str(widget.visualization.x_field or widget.visualization.category_field or "").strip()
     y_field = str(widget.visualization.y_field or widget.visualization.value_field or "").strip()
     metric_type, metric_field, metric_alias = _widget_metric_parts(widget)
-    source_rows = _apply_widget_filter(query_engine, _fetch_rows_for_source(query_engine, x_source, limit=None), widget.query.filter)
+    source_rows_raw = _fetch_rows_for_source(query_engine, x_source, limit=None)
+    source_rows = _apply_widget_filter(query_engine, source_rows_raw, widget.query.filter)
     if not source_rows or not x_field or not y_field:
         return []
 
@@ -287,14 +357,31 @@ def _double_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dic
 
 def build_widget_dataset(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
     chart_type = str(widget.visualization.type or "").strip().lower()
+    if query_engine is not None:
+        primary_source = str(widget.data_source or "").strip()
+        style = dict(widget.style or {})
+        if chart_type in STANDARD_DOUBLE_SOURCE_CHARTS:
+            primary_source = str(style.get("x_data_source") or primary_source).strip()
+        source_rows = _fetch_rows_for_source(query_engine, primary_source, limit=None) if primary_source else []
+        cache = _get_dataset_cache(query_engine)
+        cache_key = _widget_dataset_cache_key(widget, _row_collection_signature(source_rows))
+        cached_rows = cache.get(cache_key)
+        if cached_rows is not None:
+            return cached_rows
+
     if chart_type in STANDARD_SINGLE_SOURCE_CHARTS:
-        return _single_source_chart_rows(query_engine, widget)
-    if chart_type in STANDARD_DOUBLE_SOURCE_CHARTS:
-        return _double_source_chart_rows(query_engine, widget)
-    try:
-        return query_engine.execute(widget.data_source, widget.query, None) if query_engine else []
-    except Exception:
-        return []
+        result = _single_source_chart_rows(query_engine, widget)
+    elif chart_type in STANDARD_DOUBLE_SOURCE_CHARTS:
+        result = _double_source_chart_rows(query_engine, widget)
+    else:
+        try:
+            result = query_engine.execute(widget.data_source, widget.query, None) if query_engine else []
+        except Exception:
+            result = []
+    if query_engine is not None:
+        cache[cache_key] = result
+        _trim_cache(cache)
+    return result
 
 
 class _NoWheelComboBox(QComboBox):
@@ -494,6 +581,7 @@ class WidgetEditorDialog(QDialog):
         self._working_copy = deepcopy(widget_model)
         self._source_rows: List[Dict[str, Any]] = []
         self._source_rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
+        self._field_catalog_by_source: Dict[tuple[str, tuple[Any, ...]], List[Dict[str, Any]]] = {}
         self._field_catalog: List[Dict[str, Any]] = []
         self._mapping_controls: Dict[str, Any] = {}
         self._query_controls: Dict[str, Any] = {}
@@ -503,6 +591,8 @@ class WidgetEditorDialog(QDialog):
         self._applying_size_preset = False
         self._preview_refresh_suspend_count = 0
         self._preview_refresh_pending = False
+        self._last_preview_signature: Optional[tuple[Any, ...]] = None
+        self._last_sheet_signature: Optional[tuple[Any, ...]] = None
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         # Slightly longer debounce keeps the editor responsive while typing/filtering.
@@ -1298,7 +1388,14 @@ class WidgetEditorDialog(QDialog):
         if rows is None:
             rows = self._fetch_source_rows(cleaned)
             self._source_rows_by_name[cleaned] = rows
-        return self._build_field_catalog(rows)
+        cache_key = (cleaned, _row_collection_signature(rows))
+        cached_catalog = self._field_catalog_by_source.get(cache_key)
+        if cached_catalog is not None:
+            return cached_catalog
+        catalog = self._build_field_catalog(rows)
+        self._field_catalog_by_source[cache_key] = catalog
+        _trim_cache(self._field_catalog_by_source)
+        return catalog
 
     def _source_has_compatible_secondary_fields(self, source_name: str, chart_type: str, primary_field: Optional[str]) -> bool:
         normalized_chart = str(chart_type or "").strip().lower()
@@ -2316,8 +2413,15 @@ class WidgetEditorDialog(QDialog):
     def _refresh_preview(self):
         self._working_copy = self._collect_working_copy()
         preview_rows = self._execute_plot_preview_rows()
-        self._refresh_chart_preview(preview_rows)
-        self._refresh_sheet_preview(preview_rows)
+        chart_signature = (
+            self._working_copy.visualization.type,
+            _freeze_preview_config(self._chart_config()),
+            _preview_rows_signature(preview_rows),
+        )
+        sheet_rows = self._build_sheet_preview_rows(preview_rows)
+        sheet_signature = _preview_rows_signature(sheet_rows)
+        self._refresh_chart_preview(preview_rows, chart_signature=chart_signature)
+        self._refresh_sheet_preview(sheet_rows, sheet_signature=sheet_signature)
 
     def _chart_config(self) -> Dict[str, Any]:
         visualization = self._working_copy.visualization
@@ -2414,7 +2518,12 @@ class WidgetEditorDialog(QDialog):
             })
         return self._apply_sheet_preview_headers(preview_rows)
 
-    def _refresh_chart_preview(self, preview_data: Optional[List[Dict[str, Any]]] = None):
+    def _refresh_chart_preview(self, preview_data: Optional[List[Dict[str, Any]]] = None, *, chart_signature: Optional[tuple[Any, ...]] = None):
+        if chart_signature is not None and chart_signature == self._last_preview_signature:
+            self.preview_status_label.setText(
+                f"Preview rows: {len(preview_data or [])} | Field sample rows: {len(self._source_rows)}"
+            )
+            return
         while self.preview_chart_layout.count() > 0:
             item = self.preview_chart_layout.takeAt(0)
             if item.widget() is not None:
@@ -2439,6 +2548,7 @@ class WidgetEditorDialog(QDialog):
             self._install_preview_activation_handlers(preview_widget)
             self._set_color_editor_active(preserve_color_state)
             self.preview_chart_layout.addWidget(preview_widget)
+            self._last_preview_signature = chart_signature
             self.preview_status_label.setText(
                 f"Preview rows: {len(preview_data)} | Field sample rows: {len(self._source_rows)}"
             )
@@ -2447,10 +2557,16 @@ class WidgetEditorDialog(QDialog):
             error_label.setWordWrap(True)
             error_label.setStyleSheet("color: #a61e1e;")
             self.preview_chart_layout.addWidget(error_label)
+            self._last_preview_signature = None
             self.preview_status_label.setText("Preview failed. Check field mappings, filter expression, or source sample.")
 
-    def _refresh_sheet_preview(self, preview_rows: Optional[List[Dict[str, Any]]] = None):
-        self._populate_table(self.preview_sheet_table, self._build_sheet_preview_rows(preview_rows))
+    def _refresh_sheet_preview(self, preview_rows: Optional[List[Dict[str, Any]]] = None, *, sheet_signature: Optional[tuple[Any, ...]] = None):
+        if preview_rows is None:
+            preview_rows = self._build_sheet_preview_rows(None)
+        if sheet_signature is not None and sheet_signature == self._last_sheet_signature:
+            return
+        self._populate_table(self.preview_sheet_table, preview_rows)
+        self._last_sheet_signature = sheet_signature
 
     def _execute_aggregated_preview(self) -> List[Dict[str, Any]]:
         return build_widget_dataset(self.query_engine, self._working_copy)

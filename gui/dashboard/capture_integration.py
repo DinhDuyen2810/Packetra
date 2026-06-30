@@ -277,7 +277,7 @@ class CaptureDataSourceBuilder:
 
                 if limit is not None:
                     return list(cache_rows[:max(1, int(limit))])
-                return list(cache_rows)
+                return cache_rows
             except Exception as e:
                 print(f"Error fetching packets: {e}")
                 return []
@@ -345,7 +345,7 @@ class CaptureDataSourceBuilder:
 
                 if limit is not None:
                     return list(cache_rows[:max(1, int(limit))])
-                return list(cache_rows)
+                return cache_rows
             except Exception as e:
                 print(f"Error fetching endpoints: {e}")
                 return []
@@ -417,7 +417,7 @@ class CaptureDataSourceBuilder:
 
                 if limit is not None:
                     return list(cache_rows[:max(1, int(limit))])
-                return list(cache_rows)
+                return cache_rows
             except Exception as e:
                 print(f"Error fetching conversations: {e}")
                 return []
@@ -460,7 +460,7 @@ class CaptureDataSourceBuilder:
 
                 if limit is not None:
                     return list(cache_rows[:max(1, int(limit))])
-                return list(cache_rows)
+                return cache_rows
             except Exception as e:
                 print(f"Error fetching protocol stats: {e}")
                 return []
