@@ -233,15 +233,17 @@ class _PointerInspectorController(QObject):
 
     def eventFilter(self, watched, event):
         event_type = event.type()
-        if self.provider is not None and event_type == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
-            text = self.provider(_mouse_event_pos(event))
+        provider = getattr(self, "provider", None)
+        active_text = getattr(self, "active_text", None)
+        if provider is not None and event_type == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+            text = provider(_mouse_event_pos(event))
             if text:
                 self.start(text, _mouse_event_global_pos(event))
             else:
                 self.stop()
-        elif self.active_text and event_type == QEvent.MouseMove:
-            if self.provider is not None:
-                next_text = self.provider(_mouse_event_pos(event))
+        elif active_text and event_type == QEvent.MouseMove:
+            if provider is not None:
+                next_text = provider(_mouse_event_pos(event))
                 if next_text:
                     self.active_text = next_text
             self._show(_mouse_event_global_pos(event))
@@ -2295,38 +2297,59 @@ class HistogramRenderer:
             return _empty_widget("No data", parent)
 
         config = config or {}
-        numeric_field = config.get("valueField") or config.get("yField")
-        if not numeric_field or not any(numeric_field in row for row in data):
-            numeric_field = _infer_value_field(data, config)
-        if not numeric_field:
-            return _empty_widget("Histogram is missing a numeric field", parent)
-
-        values = [
-            numeric_value
-            for row in data
-            for numeric_value in [_coerce_number(row.get(numeric_field))]
-            if numeric_value is not None
-        ]
-        if not values:
-            return _empty_widget("No plottable data", parent)
-
-        min_value = min(values)
-        max_value = max(values)
-        if min_value == max_value:
-            labels = [_format_number(min_value)]
-            counts = [len(values)]
+        if data and len(data[0].keys()) == 2:
+            keys = list(data[0].keys())
+            label_field = keys[0]
+            numeric_field = keys[1]
+            direct_points = []
+            for row in data:
+                numeric_value = _coerce_number(row.get(numeric_field))
+                if numeric_value is None:
+                    continue
+                direct_points.append((str(row.get(label_field, "") or ""), numeric_value))
+            if direct_points:
+                labels = [label for label, _ in direct_points]
+                counts = [value for _, value in direct_points]
+            else:
+                labels = []
+                counts = []
         else:
-            bin_count = min(8, max(4, int(math.sqrt(len(values)))))
-            bin_width = (max_value - min_value) / bin_count or 1.0
-            counts = [0] * bin_count
-            for value in values:
-                index = min(bin_count - 1, int((value - min_value) / bin_width))
-                counts[index] += 1
             labels = []
-            for index in range(bin_count):
-                low = min_value + (index * bin_width)
-                high = min_value + ((index + 1) * bin_width)
-                labels.append(f"{_format_number(low)}-{_format_number(high)}")
+            counts = []
+
+        numeric_field = config.get("valueField") or config.get("yField")
+        if not labels or not counts:
+            if not numeric_field or not any(numeric_field in row for row in data):
+                numeric_field = _infer_value_field(data, config)
+            if not numeric_field:
+                return _empty_widget("Histogram is missing a numeric field", parent)
+
+            values = [
+                numeric_value
+                for row in data
+                for numeric_value in [_coerce_number(row.get(numeric_field))]
+                if numeric_value is not None
+            ]
+            if not values:
+                return _empty_widget("No plottable data", parent)
+
+            min_value = min(values)
+            max_value = max(values)
+            if min_value == max_value:
+                labels = [_format_number(min_value)]
+                counts = [len(values)]
+            else:
+                bin_count = min(8, max(4, int(math.sqrt(len(values)))))
+                bin_width = (max_value - min_value) / bin_count or 1.0
+                counts = [0] * bin_count
+                for value in values:
+                    index = min(bin_count - 1, int((value - min_value) / bin_width))
+                    counts[index] += 1
+                labels = []
+                for index in range(bin_count):
+                    low = min_value + (index * bin_width)
+                    high = min_value + ((index + 1) * bin_width)
+                    labels.append(f"{_format_number(low)}-{_format_number(high)}")
 
         bar_set = QBarSet("Frequency")
         for count in counts:
@@ -2396,6 +2419,11 @@ class HeatmapRenderer:
             return _empty_widget("No data", parent)
 
         config = config or {}
+        if data and len(data[0].keys()) == 2:
+            keys = list(data[0].keys())
+            config = dict(config)
+            config["categoryField"] = keys[0]
+            config["valueField"] = keys[1]
         value_field = config.get("valueField")
         label_field = config.get("categoryField")
         first_row = data[0]

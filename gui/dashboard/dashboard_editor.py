@@ -19,6 +19,7 @@ from uuid import uuid4
 from datetime import datetime
 from copy import deepcopy
 from contextlib import contextmanager
+from collections import defaultdict
 
 from .models import (
     Dashboard, DashboardWidget, WidgetQuery, VisualizationConfig,
@@ -42,7 +43,7 @@ def _apply_fixed_screen_size(dialog: QDialog):
     )
 
 
-def _fetch_rows_for_source(query_engine, source_name: str, *, limit: int = 500) -> List[Dict[str, Any]]:
+def _fetch_rows_for_source(query_engine, source_name: str, *, limit: Optional[int] = 500) -> List[Dict[str, Any]]:
     if not query_engine or not getattr(query_engine, "registry", None):
         return []
     cleaned_source = str(source_name or "").strip()
@@ -55,7 +56,10 @@ def _fetch_rows_for_source(query_engine, source_name: str, *, limit: int = 500) 
     if fetcher is None:
         return []
     try:
-        rows = fetcher(limit=limit) or []
+        if limit is None:
+            rows = fetcher() or []
+        else:
+            rows = fetcher(limit=limit) or []
     except TypeError:
         try:
             rows = fetcher() or []
@@ -63,6 +67,8 @@ def _fetch_rows_for_source(query_engine, source_name: str, *, limit: int = 500) 
             return []
     except Exception:
         return []
+    if limit is None:
+        return list(rows)
     return list(rows)[:max(1, int(limit or 500))]
 
 
@@ -95,6 +101,202 @@ def _build_dual_source_xy_rows(
     return merged
 
 
+STANDARD_SINGLE_SOURCE_CHARTS = {"metric", "pie", "donut", "radar"}
+STANDARD_DOUBLE_SOURCE_CHARTS = {"table", "bar", "horizontal_bar", "line", "area", "scatter", "treemap", "heatmap", "histogram", "sunburst"}
+STANDARD_PROPORTION_CHARTS = {"pie", "donut", "radar"}
+
+
+def _widget_metric_parts(widget: DashboardWidget) -> tuple[str, str, str]:
+    metric = widget.query.metrics[0] if widget.query and widget.query.metrics else None
+    metric_type = str(metric.type if metric is not None else "none").strip() or "none"
+    metric_field = str(metric.field if metric is not None else "").strip()
+    metric_alias = str(metric.as_ if metric is not None else "").strip()
+    if not metric_alias:
+        metric_alias = "metric_value" if widget.visualization.type == "metric" else "value"
+    return metric_type, metric_field, metric_alias
+
+
+def _apply_widget_filter(query_engine, rows: List[Dict[str, Any]], filter_expr: Optional[str]) -> List[Dict[str, Any]]:
+    cleaned = str(filter_expr or "").strip()
+    if not cleaned or not query_engine:
+        return rows
+    try:
+        return query_engine._apply_filter(rows, cleaned)
+    except Exception:
+        return rows
+
+
+def _is_blank_value(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _coerce_numeric(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except Exception:
+        return None
+
+
+def _is_unit_metric_field(field_name: str) -> bool:
+    cleaned = str(field_name or "").strip().lower()
+    return cleaned in {"packet", "packets", "conversation", "conversations"}
+
+
+def _metric_requires_numeric(metric_type: str) -> bool:
+    return str(metric_type or "").strip().lower() in {"sum", "avg", "min", "max", "sum_percent"}
+
+
+def _aggregate_group_rows(rows: List[Dict[str, Any]], metric_type: str, field_name: str) -> Any:
+    normalized_metric = str(metric_type or "count").strip().lower() or "count"
+    cleaned_field = str(field_name or "").strip()
+
+    if _is_unit_metric_field(cleaned_field) or cleaned_field == "*":
+        if normalized_metric in {"count", "count_percent"}:
+            return len(rows)
+        if normalized_metric in {"first", "last"}:
+            return len(rows)
+        return None
+
+    values = [row.get(cleaned_field) for row in rows if cleaned_field in row and not _is_blank_value(row.get(cleaned_field))]
+    if normalized_metric == "count":
+        return len(values)
+    if normalized_metric == "distinct_count":
+        return len({str(value) for value in values})
+    if normalized_metric == "first":
+        return values[0] if values else None
+    if normalized_metric == "last":
+        return values[-1] if values else None
+
+    numeric_values = [_coerce_numeric(value) for value in values]
+    numeric_values = [value for value in numeric_values if value is not None]
+    if normalized_metric == "sum":
+        return sum(numeric_values) if numeric_values else 0
+    if normalized_metric == "avg":
+        return (sum(numeric_values) / len(numeric_values)) if numeric_values else 0
+    if normalized_metric == "min":
+        return min(numeric_values) if numeric_values else None
+    if normalized_metric == "max":
+        return max(numeric_values) if numeric_values else None
+    return None
+
+
+def _single_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
+    chart_type = str(widget.visualization.type or "").strip().lower()
+    metric_type, metric_field, metric_alias = _widget_metric_parts(widget)
+    source_rows = _apply_widget_filter(query_engine, _fetch_rows_for_source(query_engine, widget.data_source, limit=None), widget.query.filter)
+    if not source_rows:
+        return []
+
+    if chart_type == "metric":
+        source_field = metric_field if metric_field not in {"", "*"} else str(widget.visualization.value_field or "").strip()
+        value = _aggregate_group_rows(source_rows, metric_type, source_field or "packet")
+        return [{metric_alias or "metric_value": value}]
+
+    category_field = str(widget.visualization.category_field or "").strip()
+    if not category_field:
+        return []
+
+    grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in source_rows:
+        category_value = row.get(category_field)
+        if _is_blank_value(category_value):
+            continue
+        grouped_rows[str(category_value)].append(row)
+
+    if not grouped_rows:
+        return []
+
+    if metric_type == "sum_percent":
+        totals: Dict[str, float] = {}
+        grand_total = 0.0
+        for category_value, rows in grouped_rows.items():
+            numeric_values = [_coerce_numeric(row.get(category_field)) for row in rows]
+            numeric_sum = sum(value for value in numeric_values if value is not None)
+            if numeric_sum <= 0:
+                continue
+            totals[category_value] = numeric_sum
+            grand_total += numeric_sum
+        if grand_total <= 0:
+            return []
+        return [
+            {category_field: category_value, "%": round((total / grand_total) * 100.0, 2)}
+            for category_value, total in totals.items()
+        ]
+
+    total_count = sum(len(rows) for rows in grouped_rows.values())
+    if total_count <= 0:
+        return []
+    return [
+        {category_field: category_value, "%": round((len(rows) / total_count) * 100.0, 2)}
+        for category_value, rows in grouped_rows.items()
+    ]
+
+
+def _double_source_chart_rows(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
+    style = dict(widget.style or {})
+    x_source = str(style.get("x_data_source") or widget.data_source or "").strip()
+    y_source = str(style.get("y_data_source") or widget.data_source or "").strip()
+    if not x_source or not y_source or x_source != y_source:
+        return []
+
+    x_field = str(widget.visualization.x_field or widget.visualization.category_field or "").strip()
+    y_field = str(widget.visualization.y_field or widget.visualization.value_field or "").strip()
+    metric_type, metric_field, metric_alias = _widget_metric_parts(widget)
+    source_rows = _apply_widget_filter(query_engine, _fetch_rows_for_source(query_engine, x_source, limit=None), widget.query.filter)
+    if not source_rows or not x_field or not y_field:
+        return []
+
+    if metric_type == "none":
+        if _is_unit_metric_field(y_field):
+            metric_type = "count"
+        else:
+            metric_type = "sum"
+
+    aggregation_field = metric_field if metric_field not in {"", "*"} else y_field
+    grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    ordered_values: List[str] = []
+    for row in source_rows:
+        x_value = row.get(x_field)
+        if _is_blank_value(x_value):
+            continue
+        key = str(x_value)
+        if key not in grouped_rows:
+            ordered_values.append(key)
+        grouped_rows[key].append(row)
+
+    if not grouped_rows:
+        return []
+
+    output_value_field = metric_alias or ("count" if metric_type == "count" else y_field)
+    result_rows: List[Dict[str, Any]] = []
+    for key in ordered_values:
+        group_rows = grouped_rows.get(key, [])
+        value = _aggregate_group_rows(group_rows, metric_type, aggregation_field)
+        if value is None:
+            continue
+        result_rows.append({
+            x_field: key,
+            output_value_field: value,
+        })
+    return result_rows
+
+
+def build_widget_dataset(query_engine, widget: DashboardWidget) -> List[Dict[str, Any]]:
+    chart_type = str(widget.visualization.type or "").strip().lower()
+    if chart_type in STANDARD_SINGLE_SOURCE_CHARTS:
+        return _single_source_chart_rows(query_engine, widget)
+    if chart_type in STANDARD_DOUBLE_SOURCE_CHARTS:
+        return _double_source_chart_rows(query_engine, widget)
+    try:
+        return query_engine.execute(widget.data_source, widget.query, None) if query_engine else []
+    except Exception:
+        return []
+
+
 class _NoWheelComboBox(QComboBox):
     def wheelEvent(self, event):
         if self.hasFocus():
@@ -121,16 +323,16 @@ class WidgetEditorDialog(QDialog):
         "Large (8 x 5)": (8, 5),
         "Full Width (12 x 4)": (12, 4),
     }
-    METRIC_TYPES = ["none", "count", "distinct_count", "sum", "avg", "min", "max", "first", "last"]
+    METRIC_TYPES = ["none", "count", "sum", "avg", "min", "max", "first", "last", "count_percent", "sum_percent"]
     TIME_BUCKETS = ["", "1s", "5s", "10s", "30s", "1m", "5m", "10m", "1h"]
     FILTER_OPERATORS = ["==", "!=", ">", ">=", "<", "<="]
     FILTER_JOINERS = ["AND", "OR"]
     FIELD_ROLE_OPTIONS = ["All Roles", "time", "metric", "dimension", "flag"]
     CORE_SHARED_FIELDS = ["time", "protocol", "bytes", "packets", "packet"]
-    SINGLE_SOURCE_CHARTS = {"metric", "histogram", "pie", "donut", "radar", "treemap", "sunburst"}
-    PROPORTION_SOURCE_CHARTS = {"pie", "donut", "radar", "treemap", "sunburst"}
+    SINGLE_SOURCE_CHARTS = set(STANDARD_SINGLE_SOURCE_CHARTS)
+    PROPORTION_SOURCE_CHARTS = set(STANDARD_PROPORTION_CHARTS)
     HIERARCHY_PROTOCOL_CHARTS = {"treemap", "sunburst"}
-    DOUBLE_SOURCE_CHARTS = {"bar", "horizontal_bar", "line", "area", "scatter", "heatmap", "table"}
+    DOUBLE_SOURCE_CHARTS = set(STANDARD_DOUBLE_SOURCE_CHARTS)
     ASSIGNMENT_LABELS = {
         "x_field": "X Axis",
         "y_field": "Y Axis",
@@ -840,10 +1042,13 @@ class WidgetEditorDialog(QDialog):
             if tab_index >= 0:
                 self.tabs.removeTab(tab_index)
 
-        self._set_control_enabled(*self._style_controls["legend"], False)
-        self._set_control_enabled(*self._style_controls["labels"], False)
-        self._set_control_enabled(*self._style_controls["x_axis_label"], False)
-        self._set_control_enabled(*self._style_controls["y_axis_label"], False)
+        self._set_form_row_visible(*self._style_controls["legend"], False)
+        self._set_form_row_visible(*self._style_controls["labels"], False)
+        self._set_form_row_visible(*self._style_controls["x_axis_label"], False)
+        self._set_form_row_visible(*self._style_controls["y_axis_label"], False)
+        self._set_form_row_visible(*self._style_controls["unit"], False)
+        if hasattr(self, "style_options_hint_label"):
+            self.style_options_hint_label.setVisible(False)
         self._set_color_editor_active(False)
 
     def _on_size_preset_changed(self, preset_name: str):
@@ -853,7 +1058,7 @@ class WidgetEditorDialog(QDialog):
                 self._apply_size_preset(preset_name)
             finally:
                 self._applying_size_preset = False
-            self._sync_size_preset(prefer_custom=False)
+            self._sync_size_preset(prefer_custom=str(preset_name or "").strip() == "Custom")
             self._sync_size_preset_editability()
         self._schedule_preview_refresh()
 
@@ -864,72 +1069,50 @@ class WidgetEditorDialog(QDialog):
         self._sync_size_preset_editability()
 
     def _sync_size_preset_editability(self):
-        # Presets act as quick-fill shortcuts; keep dimensions editable for fine tuning.
-        self.width_spin.setEnabled(True)
-        self.height_spin.setEnabled(True)
+        is_custom = self.size_preset_combo.currentText().strip() == "Custom"
+        self.width_spin.setEnabled(is_custom)
+        self.height_spin.setEnabled(is_custom)
 
     def _source_behavior(self, chart_type: str) -> Dict[str, Any]:
         normalized = (chart_type or "").strip().lower()
-        if normalized in self.PROPORTION_SOURCE_CHARTS:
+        if normalized in {"pie", "donut", "radar"}:
             return {
                 "mode": "single",
                 "single_label": "Category Field",
-                "hint": "Pick one category field from the current source. Value can come from metric or built-in numeric fields.",
+                "hint": "Chon 1 source va 1 category field. He thong se tao bang 2 cot: Gia tri | %.",
                 "primary_axis_label": "Category Name",
-                "secondary_axis_label": "Value Name",
+                "secondary_axis_label": "Percent Name",
                 "swap": False,
                 "metric_locked": None,
             }
         if normalized == "metric":
             return {
                 "mode": "single",
-                "single_label": "Metric Source Field",
-                "hint": "Choose one field, then Style decides whether to count, sum, average, get min/max, first or last.",
+                "single_label": "Category Field",
+                "hint": "Chon 1 source va 1 field. Metric se tinh 1 gia tri tong hop duy nhat.",
                 "primary_axis_label": "Label",
                 "secondary_axis_label": "Value Name",
                 "swap": False,
                 "metric_locked": None,
             }
-        if normalized == "histogram":
-            return {
-                "mode": "single",
-                "single_label": "Numeric Source Field",
-                "hint": "Histogram uses one numeric field and automatically builds value buckets.",
-                "primary_axis_label": "Bucket Label",
-                "secondary_axis_label": "Count Label",
-                "swap": False,
-                "metric_locked": "none",
-            }
-        if normalized in {"bar", "horizontal_bar", "heatmap", "table"}:
+        if normalized in self.DOUBLE_SOURCE_CHARTS:
             return {
                 "mode": "double",
-                "primary_label": "X Field",
-                "secondary_label": "Y Field",
-                "hint": "Choose X and Y fields from the selected sources.",
-                "primary_axis_label": "X Name",
-                "secondary_axis_label": "Y Name",
-                "swap": True,
-                "metric_locked": None,
-            }
-        if normalized in {"line", "area", "scatter"}:
-            return {
-                "mode": "double",
-                "primary_label": "X Field",
-                "secondary_label": "Y Field",
-                "hint": "For 2-axis charts, use time on X when available and choose a numeric Y field.",
+                "primary_label": "X Category Field",
+                "secondary_label": "Y Category Field",
+                "hint": "X la nguon A dung de group. Y la nguon B duoc tinh trong tung nhom cua X.",
                 "primary_axis_label": "X Name",
                 "secondary_axis_label": "Y Name",
                 "swap": True,
                 "metric_locked": None,
             }
         return {
-            "mode": "double",
-            "primary_label": "X Axis Field",
-            "secondary_label": "Y Axis Field",
-            "hint": "The first field drives the X axis. The second field drives the Y axis. You can rename or swap them here.",
+            "mode": "single",
+            "single_label": "Category Field",
+            "hint": "Chon field du lieu cho chart hien tai.",
             "primary_axis_label": "X Name",
             "secondary_axis_label": "Y Name",
-            "swap": True,
+            "swap": False,
             "metric_locked": None,
         }
 
@@ -941,6 +1124,7 @@ class WidgetEditorDialog(QDialog):
         with self._preview_refresh_batch():
             self._sync_hidden_controls_from_simple_editor()
             self._refresh_secondary_field_compatibility()
+            self._refresh_metric_type_compatibility()
         self._schedule_preview_refresh()
 
     def _swap_simple_source_fields(self):
@@ -977,11 +1161,61 @@ class WidgetEditorDialog(QDialog):
     def _is_numeric_field(self, field_id: Optional[str]) -> bool:
         entry = self._field_catalog_entry(field_id)
         if entry is None:
-            return False
+            return _is_unit_metric_field(str(field_id or ""))
         field_type = str(entry.get("type") or "").strip().lower()
         if field_type in {"int", "float"}:
             return True
         return str(entry.get("role") or "").strip().lower() == "metric"
+
+    def _allowed_metric_types(self, chart_type: str, field_id: Optional[str]) -> List[str]:
+        normalized_chart = str(chart_type or "").strip().lower()
+        cleaned_field = str(field_id or "").strip()
+        is_numeric = self._is_numeric_field(cleaned_field)
+        is_unit = _is_unit_metric_field(cleaned_field)
+
+        if normalized_chart == "metric":
+            return ["count"] if is_unit else (["count", "sum", "avg", "min", "max", "first", "last"] if is_numeric else ["count", "first", "last"])
+        if normalized_chart in {"pie", "donut", "radar"}:
+            return ["count_percent", "sum_percent"] if is_numeric else ["count_percent"]
+        if normalized_chart in self.DOUBLE_SOURCE_CHARTS:
+            if is_unit:
+                return ["count"]
+            if is_numeric:
+                return ["sum", "count", "avg", "min", "max", "first", "last"]
+            return ["count", "first", "last"] if normalized_chart == "table" else ["count"]
+        return ["none", "count", "sum", "avg", "min", "max", "first", "last"]
+
+    def _refresh_metric_type_compatibility(self):
+        if not hasattr(self, "metric_type_combo"):
+            return
+        chart_type = self.visualization_combo.currentText().strip().lower() if hasattr(self, "visualization_combo") else ""
+        behavior = self._source_behavior(chart_type)
+        current_value = self.metric_type_combo.currentText().strip() or "none"
+        if behavior.get("mode") == "single":
+            metric_field = self.single_source_field_combo.currentText().strip()
+        else:
+            metric_field = self.secondary_source_field_combo.currentText().strip()
+        allowed = self._allowed_metric_types(chart_type, metric_field)
+        if chart_type in self.DOUBLE_SOURCE_CHARTS or chart_type in STANDARD_SINGLE_SOURCE_CHARTS:
+            allowed = [item for item in allowed if item != "none"]
+        else:
+            allowed = ["none"] + [item for item in allowed if item != "none"]
+
+        model = self.metric_type_combo.model()
+        self.metric_type_combo.blockSignals(True)
+        self.metric_type_combo.clear()
+        self.metric_type_combo.addItems(allowed)
+        for row in range(self.metric_type_combo.count()):
+            item = model.item(row) if hasattr(model, "item") else None
+            if item is not None:
+                item.setEnabled(True)
+        if current_value in allowed:
+            self.metric_type_combo.setCurrentText(current_value)
+        elif allowed:
+            self.metric_type_combo.setCurrentText(allowed[0])
+        else:
+            self.metric_type_combo.setCurrentIndex(-1)
+        self.metric_type_combo.blockSignals(False)
 
     def _preferred_time_field(self) -> Optional[str]:
         for entry in self._field_catalog:
@@ -1070,19 +1304,11 @@ class WidgetEditorDialog(QDialog):
         normalized_chart = str(chart_type or "").strip().lower()
         catalog = self._source_field_catalog_for(source_name)
         primary_cleaned = str(primary_field or "").strip()
-        if normalized_chart not in {"line", "area", "scatter"}:
-            for entry in catalog:
-                field_id = str(entry.get("id") or "").strip()
-                if field_id and (not primary_cleaned or field_id != primary_cleaned):
-                    return True
-            return False
         for entry in catalog:
             field_id = str(entry.get("id") or "").strip()
             if not field_id or (primary_cleaned and field_id == primary_cleaned):
                 continue
-            field_type = str(entry.get("type") or "").strip().lower()
-            field_role = str(entry.get("role") or "").strip().lower()
-            if field_type in {"int", "float"} or field_role == "metric":
+            if self._allowed_metric_types(normalized_chart, field_id):
                 return True
         return False
 
@@ -1098,6 +1324,7 @@ class WidgetEditorDialog(QDialog):
             return
 
         primary_field = self.primary_source_field_combo.currentText().strip() if hasattr(self, "primary_source_field_combo") else ""
+        x_source = self.x_data_source_combo.currentText().strip()
         model = self.y_data_source_combo.model()
         current_source = self.y_data_source_combo.currentText().strip()
         compatible_sources: List[str] = []
@@ -1105,7 +1332,7 @@ class WidgetEditorDialog(QDialog):
         self.y_data_source_combo.blockSignals(True)
         for row in range(self.y_data_source_combo.count()):
             source_name = self.y_data_source_combo.itemText(row).strip()
-            compatible = self._source_has_compatible_secondary_fields(source_name, chart_type, primary_field)
+            compatible = bool(source_name and x_source and source_name == x_source and self._source_has_compatible_secondary_fields(source_name, chart_type, primary_field))
             if compatible:
                 compatible_sources.append(source_name)
             if hasattr(model, "item"):
@@ -1122,7 +1349,7 @@ class WidgetEditorDialog(QDialog):
         has_compatible_source = bool(compatible_sources)
         self.y_data_source_combo.setEnabled(has_compatible_source)
         self.y_data_source_label.setEnabled(has_compatible_source)
-        self.y_data_source_combo.setToolTip("" if has_compatible_source else "No compatible Y source for current chart and Field 1.")
+        self.y_data_source_combo.setToolTip("" if has_compatible_source else "Y Source chi duoc bat khi co the tao bang hop le cung X Source.")
         self.y_data_source_combo.blockSignals(False)
 
         dual_sources_visible = behavior.get("mode") == "double"
@@ -1230,25 +1457,14 @@ class WidgetEditorDialog(QDialog):
     def _sync_hidden_controls_from_simple_editor(self):
         chart_type = self.visualization_combo.currentText().strip().lower()
         behavior = self._source_behavior(chart_type)
-        metric_type = self.metric_type_combo.currentText().strip() or "none"
+        metric_type = self.metric_type_combo.currentText().strip() or "count"
         single_field = self.single_source_field_combo.currentText().strip() or None
         primary_field = self.primary_source_field_combo.currentText().strip() or None
         secondary_field = self.secondary_source_field_combo.currentText().strip() or None
-        preferred_time_field = self._preferred_time_field()
-        protocol_series_field = self._preferred_protocol_field() if chart_type in {"line", "area"} else None
-        selected_source = self.data_source_combo.currentText().strip() or None
-        working_copy_source = getattr(self._working_copy, "data_source", None)
-        fallback_value_field = self._working_copy.visualization.value_field if selected_source and working_copy_source == selected_source else None
-        current_value_field = self.value_field_combo.currentText().strip() or fallback_value_field or None
 
-        locked_metric = behavior.get("metric_locked")
-        if locked_metric is not None and metric_type != locked_metric:
-            self.metric_type_combo.blockSignals(True)
-            self.metric_type_combo.setCurrentText(locked_metric)
-            self.metric_type_combo.blockSignals(False)
-            metric_type = locked_metric
-
-        metric_alias = self._default_metric_alias(metric_type, secondary_field or single_field)
+        self._refresh_metric_type_compatibility()
+        metric_type = self.metric_type_combo.currentText().strip() or "count"
+        metric_alias = "%" if chart_type in self.PROPORTION_SOURCE_CHARTS else ("metric_value" if chart_type == "metric" else (secondary_field or "value").replace(".", "_"))
         self.metric_alias_input.setText(metric_alias)
         self.columns_input.setText("")
         self.group_by_input.setText("")
@@ -1260,102 +1476,34 @@ class WidgetEditorDialog(QDialog):
         self._clear_combo_text(self.metric_field_combo)
 
         if chart_type in self.PROPORTION_SOURCE_CHARTS:
-            if chart_type in self.HIERARCHY_PROTOCOL_CHARTS:
-                category_field = single_field or primary_field or "conversation"
-                protocol_field = self._preferred_protocol_field()
-                direct_total_field = self._preferred_single_source_total_field(category_field, current_value_field)
-                self._set_combo_to_text(self.category_field_combo, category_field or "")
-                self._set_combo_to_text(self.series_field_combo, protocol_field or "protocol")
-                self.metric_type_combo.blockSignals(True)
-                self.metric_type_combo.setCurrentText("none")
-                self.metric_type_combo.blockSignals(False)
-                self._set_combo_to_text(self.value_field_combo, direct_total_field or current_value_field or "packets")
-                self.group_by_input.setText("")
-                selected_columns = [field for field in [category_field, protocol_field, direct_total_field or current_value_field or "packets"] if field]
-                self.columns_input.setText(", ".join(dict.fromkeys(selected_columns)))
-                return
-            category_field = single_field or primary_field
-            direct_total_field = self._preferred_single_source_total_field(category_field, current_value_field)
-            self._set_combo_to_text(self.category_field_combo, category_field or "")
-            if metric_type == "none" and direct_total_field:
-                self.metric_type_combo.blockSignals(True)
-                self.metric_type_combo.setCurrentText("none")
-                self.metric_type_combo.blockSignals(False)
-                self._set_combo_to_text(self.value_field_combo, direct_total_field)
-                self.columns_input.setText(", ".join([field for field in [category_field, direct_total_field] if field]))
-            else:
-                metric_field = "*" if metric_type == "count" else (current_value_field or "*")
-                self._set_combo_to_text(self.metric_field_combo, metric_field)
-                self._set_combo_to_text(self.value_field_combo, metric_alias)
-                self.group_by_input.setText(category_field or "")
-                self.columns_input.setText(", ".join([field for field in [category_field, metric_alias] if field]))
-            return
-
-        if chart_type == "histogram":
-            self.metric_type_combo.setCurrentText("none")
-            self._set_combo_to_text(self.value_field_combo, single_field or "")
-            self.columns_input.setText(single_field or "")
+            self._set_combo_to_text(self.category_field_combo, single_field or "")
+            self._set_combo_to_text(self.value_field_combo, "%")
+            self._set_combo_to_text(self.metric_field_combo, single_field or "*")
+            self.columns_input.setText(", ".join([field for field in [single_field, "%"] if field]))
             return
 
         if chart_type == "metric":
-            metric_field = "*" if metric_type == "count" else (single_field or "*")
-            self._set_combo_to_text(self.metric_field_combo, metric_field)
+            self._set_combo_to_text(self.metric_field_combo, single_field or "*")
             self._set_combo_to_text(self.value_field_combo, metric_alias)
             self.columns_input.setText(metric_alias)
             return
 
-        if chart_type in {"bar", "horizontal_bar", "heatmap", "table"}:
+        if chart_type in {"bar", "horizontal_bar", "heatmap", "table", "treemap", "sunburst", "histogram"}:
             self._set_combo_to_text(self.category_field_combo, primary_field or "")
-            if metric_type == "none":
-                self._set_combo_to_text(self.value_field_combo, secondary_field or "")
-                plotted_value = secondary_field
-            else:
-                self._set_combo_to_text(self.metric_field_combo, "*" if metric_type == "count" else (secondary_field or "*"))
-                self._set_combo_to_text(self.value_field_combo, metric_alias)
-                self.group_by_input.setText(primary_field or "")
-                plotted_value = metric_alias
-            selected_columns = [field for field in [primary_field, plotted_value] if field]
-            self.columns_input.setText(", ".join(selected_columns))
-            return
-
-        effective_primary_field = primary_field or (preferred_time_field if chart_type in {"line", "area", "scatter"} else None)
-        secondary_is_numeric = self._is_numeric_field(secondary_field)
-        self._set_combo_to_text(self.x_field_combo, effective_primary_field or "")
-        if chart_type in {"line", "area"}:
-            self._set_combo_to_text(self.series_field_combo, protocol_series_field or "")
-        if chart_type in {"line", "area"} and secondary_field and not secondary_is_numeric:
-            self.metric_type_combo.blockSignals(True)
-            self.metric_type_combo.setCurrentText("count")
-            self.metric_type_combo.blockSignals(False)
-            self.metric_alias_input.setText("count")
-            self._set_combo_to_text(self.metric_field_combo, "*")
-            self._set_combo_to_text(self.y_field_combo, "count")
-            self._set_combo_to_text(self.value_field_combo, "count")
-            grouped_fields = [field for field in [effective_primary_field, protocol_series_field] if field]
-            self.group_by_input.setText(", ".join(grouped_fields))
-            selected_columns = [field for field in [effective_primary_field, protocol_series_field, "count"] if field]
-            if preferred_time_field and preferred_time_field not in selected_columns:
-                selected_columns.insert(0, preferred_time_field)
-            self.columns_input.setText(", ".join(selected_columns))
-            return
-
-        if metric_type == "none" or chart_type == "scatter":
-            self._set_combo_to_text(self.y_field_combo, secondary_field or "")
-            self._set_combo_to_text(self.value_field_combo, secondary_field or "")
-            plotted_value = secondary_field
-        else:
-            self._set_combo_to_text(self.metric_field_combo, "*" if metric_type == "count" else (secondary_field or "*"))
-            self._set_combo_to_text(self.y_field_combo, metric_alias)
+            self._set_combo_to_text(self.x_field_combo, primary_field or "")
+            self._set_combo_to_text(self.metric_field_combo, secondary_field or "*")
             self._set_combo_to_text(self.value_field_combo, metric_alias)
-            grouped_fields = [field for field in [effective_primary_field, protocol_series_field] if field] if chart_type in {"line", "area"} else [effective_primary_field]
-            self.group_by_input.setText(", ".join([field for field in grouped_fields if field]))
-            plotted_value = metric_alias
-        selected_columns = [field for field in [effective_primary_field, plotted_value] if field]
-        if chart_type in {"line", "area"} and protocol_series_field and protocol_series_field not in selected_columns:
-            selected_columns.append(protocol_series_field)
-        if chart_type in {"line", "area", "scatter"} and preferred_time_field and preferred_time_field not in selected_columns:
-            selected_columns.insert(0, preferred_time_field)
-        self.columns_input.setText(", ".join(selected_columns))
+            self._set_combo_to_text(self.y_field_combo, metric_alias)
+            self.group_by_input.setText(primary_field or "")
+            self.columns_input.setText(", ".join([field for field in [primary_field, metric_alias] if field]))
+            return
+
+        self._set_combo_to_text(self.x_field_combo, primary_field or "")
+        self._set_combo_to_text(self.metric_field_combo, secondary_field or "*")
+        self._set_combo_to_text(self.y_field_combo, metric_alias)
+        self._set_combo_to_text(self.value_field_combo, metric_alias)
+        self.group_by_input.setText(primary_field or "")
+        self.columns_input.setText(", ".join([field for field in [primary_field, metric_alias] if field]))
 
     def _sync_simple_controls_from_working_copy(self):
         chart_type = (self.visualization_combo.currentText() or self.widget_model.visualization.type or "").strip().lower()
@@ -1363,25 +1511,12 @@ class WidgetEditorDialog(QDialog):
         visualization = self._working_copy.visualization
         metric = query.metrics[0] if query.metrics else None
 
-        if chart_type in self.HIERARCHY_PROTOCOL_CHARTS:
-            source_field = visualization.category_field or ((query.columns or [""])[0] if query.columns else "")
+        if chart_type in self.PROPORTION_SOURCE_CHARTS or chart_type == "metric":
+            source_field = visualization.category_field or visualization.value_field or (metric.field if metric is not None and metric.field != "*" else "")
             self._set_combo_to_text(self.single_source_field_combo, source_field)
-            return
-        if chart_type in self.PROPORTION_SOURCE_CHARTS:
-            source_field = visualization.category_field or ((query.group_by or [""])[0])
-            self._set_combo_to_text(self.single_source_field_combo, source_field)
-        elif chart_type == "histogram":
-            self._set_combo_to_text(self.single_source_field_combo, visualization.value_field or "")
-        elif chart_type == "metric":
-            metric_field = "" if metric is None or metric.field == "*" else metric.field
-            self._set_combo_to_text(self.single_source_field_combo, metric_field)
-        elif chart_type in {"bar", "horizontal_bar", "heatmap", "table"}:
-            self._set_combo_to_text(self.primary_source_field_combo, visualization.category_field or ((query.group_by or [""])[0]))
+        elif chart_type in self.DOUBLE_SOURCE_CHARTS:
+            self._set_combo_to_text(self.primary_source_field_combo, visualization.x_field or visualization.category_field or ((query.group_by or [""])[0]))
             secondary_value = metric.field if metric is not None and metric.field != "*" else (visualization.value_field or "")
-            self._set_combo_to_text(self.secondary_source_field_combo, secondary_value)
-        else:
-            self._set_combo_to_text(self.primary_source_field_combo, visualization.x_field or self._preferred_time_field() or "")
-            secondary_value = metric.field if metric is not None and metric.field != "*" else (visualization.y_field or visualization.value_field or "")
             self._set_combo_to_text(self.secondary_source_field_combo, secondary_value)
 
     def _chart_supports_color(self, chart_type: str) -> bool:
@@ -1391,7 +1526,7 @@ class WidgetEditorDialog(QDialog):
         return chart_type in {"pie", "donut", "treemap", "sunburst"}
 
     def _chart_supports_metric(self, chart_type: str) -> bool:
-        return chart_type not in {"histogram", "scatter"} and chart_type != ""
+        return chart_type in (self.SINGLE_SOURCE_CHARTS | self.DOUBLE_SOURCE_CHARTS)
 
     def _set_color_editor_active(self, active: bool):
         chart_type = self.visualization_combo.currentText().strip().lower()
@@ -1530,6 +1665,7 @@ class WidgetEditorDialog(QDialog):
             self._sync_hidden_controls_from_simple_editor()
             self._refresh_secondary_field_compatibility()
             self._refresh_dual_source_compatibility()
+            self._refresh_metric_type_compatibility()
 
     def _on_chart_type_changed(self, _chart_type: str):
         with self._preview_refresh_batch():
@@ -1640,6 +1776,7 @@ class WidgetEditorDialog(QDialog):
             self._load_source(working.data_source)
             self._sync_simple_controls_from_working_copy()
             self._apply_chart_type_capabilities()
+            self._refresh_metric_type_compatibility()
 
     def _set_combo_to_text(self, combo: QComboBox, text: str):
         cleaned = str(text or "").strip()
@@ -1683,6 +1820,7 @@ class WidgetEditorDialog(QDialog):
             self._load_source(source_name)
             self._sync_hidden_controls_from_simple_editor()
             self._refresh_dual_source_compatibility()
+            self._refresh_metric_type_compatibility()
         self._schedule_preview_refresh()
 
     def _on_dual_source_changed(self, _source_name: str):
@@ -1690,6 +1828,7 @@ class WidgetEditorDialog(QDialog):
             self._load_source(self.data_source_combo.currentText().strip())
             self._sync_hidden_controls_from_simple_editor()
             self._refresh_dual_source_compatibility()
+            self._refresh_metric_type_compatibility()
         self._schedule_preview_refresh()
 
     def _active_field_sources(self, default_source: Optional[str] = None) -> List[str]:
@@ -1874,28 +2013,37 @@ class WidgetEditorDialog(QDialog):
             self.field_group_filter_combo.setCurrentText("All Groups")
 
     def _refresh_field_combo_items(self):
-        field_ids = [entry["id"] for entry in self._field_catalog]
-        combos = [
-            self.single_source_field_combo,
-            self.primary_source_field_combo,
-            self.secondary_source_field_combo,
-            self.x_field_combo,
-            self.y_field_combo,
-            self.category_field_combo,
-            self.value_field_combo,
-            self.series_field_combo,
-            self.metric_field_combo,
-            self.sort_field_combo,
-            self.filter_field_combo,
+        base_source = self.data_source_combo.currentText().strip() or self._working_copy.data_source
+        x_source = self.x_data_source_combo.currentText().strip() or base_source
+        y_source = self.y_data_source_combo.currentText().strip() or base_source
+        merged_field_ids = [entry["id"] for entry in self._field_catalog]
+        source_field_ids = {
+            "single": [entry["id"] for entry in self._source_field_catalog_for(base_source)],
+            "x": [entry["id"] for entry in self._source_field_catalog_for(x_source)],
+            "y": [entry["id"] for entry in self._source_field_catalog_for(y_source)],
+        }
+
+        combo_map = [
+            (self.single_source_field_combo, source_field_ids["single"], False),
+            (self.primary_source_field_combo, source_field_ids["x"], False),
+            (self.secondary_source_field_combo, source_field_ids["y"], False),
+            (self.x_field_combo, source_field_ids["x"], False),
+            (self.y_field_combo, source_field_ids["y"], False),
+            (self.category_field_combo, merged_field_ids, False),
+            (self.value_field_combo, merged_field_ids, False),
+            (self.series_field_combo, merged_field_ids, False),
+            (self.metric_field_combo, source_field_ids["y"] or source_field_ids["single"] or merged_field_ids, True),
+            (self.sort_field_combo, merged_field_ids, False),
+            (self.filter_field_combo, merged_field_ids, False),
         ]
-        for combo in combos:
+        for combo, field_ids, include_star in combo_map:
             current_text = combo.currentText().strip()
             combo.blockSignals(True)
             combo.clear()
-            if combo is self.metric_field_combo:
+            if include_star:
                 combo.addItem("*")
             combo.addItems(field_ids)
-            keep_current = current_text and (current_text in field_ids or (combo is self.metric_field_combo and current_text == "*"))
+            keep_current = current_text and (current_text in field_ids or (include_star and current_text == "*"))
             if keep_current:
                 self._set_combo_to_text(combo, current_text)
             else:
@@ -2090,7 +2238,7 @@ class WidgetEditorDialog(QDialog):
         y_source = self.y_data_source_combo.currentText().strip() or base_source
         behavior = self._source_behavior(self.visualization_combo.currentText().strip().lower())
         if behavior.get("mode") == "double":
-            working.data_source = y_source or base_source
+            working.data_source = x_source or base_source
             style["x_data_source"] = x_source
             style["y_data_source"] = y_source
         else:
@@ -2231,20 +2379,15 @@ class WidgetEditorDialog(QDialog):
         )
 
     def _execute_plot_preview_rows(self) -> List[Dict[str, Any]]:
-        if not self.query_engine:
-            return []
-        try:
-            if self._uses_dual_source_execution():
-                return self._execute_dual_source_preview_rows()
-            return self.query_engine.execute(self._working_copy.data_source, self._working_copy.query, None)
-        except Exception:
-            return []
+        return build_widget_dataset(self.query_engine, self._working_copy)
 
     def _build_sheet_preview_rows(self, rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         if rows is None:
             rows = self._execute_plot_preview_rows()
         chart_type = self.visualization_combo.currentText().strip().lower()
         if chart_type not in self.PROPORTION_SOURCE_CHARTS or not rows:
+            return self._apply_sheet_preview_headers(rows)
+        if len(rows[0].keys()) == 2 and "%" in rows[0]:
             return self._apply_sheet_preview_headers(rows)
 
         category_field = self._working_copy.visualization.category_field or self.primary_source_field_combo.currentText().strip() or "source"
@@ -2287,7 +2430,7 @@ class WidgetEditorDialog(QDialog):
 
         try:
             if preview_data is None:
-                preview_data = self.query_engine.execute(self._working_copy.data_source, self._working_copy.query, None)
+                preview_data = build_widget_dataset(self.query_engine, self._working_copy)
             renderer = self.viz_registry.get_renderer(self._working_copy.visualization.type)
             if renderer is None:
                 raise ValueError(f"Renderer '{self._working_copy.visualization.type}' not found")
@@ -2310,37 +2453,10 @@ class WidgetEditorDialog(QDialog):
         self._populate_table(self.preview_sheet_table, self._build_sheet_preview_rows(preview_rows))
 
     def _execute_aggregated_preview(self) -> List[Dict[str, Any]]:
-        if not self.query_engine:
-            return []
-        try:
-            return self.query_engine.execute(self._working_copy.data_source, self._working_copy.query, None)
-        except Exception:
-            return []
+        return build_widget_dataset(self.query_engine, self._working_copy)
 
     def _execute_raw_preview(self) -> List[Dict[str, Any]]:
-        if not self.query_engine:
-            return []
-        if self._uses_dual_source_execution():
-            return self._execute_dual_source_preview_rows()
-        raw_query = deepcopy(self._working_copy.query)
-        raw_query.group_by = None
-        raw_query.metrics = None
-        raw_query.time_bucket = None
-        raw_query.sort = None
-        raw_query.limit = raw_query.limit or 50
-        selected_columns = [field for field in [
-            self.x_field_combo.currentText().strip(),
-            self.y_field_combo.currentText().strip(),
-            self.category_field_combo.currentText().strip(),
-            self.value_field_combo.currentText().strip(),
-            self.series_field_combo.currentText().strip(),
-        ] if field]
-        column_override = [field.strip() for field in self.columns_input.text().split(",") if field.strip()]
-        raw_query.columns = column_override or list(dict.fromkeys(selected_columns)) or None
-        try:
-            return self.query_engine.execute(self._working_copy.data_source, raw_query, None)
-        except Exception:
-            return []
+        return build_widget_dataset(self.query_engine, self._working_copy)
 
     @staticmethod
     def _populate_table(table: QTableWidget, rows: List[Dict[str, Any]]):
@@ -2510,28 +2626,7 @@ class GridWidget(QFrame):
         return self.widget.visualization.type in {"line", "area", "scatter"} and bool(x_source and y_source and x_source != y_source)
 
     def _load_widget_rows(self) -> List[Dict[str, Any]]:
-        if self._uses_dual_source_mapping():
-            style = dict(self.widget.style or {})
-            x_source = str(style.get("x_data_source") or self.widget.data_source or "").strip()
-            y_source = str(style.get("y_data_source") or self.widget.data_source or "").strip()
-            x_field = str(self.widget.visualization.x_field or "time").strip() or "time"
-            y_field = str(self.widget.visualization.y_field or self.widget.visualization.value_field or "packets").strip() or "packets"
-            series_field = str(self.widget.visualization.series_field or "").strip() or None
-            return _build_dual_source_xy_rows(
-                self.query_engine,
-                x_source,
-                y_source,
-                x_field,
-                y_field,
-                series_field=series_field,
-                limit=max(50, int(getattr(self.widget.query, "limit", 0) or 500)),
-            )
-
-        return self.query_engine.execute(
-            data_source=self.widget.data_source,
-            query=self.widget.query,
-            global_filter=None,
-        )
+        return build_widget_dataset(self.query_engine, self.widget)
 
     def _toggle_view_mode(self):
         next_mode = "chart" if self._effective_display_mode() == "table" else "table"

@@ -677,26 +677,8 @@ class DashboardOverviewDialog(QDialog):
 
         widget_model = dashboard.widgets[0]
         try:
-            style = dict(widget_model.style or {})
-            x_source = str(style.get("x_data_source") or "").strip()
-            y_source = str(style.get("y_data_source") or "").strip()
-            if widget_model.visualization.type in {"line", "area", "scatter"} and x_source and y_source and x_source != y_source:
-                from .dashboard_editor import _build_dual_source_xy_rows
-                data = _build_dual_source_xy_rows(
-                    self.query_engine,
-                    x_source,
-                    y_source,
-                    str(widget_model.visualization.x_field or "time"),
-                    str(widget_model.visualization.y_field or widget_model.visualization.value_field or "packets"),
-                    series_field=str(widget_model.visualization.series_field or "").strip() or None,
-                    limit=max(50, int(widget_model.query.limit or 500)),
-                )
-            else:
-                data = self.query_engine.execute(
-                    data_source=widget_model.data_source,
-                    query=widget_model.query,
-                    global_filter=None,
-                )
+            from .dashboard_editor import build_widget_dataset
+            data = build_widget_dataset(self.query_engine, widget_model)
             render_type = "table" if display_mode == "table" else widget_model.visualization.type
             preview_font_scale = self._template_preview_font_scale(render_type) if compact_mode and bool(getattr(dashboard, "is_template", False)) else 1.0
             renderer = self.viz_registry.get_renderer(render_type)
