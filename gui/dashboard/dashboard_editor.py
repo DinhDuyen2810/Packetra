@@ -3381,7 +3381,7 @@ class DashboardEditor(QDialog):
             self.grid_layout.setRowMinimumHeight(row, self.GRID_ROW_HEIGHT)
         
         for col in range(12):
-            self.grid_layout.setColumnMinimumWidth(col, 100)
+            self.grid_layout.setColumnMinimumWidth(col, 30)
             self.grid_layout.setColumnStretch(col, 1)
         
         # Set bottom-right area to stretch
