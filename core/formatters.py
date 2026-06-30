@@ -11923,7 +11923,7 @@ def _sip_e164_children(user_text: str) -> List[Dict[str, Any]]:
         '1': 'United States/Canada',
         '44': 'United Kingdom',
         '33': 'France',
-        '84': 'Viet Nam',
+        '84': 'Vietnam',
     }
     for size in (3, 2, 1):
         prefix = digits[:size]

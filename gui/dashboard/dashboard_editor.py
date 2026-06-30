@@ -184,6 +184,8 @@ JOIN_FIELD_SEMANTICS: Dict[str, str] = {
     "protocol": "protocol",
     "protocols": "protocol",
     "frame.protocol": "protocol",
+    "conversation": "conversation",
+    "conversations": "conversation",
     "query": "dns_query",
     "dns.query": "dns_query",
     "dns.qry.name": "dns_query",
@@ -445,32 +447,58 @@ def _double_source_chart_rows(query_engine, widget: DashboardWidget, source_rows
         else:
             metric_type = "sum"
 
+    multi_purpose = bool(style.get("multi_purpose", False))
     aggregation_field = metric_field if metric_field not in {"", "*"} else y_field
     output_value_field = metric_alias or ("count" if metric_type == "count" else y_field)
     result_rows: List[Dict[str, Any]] = []
 
     if x_source == y_source:
-        grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        ordered_values: List[str] = []
-        for row in x_rows:
-            x_value = row.get(x_field)
-            if _is_blank_value(x_value):
-                continue
-            key = str(x_value)
-            if key not in grouped_rows:
-                ordered_values.append(key)
-            grouped_rows[key].append(row)
+        if multi_purpose:
+            grouped_rows: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+            ordered_keys: List[tuple[str, str]] = []
+            for row in x_rows:
+                x_val = row.get(x_field)
+                y_val = row.get(y_field)
+                if _is_blank_value(x_val) or _is_blank_value(y_val):
+                    continue
+                key = (str(x_val), str(y_val))
+                if key not in grouped_rows:
+                    ordered_keys.append(key)
+                grouped_rows[key].append(row)
 
-        for key in ordered_values:
-            group_rows = grouped_rows.get(key, [])
-            value = _aggregate_group_rows(group_rows, metric_type, aggregation_field)
-            if value is None:
-                continue
-            result_rows.append({
-                x_field: key,
-                output_value_field: value,
-            })
-        return result_rows
+            for (x_key, y_key) in ordered_keys:
+                group_rows = grouped_rows[(x_key, y_key)]
+                value = _aggregate_group_rows(group_rows, metric_type, aggregation_field)
+                if value is None:
+                    continue
+                res_row = dict(group_rows[0])
+                res_row[x_field] = x_key
+                res_row[y_field] = y_key
+                res_row[output_value_field] = value
+                result_rows.append(res_row)
+            return result_rows
+        else:
+            grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            ordered_values: List[str] = []
+            for row in x_rows:
+                x_value = row.get(x_field)
+                if _is_blank_value(x_value):
+                    continue
+                key = str(x_value)
+                if key not in grouped_rows:
+                    ordered_values.append(key)
+                grouped_rows[key].append(row)
+
+            for key in ordered_values:
+                group_rows = grouped_rows.get(key, [])
+                value = _aggregate_group_rows(group_rows, metric_type, aggregation_field)
+                if value is None:
+                    continue
+                res_row = dict(group_rows[0])
+                res_row[x_field] = key
+                res_row[output_value_field] = value
+                result_rows.append(res_row)
+            return result_rows
 
     semantic = _field_join_semantic(x_field)
     if not semantic:
@@ -498,24 +526,45 @@ def _double_source_chart_rows(query_engine, widget: DashboardWidget, source_rows
         grouped_primary_values[display_key] = {
             "display": raw_value,
             "tokens": join_tokens,
+            "row": row,
         }
         ordered_primary_values.append(display_key)
 
     for display_key in ordered_primary_values:
-        join_tokens = grouped_primary_values[display_key]["tokens"]
+        entry = grouped_primary_values[display_key]
+        join_tokens = entry["tokens"]
         matched_indexes = set()
         for token in join_tokens:
             matched_indexes.update(indexed_rows.get(token, []))
         if not matched_indexes:
             continue
         matched_rows = [y_rows[idx] for idx in sorted(matched_indexes)]
-        value = _aggregate_group_rows(matched_rows, metric_type, aggregation_field)
-        if value is None:
-            continue
-        result_rows.append({
-            x_field: grouped_primary_values[display_key]["display"],
-            output_value_field: value,
-        })
+        
+        if multi_purpose:
+            sub_grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for m_row in matched_rows:
+                y_val = m_row.get(y_field)
+                if _is_blank_value(y_val):
+                    continue
+                sub_grouped[str(y_val)].append(m_row)
+
+            for y_val_key, sub_rows in sub_grouped.items():
+                value = _aggregate_group_rows(sub_rows, metric_type, aggregation_field)
+                if value is None:
+                    continue
+                res_row = dict(entry["row"])
+                res_row[x_field] = entry["display"]
+                res_row[y_field] = y_val_key
+                res_row[output_value_field] = value
+                result_rows.append(res_row)
+        else:
+            value = _aggregate_group_rows(matched_rows, metric_type, aggregation_field)
+            if value is None:
+                continue
+            res_row = dict(entry["row"])
+            res_row[x_field] = entry["display"]
+            res_row[output_value_field] = value
+            result_rows.append(res_row)
     return result_rows
 
 
@@ -994,6 +1043,11 @@ class WidgetEditorDialog(QDialog):
         self.swap_axes_label = QLabel("")
         self.simple_source_form.addRow(self.swap_axes_label, swap_widget)
 
+        self.multi_purpose_checkbox = QCheckBox("Multi-purpose Chart (Split by Y Category)")
+        self.multi_purpose_checkbox.stateChanged.connect(self._on_multi_purpose_changed)
+        self.multi_purpose_label = QLabel("Multi-purpose")
+        self.simple_source_form.addRow(self.multi_purpose_label, self.multi_purpose_checkbox)
+
         self.source_tab_hint_label = QLabel("Choose chart type first, then pick the fields from the current data source that should be plotted.")
         self.source_tab_hint_label.setWordWrap(True)
         self.source_tab_hint_label.setStyleSheet("color: #666; font-size: 9pt;")
@@ -1348,7 +1402,7 @@ class WidgetEditorDialog(QDialog):
             return {
                 "mode": "single",
                 "single_label": "Category Field",
-                "hint": "Chon 1 source va 1 category field. He thong se tao bang 2 cot: Gia tri | %.",
+                "hint": "Choose 1 source and 1 category field. The system will create a table with 2 columns: Value | %.",
                 "primary_axis_label": "Category Name",
                 "secondary_axis_label": "Percent Name",
                 "swap": False,
@@ -1358,7 +1412,7 @@ class WidgetEditorDialog(QDialog):
             return {
                 "mode": "single",
                 "single_label": "Category Field",
-                "hint": "Chon 1 source va 1 field. Metric se tinh 1 gia tri tong hop duy nhat.",
+                "hint": "Choose 1 source and 1 field. Metric will calculate a single aggregated value.",
                 "primary_axis_label": "Label",
                 "secondary_axis_label": "Value Name",
                 "swap": False,
@@ -1369,7 +1423,7 @@ class WidgetEditorDialog(QDialog):
                 "mode": "double",
                 "primary_label": "X Category Field",
                 "secondary_label": "Y Category Field",
-                "hint": "X la nguon A dung de group. Y la nguon B duoc tinh trong tung nhom cua X.",
+                "hint": "X is source A used for grouping. Y is source B calculated within each group of X.",
                 "primary_axis_label": "X Name",
                 "secondary_axis_label": "Y Name",
                 "swap": True,
@@ -1378,7 +1432,7 @@ class WidgetEditorDialog(QDialog):
         return {
             "mode": "single",
             "single_label": "Category Field",
-            "hint": "Chon field du lieu cho chart hien tai.",
+            "hint": "Choose a data field for the current chart.",
             "primary_axis_label": "X Name",
             "secondary_axis_label": "Y Name",
             "swap": False,
@@ -1394,6 +1448,10 @@ class WidgetEditorDialog(QDialog):
             self._sync_hidden_controls_from_simple_editor()
             self._refresh_secondary_field_compatibility()
             self._refresh_metric_type_compatibility()
+            self._refresh_dual_source_compatibility()
+        self._schedule_preview_refresh()
+
+    def _on_multi_purpose_changed(self, state):
         self._schedule_preview_refresh()
 
     def _swap_simple_source_fields(self):
@@ -1634,6 +1692,10 @@ class WidgetEditorDialog(QDialog):
                 item = model.item(row)
                 if item is not None:
                     item.setEnabled(compatible)
+                    if not compatible:
+                        item.setForeground(QColor("#a0a0a0"))
+                    else:
+                        item.setForeground(QColor())
 
         if current_source and current_source not in compatible_sources:
             if compatible_sources:
@@ -1644,7 +1706,7 @@ class WidgetEditorDialog(QDialog):
         has_compatible_source = bool(compatible_sources)
         self.y_data_source_combo.setEnabled(has_compatible_source)
         self.y_data_source_label.setEnabled(has_compatible_source)
-        self.y_data_source_combo.setToolTip("" if has_compatible_source else "Y Source chi duoc bat khi co the tao bang hop le cung X Source.")
+        self.y_data_source_combo.setToolTip("" if has_compatible_source else "Y Source is only enabled when a valid table can be created with X Source.")
         self.y_data_source_combo.blockSignals(False)
 
         dual_sources_visible = behavior.get("mode") == "double"
@@ -1759,7 +1821,7 @@ class WidgetEditorDialog(QDialog):
 
         self._refresh_metric_type_compatibility()
         metric_type = self.metric_type_combo.currentText().strip() or "count"
-        metric_alias = "%" if chart_type in self.PROPORTION_SOURCE_CHARTS else ("metric_value" if chart_type == "metric" else (secondary_field or "value").replace(".", "_"))
+        metric_alias = "%" if chart_type in self.PROPORTION_SOURCE_CHARTS else ("metric_value" if chart_type == "metric" else self._default_metric_alias(metric_type, secondary_field))
         self.metric_alias_input.setText(metric_alias)
         self.columns_input.setText("")
         self.group_by_input.setText("")
@@ -1933,6 +1995,8 @@ class WidgetEditorDialog(QDialog):
         self._set_form_row_visible(self.source_secondary_axis_label, self.axis_y_label_input, dual_sources_visible)
         self._set_form_row_visible(self.swap_axes_label, self.swap_axes_button.parentWidget(), behavior.get("swap", False) and behavior["mode"] == "double")
         self.swap_axes_button.setEnabled(bool(behavior.get("swap", False)))
+        show_multi_purpose = chart_type in {"line", "area"} and behavior["mode"] == "double"
+        self._set_form_row_visible(self.multi_purpose_label, self.multi_purpose_checkbox, show_multi_purpose)
         self.single_source_field_label.setText(behavior.get("single_label", "Source Field"))
         self.primary_source_field_label.setText(behavior.get("primary_label", "Primary Field"))
         self.secondary_source_field_label.setText(behavior.get("secondary_label", "Secondary Field"))
@@ -2004,6 +2068,7 @@ class WidgetEditorDialog(QDialog):
             self.unit_input,
             self.primary_color_input,
             self.color_palette_input,
+            self.multi_purpose_checkbox,
         ]
         for widget in watched_widgets:
             if isinstance(widget, (QLineEdit, QTextEdit)):
@@ -2063,6 +2128,7 @@ class WidgetEditorDialog(QDialog):
 
             self.legend_check.setChecked(bool(visualization.show_legend))
             self.labels_check.setChecked(bool(visualization.show_labels))
+            self.multi_purpose_checkbox.setChecked(bool(style.get("multi_purpose", False)))
             self.axis_x_label_input.setText(str(style.get("x_axis_label") or ""))
             self.axis_y_label_input.setText(str(style.get("y_axis_label") or ""))
             self.unit_input.setText(str(style.get("unit") or ""))
@@ -2581,6 +2647,8 @@ class WidgetEditorDialog(QDialog):
         style["primary_color"] = self.primary_color_input.text().strip() or None
         style["color_palette"] = self.color_palette_input.text().strip() or None
         style["display_mode"] = self.display_mode_combo.currentText().strip().lower()
+        if hasattr(self, "multi_purpose_checkbox"):
+            style["multi_purpose"] = self.multi_purpose_checkbox.isChecked()
         working.query = query
         working.style = {key: value for key, value in style.items() if value not in (None, "")}
         return working
@@ -2649,6 +2717,8 @@ class WidgetEditorDialog(QDialog):
             config["xDataSource"] = style["x_data_source"]
         if style.get("y_data_source"):
             config["yDataSource"] = style["y_data_source"]
+        if style.get("multi_purpose"):
+            config["multiPurpose"] = True
         return config
 
     def _selected_xy_sources(self) -> tuple[str, str]:
@@ -2915,6 +2985,8 @@ class GridWidget(QFrame):
             config["primaryColor"] = style["primary_color"]
         if style.get("color_palette"):
             config["colorPalette"] = style["color_palette"]
+        if style.get("multi_purpose"):
+            config["multiPurpose"] = True
         if self._effective_display_mode() == "table":
             config["type"] = "table"
             config["showLegend"] = False

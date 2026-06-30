@@ -603,7 +603,9 @@ def _extract_xy_series_points(data: List[Dict[str, Any]], config: Dict[str, Any]
         return x_field, None, None, {}
 
     series_field = config.get("seriesField")
-    if not series_field and str(config.get("type") or "").strip().lower() in {"line", "area"}:
+    if config.get("multiPurpose"):
+        series_field = config.get("yField") or series_field
+    elif not series_field and str(config.get("type") or "").strip().lower() in {"line", "area"}:
         for protocol_field in ("protocol", "frame.protocol"):
             if any(protocol_field in row for row in data):
                 series_field = protocol_field

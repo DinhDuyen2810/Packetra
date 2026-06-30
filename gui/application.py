@@ -2191,7 +2191,7 @@ class ApplicationWindow(QMainWindow):
         self._refresh_analyze_menu_state()
 
     def _build_menubar(self):
-        """Xay dung menu bar theo nhom tab feature."""
+        """Build menu bar by feature tab groups."""
         menubar = self.menuBar()
         menubar.clear()
 
